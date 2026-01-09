@@ -425,6 +425,7 @@ body {
   align-items: stretch;
   gap: 2px;
   padding: 2px;
+  height: 120px;
   border-radius: 5px;
   border: 1px solid var(--border);
   background: #fffdf9;
@@ -439,8 +440,8 @@ body {
 
 textarea {
   width: 100%;
-  min-height: 44px;
-  max-height: 120px;
+  min-height: 64px;
+  max-height: 160px;
   border: none;
   background: transparent;
   padding: 8px 64px 18px 8px;
