@@ -1,4 +1,4 @@
-## ADDED Requirements
+﻿## ADDED Requirements
 ### Requirement: Message file storage
 客户端 SHALL 将每条外发消息存储为 WebDAV 目录中的单个文件。
 文本消息 MUST 使用 UTF-8 `.txt` 文件；文件消息 MUST 保留原始字节与扩展名。
@@ -21,9 +21,15 @@
 - **WHEN** 客户端发现新的消息文件
 - **THEN** 能仅从文件名解析出发送者名称与时间戳
 
+#### Scenario: Ignore non-message files
+- **WHEN** 客户端发现不符合消息命名格式的文件
+- **THEN** 不下载该文件
+- **AND** 不在列表中展示
+
 ### Requirement: Local message index and sync
 客户端 SHALL 维护本地 SQLite 消息索引，并在启动与配置的周期内刷新。
 手动刷新 SHALL 触发一次立即同步。
+对于文件消息，客户端 SHALL 在同步时自动下载文件内容并保存到本地存储。
 
 #### Scenario: Periodic refresh
 - **WHEN** WebDAV 目录出现新的消息文件
@@ -34,9 +40,14 @@
 - **WHEN** 用户点击手动刷新
 - **THEN** 客户端立即执行同步并更新列表
 
+#### Scenario: Auto-download file message
+- **WHEN** 定时同步发现新的文件消息
+- **THEN** 客户端自动下载文件内容到本地存储
+- **AND** 列表项可访问已下载文件
+
 ### Requirement: Message feed display
 客户端 SHALL 提供按时间排序的聊天式列表，并显示发送者名称、时间戳与文件大小。
-文本消息 SHALL 显示内容；文件消息 SHALL 显示文件名。
+文本消息 SHALL 显示全文内容；文件消息 SHALL 显示文件名。
 
 #### Scenario: Open the feed
 - **WHEN** 用户打开应用
