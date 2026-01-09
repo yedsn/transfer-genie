@@ -110,7 +110,7 @@ body {
 
 .feed {
   background: var(--panel);
-  border-radius: var(--radius);
+  border-radius: 0;
   padding: 20px;
   box-shadow: var(--shadow);
   display: flex;
@@ -155,13 +155,13 @@ body {
   overflow-y: auto;
   padding-right: 8px;
   background: var(--panel-soft);
-  border-radius: 16px;
+  border-radius: 0;
   border: 1px solid var(--border);
 }
 
 .message-card {
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 0;
   padding: 16px 18px;
   display: flex;
   flex-direction: column;
@@ -507,7 +507,7 @@ input {
 
 .settings {
   background: var(--panel);
-  border-radius: var(--radius);
+  border-radius: 0;
   padding: 22px;
   box-shadow: var(--shadow);
   border: 1px solid var(--border);
