@@ -143,6 +143,58 @@ body {
   border: 1px solid var(--border);
 }
 
+.downloading-tag {
+  font-size: 12px;
+  color: var(--accent-strong);
+  background: #fff1e8;
+  border-radius: 999px;
+  padding: 6px 12px;
+  border: 1px solid #ffd1b6;
+}
+
+.download-progress-tag {
+  display: none;
+}
+
+.message-card.is-downloading .download-progress-tag {
+  display: inline-flex;
+}
+
+.message-card.is-downloading .download-action {
+  display: none;
+}
+
+.download-progress {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.download-progress.hidden {
+  display: none;
+}
+
+.download-progress-bar {
+  width: 100%;
+  height: 6px;
+  background: #f0e7de;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.download-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+
+.download-progress-text {
+  font-size: 12px;
+  color: var(--muted);
+}
+
 .action-menu {
   position: relative;
 }

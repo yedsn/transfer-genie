@@ -14,8 +14,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex as AsyncMutex;
+use tauri::Window;
 
 struct AppState {
   settings_path: PathBuf,
@@ -43,6 +44,15 @@ struct DownloadResult {
   status: String,
   path: Option<String>,
   suggested_path: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+struct DownloadProgress {
+  filename: String,
+  received: u64,
+  total: Option<u64>,
+  status: String,
+  error: Option<String>,
 }
 
 #[tauri::command]
@@ -165,6 +175,7 @@ async fn send_file(state: State<'_, AppState>, path: String) -> Result<(), Strin
 
 #[tauri::command]
 async fn download_message_file(
+  window: Window,
   state: State<'_, AppState>,
   filename: String,
   original_name: String,
@@ -191,7 +202,40 @@ async fn download_message_file(
   };
 
   let remote_path = format!("files/{}", filename);
-  let bytes = webdav::download_file(&state.http, &settings, &remote_path).await?;
+  let window = window.clone();
+  let bytes = match webdav::download_file_with_progress(
+    &state.http,
+    &settings,
+    &remote_path,
+    |received, total| {
+      emit_download_progress(
+        &window,
+        &filename,
+        received,
+        total,
+        "progress",
+        None,
+      );
+    },
+  )
+  .await
+  {
+    Ok(bytes) => {
+      emit_download_progress(
+        &window,
+        &filename,
+        bytes.len() as u64,
+        Some(bytes.len() as u64),
+        "complete",
+        None,
+      );
+      bytes
+    }
+    Err(err) => {
+      emit_download_progress(&window, &filename, 0, None, "error", Some(err.clone()));
+      return Err(err);
+    }
+  };
   ensure_parent_dir(&final_path)?;
   fs::write(&final_path, &bytes).map_err(|err| format!("保存文件失败: {err}"))?;
   update_message_local_path(&state.db_path, &filename, &final_path, bytes.len() as i64)?;
@@ -205,6 +249,7 @@ async fn download_message_file(
 
 #[tauri::command]
 async fn save_message_file_as(
+  window: Window,
   state: State<'_, AppState>,
   filename: String,
   target_path: String,
@@ -217,7 +262,40 @@ async fn save_message_file_as(
   }
   let final_path = PathBuf::from(target_path);
   let remote_path = format!("files/{}", filename);
-  let bytes = webdav::download_file(&state.http, &settings, &remote_path).await?;
+  let window = window.clone();
+  let bytes = match webdav::download_file_with_progress(
+    &state.http,
+    &settings,
+    &remote_path,
+    |received, total| {
+      emit_download_progress(
+        &window,
+        &filename,
+        received,
+        total,
+        "progress",
+        None,
+      );
+    },
+  )
+  .await
+  {
+    Ok(bytes) => {
+      emit_download_progress(
+        &window,
+        &filename,
+        bytes.len() as u64,
+        Some(bytes.len() as u64),
+        "complete",
+        None,
+      );
+      bytes
+    }
+    Err(err) => {
+      emit_download_progress(&window, &filename, 0, None, "error", Some(err.clone()));
+      return Err(err);
+    }
+  };
   ensure_parent_dir(&final_path)?;
   fs::write(&final_path, &bytes).map_err(|err| format!("保存文件失败: {err}"))?;
   update_message_local_path(&state.db_path, &filename, &final_path, bytes.len() as i64)?;
@@ -449,6 +527,24 @@ fn update_message_local_path(
   }
   db::upsert_message(db_path, &message).map_err(|err| err.to_string())?;
   Ok(())
+}
+
+fn emit_download_progress(
+  window: &Window,
+  filename: &str,
+  received: u64,
+  total: Option<u64>,
+  status: &str,
+  error: Option<String>,
+) {
+  let payload = DownloadProgress {
+    filename: filename.to_string(),
+    received,
+    total,
+    status: status.to_string(),
+    error,
+  };
+  let _ = window.emit("download-progress", payload);
 }
 
 async fn run_sync(state: &AppState, source: &str) -> Result<SyncStatus, String> {

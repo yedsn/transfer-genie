@@ -2726,10 +2726,12 @@ dependencies = [
  "system-configuration",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
  "webpki-roots",
  "winreg 0.50.0",
@@ -4027,6 +4029,7 @@ dependencies = [
 name = "transfer-genie"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "percent-encoding",
  "quick-xml 0.31.0",
  "rand 0.8.5",

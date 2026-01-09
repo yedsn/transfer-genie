@@ -2,6 +2,7 @@ const tauri = window.__TAURI__ || {};
 const invoke = tauri.core?.invoke || tauri.invoke;
 const openDialog = tauri.dialog?.open;
 const saveDialog = tauri.dialog?.save;
+const listen = tauri.event?.listen;
 
 const messageList = document.getElementById('message-list');
 const syncStatus = document.getElementById('sync-status');
@@ -22,6 +23,7 @@ const downloadDirHint = document.getElementById('download-dir-hint');
 
 let refreshTimer = null;
 let didInitialSync = false;
+const downloadProgress = new Map();
 
 function formatBytes(bytes) {
   if (bytes <= 0) return '0 B';
@@ -43,6 +45,60 @@ function formatTime(timestampMs) {
 function setStatus(text, isError = false) {
   syncStatus.textContent = text;
   syncStatus.style.color = isError ? '#d6452d' : '';
+}
+
+function formatProgress(received, total) {
+  if (!total) {
+    return `${formatBytes(received)} 已下载`;
+  }
+  const percent = Math.min(100, Math.round((received / total) * 100));
+  return `${percent}% · ${formatBytes(received)} / ${formatBytes(total)}`;
+}
+
+function escapeSelector(value) {
+  if (window.CSS && typeof window.CSS.escape === 'function') {
+    return window.CSS.escape(value);
+  }
+  return value.replace(/["\\]/g, '\\$&');
+}
+
+function setProgressFor(filename, payload) {
+  if (!filename) return;
+  if (!payload || payload.status !== 'progress') {
+    downloadProgress.delete(filename);
+    return;
+  }
+  downloadProgress.set(filename, payload);
+}
+
+function updateProgressUI(filename) {
+  const progress = downloadProgress.get(filename);
+  const cardSelector = `.message-card[data-filename="${escapeSelector(filename)}"]`;
+  const card = document.querySelector(cardSelector);
+  if (card) {
+    card.classList.toggle('is-downloading', !!progress);
+  }
+  const selector = `.download-progress[data-filename="${escapeSelector(filename)}"]`;
+  const wrap = document.querySelector(selector);
+  if (!wrap) return;
+  if (!progress) {
+    wrap.classList.add('hidden');
+    return;
+  }
+  const fill = wrap.querySelector('.download-progress-fill');
+  const text = wrap.querySelector('.download-progress-text');
+  if (progress.total) {
+    const percent = Math.min(100, Math.round((progress.received / progress.total) * 100));
+    if (fill) {
+      fill.style.width = `${percent}%`;
+    }
+  } else if (fill) {
+    fill.style.width = '30%';
+  }
+  if (text) {
+    text.textContent = formatProgress(progress.received || 0, progress.total);
+  }
+  wrap.classList.remove('hidden');
 }
 
 function setHint(element, text) {
@@ -230,6 +286,7 @@ function renderMessages(messages) {
   messages.forEach((message) => {
     const item = document.createElement('li');
     item.className = 'message-card';
+    item.dataset.filename = message.filename;
 
     const header = document.createElement('div');
     header.className = 'message-header';
@@ -253,12 +310,23 @@ function renderMessages(messages) {
       copyButton.addEventListener('click', () => copyTextToClipboard(message.content || ''));
       actions.appendChild(copyButton);
     } else {
+      const progress = downloadProgress.get(message.filename);
+      const isDownloading = progress && progress.status === 'progress';
+      if (isDownloading) {
+        item.classList.add('is-downloading');
+      }
+
       if (!message.download_exists) {
         const downloadButton = document.createElement('button');
-        downloadButton.className = 'button primary small';
+        downloadButton.className = 'button primary small download-action';
         downloadButton.textContent = '下载';
         downloadButton.addEventListener('click', () => downloadMessageFile(message));
         actions.appendChild(downloadButton);
+
+        const downloadingTag = document.createElement('span');
+        downloadingTag.className = 'downloading-tag download-progress-tag';
+        downloadingTag.textContent = '下载中';
+        actions.appendChild(downloadingTag);
       } else {
         const downloadedTag = document.createElement('span');
         downloadedTag.className = 'downloaded-tag';
@@ -298,6 +366,39 @@ function renderMessages(messages) {
     item.appendChild(header);
     item.appendChild(body);
     item.appendChild(footer);
+
+    if (message.kind === 'file') {
+      const progress = downloadProgress.get(message.filename);
+      const progressWrap = document.createElement('div');
+      progressWrap.className = 'download-progress';
+      progressWrap.dataset.filename = message.filename;
+
+      const progressBar = document.createElement('div');
+      progressBar.className = 'download-progress-bar';
+
+      const progressFill = document.createElement('div');
+      progressFill.className = 'download-progress-fill';
+      progressBar.appendChild(progressFill);
+
+      const progressText = document.createElement('div');
+      progressText.className = 'download-progress-text';
+
+      progressWrap.appendChild(progressBar);
+      progressWrap.appendChild(progressText);
+
+      if (progress && progress.status === 'progress') {
+        const total = progress.total || 0;
+        if (total > 0) {
+          const percent = Math.min(100, Math.round((progress.received / total) * 100));
+          progressFill.style.width = `${percent}%`;
+        }
+        progressText.textContent = formatProgress(progress.received || 0, progress.total);
+      } else {
+        progressWrap.classList.add('hidden');
+      }
+
+      item.appendChild(progressWrap);
+    }
     messageList.appendChild(item);
   });
 }
@@ -473,6 +574,34 @@ async function manualRefresh() {
   } catch (error) {
     setStatus(`手动刷新失败：${error}`, true);
   }
+}
+
+if (listen) {
+  listen('download-progress', (event) => {
+    const payload = event.payload || {};
+    const filename = payload.filename;
+    if (!filename) {
+      return;
+    }
+    if (payload.status === 'progress') {
+      setProgressFor(filename, payload);
+      updateProgressUI(filename);
+      return;
+    }
+    if (payload.status === 'complete') {
+      downloadProgress.delete(filename);
+      updateProgressUI(filename);
+      loadMessages();
+      return;
+    }
+    if (payload.status === 'error') {
+      downloadProgress.delete(filename);
+      updateProgressUI(filename);
+      if (payload.error) {
+        setStatus(`下载失败：${payload.error}`, true);
+      }
+    }
+  });
 }
 
 refreshButton.addEventListener('click', manualRefresh);

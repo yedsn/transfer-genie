@@ -1,4 +1,5 @@
 use crate::types::{DavEntry, Settings};
+use futures_util::StreamExt;
 use percent_encoding::percent_decode_str;
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -201,6 +202,45 @@ pub async fn download_file(
     .await
     .map(|bytes| bytes.to_vec())
     .map_err(|err| format!("读取下载内容失败: {err}"))
+}
+
+pub async fn download_file_with_progress<F>(
+  client: &Client,
+  settings: &Settings,
+  remote_path: &str,
+  mut on_progress: F,
+) -> Result<Vec<u8>, String>
+where
+  F: FnMut(u64, Option<u64>),
+{
+  let mut url = base_url(settings)?;
+  url = url
+    .join(remote_path)
+    .map_err(|err| format!("文件地址无效: {err}"))?;
+
+  let request = client.get(url);
+  let response = apply_auth(request, settings)
+    .send()
+    .await
+    .map_err(|err| format!("下载失败: {err}"))?;
+
+  let status = response.status();
+  if !status.is_success() {
+    return Err(format!("下载失败: HTTP {}", status));
+  }
+
+  let total = response.content_length();
+  let mut stream = response.bytes_stream();
+  let mut bytes = Vec::new();
+  let mut received = 0u64;
+  on_progress(received, total);
+  while let Some(chunk) = stream.next().await {
+    let chunk = chunk.map_err(|err| format!("读取下载内容失败: {err}"))?;
+    received += chunk.len() as u64;
+    bytes.extend_from_slice(&chunk);
+    on_progress(received, total);
+  }
+  Ok(bytes)
 }
 
 pub async fn download_optional_file(
