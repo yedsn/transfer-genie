@@ -3,6 +3,8 @@ const invoke = tauri.core?.invoke || tauri.invoke;
 const openDialog = tauri.dialog?.open;
 const saveDialog = tauri.dialog?.save;
 const listen = tauri.event?.listen;
+const convertFileSrc =
+  tauri.core?.convertFileSrc || tauri.tauri?.convertFileSrc || tauri.convertFileSrc;
 
 const messageList = document.getElementById('message-list');
 const syncStatus = document.getElementById('sync-status');
@@ -38,6 +40,12 @@ const downloadSpeed = new Map();
 const uploadSpeed = new Map();
 let selectionMode = false;
 const selectedMessages = new Set();
+let previewOverlay = null;
+let previewKeyHandler = null;
+const imagePreviewCache = new Map();
+const imagePreviewInflight = new Map();
+const transparentPixel =
+  'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
 
 function formatBytes(bytes) {
   if (bytes <= 0) return '0 B';
@@ -49,6 +57,86 @@ function formatBytes(bytes) {
     idx += 1;
   }
   return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[idx]}`;
+}
+
+function isImageFile(name) {
+  if (!name) return false;
+  const lower = name.toLowerCase();
+  return ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'].some((ext) =>
+    lower.endsWith(ext),
+  );
+}
+
+function toFileSrc(path) {
+  if (!path) return null;
+  if (convertFileSrc) {
+    return convertFileSrc(path);
+  }
+  if (path.startsWith('file://')) {
+    return path;
+  }
+  const normalized = path.replace(/\\/g, '/');
+  const prefix = normalized.startsWith('/') ? 'file://' : 'file:///';
+  return `${prefix}${encodeURI(normalized)}`;
+}
+
+async function ensureImagePreview(filename, options = {}) {
+  if (!filename) return null;
+  const webdavUrl = webdavUrlInput?.value.trim();
+  if (!webdavUrl) {
+    if (!options.quiet) {
+      setErrorStatus('请先配置 WebDAV 地址');
+    }
+    return null;
+  }
+  if (imagePreviewCache.has(filename)) {
+    return imagePreviewCache.get(filename);
+  }
+  if (imagePreviewInflight.has(filename)) {
+    return imagePreviewInflight.get(filename);
+  }
+  if (!invoke) {
+    if (!options.quiet) {
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
+    }
+    return null;
+  }
+  const task = invoke('fetch_image_preview', { filename })
+    .then((path) => {
+      if (path) {
+        imagePreviewCache.set(filename, path);
+        return path;
+      }
+      return null;
+    })
+    .catch((error) => {
+      console.error('[preview] error', error);
+      if (!options.quiet) {
+        setErrorStatus(`图片预览失败：${error}`);
+      }
+      return null;
+    })
+    .finally(() => {
+      imagePreviewInflight.delete(filename);
+    });
+  imagePreviewInflight.set(filename, task);
+  return task;
+}
+
+function attachImagePreview(image, message) {
+  image.classList.add('is-loading');
+  image.src = transparentPixel;
+  ensureImagePreview(message.filename, { quiet: true }).then((path) => {
+    if (!path) {
+      return;
+    }
+    const src = toFileSrc(path);
+    if (!src) {
+      return;
+    }
+    image.src = src;
+    image.classList.remove('is-loading');
+  });
 }
 
 function formatTime(timestampMs) {
@@ -69,6 +157,53 @@ function setSuccessStatus(text) {
 function setErrorStatus(text) {
   syncStatus.textContent = text;
   syncStatus.style.color = '#d6452d';
+}
+
+function closeImagePreview() {
+  if (previewOverlay) {
+    previewOverlay.remove();
+    previewOverlay = null;
+  }
+  if (previewKeyHandler) {
+    document.removeEventListener('keydown', previewKeyHandler);
+    previewKeyHandler = null;
+  }
+}
+
+function showImagePreview(src, name) {
+  if (!src) return;
+  closeImagePreview();
+  const overlay = document.createElement('div');
+  overlay.className = 'image-preview-overlay';
+
+  const image = document.createElement('img');
+  image.className = 'image-preview';
+  image.src = src;
+  image.alt = name || '图片预览';
+
+  const closeButton = document.createElement('button');
+  closeButton.className = 'image-preview-close';
+  closeButton.type = 'button';
+  closeButton.textContent = '关闭';
+  closeButton.addEventListener('click', closeImagePreview);
+
+  overlay.addEventListener('click', (event) => {
+    if (event.target === overlay) {
+      closeImagePreview();
+    }
+  });
+
+  previewKeyHandler = (event) => {
+    if (event.key === 'Escape') {
+      closeImagePreview();
+    }
+  };
+
+  document.addEventListener('keydown', previewKeyHandler);
+  overlay.appendChild(image);
+  overlay.appendChild(closeButton);
+  document.body.appendChild(overlay);
+  previewOverlay = overlay;
 }
 
 function formatProgress(received, total, label = '已下载', speed = 0) {
@@ -673,9 +808,13 @@ function renderMessages(messages, options = {}) {
     const isFile = message.kind === 'file';
     const selfName = senderNameInput?.value.trim();
     const isSelf = message.sender === '我' || (selfName && message.sender === selfName);
+    const isImage = isFile && isImageFile(message.original_name);
+    const cachedPreview = imagePreviewCache.get(message.filename);
+    const imageSrc = isImage ? toFileSrc(message.local_path || cachedPreview) : null;
     item.classList.toggle('is-file', isFile);
     item.classList.toggle('is-text', !isFile);
     item.classList.toggle('is-self', isSelf);
+    item.classList.toggle('is-image', isImage);
     item.classList.toggle('with-selection', selectionMode);
     item.dataset.filename = message.filename;
     item.classList.toggle('is-selected', selectedMessages.has(message.filename));
@@ -702,8 +841,42 @@ function renderMessages(messages, options = {}) {
 
     const body = document.createElement('div');
     body.className = 'message-body';
-    body.textContent =
-      message.kind === 'text' ? message.content || '' : message.original_name;
+    if (message.kind === 'text') {
+      body.textContent = message.content || '';
+    } else if (isImage) {
+      const image = document.createElement('img');
+      image.className = 'message-image';
+      if (imageSrc) {
+        image.src = imageSrc;
+      } else {
+        attachImagePreview(image, message);
+      }
+      image.alt = message.original_name || '图片';
+      image.loading = 'lazy';
+      image.addEventListener('click', async (event) => {
+        if (selectionMode) {
+          return;
+        }
+        event.stopPropagation();
+        if (image.classList.contains('is-loading') || !image.src) {
+          const path = await ensureImagePreview(message.filename, { quiet: false });
+          if (!path) {
+            return;
+          }
+          const src = toFileSrc(path);
+          if (src) {
+            image.src = src;
+            image.classList.remove('is-loading');
+            showImagePreview(src, message.original_name);
+          }
+          return;
+        }
+        showImagePreview(image.src, message.original_name);
+      });
+      body.appendChild(image);
+    } else {
+      body.textContent = message.original_name;
+    }
 
     const meta = document.createElement('div');
     meta.className = 'message-meta';
@@ -901,7 +1074,7 @@ function mergeMessages(messages) {
       kind: 'file',
       original_name: upload.originalName || '上传文件',
       content: null,
-      local_path: null,
+      local_path: upload.localPath || null,
       download_exists: false,
       uploading: true,
     });
@@ -1048,6 +1221,7 @@ async function sendFile() {
     pendingUploads.set(clientId, {
       clientId,
       originalName,
+      localPath: path,
       timestamp_ms: Date.now(),
       received: 0,
       total: 0,

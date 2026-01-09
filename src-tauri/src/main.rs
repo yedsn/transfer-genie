@@ -398,6 +398,29 @@ async fn save_message_file_as(
 }
 
 #[tauri::command]
+async fn fetch_image_preview(state: State<'_, AppState>, filename: String) -> Result<String, String> {
+  let settings = current_settings(&state)?;
+  ensure_webdav_configured(&settings)?;
+
+  if filename.contains('/') || filename.contains('\\') {
+    return Err("非法文件名".to_string());
+  }
+
+  let preview_dir = state.files_dir.join("previews");
+  fs::create_dir_all(&preview_dir).map_err(|err| format!("创建预览目录失败: {err}"))?;
+
+  let target_path = preview_dir.join(&filename);
+  if target_path.exists() {
+    return Ok(target_path.to_string_lossy().to_string());
+  }
+
+  let remote_path = format!("files/{}", filename);
+  let bytes = webdav::download_file(&state.http, &settings, &remote_path).await?;
+  fs::write(&target_path, &bytes).map_err(|err| format!("保存预览失败: {err}"))?;
+  Ok(target_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 async fn delete_messages(
   state: State<'_, AppState>,
   filenames: Vec<String>,
@@ -1232,6 +1255,7 @@ fn main() {
       send_text,
       send_file,
       download_message_file,
+      fetch_image_preview,
       save_message_file_as,
       delete_messages,
       cleanup_messages,
