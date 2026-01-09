@@ -170,6 +170,11 @@ body {
   align-items: flex-start;
 }
 
+.message-card.with-selection {
+  position: relative;
+  padding-left: 26px;
+}
+
 .message-card.is-self {
   align-items: flex-end;
 }
@@ -245,6 +250,12 @@ body {
 .message-select {
   width: 16px;
   height: 16px;
+}
+
+.message-card.with-selection .message-select {
+  position: absolute;
+  left: 0;
+  top: 10px;
 }
 
 .downloaded-tag {

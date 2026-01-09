@@ -666,11 +666,13 @@ function renderMessages(messages, options = {}) {
     item.classList.toggle('is-file', isFile);
     item.classList.toggle('is-text', !isFile);
     item.classList.toggle('is-self', isSelf);
+    item.classList.toggle('with-selection', selectionMode);
     item.dataset.filename = message.filename;
     item.classList.toggle('is-selected', selectedMessages.has(message.filename));
 
     const header = document.createElement('div');
     header.className = 'message-header';
+    let selectionCheckbox = null;
     if (selectionMode) {
       const checkbox = document.createElement('input');
       checkbox.type = 'checkbox';
@@ -681,7 +683,8 @@ function renderMessages(messages, options = {}) {
         toggleSelectedMessage(message.filename, checkbox.checked);
         item.classList.toggle('is-selected', checkbox.checked);
       });
-      header.appendChild(checkbox);
+      selectionCheckbox = checkbox;
+      item.appendChild(checkbox);
     }
     const headerText = document.createElement('span');
     headerText.textContent = `${message.sender} · ${formatTime(message.timestamp_ms)}`;
@@ -779,6 +782,22 @@ function renderMessages(messages, options = {}) {
     item.appendChild(header);
     item.appendChild(body);
     item.appendChild(footer);
+
+    item.addEventListener('click', (event) => {
+      if (!selectionMode || !selectionCheckbox || selectionCheckbox.disabled) {
+        return;
+      }
+      if (
+        event.target.closest(
+          'button, a, input, textarea, select, summary, details, .action-menu, .message-actions',
+        )
+      ) {
+        return;
+      }
+      selectionCheckbox.checked = !selectionCheckbox.checked;
+      toggleSelectedMessage(message.filename, selectionCheckbox.checked);
+      item.classList.toggle('is-selected', selectionCheckbox.checked);
+    });
 
     if (message.kind === 'file') {
       const progress = downloadProgress.get(message.filename);
