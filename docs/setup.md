@@ -38,11 +38,23 @@
 
 ## 4. 启动项目
 
+### Windows
+
 在项目根目录运行：
 
 ```
 cargo tauri dev --manifest-path src-tauri/Cargo.toml
 ```
+
+### macOS
+
+在项目根目录运行：
+
+```
+cargo tauri dev --manifest-path src-tauri/Cargo.toml
+```
+
+如果提示找不到 `tauri` 命令，请先执行 `cargo install tauri-cli --locked`，并重开终端。
 
 ## 5. 常见问题
 
