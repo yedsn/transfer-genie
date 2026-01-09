@@ -4,7 +4,7 @@
   color-scheme: light;
   --bg: #f6f1eb;
   --panel: #ffffff;
-  --panel-soft: #fff6ee;
+  --panel-soft: #f5f5f5;
   --ink: #1b1b1f;
   --muted: #6b6b73;
   --accent: #ff7a2f;
@@ -41,7 +41,7 @@ body {
 .app {
   width: 100%;
   margin: 0;
-  padding: 0 0 calc(var(--tabbar-height) + 12px);
+  padding: 0 0 var(--tabbar-height);
   display: flex;
   flex-direction: column;
   gap: 0;
@@ -93,7 +93,7 @@ body {
   gap: 8px;
   flex: 1;
   min-height: 0;
-  padding: 0 0 16px;
+  padding: 0;
 }
 
 .tab-panel {
@@ -160,27 +160,67 @@ body {
 }
 
 .message-card {
-  border: 1px solid var(--border);
+  border: none;
   border-radius: 0;
-  padding: 16px 18px;
+  padding: 4px 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  background: #fffaf5;
+  gap: 6px;
+  background: transparent;
+  align-items: flex-start;
+}
+
+.message-card.is-self {
+  align-items: flex-end;
+}
+
+.message-card.is-selected .message-body {
+  outline: 1px solid #ffd1b6;
 }
 
 .message-header {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  font-size: 12px;
   color: var(--muted);
+  max-width: 76%;
 }
 
 .message-body {
   font-size: 15px;
   white-space: pre-wrap;
   word-break: break-word;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  max-width: 76%;
+}
+
+.message-card.is-file .message-body {
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.message-card.is-file .message-body::before {
+  content: "文件";
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  font-size: 11px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  background: #f7f1ea;
+}
+
+.message-card.is-self .message-body {
+  background: #dff5d5;
+  border-color: #c8ebc0;
 }
 
 .message-meta {
@@ -191,8 +231,9 @@ body {
 .message-footer {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  justify-content: flex-start;
+  gap: 10px;
+  max-width: 76%;
 }
 
 .message-actions {
@@ -204,11 +245,6 @@ body {
 .message-select {
   width: 16px;
   height: 16px;
-}
-
-.message-card.is-selected {
-  border-color: #ffd1b6;
-  box-shadow: 0 0 0 1px #ffd1b6;
 }
 
 .downloaded-tag {
@@ -248,6 +284,18 @@ body {
   border-radius: 999px;
   padding: 6px 12px;
   border: 1px solid #c7ddf6;
+}
+
+.message-card.is-file .downloaded-tag,
+.message-card.is-file .downloading-tag,
+.message-card.is-file .uploading-tag {
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+.message-card.is-self .message-footer {
+  justify-content: flex-end;
 }
 
 .upload-progress {
@@ -659,7 +707,7 @@ input {
   }
 
   .app {
-    padding: 0 0 calc(var(--tabbar-height) + 8px);
+    padding: 0 0 var(--tabbar-height);
   }
 
   .topbar {

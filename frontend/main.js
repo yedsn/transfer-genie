@@ -660,6 +660,12 @@ function renderMessages(messages, options = {}) {
   merged.forEach((message) => {
     const item = document.createElement('li');
     item.className = 'message-card';
+    const isFile = message.kind === 'file';
+    const selfName = senderNameInput?.value.trim();
+    const isSelf = message.sender === '我' || (selfName && message.sender === selfName);
+    item.classList.toggle('is-file', isFile);
+    item.classList.toggle('is-text', !isFile);
+    item.classList.toggle('is-self', isSelf);
     item.dataset.filename = message.filename;
     item.classList.toggle('is-selected', selectedMessages.has(message.filename));
 
