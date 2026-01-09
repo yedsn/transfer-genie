@@ -115,6 +115,7 @@ pub fn list_messages(path: &Path) -> rusqlite::Result<Vec<Message>> {
       original_name: row.get(5)?,
       content: row.get(6)?,
       local_path: row.get(7)?,
+      download_exists: false,
     })
   })?;
 

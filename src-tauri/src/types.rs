@@ -21,6 +21,7 @@ pub struct Message {
   pub original_name: String,
   pub content: Option<String>,
   pub local_path: Option<String>,
+  pub download_exists: bool,
 }
 
 #[derive(Clone, Serialize)]

@@ -75,7 +75,19 @@ fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<Setti
 
 #[tauri::command]
 fn list_messages(state: State<'_, AppState>) -> Result<Vec<Message>, String> {
-  db::list_messages(&state.db_path).map_err(|err| err.to_string())
+  let mut messages = db::list_messages(&state.db_path).map_err(|err| err.to_string())?;
+  let settings = current_settings(&state)?;
+  let base_dir = resolve_download_dir(&state, &settings);
+  for message in messages.iter_mut() {
+    if message.kind == MessageKind::File.as_str() {
+      let file_name = sanitize_filename(&message.original_name);
+      let target_path = base_dir.join(file_name);
+      message.download_exists = target_path.exists();
+    } else {
+      message.download_exists = false;
+    }
+  }
+  Ok(messages)
 }
 
 #[tauri::command]

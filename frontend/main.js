@@ -141,27 +141,34 @@ function showDownloadConflictDialog(filename) {
 
 async function downloadMessageFile(message) {
   try {
+    console.info('[download] click', {
+      filename: message.filename,
+      original_name: message.original_name,
+    });
     if (!invoke) {
       setStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置', true);
       return;
     }
     const result = await invoke('download_message_file', {
       filename: message.filename,
-      original_name: message.original_name,
-      conflict_action: 'prompt',
+      originalName: message.original_name,
+      conflictAction: 'prompt',
     });
+    console.info('[download] result', result);
 
     if (result.status === 'conflict') {
       const choice = await showDownloadConflictDialog(message.original_name);
+      console.info('[download] conflict choice', choice);
       if (choice === 'cancel') {
         setStatus('已取消下载');
         return;
       }
       const retry = await invoke('download_message_file', {
         filename: message.filename,
-        original_name: message.original_name,
-        conflict_action: choice,
+        originalName: message.original_name,
+        conflictAction: choice,
       });
+      console.info('[download] retry result', retry);
       if (retry.status === 'saved') {
         setStatus(`文件已保存到 ${retry.path || ''}`.trim());
       }
@@ -172,12 +179,17 @@ async function downloadMessageFile(message) {
       setStatus(`文件已保存到 ${result.path || ''}`.trim());
     }
   } catch (error) {
+    console.error('[download] error', error);
     setStatus(`下载失败：${error}`, true);
   }
 }
 
 async function saveMessageFileAs(message) {
   try {
+    console.info('[download] save as click', {
+      filename: message.filename,
+      original_name: message.original_name,
+    });
     if (!invoke) {
       setStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置', true);
       return;
@@ -192,12 +204,15 @@ async function saveMessageFileAs(message) {
     if (!target) {
       return;
     }
+    console.info('[download] save as target', target);
     const result = await invoke('save_message_file_as', {
       filename: message.filename,
-      target_path: target,
+      targetPath: target,
     });
+    console.info('[download] save as result', result);
     setStatus(`文件已保存到 ${result.path || target}`.trim());
   } catch (error) {
+    console.error('[download] save as error', error);
     setStatus(`另存为失败：${error}`, true);
   }
 }
@@ -238,11 +253,18 @@ function renderMessages(messages) {
       copyButton.addEventListener('click', () => copyTextToClipboard(message.content || ''));
       actions.appendChild(copyButton);
     } else {
-      const downloadButton = document.createElement('button');
-      downloadButton.className = 'button primary small';
-      downloadButton.textContent = '下载';
-      downloadButton.addEventListener('click', () => downloadMessageFile(message));
-      actions.appendChild(downloadButton);
+      if (!message.download_exists) {
+        const downloadButton = document.createElement('button');
+        downloadButton.className = 'button primary small';
+        downloadButton.textContent = '下载';
+        downloadButton.addEventListener('click', () => downloadMessageFile(message));
+        actions.appendChild(downloadButton);
+      } else {
+        const downloadedTag = document.createElement('span');
+        downloadedTag.className = 'downloaded-tag';
+        downloadedTag.textContent = '已下载';
+        actions.appendChild(downloadedTag);
+      }
 
       const menu = document.createElement('details');
       menu.className = 'action-menu';
