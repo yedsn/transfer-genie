@@ -21,6 +21,7 @@ struct AppState {
   settings_path: PathBuf,
   db_path: PathBuf,
   files_dir: PathBuf,
+  default_download_dir: PathBuf,
   settings: Mutex<Settings>,
   sync_status: Mutex<SyncStatus>,
   sync_guard: AsyncMutex<()>,
@@ -35,6 +36,13 @@ struct HistoryEntry {
   size: i64,
   kind: String,
   original_name: String,
+}
+
+#[derive(Serialize)]
+struct DownloadResult {
+  status: String,
+  path: Option<String>,
+  suggested_path: Option<String>,
 }
 
 #[tauri::command]
@@ -52,6 +60,8 @@ fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<Setti
   if normalized.refresh_interval_secs == 0 {
     normalized.refresh_interval_secs = 5;
   }
+  normalized.download_dir =
+    normalize_download_dir(&normalized.download_dir, &state.default_download_dir);
 
   write_settings(&state.settings_path, &normalized)?;
 
@@ -142,6 +152,72 @@ async fn send_file(state: State<'_, AppState>, path: String) -> Result<(), Strin
 }
 
 #[tauri::command]
+async fn download_message_file(
+  state: State<'_, AppState>,
+  filename: String,
+  original_name: String,
+  conflict_action: Option<String>,
+) -> Result<DownloadResult, String> {
+  let settings = current_settings(&state)?;
+  ensure_webdav_configured(&settings)?;
+
+  let base_dir = resolve_download_dir(&state, &settings);
+  fs::create_dir_all(&base_dir).map_err(|err| format!("创建下载目录失败: {err}"))?;
+
+  let file_name = sanitize_filename(&original_name);
+  let target_path = base_dir.join(file_name);
+  let action = parse_conflict_action(conflict_action);
+  let final_path = match resolve_download_target(&target_path, action)? {
+    DownloadDecision::Conflict { suggested } => {
+      return Ok(DownloadResult {
+        status: "conflict".to_string(),
+        path: None,
+        suggested_path: Some(suggested.to_string_lossy().to_string()),
+      });
+    }
+    DownloadDecision::Ready(path) => path,
+  };
+
+  let remote_path = format!("files/{}", filename);
+  let bytes = webdav::download_file(&state.http, &settings, &remote_path).await?;
+  ensure_parent_dir(&final_path)?;
+  fs::write(&final_path, &bytes).map_err(|err| format!("保存文件失败: {err}"))?;
+  update_message_local_path(&state.db_path, &filename, &final_path, bytes.len() as i64)?;
+
+  Ok(DownloadResult {
+    status: "saved".to_string(),
+    path: Some(final_path.to_string_lossy().to_string()),
+    suggested_path: None,
+  })
+}
+
+#[tauri::command]
+async fn save_message_file_as(
+  state: State<'_, AppState>,
+  filename: String,
+  target_path: String,
+) -> Result<DownloadResult, String> {
+  let settings = current_settings(&state)?;
+  ensure_webdav_configured(&settings)?;
+
+  if target_path.trim().is_empty() {
+    return Err("未选择保存路径".to_string());
+  }
+  let final_path = PathBuf::from(target_path);
+  let remote_path = format!("files/{}", filename);
+  let bytes = webdav::download_file(&state.http, &settings, &remote_path).await?;
+  ensure_parent_dir(&final_path)?;
+  fs::write(&final_path, &bytes).map_err(|err| format!("保存文件失败: {err}"))?;
+  update_message_local_path(&state.db_path, &filename, &final_path, bytes.len() as i64)?;
+
+  Ok(DownloadResult {
+    status: "saved".to_string(),
+    path: Some(final_path.to_string_lossy().to_string()),
+    suggested_path: None,
+  })
+}
+
+#[tauri::command]
 async fn manual_refresh(state: State<'_, AppState>) -> Result<SyncStatus, String> {
   run_sync(&state, "手动刷新").await
 }
@@ -207,10 +283,33 @@ fn files_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
   Ok(base.join("files"))
 }
 
-fn load_settings(path: &Path) -> Result<Settings, String> {
+fn default_download_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
+  app_handle
+    .path()
+    .download_dir()
+    .or_else(|_| app_handle.path().app_data_dir())
+    .map_err(|err| format!("无法定位系统下载目录: {err}"))
+}
+
+fn normalize_download_dir(raw: &str, fallback: &Path) -> String {
+  let trimmed = raw.trim();
+  if trimmed.is_empty() {
+    fallback.to_string_lossy().to_string()
+  } else {
+    trimmed.to_string()
+  }
+}
+
+fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, String> {
   if path.exists() {
     let data = fs::read_to_string(path).map_err(|err| format!("读取设置失败: {err}"))?;
-    let settings = serde_json::from_str(&data).map_err(|err| format!("解析设置失败: {err}"))?;
+    let mut settings =
+      serde_json::from_str::<Settings>(&data).map_err(|err| format!("解析设置失败: {err}"))?;
+    let normalized = normalize_download_dir(&settings.download_dir, fallback_download_dir);
+    if settings.download_dir != normalized {
+      settings.download_dir = normalized;
+      write_settings(path, &settings)?;
+    }
     Ok(settings)
   } else {
     let settings = Settings {
@@ -219,6 +318,7 @@ fn load_settings(path: &Path) -> Result<Settings, String> {
       password: String::new(),
       sender_name: random_sender_name(),
       refresh_interval_secs: 5,
+      download_dir: normalize_download_dir("", fallback_download_dir),
     };
     write_settings(path, &settings)?;
     Ok(settings)
@@ -232,6 +332,110 @@ fn write_settings(path: &Path, settings: &Settings) -> Result<(), String> {
   let data = serde_json::to_string_pretty(settings)
     .map_err(|err| format!("序列化设置失败: {err}"))?;
   fs::write(path, data).map_err(|err| format!("写入设置失败: {err}"))?;
+  Ok(())
+}
+
+enum ConflictAction {
+  Prompt,
+  Overwrite,
+  Rename,
+}
+
+enum DownloadDecision {
+  Ready(PathBuf),
+  Conflict { suggested: PathBuf },
+}
+
+fn parse_conflict_action(raw: Option<String>) -> ConflictAction {
+  match raw.as_deref() {
+    Some("overwrite") => ConflictAction::Overwrite,
+    Some("rename") => ConflictAction::Rename,
+    _ => ConflictAction::Prompt,
+  }
+}
+
+fn resolve_download_dir(state: &AppState, settings: &Settings) -> PathBuf {
+  let trimmed = settings.download_dir.trim();
+  if trimmed.is_empty() {
+    state.default_download_dir.clone()
+  } else {
+    PathBuf::from(trimmed)
+  }
+}
+
+fn sanitize_filename(name: &str) -> String {
+  Path::new(name)
+    .file_name()
+    .and_then(|value| value.to_str())
+    .filter(|value| !value.trim().is_empty())
+    .unwrap_or("download.bin")
+    .to_string()
+}
+
+fn resolve_download_target(
+  target_path: &Path,
+  action: ConflictAction,
+) -> Result<DownloadDecision, String> {
+  if !target_path.exists() {
+    return Ok(DownloadDecision::Ready(target_path.to_path_buf()));
+  }
+
+  if target_path.is_dir() && matches!(action, ConflictAction::Overwrite) {
+    return Err("目标路径已存在且为目录".to_string());
+  }
+
+  match action {
+    ConflictAction::Prompt => Ok(DownloadDecision::Conflict {
+      suggested: build_renamed_path(target_path)?,
+    }),
+    ConflictAction::Overwrite => Ok(DownloadDecision::Ready(target_path.to_path_buf())),
+    ConflictAction::Rename => Ok(DownloadDecision::Ready(build_renamed_path(target_path)?)),
+  }
+}
+
+fn build_renamed_path(target_path: &Path) -> Result<PathBuf, String> {
+  let parent = target_path
+    .parent()
+    .ok_or_else(|| "无法解析保存目录".to_string())?;
+  let stem = target_path
+    .file_stem()
+    .and_then(|value| value.to_str())
+    .unwrap_or("download");
+  let extension = target_path
+    .extension()
+    .and_then(|value| value.to_str())
+    .map(|value| format!(".{value}"))
+    .unwrap_or_default();
+
+  for index in 1..=9999 {
+    let candidate = parent.join(format!("{stem} ({index}){extension}"));
+    if !candidate.exists() {
+      return Ok(candidate);
+    }
+  }
+  Err("无法生成可用文件名".to_string())
+}
+
+fn ensure_parent_dir(path: &Path) -> Result<(), String> {
+  if let Some(parent) = path.parent() {
+    fs::create_dir_all(parent).map_err(|err| format!("创建目录失败: {err}"))?;
+  }
+  Ok(())
+}
+
+fn update_message_local_path(
+  db_path: &Path,
+  filename: &str,
+  local_path: &Path,
+  size: i64,
+) -> Result<(), String> {
+  let existing = db::get_message(db_path, filename).map_err(|err| err.to_string())?;
+  let mut message = existing.ok_or_else(|| "未找到消息记录".to_string())?;
+  message.local_path = Some(local_path.to_string_lossy().to_string());
+  if size > 0 {
+    message.size = size;
+  }
+  db::upsert_message(db_path, &message).map_err(|err| err.to_string())?;
   Ok(())
 }
 
@@ -401,26 +605,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
         }
       }
       MessageKind::File => {
-        let needs_download = match message.local_path.as_deref() {
-          Some(path) => !Path::new(path).exists(),
-          None => true,
-        };
-        if needs_download {
-          let bytes = if file_entry.is_some() {
-            Some(webdav::download_file(&state.http, &settings, &remote_path).await?)
-          } else {
-            webdav::download_optional_file(&state.http, &settings, &remote_path).await?
-          };
-          if let Some(bytes) = bytes {
-            fs::create_dir_all(&state.files_dir)
-              .map_err(|err| format!("创建文件目录失败: {err}"))?;
-            let local_path = state.files_dir.join(&filename);
-            fs::write(&local_path, &bytes).map_err(|err| format!("保存文件失败: {err}"))?;
-            message.local_path = Some(local_path.to_string_lossy().to_string());
-            message.size = bytes.len() as i64;
-            changed = true;
-          }
-        }
+        // File downloads happen on demand.
       }
     }
 
@@ -536,16 +721,18 @@ fn main() {
       let settings_path = settings_path(&app.handle())?;
       let db_path = db_path(&app.handle())?;
       let files_dir = files_dir(&app.handle())?;
+      let default_download_dir = default_download_dir(&app.handle())?;
 
       db::init_db(&db_path)?;
       fs::create_dir_all(&files_dir).map_err(|err| format!("创建文件目录失败: {err}"))?;
 
-      let settings = load_settings(&settings_path)?;
+      let settings = load_settings(&settings_path, &default_download_dir)?;
 
       app.manage(AppState {
         settings_path,
         db_path,
         files_dir,
+        default_download_dir,
         settings: Mutex::new(settings),
         sync_status: Mutex::new(SyncStatus::idle()),
         sync_guard: AsyncMutex::new(()),
@@ -562,6 +749,8 @@ fn main() {
       list_messages,
       send_text,
       send_file,
+      download_message_file,
+      save_message_file_as,
       manual_refresh,
       get_sync_status
     ])

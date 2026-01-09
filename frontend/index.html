@@ -58,6 +58,16 @@
                 刷新间隔（秒）
                 <input id="refresh-interval" type="number" min="1" step="1" />
               </label>
+              <label>
+                下载目录
+                <div class="field-row">
+                  <input id="download-dir" type="text" placeholder="系统默认下载目录" />
+                  <button id="choose-download-dir" class="button ghost small" type="button">
+                    选择
+                  </button>
+                </div>
+                <span id="download-dir-hint" class="field-hint"></span>
+              </label>
               <button id="save-settings" class="button primary">保存设置</button>
             </div>
           </details>

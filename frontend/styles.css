@@ -121,6 +121,52 @@ body {
   color: var(--muted);
 }
 
+.message-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.message-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.action-menu {
+  position: relative;
+}
+
+.action-menu summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.action-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.action-menu-list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  z-index: 10;
+  min-width: 120px;
+}
+
+.action-menu:not([open]) .action-menu-list {
+  display: none;
+}
+
 .side {
   display: flex;
   flex-direction: column;
@@ -166,6 +212,21 @@ label {
   color: var(--muted);
 }
 
+.field-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.field-row input {
+  flex: 1;
+}
+
+.field-hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+
 input {
   border-radius: 10px;
   border: 1px solid var(--border);
@@ -201,6 +262,11 @@ input {
   color: #fff;
 }
 
+.button.small {
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
 .button.ghost {
   background: transparent;
   border: 1px solid var(--border);
@@ -210,6 +276,42 @@ input {
 .button:hover {
   transform: translateY(-1px);
   transition: transform 0.2s ease;
+}
+
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 15, 25, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 999;
+}
+
+.dialog {
+  background: var(--panel);
+  border-radius: var(--radius);
+  padding: 20px;
+  box-shadow: var(--shadow);
+  border: 1px solid var(--border);
+  width: min(360px, calc(100% - 32px));
+}
+
+.dialog-title {
+  margin: 0;
+  font-size: 16px;
+}
+
+.dialog-text {
+  margin: 8px 0 16px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 @media (max-width: 960px) {

@@ -1,6 +1,7 @@
 const tauri = window.__TAURI__ || {};
 const invoke = tauri.core?.invoke || tauri.invoke;
 const openDialog = tauri.dialog?.open;
+const saveDialog = tauri.dialog?.save;
 
 const messageList = document.getElementById('message-list');
 const syncStatus = document.getElementById('sync-status');
@@ -15,6 +16,9 @@ const webdavUserInput = document.getElementById('webdav-user');
 const webdavPassInput = document.getElementById('webdav-pass');
 const senderNameInput = document.getElementById('sender-name');
 const refreshIntervalInput = document.getElementById('refresh-interval');
+const downloadDirInput = document.getElementById('download-dir');
+const chooseDownloadDirButton = document.getElementById('choose-download-dir');
+const downloadDirHint = document.getElementById('download-dir-hint');
 
 let refreshTimer = null;
 let didInitialSync = false;
@@ -39,6 +43,163 @@ function formatTime(timestampMs) {
 function setStatus(text, isError = false) {
   syncStatus.textContent = text;
   syncStatus.style.color = isError ? '#d6452d' : '';
+}
+
+function setHint(element, text) {
+  if (!element) return;
+  element.textContent = text || '';
+}
+
+async function copyTextToClipboard(text) {
+  if (!text) {
+    setStatus('没有可复制的内容', true);
+    return;
+  }
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.setAttribute('readonly', 'true');
+      textarea.style.position = 'absolute';
+      textarea.style.left = '-9999px';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+    }
+    setStatus('已复制到剪贴板');
+  } catch (error) {
+    setStatus(`复制失败：${error}`, true);
+  }
+}
+
+function showDownloadConflictDialog(filename) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+
+    const dialog = document.createElement('div');
+    dialog.className = 'dialog';
+
+    const title = document.createElement('h3');
+    title.className = 'dialog-title';
+    title.textContent = '文件已存在';
+
+    const message = document.createElement('p');
+    message.className = 'dialog-text';
+    message.textContent = `下载目录已存在同名文件：${filename}`;
+
+    const actions = document.createElement('div');
+    actions.className = 'dialog-actions';
+
+    const renameButton = document.createElement('button');
+    renameButton.className = 'button small';
+    renameButton.textContent = '自动改名';
+
+    const overwriteButton = document.createElement('button');
+    overwriteButton.className = 'button primary small';
+    overwriteButton.textContent = '覆盖';
+
+    const cancelButton = document.createElement('button');
+    cancelButton.className = 'button ghost small';
+    cancelButton.textContent = '取消';
+
+    const cleanup = (choice) => {
+      document.removeEventListener('keydown', onKeyDown);
+      overlay.remove();
+      resolve(choice);
+    };
+
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        cleanup('cancel');
+      }
+    };
+
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) {
+        cleanup('cancel');
+      }
+    });
+    renameButton.addEventListener('click', () => cleanup('rename'));
+    overwriteButton.addEventListener('click', () => cleanup('overwrite'));
+    cancelButton.addEventListener('click', () => cleanup('cancel'));
+
+    actions.appendChild(renameButton);
+    actions.appendChild(overwriteButton);
+    actions.appendChild(cancelButton);
+    dialog.appendChild(title);
+    dialog.appendChild(message);
+    dialog.appendChild(actions);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    document.addEventListener('keydown', onKeyDown);
+  });
+}
+
+async function downloadMessageFile(message) {
+  try {
+    if (!invoke) {
+      setStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置', true);
+      return;
+    }
+    const result = await invoke('download_message_file', {
+      filename: message.filename,
+      original_name: message.original_name,
+      conflict_action: 'prompt',
+    });
+
+    if (result.status === 'conflict') {
+      const choice = await showDownloadConflictDialog(message.original_name);
+      if (choice === 'cancel') {
+        setStatus('已取消下载');
+        return;
+      }
+      const retry = await invoke('download_message_file', {
+        filename: message.filename,
+        original_name: message.original_name,
+        conflict_action: choice,
+      });
+      if (retry.status === 'saved') {
+        setStatus(`文件已保存到 ${retry.path || ''}`.trim());
+      }
+      return;
+    }
+
+    if (result.status === 'saved') {
+      setStatus(`文件已保存到 ${result.path || ''}`.trim());
+    }
+  } catch (error) {
+    setStatus(`下载失败：${error}`, true);
+  }
+}
+
+async function saveMessageFileAs(message) {
+  try {
+    if (!invoke) {
+      setStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置', true);
+      return;
+    }
+    if (!saveDialog) {
+      setStatus('未检测到保存对话框插件，请确认已启用 dialog 插件', true);
+      return;
+    }
+    const target = await saveDialog({
+      defaultPath: message.original_name,
+    });
+    if (!target) {
+      return;
+    }
+    const result = await invoke('save_message_file_as', {
+      filename: message.filename,
+      target_path: target,
+    });
+    setStatus(`文件已保存到 ${result.path || target}`.trim());
+  } catch (error) {
+    setStatus(`另存为失败：${error}`, true);
+  }
 }
 
 function renderMessages(messages) {
@@ -67,9 +228,54 @@ function renderMessages(messages) {
     meta.className = 'message-meta';
     meta.textContent = `大小 ${formatBytes(message.size || 0)}`;
 
+    const actions = document.createElement('div');
+    actions.className = 'message-actions';
+
+    if (message.kind === 'text') {
+      const copyButton = document.createElement('button');
+      copyButton.className = 'button ghost small';
+      copyButton.textContent = '复制';
+      copyButton.addEventListener('click', () => copyTextToClipboard(message.content || ''));
+      actions.appendChild(copyButton);
+    } else {
+      const downloadButton = document.createElement('button');
+      downloadButton.className = 'button primary small';
+      downloadButton.textContent = '下载';
+      downloadButton.addEventListener('click', () => downloadMessageFile(message));
+      actions.appendChild(downloadButton);
+
+      const menu = document.createElement('details');
+      menu.className = 'action-menu';
+
+      const summary = document.createElement('summary');
+      summary.className = 'button ghost small';
+      summary.textContent = '更多';
+
+      const menuList = document.createElement('div');
+      menuList.className = 'action-menu-list';
+
+      const saveAsButton = document.createElement('button');
+      saveAsButton.className = 'button ghost small';
+      saveAsButton.textContent = '另存为';
+      saveAsButton.addEventListener('click', () => {
+        menu.open = false;
+        saveMessageFileAs(message);
+      });
+
+      menuList.appendChild(saveAsButton);
+      menu.appendChild(summary);
+      menu.appendChild(menuList);
+      actions.appendChild(menu);
+    }
+
+    const footer = document.createElement('div');
+    footer.className = 'message-footer';
+    footer.appendChild(meta);
+    footer.appendChild(actions);
+
     item.appendChild(header);
     item.appendChild(body);
-    item.appendChild(meta);
+    item.appendChild(footer);
     messageList.appendChild(item);
   });
 }
@@ -131,6 +337,10 @@ async function loadSettings() {
     webdavPassInput.value = settings.password || '';
     senderNameInput.value = settings.sender_name || '';
     refreshIntervalInput.value = settings.refresh_interval_secs || 5;
+    if (downloadDirInput) {
+      downloadDirInput.value = settings.download_dir || '';
+      setHint(downloadDirHint, '');
+    }
     startRefreshTimer(settings.refresh_interval_secs || 5);
     if (!didInitialSync && settings.webdav_url && settings.webdav_url.trim()) {
       didInitialSync = true;
@@ -148,6 +358,7 @@ async function saveSettings() {
     password: webdavPassInput.value,
     sender_name: senderNameInput.value.trim(),
     refresh_interval_secs: Number(refreshIntervalInput.value) || 5,
+    download_dir: downloadDirInput ? downloadDirInput.value.trim() : '',
   };
 
   try {
@@ -158,6 +369,7 @@ async function saveSettings() {
     const updated = await invoke('save_settings', { settings: payload });
     setStatus('设置已保存');
     startRefreshTimer(updated.refresh_interval_secs || 5);
+    setHint(downloadDirHint, '下载目录已保存');
   } catch (error) {
     setStatus(`保存设置失败：${error}`, true);
   }
@@ -206,6 +418,27 @@ async function sendFile() {
   }
 }
 
+async function chooseDownloadDir() {
+  try {
+    if (!openDialog) {
+      setStatus('未检测到对话框插件，请确认已启用 dialog 插件', true);
+      return;
+    }
+    const selected = await openDialog({ multiple: false, directory: true });
+    if (!selected) {
+      return;
+    }
+    const path = Array.isArray(selected) ? selected[0] : selected;
+    if (!path || !downloadDirInput) {
+      return;
+    }
+    downloadDirInput.value = path;
+    setHint(downloadDirHint, '已选择下载目录，保存后生效');
+  } catch (error) {
+    setStatus(`选择下载目录失败：${error}`, true);
+  }
+}
+
 async function manualRefresh() {
   try {
     if (!invoke) {
@@ -224,6 +457,9 @@ refreshButton.addEventListener('click', manualRefresh);
 sendTextButton.addEventListener('click', sendText);
 sendFileButton.addEventListener('click', sendFile);
 saveSettingsButton.addEventListener('click', saveSettings);
+if (chooseDownloadDirButton) {
+  chooseDownloadDirButton.addEventListener('click', chooseDownloadDir);
+}
 
 loadSettings();
 loadMessages();

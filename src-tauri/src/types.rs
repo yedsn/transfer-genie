@@ -7,6 +7,8 @@ pub struct Settings {
   pub password: String,
   pub sender_name: String,
   pub refresh_interval_secs: u64,
+  #[serde(default)]
+  pub download_dir: String,
 }
 
 #[derive(Clone, Serialize)]
