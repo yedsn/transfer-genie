@@ -405,19 +405,20 @@ body {
 }
 
 .composer {
-  padding: 12px 0 0;
+  padding: 5px 0 0;
   flex-shrink: 0;
 }
 
 .composer-row {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  border-radius: 18px;
+  align-items: stretch;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 5px;
   border: 1px solid var(--border);
   background: #fffdf9;
   box-shadow: 0 10px 26px rgba(15, 15, 25, 0.06);
+  position: relative;
 }
 
 .composer-row:focus-within {
@@ -431,7 +432,7 @@ textarea {
   max-height: 120px;
   border: none;
   background: transparent;
-  padding: 6px 4px;
+  padding: 8px 64px 18px 8px;
   font-family: inherit;
   resize: none;
   font-size: 14px;
@@ -441,8 +442,11 @@ textarea {
 
 .composer-actions {
   display: flex;
-  gap: 10px;
+  gap: 6px;
   align-items: center;
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
 }
 
 label {

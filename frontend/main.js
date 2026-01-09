@@ -989,6 +989,7 @@ async function sendText() {
     await invoke('send_text', { text });
     textInput.value = '';
     await loadMessages();
+    setStatus('发送成功');
   } catch (error) {
     setStatus(`发送失败：${error}`, true);
   }
@@ -1030,6 +1031,7 @@ async function sendFile() {
       renderMessages(lastMessages);
     }
     await loadMessages();
+    setStatus('发送成功');
   } catch (error) {
     if (clientId) {
       pendingUploads.delete(clientId);
@@ -1163,6 +1165,15 @@ if (cancelSelectionButton) {
 }
 if (cleanupMessagesButton) {
   cleanupMessagesButton.addEventListener('click', cleanupMessages);
+}
+
+if (textInput) {
+  textInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      sendText();
+    }
+  });
 }
 
 tabButtons.forEach((button) => {
