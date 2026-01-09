@@ -4029,6 +4029,7 @@ dependencies = [
 name = "transfer-genie"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "futures-util",
  "percent-encoding",
  "quick-xml 0.31.0",

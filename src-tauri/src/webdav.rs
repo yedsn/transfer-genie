@@ -1,9 +1,10 @@
 use crate::types::{DavEntry, Settings};
+use bytes::Bytes;
 use futures_util::StreamExt;
 use percent_encoding::percent_decode_str;
 use quick_xml::events::Event;
 use quick_xml::Reader;
-use reqwest::{Client, Method, RequestBuilder};
+use reqwest::{Body, Client, Method, RequestBuilder};
 use url::Url;
 
 fn apply_auth(request: RequestBuilder, settings: &Settings) -> RequestBuilder {
@@ -286,6 +287,51 @@ pub async fn upload_file(
     .map_err(|err| format!("上传地址无效: {err}"))?;
 
   let request = client.put(url).body(data);
+  let response = apply_auth(request, settings)
+    .send()
+    .await
+    .map_err(|err| format!("上传失败: {err}"))?;
+
+  let status = response.status();
+  if !status.is_success() {
+    return Err(format!("上传失败: HTTP {}", status));
+  }
+  Ok(())
+}
+
+pub async fn upload_file_with_progress<F>(
+  client: &Client,
+  settings: &Settings,
+  remote_path: &str,
+  data: Vec<u8>,
+  mut on_progress: F,
+) -> Result<(), String>
+where
+  F: FnMut(u64, u64) + Send + 'static,
+{
+  let mut url = base_url(settings)?;
+  url = url
+    .join(remote_path)
+    .map_err(|err| format!("上传地址无效: {err}"))?;
+
+  let total = data.len() as u64;
+  let chunk_size = 64 * 1024;
+  on_progress(0, total);
+
+  let mut sent = 0u64;
+  let mut on_progress = on_progress;
+  let chunks: Vec<Bytes> = data
+    .chunks(chunk_size)
+    .map(Bytes::copy_from_slice)
+    .collect();
+  let stream = futures_util::stream::iter(chunks.into_iter()).map(move |chunk| {
+    sent += chunk.len() as u64;
+    on_progress(sent, total);
+    Ok::<Bytes, std::io::Error>(chunk)
+  });
+
+  let body = Body::wrap_stream(stream);
+  let request = client.put(url).body(body);
   let response = apply_auth(request, settings)
     .send()
     .await

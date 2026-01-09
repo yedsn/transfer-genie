@@ -55,6 +55,17 @@ struct DownloadProgress {
   error: Option<String>,
 }
 
+#[derive(Clone, Serialize)]
+struct UploadProgress {
+  client_id: String,
+  filename: Option<String>,
+  original_name: Option<String>,
+  received: u64,
+  total: u64,
+  status: String,
+  error: Option<String>,
+}
+
 #[tauri::command]
 fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
   let settings = state
@@ -132,7 +143,12 @@ async fn send_text(state: State<'_, AppState>, text: String) -> Result<(), Strin
 }
 
 #[tauri::command]
-async fn send_file(state: State<'_, AppState>, path: String) -> Result<(), String> {
+async fn send_file(
+  window: Window,
+  state: State<'_, AppState>,
+  path: String,
+  client_id: Option<String>,
+) -> Result<(), String> {
   let settings = current_settings(&state)?;
   ensure_webdav_configured(&settings)?;
 
@@ -144,22 +160,90 @@ async fn send_file(state: State<'_, AppState>, path: String) -> Result<(), Strin
     .to_string();
 
   let data = fs::read(&file_path).map_err(|err| format!("读取文件失败: {err}"))?;
+  let total_bytes = data.len() as u64;
   let timestamp_ms = now_ms();
   let filename = build_message_filename(&settings.sender_name, &original_name, timestamp_ms);
   let remote_path = format!("files/{}", filename);
 
+  let client_id = client_id
+    .and_then(|value| {
+      if value.trim().is_empty() {
+        None
+      } else {
+        Some(value)
+      }
+    })
+    .unwrap_or_else(|| filename.clone());
+
   webdav::ensure_directory(&state.http, &settings, "files").await?;
-  webdav::upload_file(&state.http, &settings, &remote_path, data.clone()).await?;
+  emit_upload_progress(
+    &window,
+    &client_id,
+    Some(&filename),
+    Some(&original_name),
+    0,
+    total_bytes,
+    "progress",
+    None,
+  );
+
+  let progress_window = window.clone();
+  let progress_client_id = client_id.clone();
+  let progress_filename = filename.clone();
+  let progress_original_name = original_name.clone();
+  let upload_result = webdav::upload_file_with_progress(
+    &state.http,
+    &settings,
+    &remote_path,
+    data,
+    move |sent, total| {
+      emit_upload_progress(
+        &progress_window,
+        &progress_client_id,
+        Some(&progress_filename),
+        Some(&progress_original_name),
+        sent,
+        total,
+        "progress",
+        None,
+      );
+    },
+  )
+  .await;
+
+  if let Err(err) = upload_result {
+    emit_upload_progress(
+      &window,
+      &client_id,
+      Some(&filename),
+      Some(&original_name),
+      0,
+      total_bytes,
+      "error",
+      Some(err.clone()),
+    );
+    return Err(err);
+  }
+  emit_upload_progress(
+    &window,
+    &client_id,
+    Some(&filename),
+    Some(&original_name),
+    total_bytes,
+    total_bytes,
+    "complete",
+    None,
+  );
 
   let local_path = state.files_dir.join(&filename);
   fs::create_dir_all(&state.files_dir).map_err(|err| format!("创建目录失败: {err}"))?;
-  fs::write(&local_path, &data).map_err(|err| format!("保存本地文件失败: {err}"))?;
+  fs::copy(&file_path, &local_path).map_err(|err| format!("保存本地文件失败: {err}"))?;
 
   let message = DbMessage {
     filename: filename.clone(),
     sender: settings.sender_name.clone(),
     timestamp_ms,
-    size: data.len() as i64,
+    size: total_bytes as i64,
     kind: MessageKind::File.as_str().to_string(),
     original_name,
     etag: None,
@@ -545,6 +629,28 @@ fn emit_download_progress(
     error,
   };
   let _ = window.emit("download-progress", payload);
+}
+
+fn emit_upload_progress(
+  window: &Window,
+  client_id: &str,
+  filename: Option<&str>,
+  original_name: Option<&str>,
+  received: u64,
+  total: u64,
+  status: &str,
+  error: Option<String>,
+) {
+  let payload = UploadProgress {
+    client_id: client_id.to_string(),
+    filename: filename.map(|value| value.to_string()),
+    original_name: original_name.map(|value| value.to_string()),
+    received,
+    total,
+    status: status.to_string(),
+    error,
+  };
+  let _ = window.emit("upload-progress", payload);
 }
 
 async fn run_sync(state: &AppState, source: &str) -> Result<SyncStatus, String> {

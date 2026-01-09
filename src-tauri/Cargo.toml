@@ -20,6 +20,7 @@ thiserror = "1.0"
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 futures-util = "0.3"
+bytes = "1"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
