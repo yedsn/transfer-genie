@@ -20,6 +20,12 @@ const refreshIntervalInput = document.getElementById('refresh-interval');
 const downloadDirInput = document.getElementById('download-dir');
 const chooseDownloadDirButton = document.getElementById('choose-download-dir');
 const downloadDirHint = document.getElementById('download-dir-hint');
+const toggleSelectionButton = document.getElementById('toggle-selection');
+const selectionBar = document.getElementById('selection-bar');
+const selectionCount = document.getElementById('selection-count');
+const deleteSelectedButton = document.getElementById('delete-selected');
+const cancelSelectionButton = document.getElementById('cancel-selection');
+const cleanupMessagesButton = document.getElementById('cleanup-messages');
 
 let refreshTimer = null;
 let didInitialSync = false;
@@ -28,6 +34,8 @@ const pendingUploads = new Map();
 let lastMessages = [];
 const downloadSpeed = new Map();
 const uploadSpeed = new Map();
+let selectionMode = false;
+const selectedMessages = new Set();
 
 function formatBytes(bytes) {
   if (bytes <= 0) return '0 B';
@@ -190,6 +198,174 @@ function updateUploadProgressUI(uploadId) {
 function setHint(element, text) {
   if (!element) return;
   element.textContent = text || '';
+}
+
+function updateSelectionBar() {
+  if (!selectionBar || !selectionCount || !deleteSelectedButton) return;
+  const count = selectedMessages.size;
+  selectionBar.hidden = !selectionMode;
+  selectionBar.style.display = selectionMode ? 'flex' : 'none';
+  selectionCount.hidden = !selectionMode;
+  selectionCount.textContent = `已选中 ${count} 项`;
+  deleteSelectedButton.disabled = count === 0;
+}
+
+function updateSelectionToggleLabel() {
+  if (!toggleSelectionButton) return;
+  toggleSelectionButton.textContent = selectionMode ? '完成' : '选择';
+}
+
+function setSelectionMode(enabled) {
+  selectionMode = enabled;
+  if (!selectionMode) {
+    selectedMessages.clear();
+  }
+  updateSelectionToggleLabel();
+  updateSelectionBar();
+  renderMessages(lastMessages);
+}
+
+function toggleSelectionMode() {
+  setSelectionMode(!selectionMode);
+}
+
+function toggleSelectedMessage(filename, checked) {
+  if (!filename) return;
+  if (checked) {
+    selectedMessages.add(filename);
+  } else {
+    selectedMessages.delete(filename);
+  }
+  updateSelectionBar();
+}
+
+function scrollMessageListToBottom() {
+  if (!messageList) return;
+  requestAnimationFrame(() => {
+    messageList.scrollTop = messageList.scrollHeight;
+  });
+}
+
+function showDeleteConfirmDialog(count) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+
+    const dialog = document.createElement('div');
+    dialog.className = 'dialog';
+
+    const title = document.createElement('h3');
+    title.className = 'dialog-title';
+    title.textContent = '确认删除';
+
+    const message = document.createElement('p');
+    message.className = 'dialog-text';
+    message.textContent = `将删除 ${count} 条消息，选择删除范围。`;
+
+    const actions = document.createElement('div');
+    actions.className = 'dialog-actions';
+
+    const localButton = document.createElement('button');
+    localButton.className = 'button small';
+    localButton.textContent = '仅本地删除';
+
+    const remoteButton = document.createElement('button');
+    remoteButton.className = 'button primary small';
+    remoteButton.textContent = '本地 + 远端删除';
+
+    const cancelButton = document.createElement('button');
+    cancelButton.className = 'button ghost small';
+    cancelButton.textContent = '取消';
+
+    const cleanup = (choice) => {
+      document.removeEventListener('keydown', onKeyDown);
+      overlay.remove();
+      resolve(choice);
+    };
+
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        cleanup('cancel');
+      }
+    };
+
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) {
+        cleanup('cancel');
+      }
+    });
+    localButton.addEventListener('click', () => cleanup('local'));
+    remoteButton.addEventListener('click', () => cleanup('remote'));
+    cancelButton.addEventListener('click', () => cleanup('cancel'));
+
+    actions.appendChild(localButton);
+    actions.appendChild(remoteButton);
+    actions.appendChild(cancelButton);
+    dialog.appendChild(title);
+    dialog.appendChild(message);
+    dialog.appendChild(actions);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    document.addEventListener('keydown', onKeyDown);
+  });
+}
+
+function showCleanupConfirmDialog() {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+
+    const dialog = document.createElement('div');
+    dialog.className = 'dialog';
+
+    const title = document.createElement('h3');
+    title.className = 'dialog-title';
+    title.textContent = '清理旧数据';
+
+    const message = document.createElement('p');
+    message.className = 'dialog-text';
+    message.textContent = '将删除 30 天前的本地与远端消息数据，是否继续？';
+
+    const actions = document.createElement('div');
+    actions.className = 'dialog-actions';
+
+    const confirmButton = document.createElement('button');
+    confirmButton.className = 'button primary small';
+    confirmButton.textContent = '开始清理';
+
+    const cancelButton = document.createElement('button');
+    cancelButton.className = 'button ghost small';
+    cancelButton.textContent = '取消';
+
+    const cleanup = (choice) => {
+      document.removeEventListener('keydown', onKeyDown);
+      overlay.remove();
+      resolve(choice);
+    };
+
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        cleanup(false);
+      }
+    };
+
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) {
+        cleanup(false);
+      }
+    });
+    confirmButton.addEventListener('click', () => cleanup(true));
+    cancelButton.addEventListener('click', () => cleanup(false));
+
+    actions.appendChild(confirmButton);
+    actions.appendChild(cancelButton);
+    dialog.appendChild(title);
+    dialog.appendChild(message);
+    dialog.appendChild(actions);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    document.addEventListener('keydown', onKeyDown);
+  });
 }
 
 async function copyTextToClipboard(text) {
@@ -359,9 +535,100 @@ async function saveMessageFileAs(message) {
   }
 }
 
-function renderMessages(messages) {
+async function deleteSingleMessage(message) {
+  if (!message || !message.filename) {
+    return;
+  }
+  if (!invoke) {
+    setStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置', true);
+    return;
+  }
+  const choice = await showDeleteConfirmDialog(1);
+  if (choice === 'cancel') {
+    return;
+  }
+  try {
+    const result = await invoke('delete_messages', {
+      filenames: [message.filename],
+      deleteRemote: choice === 'remote',
+    });
+    const failed = result.failed || [];
+    if (failed.length > 0) {
+      setStatus('删除失败，请稍后再试', true);
+    } else {
+      setStatus('已删除 1 条消息');
+    }
+    await loadMessages();
+  } catch (error) {
+    setStatus(`删除失败：${error}`, true);
+  }
+}
+
+async function deleteSelectedMessages() {
+  const filenames = Array.from(selectedMessages);
+  if (!filenames.length) {
+    setStatus('请先选择要删除的消息', true);
+    return;
+  }
+  if (!invoke) {
+    setStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置', true);
+    return;
+  }
+  const choice = await showDeleteConfirmDialog(filenames.length);
+  if (choice === 'cancel') {
+    return;
+  }
+  try {
+    const result = await invoke('delete_messages', {
+      filenames,
+      deleteRemote: choice === 'remote',
+    });
+    const failed = result.failed || [];
+    if (failed.length > 0) {
+      setStatus(`删除完成，${failed.length} 条处理失败`, true);
+    } else {
+      setStatus(`已删除 ${result.deleted || filenames.length} 条消息`);
+    }
+  } catch (error) {
+    setStatus(`删除失败：${error}`, true);
+  } finally {
+    setSelectionMode(false);
+    await loadMessages();
+  }
+}
+async function cleanupMessages() {
+  if (!invoke) {
+    setStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置', true);
+    return;
+  }
+  const confirmed = await showCleanupConfirmDialog();
+  if (!confirmed) {
+    return;
+  }
+  try {
+    const result = await invoke('cleanup_messages');
+    const failed = result.failed || [];
+    if (failed.length > 0) {
+      setStatus(`清理完成，${failed.length} 条处理失败`, true);
+    } else {
+      setStatus(`已清理 ${result.deleted || 0} 条消息`);
+    }
+    await loadMessages();
+  } catch (error) {
+    setStatus(`清理失败：${error}`, true);
+  }
+}
+function renderMessages(messages, options = {}) {
   lastMessages = Array.isArray(messages) ? messages : [];
   const merged = mergeMessages(lastMessages);
+  const { scrollToBottom = false } = options;
+  const available = new Set(merged.map((message) => message.filename));
+  selectedMessages.forEach((filename) => {
+    if (!available.has(filename)) {
+      selectedMessages.delete(filename);
+    }
+  });
+  updateSelectionBar();
   messageList.innerHTML = '';
   if (!merged || merged.length === 0) {
     const empty = document.createElement('li');
@@ -375,10 +642,25 @@ function renderMessages(messages) {
     const item = document.createElement('li');
     item.className = 'message-card';
     item.dataset.filename = message.filename;
+    item.classList.toggle('is-selected', selectedMessages.has(message.filename));
 
     const header = document.createElement('div');
     header.className = 'message-header';
-    header.textContent = `${message.sender} · ${formatTime(message.timestamp_ms)}`;
+    if (selectionMode) {
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.className = 'message-select';
+      checkbox.checked = selectedMessages.has(message.filename);
+      checkbox.disabled = !!message.uploading;
+      checkbox.addEventListener('change', () => {
+        toggleSelectedMessage(message.filename, checkbox.checked);
+        item.classList.toggle('is-selected', checkbox.checked);
+      });
+      header.appendChild(checkbox);
+    }
+    const headerText = document.createElement('span');
+    headerText.textContent = `${message.sender} · ${formatTime(message.timestamp_ms)}`;
+    header.appendChild(headerText);
 
     const body = document.createElement('div');
     body.className = 'message-body';
@@ -448,7 +730,16 @@ function renderMessages(messages) {
           saveMessageFileAs(message);
         });
 
+        const deleteButton = document.createElement('button');
+        deleteButton.className = 'button ghost small';
+        deleteButton.textContent = '删除';
+        deleteButton.addEventListener('click', () => {
+          menu.open = false;
+          deleteSingleMessage(message);
+        });
+
         menuList.appendChild(saveAsButton);
+        menuList.appendChild(deleteButton);
         menu.appendChild(summary);
         menu.appendChild(menuList);
         actions.appendChild(menu);
@@ -541,8 +832,10 @@ function renderMessages(messages) {
     }
     messageList.appendChild(item);
   });
+  if (scrollToBottom) {
+    scrollMessageListToBottom();
+  }
 }
-
 function mergeMessages(messages) {
   const merged = [...messages];
   pendingUploads.forEach((upload) => {
@@ -570,7 +863,7 @@ async function loadMessages() {
       return;
     }
     const messages = await invoke('list_messages');
-    renderMessages(messages);
+    renderMessages(messages, { scrollToBottom: true });
   } catch (error) {
     setStatus(`加载消息失败：${error}`, true);
   }
@@ -833,6 +1126,18 @@ sendFileButton.addEventListener('click', sendFile);
 saveSettingsButton.addEventListener('click', saveSettings);
 if (chooseDownloadDirButton) {
   chooseDownloadDirButton.addEventListener('click', chooseDownloadDir);
+}
+if (toggleSelectionButton) {
+  toggleSelectionButton.addEventListener('click', toggleSelectionMode);
+}
+if (deleteSelectedButton) {
+  deleteSelectedButton.addEventListener('click', deleteSelectedMessages);
+}
+if (cancelSelectionButton) {
+  cancelSelectionButton.addEventListener('click', () => setSelectionMode(false));
+}
+if (cleanupMessagesButton) {
+  cleanupMessagesButton.addEventListener('click', cleanupMessages);
 }
 
 loadSettings();

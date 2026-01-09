@@ -22,10 +22,19 @@
 
       <main class="content">
         <section class="feed">
+          <div class="feed-toolbar">
+            <div class="feed-toolbar-left">
+              <div id="selection-bar" class="selection-bar" hidden>
+                <button id="delete-selected" class="button small" type="button">删除</button>
+                <button id="cancel-selection" class="button ghost small" type="button">取消</button>
+              </div>
+            </div>
+            <div class="feed-toolbar-right">
+              <span id="selection-count" class="selection-count" hidden>已选中 0 项</span>
+              <button id="toggle-selection" class="button ghost small" type="button">选择</button>
+            </div>
+          </div>
           <ul id="message-list" class="message-list"></ul>
-        </section>
-
-        <aside class="side">
           <section class="composer">
             <label for="text-input">发送文本</label>
             <textarea id="text-input" placeholder="输入消息..."></textarea>
@@ -34,7 +43,9 @@
               <button id="send-file" class="button">发送文件</button>
             </div>
           </section>
+        </section>
 
+        <aside class="side">
           <details class="settings" open>
             <summary>设置</summary>
             <div class="settings-body">
@@ -69,6 +80,10 @@
                 <span id="download-dir-hint" class="field-hint"></span>
               </label>
               <button id="save-settings" class="button primary">保存设置</button>
+              <div class="settings-actions">
+                <button id="cleanup-messages" class="button ghost" type="button">清理旧数据</button>
+                <span class="field-hint">将删除 30 天前的本地与远端消息</span>
+              </div>
             </div>
           </details>
         </aside>

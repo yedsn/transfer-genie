@@ -82,6 +82,29 @@ body {
   padding: 24px;
   box-shadow: var(--shadow);
   min-height: 520px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  height: 100%;
+}
+
+.feed-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.feed-toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.feed-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .message-list {
@@ -91,6 +114,9 @@ body {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  flex: 1;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .message-card {
@@ -105,7 +131,8 @@ body {
 
 .message-header {
   display: flex;
-  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
   font-size: 13px;
   color: var(--muted);
 }
@@ -132,6 +159,16 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.message-select {
+  width: 16px;
+  height: 16px;
+}
+
+.message-card.is-selected {
+  border-color: #ffd1b6;
+  box-shadow: 0 0 0 1px #ffd1b6;
 }
 
 .downloaded-tag {
@@ -268,6 +305,17 @@ body {
   display: none;
 }
 
+.selection-count {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.selection-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .side {
   display: flex;
   flex-direction: column;
@@ -345,6 +393,12 @@ input {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.settings-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .button {

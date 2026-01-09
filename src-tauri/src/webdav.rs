@@ -344,6 +344,30 @@ where
   Ok(())
 }
 
+pub async fn delete_file(
+  client: &Client,
+  settings: &Settings,
+  remote_path: &str,
+  allow_missing: bool,
+) -> Result<(), String> {
+  let mut url = base_url(settings)?;
+  url = url
+    .join(remote_path)
+    .map_err(|err| format!("删除地址无效: {err}"))?;
+
+  let request = client.request(Method::from_bytes(b"DELETE").map_err(|e| e.to_string())?, url);
+  let response = apply_auth(request, settings)
+    .send()
+    .await
+    .map_err(|err| format!("删除失败: {err}"))?;
+
+  let status = response.status();
+  if status.is_success() || (allow_missing && status.as_u16() == 404) {
+    return Ok(());
+  }
+  Err(format!("删除失败: HTTP {}", status))
+}
+
 pub async fn ensure_directory(
   client: &Client,
   settings: &Settings,

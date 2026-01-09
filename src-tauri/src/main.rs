@@ -46,6 +46,12 @@ struct DownloadResult {
   suggested_path: Option<String>,
 }
 
+#[derive(Serialize)]
+struct DeleteSummary {
+  deleted: usize,
+  failed: Vec<String>,
+}
+
 #[derive(Clone, Serialize)]
 struct DownloadProgress {
   filename: String,
@@ -392,6 +398,134 @@ async fn save_message_file_as(
 }
 
 #[tauri::command]
+async fn delete_messages(
+  state: State<'_, AppState>,
+  filenames: Vec<String>,
+  delete_remote: bool,
+) -> Result<DeleteSummary, String> {
+  let mut unique = HashSet::new();
+  let mut targets: Vec<String> = Vec::new();
+  for name in filenames {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+      continue;
+    }
+    if unique.insert(trimmed.to_string()) {
+      targets.push(trimmed.to_string());
+    }
+  }
+  if targets.is_empty() {
+    return Ok(DeleteSummary {
+      deleted: 0,
+      failed: Vec::new(),
+    });
+  }
+
+  let settings = current_settings(&state)?;
+  if delete_remote {
+    ensure_webdav_configured(&settings)?;
+  }
+
+  let mut failed: Vec<String> = Vec::new();
+  let mut succeeded: Vec<String> = targets.clone();
+  if delete_remote {
+    succeeded.clear();
+    for filename in &targets {
+      let remote_path = format!("files/{}", filename);
+      match webdav::delete_file(&state.http, &settings, &remote_path, true).await {
+        Ok(_) => succeeded.push(filename.clone()),
+        Err(_) => failed.push(filename.clone()),
+      }
+    }
+    if !succeeded.is_empty() {
+      let success_set: HashSet<String> = succeeded.iter().cloned().collect();
+      remove_history_entries(&state, &settings, &success_set).await?;
+    }
+  }
+
+  let deletable = if delete_remote { succeeded } else { targets };
+  if deletable.is_empty() {
+    return Ok(DeleteSummary {
+      deleted: 0,
+      failed,
+    });
+  }
+
+  let mut messages = Vec::new();
+  for filename in &deletable {
+    if let Some(message) = db::get_message(&state.db_path, filename).map_err(|err| err.to_string())?
+    {
+      messages.push(message);
+    }
+  }
+
+  for message in &messages {
+    delete_local_files_for_entry(
+      &state,
+      &settings,
+      &message.kind,
+      &message.original_name,
+      message.local_path.as_deref(),
+    )?;
+  }
+
+  let deleted = db::delete_messages(&state.db_path, &deletable).map_err(|err| err.to_string())?;
+  Ok(DeleteSummary { deleted, failed })
+}
+
+#[tauri::command]
+async fn cleanup_messages(state: State<'_, AppState>) -> Result<DeleteSummary, String> {
+  let settings = current_settings(&state)?;
+  ensure_webdav_configured(&settings)?;
+
+  let cutoff_ms = now_ms() - 30_i64 * 24 * 60 * 60 * 1000;
+  let messages = db::list_messages(&state.db_path).map_err(|err| err.to_string())?;
+  let candidates: Vec<Message> = messages
+    .into_iter()
+    .filter(|message| message.timestamp_ms < cutoff_ms)
+    .collect();
+
+  if candidates.is_empty() {
+    return Ok(DeleteSummary {
+      deleted: 0,
+      failed: Vec::new(),
+    });
+  }
+
+  let mut failed: Vec<String> = Vec::new();
+  let mut succeeded: Vec<String> = Vec::new();
+  for message in &candidates {
+    let remote_path = format!("files/{}", message.filename);
+    match webdav::delete_file(&state.http, &settings, &remote_path, true).await {
+      Ok(_) => succeeded.push(message.filename.clone()),
+      Err(_) => failed.push(message.filename.clone()),
+    }
+  }
+
+  if !succeeded.is_empty() {
+    let success_set: HashSet<String> = succeeded.iter().cloned().collect();
+    remove_history_entries(&state, &settings, &success_set).await?;
+  }
+
+  let success_set: HashSet<String> = succeeded.iter().cloned().collect();
+  for message in &candidates {
+    if !success_set.contains(&message.filename) {
+      continue;
+    }
+    delete_local_files_for_entry(
+      &state,
+      &settings,
+      &message.kind,
+      &message.original_name,
+      message.local_path.as_deref(),
+    )?;
+  }
+
+  let deleted = db::delete_messages(&state.db_path, &succeeded).map_err(|err| err.to_string())?;
+  Ok(DeleteSummary { deleted, failed })
+}
+
+#[tauri::command]
 async fn manual_refresh(state: State<'_, AppState>) -> Result<SyncStatus, String> {
   run_sync(&state, "手动刷新").await
 }
@@ -544,6 +678,58 @@ fn sanitize_filename(name: &str) -> String {
     .filter(|value| !value.trim().is_empty())
     .unwrap_or("download.bin")
     .to_string()
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+  path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn is_within_dir(path: &Path, base_dir: &Path) -> bool {
+  let normalized_path = normalize_path(path);
+  let normalized_base = normalize_path(base_dir);
+  normalized_path.starts_with(&normalized_base)
+}
+
+fn delete_local_file(path: &Path, base_dir: &Path) -> Result<(), String> {
+  if !path.exists() {
+    return Ok(());
+  }
+  if !is_within_dir(path, base_dir) {
+    return Ok(());
+  }
+  fs::remove_file(path).map_err(|err| format!("删除本地文件失败: {err}"))?;
+  Ok(())
+}
+
+fn delete_local_files_for_entry(
+  state: &AppState,
+  settings: &Settings,
+  kind: &str,
+  original_name: &str,
+  local_path: Option<&str>,
+) -> Result<(), String> {
+  if kind != MessageKind::File.as_str() {
+    return Ok(());
+  }
+  let base_dir = resolve_download_dir(state, settings);
+  let mut candidates: Vec<PathBuf> = Vec::new();
+  if let Some(path) = local_path {
+    if !path.trim().is_empty() {
+      candidates.push(PathBuf::from(path));
+    }
+  }
+  let default_path = base_dir.join(sanitize_filename(original_name));
+  candidates.push(default_path);
+
+  let mut seen: HashSet<PathBuf> = HashSet::new();
+  for candidate in candidates {
+    let normalized = normalize_path(&candidate);
+    if !seen.insert(normalized.clone()) {
+      continue;
+    }
+    delete_local_file(&normalized, &base_dir)?;
+  }
+  Ok(())
 }
 
 fn resolve_download_target(
@@ -908,6 +1094,38 @@ async fn save_history(
   webdav::upload_file(&state.http, settings, "history.json", data).await
 }
 
+async fn remove_history_entries(
+  state: &AppState,
+  settings: &Settings,
+  filenames: &HashSet<String>,
+) -> Result<(), String> {
+  if filenames.is_empty() {
+    return Ok(());
+  }
+  let mut history = load_history(state, settings).await?;
+  history.retain(|entry| !filenames.contains(&entry.filename));
+  save_history(state, settings, &history).await
+}
+
+fn show_main_window(app: &AppHandle) {
+  if let Some(window) = app.get_webview_window("main") {
+    let _ = window.show();
+    let _ = window.set_focus();
+  }
+}
+
+fn toggle_main_window(app: &AppHandle) {
+  if let Some(window) = app.get_webview_window("main") {
+    let is_visible = window.is_visible().unwrap_or(true);
+    if is_visible {
+      let _ = window.hide();
+    } else {
+      let _ = window.show();
+      let _ = window.set_focus();
+    }
+  }
+}
+
 fn start_sync_loop(app_handle: AppHandle) {
   tauri::async_runtime::spawn(async move {
     loop {
@@ -953,6 +1171,56 @@ fn main() {
         http: Client::new(),
       });
 
+      #[cfg(desktop)]
+      {
+        use tauri::menu::{Menu, MenuItem};
+        use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+        use tauri_plugin_global_shortcut::{Code, Modifiers, ShortcutState};
+
+        let show_item = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
+        let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+        let tray_menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+
+        TrayIconBuilder::new()
+          .menu(&tray_menu)
+          .on_menu_event(|app, event: tauri::menu::MenuEvent| match event.id().as_ref() {
+            "show" => show_main_window(app),
+            "quit" => app.exit(0),
+            _ => {}
+          })
+          .on_tray_icon_event(
+            |tray: &tauri::tray::TrayIcon<_>, event: tauri::tray::TrayIconEvent| {
+              if matches!(event, TrayIconEvent::Click { .. }) {
+                show_main_window(tray.app_handle());
+              }
+            },
+          )
+          .build(app)?;
+
+        app.handle().plugin(
+          tauri_plugin_global_shortcut::Builder::new()
+            .with_shortcuts(["alt+t"])?
+            .with_handler(|app, shortcut, event| {
+              if event.state == ShortcutState::Pressed
+                && shortcut.matches(Modifiers::ALT, Code::KeyT)
+              {
+                toggle_main_window(app);
+              }
+            })
+            .build(),
+        )?;
+
+        if let Some(window) = app.get_webview_window("main") {
+          let event_window = window.clone();
+          window.on_window_event(move |event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+              let _ = event_window.hide();
+              api.prevent_close();
+            }
+          });
+        }
+      }
+
       start_sync_loop(app.handle().clone());
       Ok(())
     })
@@ -965,6 +1233,8 @@ fn main() {
       send_file,
       download_message_file,
       save_message_file_as,
+      delete_messages,
+      cleanup_messages,
       manual_refresh,
       get_sync_status
     ])

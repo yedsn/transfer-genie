@@ -140,3 +140,21 @@ pub fn prune_messages(path: &Path, keep: &[String]) -> rusqlite::Result<()> {
   conn.execute(&sql, params_from_iter(keep.iter()))?;
   Ok(())
 }
+
+pub fn delete_messages(path: &Path, filenames: &[String]) -> rusqlite::Result<usize> {
+  let conn = Connection::open(path)?;
+  if filenames.is_empty() {
+    return Ok(0);
+  }
+  let placeholders = std::iter::repeat("?")
+    .take(filenames.len())
+    .collect::<Vec<_>>()
+    .join(",");
+  let sql = format!("DELETE FROM messages WHERE filename IN ({placeholders})");
+  conn.execute(&sql, params_from_iter(filenames.iter()))
+}
+
+pub fn delete_messages_before(path: &Path, cutoff_ms: i64) -> rusqlite::Result<usize> {
+  let conn = Connection::open(path)?;
+  conn.execute("DELETE FROM messages WHERE timestamp_ms < ?1", params![cutoff_ms])
+}

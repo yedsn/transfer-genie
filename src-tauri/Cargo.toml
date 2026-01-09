@@ -17,10 +17,13 @@ rand = "0.8"
 rusqlite = { version = "0.31", features = ["bundled"] }
 tokio = { version = "1", features = ["time", "sync", "rt-multi-thread", "macros"] }
 thiserror = "1.0"
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 futures-util = "0.3"
 bytes = "1"
+
+[target."cfg(not(any(target_os = \"android\", target_os = \"ios\")))".dependencies]
+tauri-plugin-global-shortcut = "2.0.0"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
