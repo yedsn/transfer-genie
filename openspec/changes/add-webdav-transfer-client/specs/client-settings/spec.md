@@ -1,4 +1,4 @@
-﻿## ADDED Requirements
+## ADDED Requirements
 ### Requirement: WebDAV connection settings
 客户端 SHALL 允许用户配置 WebDAV 端点 URL 与认证凭据，并持久化保存。
 客户端 SHALL 使用已保存的设置进行所有同步与上传操作，并在认证或连接失败时显示错误状态。

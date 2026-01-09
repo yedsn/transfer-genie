@@ -6,6 +6,7 @@ mod webdav;
 use crate::db::DbMessage;
 use crate::filenames::{build_message_filename, parse_message_filename, MessageKind};
 use crate::types::{Message, Settings, SyncStatus};
+use serde::{Deserialize, Serialize};
 use rand::Rng;
 use reqwest::Client;
 use std::fs;
@@ -23,6 +24,16 @@ struct AppState {
   sync_status: Mutex<SyncStatus>,
   sync_guard: AsyncMutex<()>,
   http: Client,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct HistoryEntry {
+  filename: String,
+  sender: String,
+  timestamp_ms: i64,
+  size: i64,
+  kind: String,
+  original_name: String,
 }
 
 #[tauri::command]
@@ -63,13 +74,15 @@ async fn send_text(state: State<'_, AppState>, text: String) -> Result<(), Strin
 
   let timestamp_ms = now_ms();
   let filename = build_message_filename(&settings.sender_name, "message.txt", timestamp_ms);
+  let remote_path = format!("files/{}", filename);
   let data = text.clone().into_bytes();
 
-  webdav::upload_file(&state.http, &settings, &filename, data.clone()).await?;
+  webdav::ensure_directory(&state.http, &settings, "files").await?;
+  webdav::upload_file(&state.http, &settings, &remote_path, data.clone()).await?;
 
   let message = DbMessage {
     filename: filename.clone(),
-    sender: settings.sender_name,
+    sender: settings.sender_name.clone(),
     timestamp_ms,
     size: data.len() as i64,
     kind: MessageKind::Text.as_str().to_string(),
@@ -81,6 +94,7 @@ async fn send_text(state: State<'_, AppState>, text: String) -> Result<(), Strin
   };
 
   db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
+  let _ = append_history(&state, &settings, message_to_history(&message)).await;
   Ok(())
 }
 
@@ -110,7 +124,7 @@ async fn send_file(state: State<'_, AppState>, path: String) -> Result<(), Strin
 
   let message = DbMessage {
     filename: filename.clone(),
-    sender: settings.sender_name,
+    sender: settings.sender_name.clone(),
     timestamp_ms,
     size: data.len() as i64,
     kind: MessageKind::File.as_str().to_string(),
@@ -122,6 +136,7 @@ async fn send_file(state: State<'_, AppState>, path: String) -> Result<(), Strin
   };
 
   db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
+  let _ = append_history(&state, &settings, message_to_history(&message)).await;
   Ok(())
 }
 
@@ -264,9 +279,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
 
   ensure_webdav_configured(&settings)?;
 
-  let mut entries = webdav::list_entries(&state.http, &settings, None, false).await?;
-  let mut file_entries = webdav::list_entries(&state.http, &settings, Some("files"), true).await?;
-  entries.append(&mut file_entries);
+  let entries = webdav::list_entries(&state.http, &settings, Some("files"), true).await?;
   let mut new_count = 0usize;
 
   for entry in entries {
@@ -337,6 +350,53 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
   }
 
   Ok(new_count)
+}
+
+fn message_to_history(message: &DbMessage) -> HistoryEntry {
+  HistoryEntry {
+    filename: message.filename.clone(),
+    sender: message.sender.clone(),
+    timestamp_ms: message.timestamp_ms,
+    size: message.size,
+    kind: message.kind.clone(),
+    original_name: message.original_name.clone(),
+  }
+}
+
+async fn append_history(
+  state: &AppState,
+  settings: &Settings,
+  entry: HistoryEntry,
+) -> Result<(), String> {
+  let mut history = load_history(state, settings).await?;
+  if history.iter().any(|item| item.filename == entry.filename) {
+    return Ok(());
+  }
+  history.push(entry);
+  history.sort_by_key(|item| item.timestamp_ms);
+  save_history(state, settings, &history).await
+}
+
+async fn load_history(
+  state: &AppState,
+  settings: &Settings,
+) -> Result<Vec<HistoryEntry>, String> {
+  let bytes = webdav::download_optional_file(&state.http, settings, "history.json").await?;
+  match bytes {
+    Some(data) => serde_json::from_slice::<Vec<HistoryEntry>>(&data)
+      .map_err(|err| format!("解析历史记录失败: {err}")),
+    None => Ok(Vec::new()),
+  }
+}
+
+async fn save_history(
+  state: &AppState,
+  settings: &Settings,
+  history: &[HistoryEntry],
+) -> Result<(), String> {
+  let data =
+    serde_json::to_vec_pretty(history).map_err(|err| format!("序列化历史记录失败: {err}"))?;
+  webdav::upload_file(&state.http, settings, "history.json", data).await
 }
 
 fn start_sync_loop(app_handle: AppHandle) {

@@ -203,6 +203,37 @@ pub async fn download_file(
     .map_err(|err| format!("读取下载内容失败: {err}"))
 }
 
+pub async fn download_optional_file(
+  client: &Client,
+  settings: &Settings,
+  remote_path: &str,
+) -> Result<Option<Vec<u8>>, String> {
+  let mut url = base_url(settings)?;
+  url = url
+    .join(remote_path)
+    .map_err(|err| format!("文件地址无效: {err}"))?;
+
+  let request = client.get(url);
+  let response = apply_auth(request, settings)
+    .send()
+    .await
+    .map_err(|err| format!("下载失败: {err}"))?;
+
+  let status = response.status();
+  if status.as_u16() == 404 {
+    return Ok(None);
+  }
+  if !status.is_success() {
+    return Err(format!("下载失败: HTTP {}", status));
+  }
+
+  response
+    .bytes()
+    .await
+    .map(|bytes| Some(bytes.to_vec()))
+    .map_err(|err| format!("读取下载内容失败: {err}"))
+}
+
 pub async fn upload_file(
   client: &Client,
   settings: &Settings,

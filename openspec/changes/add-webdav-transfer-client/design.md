@@ -9,6 +9,8 @@
 
 ## 决策
 - 使用配置的 WebDAV 根目录作为单一消息流，不引入房间/线程概念。
+- 所有消息内容文件统一存放在 WebDAV 根目录的 `files/` 子目录。
+- 在 WebDAV 根目录维护 `history.json` 作为消息历史索引文件。
 - 消息文件名编码元数据，避免依赖服务器自定义属性。
   - 建议格式：`<epoch-ms>__<sender-encoded>__<nonce>__<original-name>`。
   - 文本消息使用 `.txt` UTF-8 内容；文件消息保留原始字节与扩展名。

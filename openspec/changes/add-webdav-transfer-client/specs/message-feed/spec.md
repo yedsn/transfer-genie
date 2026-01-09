@@ -1,16 +1,16 @@
-﻿## ADDED Requirements
+## ADDED Requirements
 ### Requirement: Message file storage
-客户端 SHALL 将每条外发消息存储为 WebDAV 目录中的单个文件。
+客户端 SHALL 将每条外发消息存储为 WebDAV 根目录下 `files/` 子目录中的单个文件。
 文本消息 MUST 使用 UTF-8 `.txt` 文件；文件消息 MUST 保留原始字节与扩展名。
 
 #### Scenario: Text message upload
 - **WHEN** 用户发送文本消息
-- **THEN** 客户端向 WebDAV 目录上传单个 `.txt` 文件
+- **THEN** 客户端向 WebDAV `files/` 目录上传单个 `.txt` 文件
 - **AND** 本地消息索引记录发送者、时间戳、大小与内容
 
 #### Scenario: File message upload
 - **WHEN** 用户发送文件
-- **THEN** 客户端向 WebDAV 目录上传原始文件字节
+- **THEN** 客户端向 WebDAV `files/` 目录上传原始文件字节
 - **AND** 保存的文件保留原始扩展名
 
 ### Requirement: Message metadata encoding
@@ -25,6 +25,18 @@
 - **WHEN** 客户端发现不符合消息命名格式的文件
 - **THEN** 不下载该文件
 - **AND** 不在列表中展示
+
+### Requirement: Message history file
+客户端 SHALL 在 WebDAV 根目录维护 `history.json` 作为消息历史索引，记录每条消息的文件名、发送者、时间戳、大小、类型与原始名称。
+客户端在发送消息后 SHALL 追加或更新对应条目。
+
+#### Scenario: Append history on send
+- **WHEN** 用户发送任意消息
+- **THEN** `history.json` 包含对应的消息记录
+
+#### Scenario: Create history file
+- **WHEN** `history.json` 不存在且用户发送消息
+- **THEN** 客户端创建 `history.json`
 
 ### Requirement: Local message index and sync
 客户端 SHALL 维护本地 SQLite 消息索引，并在启动与配置的周期内刷新。
