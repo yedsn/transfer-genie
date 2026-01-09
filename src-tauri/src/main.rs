@@ -99,8 +99,10 @@ async fn send_file(state: State<'_, AppState>, path: String) -> Result<(), Strin
   let data = fs::read(&file_path).map_err(|err| format!("读取文件失败: {err}"))?;
   let timestamp_ms = now_ms();
   let filename = build_message_filename(&settings.sender_name, &original_name, timestamp_ms);
+  let remote_path = format!("files/{}", filename);
 
-  webdav::upload_file(&state.http, &settings, &filename, data.clone()).await?;
+  webdav::ensure_directory(&state.http, &settings, "files").await?;
+  webdav::upload_file(&state.http, &settings, &remote_path, data.clone()).await?;
 
   let local_path = state.files_dir.join(&filename);
   fs::create_dir_all(&state.files_dir).map_err(|err| format!("创建目录失败: {err}"))?;
@@ -262,7 +264,9 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
 
   ensure_webdav_configured(&settings)?;
 
-  let entries = webdav::list_entries(&state.http, &settings).await?;
+  let mut entries = webdav::list_entries(&state.http, &settings, None, false).await?;
+  let mut file_entries = webdav::list_entries(&state.http, &settings, Some("files"), true).await?;
+  entries.append(&mut file_entries);
   let mut new_count = 0usize;
 
   for entry in entries {
@@ -295,7 +299,8 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
     match parsed.kind {
       MessageKind::Text => {
         if message.content.is_none() {
-          let bytes = webdav::download_file(&state.http, &settings, &entry.filename).await?;
+          let bytes =
+            webdav::download_file(&state.http, &settings, &entry.remote_path).await?;
           let content = String::from_utf8_lossy(&bytes).to_string();
           message.content = Some(content);
           message.size = bytes.len() as i64;
@@ -308,7 +313,8 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
           None => true,
         };
         if needs_download {
-          let bytes = webdav::download_file(&state.http, &settings, &entry.filename).await?;
+          let bytes =
+            webdav::download_file(&state.http, &settings, &entry.remote_path).await?;
           fs::create_dir_all(&state.files_dir)
             .map_err(|err| format!("创建文件目录失败: {err}"))?;
           let local_path = state.files_dir.join(&entry.filename);

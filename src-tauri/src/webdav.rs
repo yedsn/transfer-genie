@@ -38,8 +38,20 @@ fn extract_filename(href: &str) -> String {
     .to_string()
 }
 
-pub async fn list_entries(client: &Client, settings: &Settings) -> Result<Vec<DavEntry>, String> {
-  let url = base_url(settings)?;
+pub async fn list_entries(
+  client: &Client,
+  settings: &Settings,
+  prefix: Option<&str>,
+  allow_missing: bool,
+) -> Result<Vec<DavEntry>, String> {
+  let mut url = base_url(settings)?;
+  let prefix_trim = prefix.unwrap_or("").trim_matches('/');
+  if !prefix_trim.is_empty() {
+    let target = format!("{}/", prefix_trim);
+    url = url
+      .join(&target)
+      .map_err(|err| format!("WebDAV 路径无效: {err}"))?;
+  }
   let body = r#"<?xml version="1.0" encoding="utf-8"?>
 <d:propfind xmlns:d="DAV:">
   <d:prop>
@@ -63,6 +75,9 @@ pub async fn list_entries(client: &Client, settings: &Settings) -> Result<Vec<Da
 
   let status = response.status();
   if !status.is_success() {
+    if allow_missing && status.as_u16() == 404 {
+      return Ok(Vec::new());
+    }
     return Err(format!("WebDAV 列表失败: HTTP {}", status));
   }
 
@@ -85,6 +100,7 @@ pub async fn list_entries(client: &Client, settings: &Settings) -> Result<Vec<Da
           b"response" => {
             current = Some(DavEntry {
               filename: String::new(),
+              remote_path: String::new(),
               href: String::new(),
               etag: None,
               size: None,
@@ -118,6 +134,11 @@ pub async fn list_entries(client: &Client, settings: &Settings) -> Result<Vec<Da
               b"href" => {
                 entry.href = value.clone();
                 entry.filename = extract_filename(&value);
+                entry.remote_path = if prefix_trim.is_empty() {
+                  entry.filename.clone()
+                } else {
+                  format!("{}/{}", prefix_trim, entry.filename)
+                };
                 if value.ends_with('/') {
                   entry.is_collection = true;
                 }
@@ -157,10 +178,12 @@ pub async fn list_entries(client: &Client, settings: &Settings) -> Result<Vec<Da
 pub async fn download_file(
   client: &Client,
   settings: &Settings,
-  filename: &str,
+  remote_path: &str,
 ) -> Result<Vec<u8>, String> {
   let mut url = base_url(settings)?;
-  url = url.join(filename).map_err(|err| format!("文件地址无效: {err}"))?;
+  url = url
+    .join(remote_path)
+    .map_err(|err| format!("文件地址无效: {err}"))?;
 
   let request = client.get(url);
   let response = apply_auth(request, settings)
@@ -183,11 +206,13 @@ pub async fn download_file(
 pub async fn upload_file(
   client: &Client,
   settings: &Settings,
-  filename: &str,
+  remote_path: &str,
   data: Vec<u8>,
 ) -> Result<(), String> {
   let mut url = base_url(settings)?;
-  url = url.join(filename).map_err(|err| format!("上传地址无效: {err}"))?;
+  url = url
+    .join(remote_path)
+    .map_err(|err| format!("上传地址无效: {err}"))?;
 
   let request = client.put(url).body(data);
   let response = apply_auth(request, settings)
@@ -200,4 +225,28 @@ pub async fn upload_file(
     return Err(format!("上传失败: HTTP {}", status));
   }
   Ok(())
+}
+
+pub async fn ensure_directory(
+  client: &Client,
+  settings: &Settings,
+  remote_path: &str,
+) -> Result<(), String> {
+  let mut url = base_url(settings)?;
+  let target = format!("{}/", remote_path.trim_matches('/'));
+  url = url
+    .join(&target)
+    .map_err(|err| format!("目录地址无效: {err}"))?;
+
+  let request = client.request(Method::from_bytes(b"MKCOL").map_err(|e| e.to_string())?, url);
+  let response = apply_auth(request, settings)
+    .send()
+    .await
+    .map_err(|err| format!("创建目录失败: {err}"))?;
+
+  let status = response.status();
+  if status.is_success() || status.as_u16() == 405 {
+    return Ok(());
+  }
+  Err(format!("创建目录失败: HTTP {}", status))
 }

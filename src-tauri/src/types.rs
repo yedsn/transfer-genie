@@ -43,6 +43,7 @@ impl SyncStatus {
 #[derive(Clone)]
 pub struct DavEntry {
   pub filename: String,
+  pub remote_path: String,
   pub href: String,
   pub etag: Option<String>,
   pub size: Option<u64>,
