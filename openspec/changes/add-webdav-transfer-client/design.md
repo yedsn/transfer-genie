@@ -1,4 +1,4 @@
-﻿## 背景
+## 背景
 - 新建 Tauri 桌面应用，支持 Windows 与 macOS。
 - WebDAV 目录作为共享消息存储。
 - 每条消息对应单个文件；本地 SQLite 数据库索引消息元数据。
@@ -11,6 +11,7 @@
 - 使用配置的 WebDAV 根目录作为单一消息流，不引入房间/线程概念。
 - 所有消息内容文件统一存放在 WebDAV 根目录的 `files/` 子目录。
 - 在 WebDAV 根目录维护 `history.json` 作为消息历史索引文件。
+- 同步优先读取 `history.json` 构建本地索引，并以 `files/` 目录内容补全缺失记录。
 - 消息文件名编码元数据，避免依赖服务器自定义属性。
   - 建议格式：`<epoch-ms>__<sender-encoded>__<nonce>__<original-name>`。
   - 文本消息使用 `.txt` UTF-8 内容；文件消息保留原始字节与扩展名。

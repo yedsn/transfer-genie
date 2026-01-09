@@ -1,4 +1,4 @@
-mod db;
+﻿mod db;
 mod filenames;
 mod types;
 mod webdav;
@@ -9,6 +9,7 @@ use crate::types::{Message, Settings, SyncStatus};
 use serde::{Deserialize, Serialize};
 use rand::Rng;
 use reqwest::Client;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -279,45 +280,124 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
 
   ensure_webdav_configured(&settings)?;
 
-  let entries = webdav::list_entries(&state.http, &settings, Some("files"), true).await?;
-  let mut new_count = 0usize;
+  let history = load_history(state, &settings).await?;
+  let mut history_map: HashMap<String, HistoryEntry> = history
+    .into_iter()
+    .map(|entry| (entry.filename.clone(), entry))
+    .collect();
 
+  let entries = webdav::list_entries(&state.http, &settings, Some("files"), true).await?;
+  let mut files_map: HashMap<String, crate::types::DavEntry> = HashMap::new();
   for entry in entries {
     if entry.is_collection {
       continue;
     }
+    files_map.insert(entry.filename.clone(), entry);
+  }
 
-    let parsed = match parse_message_filename(&entry.filename) {
-      Some(parsed) => parsed,
-      None => continue,
+  let mut all_filenames: HashSet<String> = HashSet::new();
+  for name in history_map.keys() {
+    all_filenames.insert(name.clone());
+  }
+  for name in files_map.keys() {
+    all_filenames.insert(name.clone());
+  }
+
+  let keep_list: Vec<String> = all_filenames.iter().cloned().collect();
+  db::prune_messages(&state.db_path, &keep_list).map_err(|err| err.to_string())?;
+
+  let mut new_count = 0usize;
+  let mut new_history_entries: Vec<HistoryEntry> = Vec::new();
+
+  for filename in all_filenames {
+    let file_entry = files_map.get(&filename);
+    let history_entry = history_map.get(&filename);
+
+    let parsed = parse_message_filename(&filename);
+    let (sender, timestamp_ms, kind, original_name, size_hint) = if let Some(history) = history_entry
+    {
+      (
+        history.sender.clone(),
+        history.timestamp_ms,
+        history.kind.clone(),
+        history.original_name.clone(),
+        history.size,
+      )
+    } else if let Some(parsed) = parsed.as_ref() {
+      (
+        parsed.sender.clone(),
+        parsed.timestamp_ms,
+        parsed.kind.as_str().to_string(),
+        parsed.original_name.clone(),
+        file_entry
+          .and_then(|entry| entry.size)
+          .unwrap_or(0) as i64,
+      )
+    } else {
+      continue;
     };
 
-    let existing = db::get_message(&state.db_path, &entry.filename).map_err(|err| err.to_string())?;
-
+    let existing = db::get_message(&state.db_path, &filename).map_err(|err| err.to_string())?;
     let mut message = existing.clone().unwrap_or(DbMessage {
-      filename: entry.filename.clone(),
-      sender: parsed.sender.clone(),
-      timestamp_ms: parsed.timestamp_ms,
-      size: entry.size.unwrap_or(0) as i64,
-      kind: parsed.kind.as_str().to_string(),
-      original_name: parsed.original_name.clone(),
-      etag: entry.etag.clone(),
-      mtime: entry.mtime.clone(),
+      filename: filename.clone(),
+      sender,
+      timestamp_ms,
+      size: size_hint,
+      kind,
+      original_name,
+      etag: None,
+      mtime: None,
       content: None,
       local_path: None,
     });
 
+    if let Some(history) = history_entry {
+      message.sender = history.sender.clone();
+      message.timestamp_ms = history.timestamp_ms;
+      message.kind = history.kind.clone();
+      message.original_name = history.original_name.clone();
+      if history.size > 0 {
+        message.size = history.size;
+      }
+    }
+
+    if let Some(entry) = file_entry {
+      message.etag = entry.etag.clone();
+      message.mtime = entry.mtime.clone();
+      if let Some(size) = entry.size {
+        message.size = size as i64;
+      }
+    }
+
+    let kind_enum = match message.kind.as_str() {
+      "text" => MessageKind::Text,
+      "file" => MessageKind::File,
+      _ => parsed
+        .as_ref()
+        .map(|item| item.kind)
+        .unwrap_or(MessageKind::File),
+    };
+
+    let remote_path = file_entry
+      .map(|entry| entry.remote_path.clone())
+      .unwrap_or_else(|| format!("files/{}", filename));
+
     let mut changed = false;
 
-    match parsed.kind {
+    match kind_enum {
       MessageKind::Text => {
         if message.content.is_none() {
-          let bytes =
-            webdav::download_file(&state.http, &settings, &entry.remote_path).await?;
-          let content = String::from_utf8_lossy(&bytes).to_string();
-          message.content = Some(content);
-          message.size = bytes.len() as i64;
-          changed = true;
+          let bytes = if file_entry.is_some() {
+            Some(webdav::download_file(&state.http, &settings, &remote_path).await?)
+          } else {
+            webdav::download_optional_file(&state.http, &settings, &remote_path).await?
+          };
+          if let Some(bytes) = bytes {
+            let content = String::from_utf8_lossy(&bytes).to_string();
+            message.content = Some(content);
+            message.size = bytes.len() as i64;
+            changed = true;
+          }
         }
       }
       MessageKind::File => {
@@ -326,27 +406,57 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
           None => true,
         };
         if needs_download {
-          let bytes =
-            webdav::download_file(&state.http, &settings, &entry.remote_path).await?;
-          fs::create_dir_all(&state.files_dir)
-            .map_err(|err| format!("创建文件目录失败: {err}"))?;
-          let local_path = state.files_dir.join(&entry.filename);
-          fs::write(&local_path, &bytes).map_err(|err| format!("保存文件失败: {err}"))?;
-          message.local_path = Some(local_path.to_string_lossy().to_string());
-          message.size = bytes.len() as i64;
-          changed = true;
+          let bytes = if file_entry.is_some() {
+            Some(webdav::download_file(&state.http, &settings, &remote_path).await?)
+          } else {
+            webdav::download_optional_file(&state.http, &settings, &remote_path).await?
+          };
+          if let Some(bytes) = bytes {
+            fs::create_dir_all(&state.files_dir)
+              .map_err(|err| format!("创建文件目录失败: {err}"))?;
+            let local_path = state.files_dir.join(&filename);
+            fs::write(&local_path, &bytes).map_err(|err| format!("保存文件失败: {err}"))?;
+            message.local_path = Some(local_path.to_string_lossy().to_string());
+            message.size = bytes.len() as i64;
+            changed = true;
+          }
         }
       }
     }
 
-    if existing.is_none() || changed {
-      message.etag = entry.etag.clone();
-      message.mtime = entry.mtime.clone();
+    if history_entry.is_none() {
+      new_history_entries.push(message_to_history(&message));
+    }
+
+    let mut should_upsert = existing.is_none() || changed;
+    if let Some(existing) = existing.as_ref() {
+      if existing.sender != message.sender
+        || existing.timestamp_ms != message.timestamp_ms
+        || existing.size != message.size
+        || existing.kind != message.kind
+        || existing.original_name != message.original_name
+        || existing.content != message.content
+        || existing.local_path != message.local_path
+      {
+        should_upsert = true;
+      }
+    }
+
+    if should_upsert {
       db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
       if existing.is_none() {
         new_count += 1;
       }
     }
+  }
+
+  if !new_history_entries.is_empty() {
+    for entry in new_history_entries {
+      history_map.insert(entry.filename.clone(), entry);
+    }
+    let mut history: Vec<HistoryEntry> = history_map.into_values().collect();
+    history.sort_by_key(|item| item.timestamp_ms);
+    save_history(state, &settings, &history).await?;
   }
 
   Ok(new_count)

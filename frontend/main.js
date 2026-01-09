@@ -17,6 +17,7 @@ const senderNameInput = document.getElementById('sender-name');
 const refreshIntervalInput = document.getElementById('refresh-interval');
 
 let refreshTimer = null;
+let didInitialSync = false;
 
 function formatBytes(bytes) {
   if (bytes <= 0) return '0 B';
@@ -131,6 +132,10 @@ async function loadSettings() {
     senderNameInput.value = settings.sender_name || '';
     refreshIntervalInput.value = settings.refresh_interval_secs || 5;
     startRefreshTimer(settings.refresh_interval_secs || 5);
+    if (!didInitialSync && settings.webdav_url && settings.webdav_url.trim()) {
+      didInitialSync = true;
+      await manualRefresh();
+    }
   } catch (error) {
     setStatus(`读取设置失败：${error}`, true);
   }

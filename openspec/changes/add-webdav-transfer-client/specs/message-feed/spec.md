@@ -38,6 +38,10 @@
 - **WHEN** `history.json` 不存在且用户发送消息
 - **THEN** 客户端创建 `history.json`
 
+#### Scenario: Load history on sync
+- **WHEN** 客户端执行同步
+- **THEN** 从 `history.json` 读取消息记录并更新本地索引
+
 ### Requirement: Local message index and sync
 客户端 SHALL 维护本地 SQLite 消息索引，并在启动与配置的周期内刷新。
 手动刷新 SHALL 触发一次立即同步。

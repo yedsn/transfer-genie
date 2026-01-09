@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use std::path::Path;
 
 use crate::types::Message;
@@ -45,7 +45,7 @@ pub fn get_message(path: &Path, filename: &str) -> rusqlite::Result<Option<DbMes
   let conn = Connection::open(path)?;
   conn
     .query_row(
-      "SELECT filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path\
+      "SELECT filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path \
        FROM messages WHERE filename = ?1",
       [filename],
       |row| {
@@ -123,4 +123,19 @@ pub fn list_messages(path: &Path) -> rusqlite::Result<Vec<Message>> {
     messages.push(row?);
   }
   Ok(messages)
+}
+
+pub fn prune_messages(path: &Path, keep: &[String]) -> rusqlite::Result<()> {
+  let conn = Connection::open(path)?;
+  if keep.is_empty() {
+    conn.execute("DELETE FROM messages", [])?;
+    return Ok(());
+  }
+  let placeholders = std::iter::repeat("?")
+    .take(keep.len())
+    .collect::<Vec<_>>()
+    .join(",");
+  let sql = format!("DELETE FROM messages WHERE filename NOT IN ({placeholders})");
+  conn.execute(&sql, params_from_iter(keep.iter()))?;
+  Ok(())
 }
