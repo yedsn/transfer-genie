@@ -56,9 +56,19 @@ function formatTime(timestampMs) {
   return new Date(timestampMs).toLocaleString('zh-CN');
 }
 
-function setStatus(text, isError = false) {
+function setStatus(text) {
   syncStatus.textContent = text;
-  syncStatus.style.color = isError ? '#d6452d' : '';
+  syncStatus.style.color = '';
+}
+
+function setSuccessStatus(text) {
+  syncStatus.textContent = text;
+  syncStatus.style.color = '#2e7d32';
+}
+
+function setErrorStatus(text) {
+  syncStatus.textContent = text;
+  syncStatus.style.color = '#d6452d';
 }
 
 function formatProgress(received, total, label = '已下载', speed = 0) {
@@ -389,7 +399,7 @@ function showCleanupConfirmDialog() {
 
 async function copyTextToClipboard(text) {
   if (!text) {
-    setStatus('没有可复制的内容', true);
+    setErrorStatus('没有可复制的内容');
     return;
   }
   try {
@@ -406,9 +416,9 @@ async function copyTextToClipboard(text) {
       document.execCommand('copy');
       document.body.removeChild(textarea);
     }
-    setStatus('已复制到剪贴板');
+    setSuccessStatus('已复制到剪贴板');
   } catch (error) {
-    setStatus(`复制失败：${error}`, true);
+    setErrorStatus(`复制失败：${error}`);
   }
 }
 
@@ -483,7 +493,7 @@ async function downloadMessageFile(message) {
       original_name: message.original_name,
     });
     if (!invoke) {
-      setStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置', true);
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
     const result = await invoke('download_message_file', {
@@ -507,17 +517,17 @@ async function downloadMessageFile(message) {
       });
       console.info('[download] retry result', retry);
       if (retry.status === 'saved') {
-        setStatus(`文件已保存到 ${retry.path || ''}`.trim());
+        setSuccessStatus(`文件已保存到 ${retry.path || ''}`.trim());
       }
       return;
     }
 
     if (result.status === 'saved') {
-      setStatus(`文件已保存到 ${result.path || ''}`.trim());
+      setSuccessStatus(`文件已保存到 ${result.path || ''}`.trim());
     }
   } catch (error) {
     console.error('[download] error', error);
-    setStatus(`下载失败：${error}`, true);
+    setErrorStatus(`下载失败：${error}`);
   }
 }
 
@@ -528,11 +538,11 @@ async function saveMessageFileAs(message) {
       original_name: message.original_name,
     });
     if (!invoke) {
-      setStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置', true);
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
     if (!saveDialog) {
-      setStatus('未检测到保存对话框插件，请确认已启用 dialog 插件', true);
+      setErrorStatus('未检测到保存对话框插件，请确认已启用 dialog 插件');
       return;
     }
     const target = await saveDialog({
@@ -547,10 +557,10 @@ async function saveMessageFileAs(message) {
       targetPath: target,
     });
     console.info('[download] save as result', result);
-    setStatus(`文件已保存到 ${result.path || target}`.trim());
+    setSuccessStatus(`文件已保存到 ${result.path || target}`.trim());
   } catch (error) {
     console.error('[download] save as error', error);
-    setStatus(`另存为失败：${error}`, true);
+    setErrorStatus(`另存为失败：${error}`);
   }
 }
 
@@ -559,7 +569,7 @@ async function deleteSingleMessage(message) {
     return;
   }
   if (!invoke) {
-    setStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置', true);
+    setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
     return;
   }
   const choice = await showDeleteConfirmDialog(1);
@@ -573,24 +583,24 @@ async function deleteSingleMessage(message) {
     });
     const failed = result.failed || [];
     if (failed.length > 0) {
-      setStatus('删除失败，请稍后再试', true);
+      setErrorStatus('删除失败，请稍后再试');
     } else {
-      setStatus('已删除 1 条消息');
+      setSuccessStatus('已删除 1 条消息');
     }
     await loadMessages();
   } catch (error) {
-    setStatus(`删除失败：${error}`, true);
+    setErrorStatus(`删除失败：${error}`);
   }
 }
 
 async function deleteSelectedMessages() {
   const filenames = Array.from(selectedMessages);
   if (!filenames.length) {
-    setStatus('请先选择要删除的消息', true);
+    setErrorStatus('请先选择要删除的消息');
     return;
   }
   if (!invoke) {
-    setStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置', true);
+    setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
     return;
   }
   const choice = await showDeleteConfirmDialog(filenames.length);
@@ -604,12 +614,12 @@ async function deleteSelectedMessages() {
     });
     const failed = result.failed || [];
     if (failed.length > 0) {
-      setStatus(`删除完成，${failed.length} 条处理失败`, true);
+      setErrorStatus(`删除完成，${failed.length} 条处理失败`);
     } else {
-      setStatus(`已删除 ${result.deleted || filenames.length} 条消息`);
+      setSuccessStatus(`已删除 ${result.deleted || filenames.length} 条消息`);
     }
   } catch (error) {
-    setStatus(`删除失败：${error}`, true);
+    setErrorStatus(`删除失败：${error}`);
   } finally {
     setSelectionMode(false);
     await loadMessages();
@@ -617,7 +627,7 @@ async function deleteSelectedMessages() {
 }
 async function cleanupMessages() {
   if (!invoke) {
-    setStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置', true);
+    setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
     return;
   }
   const confirmed = await showCleanupConfirmDialog();
@@ -628,13 +638,13 @@ async function cleanupMessages() {
     const result = await invoke('cleanup_messages');
     const failed = result.failed || [];
     if (failed.length > 0) {
-      setStatus(`清理完成，${failed.length} 条处理失败`, true);
+      setErrorStatus(`清理完成，${failed.length} 条处理失败`);
     } else {
-      setStatus(`已清理 ${result.deleted || 0} 条消息`);
+      setSuccessStatus(`已清理 ${result.deleted || 0} 条消息`);
     }
     await loadMessages();
   } catch (error) {
-    setStatus(`清理失败：${error}`, true);
+    setErrorStatus(`清理失败：${error}`);
   }
 }
 function renderMessages(messages, options = {}) {
@@ -903,34 +913,34 @@ function mergeMessages(messages) {
 async function loadMessages() {
   try {
     if (!invoke) {
-      setStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置', true);
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
     const messages = await invoke('list_messages');
     renderMessages(messages, { scrollToBottom: true });
   } catch (error) {
-    setStatus(`加载消息失败：${error}`, true);
+    setErrorStatus(`加载消息失败：${error}`);
   }
 }
 
 async function loadSyncStatus() {
   try {
     if (!invoke) {
-      setStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置', true);
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
     const status = await invoke('get_sync_status');
     if (status.last_error) {
-      setStatus(`同步错误：${status.last_error}`, true);
+      setErrorStatus(`同步错误：${status.last_error}`);
       return;
     }
     if (status.running) {
       setStatus(status.last_result || '同步中');
     } else {
-      setStatus(status.last_result || '已同步');
+      setSuccessStatus(status.last_result || '已同步');
     }
   } catch (error) {
-    setStatus(`状态更新失败：${error}`, true);
+    setErrorStatus(`状态更新失败：${error}`);
   }
 }
 
@@ -948,7 +958,7 @@ function startRefreshTimer(intervalSecs) {
 async function loadSettings() {
   try {
     if (!invoke) {
-      setStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置', true);
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
     const settings = await invoke('get_settings');
@@ -967,7 +977,7 @@ async function loadSettings() {
       await manualRefresh();
     }
   } catch (error) {
-    setStatus(`读取设置失败：${error}`, true);
+    setErrorStatus(`读取设置失败：${error}`);
   }
 }
 
@@ -983,15 +993,15 @@ async function saveSettings() {
 
   try {
     if (!invoke) {
-      setStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置', true);
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
     const updated = await invoke('save_settings', { settings: payload });
-    setStatus('设置已保存');
+    setSuccessStatus('设置已保存');
     startRefreshTimer(updated.refresh_interval_secs || 5);
     setHint(downloadDirHint, '下载目录已保存');
   } catch (error) {
-    setStatus(`保存设置失败：${error}`, true);
+    setErrorStatus(`保存设置失败：${error}`);
   }
 }
 
@@ -1002,15 +1012,15 @@ async function sendText() {
   }
   try {
     if (!invoke) {
-      setStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置', true);
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
     await invoke('send_text', { text });
     textInput.value = '';
     await loadMessages();
-    setStatus('发送成功');
+    setSuccessStatus('发送成功');
   } catch (error) {
-    setStatus(`发送失败：${error}`, true);
+    setErrorStatus(`发送失败：${error}`);
   }
 }
 
@@ -1018,11 +1028,11 @@ async function sendFile() {
   let clientId = null;
   try {
     if (!invoke) {
-      setStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置', true);
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
     if (!openDialog) {
-      setStatus('未检测到对话框插件，请确认已启用 dialog 插件', true);
+      setErrorStatus('未检测到对话框插件，请确认已启用 dialog 插件');
       return;
     }
     const selected = await openDialog({ multiple: false, directory: false });
@@ -1050,20 +1060,20 @@ async function sendFile() {
       renderMessages(lastMessages);
     }
     await loadMessages();
-    setStatus('发送成功');
+    setSuccessStatus('发送成功');
   } catch (error) {
     if (clientId) {
       pendingUploads.delete(clientId);
       renderMessages(lastMessages);
     }
-    setStatus(`发送文件失败：${error}`, true);
+    setErrorStatus(`发送文件失败：${error}`);
   }
 }
 
 async function chooseDownloadDir() {
   try {
     if (!openDialog) {
-      setStatus('未检测到对话框插件，请确认已启用 dialog 插件', true);
+      setErrorStatus('未检测到对话框插件，请确认已启用 dialog 插件');
       return;
     }
     const selected = await openDialog({ multiple: false, directory: true });
@@ -1077,21 +1087,21 @@ async function chooseDownloadDir() {
     downloadDirInput.value = path;
     setHint(downloadDirHint, '已选择下载目录，保存后生效');
   } catch (error) {
-    setStatus(`选择下载目录失败：${error}`, true);
+    setErrorStatus(`选择下载目录失败：${error}`);
   }
 }
 
 async function manualRefresh() {
   try {
     if (!invoke) {
-      setStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置', true);
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
     await invoke('manual_refresh');
     await loadMessages();
     await loadSyncStatus();
   } catch (error) {
-    setStatus(`手动刷新失败：${error}`, true);
+    setErrorStatus(`手动刷新失败：${error}`);
   }
 }
 
@@ -1120,7 +1130,7 @@ if (listen) {
       downloadSpeed.delete(filename);
       updateProgressUI(filename);
       if (payload.error) {
-        setStatus(`下载失败：${payload.error}`, true);
+        setErrorStatus(`下载失败：${payload.error}`);
       }
     }
   });
@@ -1160,7 +1170,7 @@ if (listen) {
       uploadSpeed.delete(clientId);
       renderMessages(lastMessages);
       if (payload.error) {
-        setStatus(`上传失败：${payload.error}`, true);
+        setErrorStatus(`上传失败：${payload.error}`);
       }
     }
   });
