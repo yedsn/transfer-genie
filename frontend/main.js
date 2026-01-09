@@ -26,6 +26,8 @@ let didInitialSync = false;
 const downloadProgress = new Map();
 const pendingUploads = new Map();
 let lastMessages = [];
+const downloadSpeed = new Map();
+const uploadSpeed = new Map();
 
 function formatBytes(bytes) {
   if (bytes <= 0) return '0 B';
@@ -49,12 +51,19 @@ function setStatus(text, isError = false) {
   syncStatus.style.color = isError ? '#d6452d' : '';
 }
 
-function formatProgress(received, total, label = '已下载') {
+function formatProgress(received, total, label = '已下载', speed = 0) {
+  const speedText = speed > 0 ? `${formatBytes(speed)}/s` : '';
   if (!total) {
-    return `${formatBytes(received)} ${label}`;
+    return [formatBytes(received), label, speedText].filter(Boolean).join(' · ');
   }
   const percent = Math.min(100, Math.round((received / total) * 100));
-  return `${percent}% · ${formatBytes(received)} / ${formatBytes(total)}`;
+  return [
+    `${percent}%`,
+    `${formatBytes(received)} / ${formatBytes(total)}`,
+    speedText,
+  ]
+    .filter(Boolean)
+    .join(' · ');
 }
 
 function escapeSelector(value) {
@@ -62,6 +71,41 @@ function escapeSelector(value) {
     return window.CSS.escape(value);
   }
   return value.replace(/["\\]/g, '\\$&');
+}
+
+function updateSpeedTracker(map, key, received) {
+  const now = Date.now();
+  const previous = map.get(key);
+  let speed = 0;
+  if (previous) {
+    const deltaBytes = received - previous.received;
+    const deltaMs = now - previous.timestamp;
+    if (deltaMs > 0 && deltaBytes >= 0) {
+      speed = deltaBytes / (deltaMs / 1000);
+    } else {
+      speed = previous.speed || 0;
+    }
+  }
+  map.set(key, {
+    received,
+    timestamp: now,
+    speed,
+  });
+  return speed;
+}
+
+function getSpeed(map, key) {
+  return map.get(key)?.speed || 0;
+}
+
+function uploadStatusLabel(upload) {
+  if (!upload || !upload.total) {
+    return '已上传';
+  }
+  if (upload.received >= upload.total) {
+    return '等待确认';
+  }
+  return '已上传';
 }
 
 function setProgressFor(filename, payload) {
@@ -98,7 +142,12 @@ function updateProgressUI(filename) {
     fill.style.width = '30%';
   }
   if (text) {
-    text.textContent = formatProgress(progress.received || 0, progress.total);
+    text.textContent = formatProgress(
+      progress.received || 0,
+      progress.total,
+      '已下载',
+      getSpeed(downloadSpeed, filename),
+    );
   }
   wrap.classList.remove('hidden');
 }
@@ -128,7 +177,12 @@ function updateUploadProgressUI(uploadId) {
     fill.style.width = '30%';
   }
   if (text) {
-    text.textContent = formatProgress(upload.received || 0, upload.total || 0, '已上传');
+    text.textContent = formatProgress(
+      upload.received || 0,
+      upload.total || 0,
+      uploadStatusLabel(upload),
+      getSpeed(uploadSpeed, uploadId),
+    );
   }
   wrap.classList.remove('hidden');
 }
@@ -435,7 +489,12 @@ function renderMessages(messages) {
           const percent = Math.min(100, Math.round((progress.received / total) * 100));
           progressFill.style.width = `${percent}%`;
         }
-        progressText.textContent = formatProgress(progress.received || 0, progress.total);
+        progressText.textContent = formatProgress(
+          progress.received || 0,
+          progress.total,
+          '已下载',
+          getSpeed(downloadSpeed, message.filename),
+        );
       } else {
         progressWrap.classList.add('hidden');
       }
@@ -467,7 +526,12 @@ function renderMessages(messages) {
             const percent = Math.min(100, Math.round((upload.received / total) * 100));
             uploadFill.style.width = `${percent}%`;
           }
-          uploadText.textContent = formatProgress(upload.received || 0, upload.total, '已上传');
+          uploadText.textContent = formatProgress(
+            upload.received || 0,
+            upload.total,
+            uploadStatusLabel(upload),
+            getSpeed(uploadSpeed, message.filename),
+          );
         } else {
           uploadWrap.classList.add('hidden');
         }
@@ -701,17 +765,20 @@ if (listen) {
     }
     if (payload.status === 'progress') {
       setProgressFor(filename, payload);
+      updateSpeedTracker(downloadSpeed, filename, payload.received || 0);
       updateProgressUI(filename);
       return;
     }
     if (payload.status === 'complete') {
       downloadProgress.delete(filename);
+      downloadSpeed.delete(filename);
       updateProgressUI(filename);
       loadMessages();
       return;
     }
     if (payload.status === 'error') {
       downloadProgress.delete(filename);
+      downloadSpeed.delete(filename);
       updateProgressUI(filename);
       if (payload.error) {
         setStatus(`下载失败：${payload.error}`, true);
@@ -738,17 +805,20 @@ if (listen) {
       entry.total = payload.total || 0;
       entry.status = 'progress';
       pendingUploads.set(clientId, entry);
+      updateSpeedTracker(uploadSpeed, clientId, entry.received);
       updateUploadProgressUI(clientId);
       return;
     }
     if (payload.status === 'complete') {
       pendingUploads.delete(clientId);
+      uploadSpeed.delete(clientId);
       renderMessages(lastMessages);
       loadMessages();
       return;
     }
     if (payload.status === 'error') {
       pendingUploads.delete(clientId);
+      uploadSpeed.delete(clientId);
       renderMessages(lastMessages);
       if (payload.error) {
         setStatus(`上传失败：${payload.error}`, true);
