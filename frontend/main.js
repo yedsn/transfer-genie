@@ -11,6 +11,8 @@ const textInput = document.getElementById('text-input');
 const sendTextButton = document.getElementById('send-text');
 const sendFileButton = document.getElementById('send-file');
 const saveSettingsButton = document.getElementById('save-settings');
+const tabButtons = Array.from(document.querySelectorAll('[data-tab-target]'));
+const tabPanels = Array.from(document.querySelectorAll('[data-tab-panel]'));
 
 const webdavUrlInput = document.getElementById('webdav-url');
 const webdavUserInput = document.getElementById('webdav-user');
@@ -244,6 +246,23 @@ function scrollMessageListToBottom() {
   requestAnimationFrame(() => {
     messageList.scrollTop = messageList.scrollHeight;
   });
+}
+
+function setActiveTab(name, options = {}) {
+  const target = name || 'home';
+  tabButtons.forEach((button) => {
+    const isActive = button.dataset.tabTarget === target;
+    button.classList.toggle('is-active', isActive);
+    button.setAttribute('aria-selected', isActive ? 'true' : 'false');
+  });
+  tabPanels.forEach((panel) => {
+    const isActive = panel.dataset.tabPanel === target;
+    panel.classList.toggle('is-active', isActive);
+    panel.setAttribute('aria-hidden', isActive ? 'false' : 'true');
+  });
+  if (target === 'home' && options.scrollToBottom) {
+    scrollMessageListToBottom();
+  }
 }
 
 function showDeleteConfirmDialog(count) {
@@ -998,7 +1017,7 @@ async function sendFile() {
       total: 0,
       status: 'progress',
     });
-    renderMessages(lastMessages);
+    renderMessages(lastMessages, { scrollToBottom: true });
     await invoke('send_file', { path, clientId });
     if (clientId) {
       pendingUploads.delete(clientId);
@@ -1140,6 +1159,14 @@ if (cleanupMessagesButton) {
   cleanupMessagesButton.addEventListener('click', cleanupMessages);
 }
 
+tabButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    const target = button.dataset.tabTarget;
+    setActiveTab(target, { scrollToBottom: target === 'home' });
+  });
+});
+
 loadSettings();
 loadMessages();
 loadSyncStatus();
+setActiveTab('home', { scrollToBottom: true });

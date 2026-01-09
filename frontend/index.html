@@ -9,21 +9,20 @@
   </head>
   <body>
     <div class="app">
-      <header class="topbar">
-        <div class="brand">
-          <h1>Transfer Genie</h1>
-          <p>WebDAV 传输助手</p>
-        </div>
-        <div class="status">
-          <div class="status-text" id="sync-status">尚未同步</div>
-          <button id="refresh-btn" class="button ghost">手动刷新</button>
-        </div>
-      </header>
-
       <main class="content">
-        <section class="feed">
-          <div class="feed-toolbar">
+        <header class="topbar">
+          <div class="brand">
+            <h1>Transfer Genie</h1>
+            <p>WebDAV 传输助手</p>
+          </div>
+        </header>
+        <section class="tab-panel is-active" data-tab-panel="home" id="tab-home" role="tabpanel">
+          <section class="feed">
+            <div class="feed-toolbar">
             <div class="feed-toolbar-left">
+              <div class="status-inline">
+                <span class="status-text" id="sync-status">尚未同步</span>
+              </div>
               <div id="selection-bar" class="selection-bar" hidden>
                 <button id="delete-selected" class="button small" type="button">删除</button>
                 <button id="cancel-selection" class="button ghost small" type="button">取消</button>
@@ -31,23 +30,30 @@
             </div>
             <div class="feed-toolbar-right">
               <span id="selection-count" class="selection-count" hidden>已选中 0 项</span>
+              <button id="refresh-btn" class="button ghost small" type="button">刷新</button>
               <button id="toggle-selection" class="button ghost small" type="button">选择</button>
             </div>
           </div>
-          <ul id="message-list" class="message-list"></ul>
-          <section class="composer">
-            <label for="text-input">发送文本</label>
-            <textarea id="text-input" placeholder="输入消息..."></textarea>
-            <div class="composer-actions">
-              <button id="send-text" class="button primary">发送文本</button>
-              <button id="send-file" class="button">发送文件</button>
-            </div>
+            <ul id="message-list" class="message-list"></ul>
+            <section class="composer">
+              <label for="text-input" class="visually-hidden">发送文本</label>
+              <div class="composer-row">
+                <textarea id="text-input" placeholder="输入消息..."></textarea>
+                <div class="composer-actions">
+                  <button id="send-file" class="icon-button" type="button">文件</button>
+                  <button id="send-text" class="icon-button primary" type="button">发送</button>
+                </div>
+              </div>
+            </section>
           </section>
         </section>
 
-        <aside class="side">
-          <details class="settings" open>
-            <summary>设置</summary>
+        <section class="tab-panel" data-tab-panel="settings" id="tab-settings" role="tabpanel">
+          <section class="settings">
+            <div class="settings-header">
+              <h2>设置</h2>
+              <p>配置 WebDAV 连接与本地同步偏好。</p>
+            </div>
             <div class="settings-body">
               <label>
                 WebDAV URL
@@ -85,9 +91,34 @@
                 <span class="field-hint">将删除 30 天前的本地与远端消息</span>
               </div>
             </div>
-          </details>
-        </aside>
+          </section>
+        </section>
       </main>
+
+      <nav class="tabbar" role="tablist" aria-label="主菜单">
+        <button
+          class="tab-button is-active"
+          type="button"
+          data-tab-target="home"
+          role="tab"
+          aria-selected="true"
+          aria-controls="tab-home"
+        >
+          <span class="tab-label">首页</span>
+          <span class="tab-caption">聊天</span>
+        </button>
+        <button
+          class="tab-button"
+          type="button"
+          data-tab-target="settings"
+          role="tab"
+          aria-selected="false"
+          aria-controls="tab-settings"
+        >
+          <span class="tab-label">设置</span>
+          <span class="tab-caption">同步配置</span>
+        </button>
+      </nav>
     </div>
 
     <script src="main.js"></script>
