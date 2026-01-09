@@ -1,0 +1,1 @@
+{"main-window":{"identifier":"main-window","description":"主窗口权限，允许核心 IPC 与文件选择对话框。","local":true,"windows":["main"],"permissions":["core:default","dialog:default"]}}

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Transfer Genie</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="tauri://tauri.js"></script>
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="brand">
+          <h1>Transfer Genie</h1>
+          <p>WebDAV 传输助手</p>
+        </div>
+        <div class="status">
+          <div class="status-text" id="sync-status">尚未同步</div>
+          <button id="refresh-btn" class="button ghost">手动刷新</button>
+        </div>
+      </header>
+
+      <main class="content">
+        <section class="feed">
+          <ul id="message-list" class="message-list"></ul>
+        </section>
+
+        <aside class="side">
+          <section class="composer">
+            <label for="text-input">发送文本</label>
+            <textarea id="text-input" placeholder="输入消息..."></textarea>
+            <div class="composer-actions">
+              <button id="send-text" class="button primary">发送文本</button>
+              <button id="send-file" class="button">发送文件</button>
+            </div>
+          </section>
+
+          <details class="settings" open>
+            <summary>设置</summary>
+            <div class="settings-body">
+              <label>
+                WebDAV URL
+                <input id="webdav-url" type="text" placeholder="https://example.com/webdav/" />
+              </label>
+              <label>
+                用户名
+                <input id="webdav-user" type="text" />
+              </label>
+              <label>
+                密码
+                <input id="webdav-pass" type="password" />
+              </label>
+              <label>
+                发送者名称
+                <input id="sender-name" type="text" />
+              </label>
+              <label>
+                刷新间隔（秒）
+                <input id="refresh-interval" type="number" min="1" step="1" />
+              </label>
+              <button id="save-settings" class="button primary">保存设置</button>
+            </div>
+          </details>
+        </aside>
+      </main>
+    </div>
+
+    <script src="main.js"></script>
+  </body>
+</html>
