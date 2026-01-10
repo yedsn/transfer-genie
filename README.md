@@ -23,7 +23,8 @@ cargo install tauri-cli --locked
 启动开发：
 
 ```
-cargo tauri dev --manifest-path src-tauri/Cargo.toml
+cd src-tauri
+cargo tauri dev
 ```
 
 如果出现 `no such command: tauri`：
@@ -36,14 +37,9 @@ cargo tauri dev --manifest-path src-tauri/Cargo.toml
 - 已安装 Rust/Cargo
 - 已安装 Tauri CLI：`cargo install tauri-cli --locked`
 
-Windows（输出 .exe）：
 ```
-cargo tauri build --manifest-path src-tauri/Cargo.toml
-```
-
-macOS（输出 .dmg）：
-```
-cargo tauri build --manifest-path src-tauri/Cargo.toml
+cd src-tauri
+cargo tauri build
 ```
 
 说明：
