@@ -553,7 +553,7 @@ async fn save_message_file_as(
 }
 
 #[tauri::command]
-fn open_message_file(
+async fn open_message_file(
   app: AppHandle,
   state: State<'_, AppState>,
   filename: String,
@@ -609,7 +609,23 @@ fn open_message_file(
       return Ok(());
     }
   }
-  Err("文件尚未下载".to_string())
+
+  let remote_path = format!("files/{}", filename);
+  let bytes = webdav::download_file(&state.http, &endpoint, &remote_path).await?;
+  ensure_parent_dir(&download_path)?;
+  fs::write(&download_path, &bytes).map_err(|err| format!("保存文件失败: {err}"))?;
+  update_message_local_path(
+    &state.db_path,
+    &endpoint.id,
+    &filename,
+    &download_path,
+    bytes.len() as i64,
+  )?;
+  app
+    .shell()
+    .open(download_path.to_string_lossy().to_string(), None)
+    .map_err(|err| format!("打开文件失败: {err}"))?;
+  Ok(())
 }
 
 #[tauri::command]
