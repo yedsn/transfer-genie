@@ -49,6 +49,13 @@ const uploadSpeed = new Map();
 let selectionMode = false;
 const selectedMessages = new Set();
 
+// 分页相关状态
+const PAGE_SIZE = 10;
+let currentOffset = 0;
+let totalMessages = 0;
+let hasMoreMessages = false;
+let isLoadingMore = false;
+
 function formatBytes(bytes) {
   if (bytes <= 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -1253,8 +1260,9 @@ async function cleanupMessages() {
 function renderMessages(messages, options = {}) {
   lastMessages = Array.isArray(messages) ? messages : [];
   const merged = mergeMessages(lastMessages);
-  const { scrollToBottom = false } = options;
+  const { scrollToBottom = false, preserveScroll = false } = options;
   const previousScrollTop = messageList ? messageList.scrollTop : 0;
+  const previousScrollHeight = messageList ? messageList.scrollHeight : 0;
   const available = new Set(merged.map((message) => message.filename));
   selectedMessages.forEach((filename) => {
     if (!available.has(filename)) {
@@ -1263,6 +1271,16 @@ function renderMessages(messages, options = {}) {
   });
   updateSelectionBar();
   messageList.innerHTML = '';
+  
+  // 添加"加载更多"提示
+  if (hasMoreMessages) {
+    const loadMoreItem = document.createElement('li');
+    loadMoreItem.className = 'load-more-hint';
+    loadMoreItem.id = 'load-more-hint';
+    loadMoreItem.textContent = isLoadingMore ? '加载中...' : '向上滚动加载更多';
+    messageList.appendChild(loadMoreItem);
+  }
+  
   if (!merged || merged.length === 0) {
     const empty = document.createElement('li');
     empty.className = 'message-card';
@@ -1508,6 +1526,12 @@ function renderMessages(messages, options = {}) {
   });
   if (scrollToBottom) {
     scrollMessageListToBottom();
+  } else if (preserveScroll && messageList) {
+    // 加载更多时，保持滚动位置（补偿新增内容的高度）
+    const newScrollHeight = messageList.scrollHeight;
+    const scrollDiff = newScrollHeight - previousScrollHeight;
+    messageList.scrollTop = previousScrollTop + scrollDiff;
+    updateScrollToBottomButton();
   } else {
     if (messageList) {
       const maxScrollTop = Math.max(0, messageList.scrollHeight - messageList.clientHeight);
@@ -1541,18 +1565,49 @@ async function loadMessages(options = {}) {
     typeof options.scrollToBottom === 'boolean'
       ? options.scrollToBottom
       : isMessageListAtBottom();
+  const loadMore = options.loadMore || false;
+  
   try {
     if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
     if (!getActiveEndpoint()) {
+      lastMessages = [];
+      totalMessages = 0;
+      hasMoreMessages = false;
+      currentOffset = 0;
       renderMessages([], { scrollToBottom: shouldScroll });
       return;
     }
-    const messages = await invoke('list_messages');
-    renderMessages(messages, { scrollToBottom: shouldScroll });
+    
+    if (loadMore) {
+      // 加载更多历史消息
+      if (isLoadingMore || !hasMoreMessages) return;
+      isLoadingMore = true;
+      const newOffset = currentOffset + PAGE_SIZE;
+      const result = await invoke('list_messages', { limit: PAGE_SIZE, offset: newOffset });
+      isLoadingMore = false;
+      
+      if (result.messages && result.messages.length > 0) {
+        // 将新加载的消息添加到开头
+        lastMessages = [...result.messages, ...lastMessages];
+        currentOffset = newOffset;
+        hasMoreMessages = result.has_more;
+        totalMessages = result.total;
+        renderMessages(lastMessages, { scrollToBottom: false, preserveScroll: true });
+      }
+    } else {
+      // 初始加载或刷新：加载最新的消息
+      currentOffset = 0;
+      const result = await invoke('list_messages', { limit: PAGE_SIZE, offset: 0 });
+      lastMessages = result.messages || [];
+      totalMessages = result.total || 0;
+      hasMoreMessages = result.has_more || false;
+      renderMessages(lastMessages, { scrollToBottom: shouldScroll });
+    }
   } catch (error) {
+    isLoadingMore = false;
     setErrorStatus(`加载消息失败：${error}`);
   }
 }
@@ -2037,6 +2092,13 @@ if (scrollToBottomButton) {
 
 if (messageList) {
   messageList.addEventListener('scroll', updateScrollToBottomButton);
+  
+  // 向上滚动加载更多
+  messageList.addEventListener('scroll', () => {
+    if (messageList.scrollTop < 50 && hasMoreMessages && !isLoadingMore) {
+      loadMessages({ loadMore: true });
+    }
+  });
 }
 
 syncComposerOffset();

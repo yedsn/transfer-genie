@@ -206,12 +206,38 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
 }
 
 pub fn list_messages(path: &Path, endpoint_id: &str) -> rusqlite::Result<Vec<Message>> {
-  let conn = Connection::open(path)?;
-  let mut stmt = conn.prepare(
-    "SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, file_hash \
-     FROM messages WHERE endpoint_id = ?1 ORDER BY timestamp_ms ASC",
-  )?;
+  list_messages_paged(path, endpoint_id, None, None)
+}
 
+pub fn list_messages_paged(
+  path: &Path,
+  endpoint_id: &str,
+  limit: Option<i64>,
+  offset: Option<i64>,
+) -> rusqlite::Result<Vec<Message>> {
+  let conn = Connection::open(path)?;
+  
+  // 使用子查询实现：先按时间倒序取最新的 N 条，再按时间正序返回
+  let sql = match (limit, offset) {
+    (Some(lim), Some(off)) => format!(
+      "SELECT * FROM (\
+        SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, file_hash \
+        FROM messages WHERE endpoint_id = ?1 ORDER BY timestamp_ms DESC LIMIT {} OFFSET {}\
+      ) ORDER BY timestamp_ms ASC",
+      lim, off
+    ),
+    (Some(lim), None) => format!(
+      "SELECT * FROM (\
+        SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, file_hash \
+        FROM messages WHERE endpoint_id = ?1 ORDER BY timestamp_ms DESC LIMIT {}\
+      ) ORDER BY timestamp_ms ASC",
+      lim
+    ),
+    _ => "SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, file_hash \
+          FROM messages WHERE endpoint_id = ?1 ORDER BY timestamp_ms ASC".to_string(),
+  };
+  
+  let mut stmt = conn.prepare(&sql)?;
   let rows = stmt.query_map([endpoint_id], |row| {
     Ok(Message {
       filename: row.get(0)?,
@@ -232,6 +258,15 @@ pub fn list_messages(path: &Path, endpoint_id: &str) -> rusqlite::Result<Vec<Mes
     messages.push(row?);
   }
   Ok(messages)
+}
+
+pub fn count_messages(path: &Path, endpoint_id: &str) -> rusqlite::Result<i64> {
+  let conn = Connection::open(path)?;
+  conn.query_row(
+    "SELECT COUNT(*) FROM messages WHERE endpoint_id = ?1",
+    params![endpoint_id],
+    |row| row.get(0),
+  )
 }
 
 pub fn prune_messages(path: &Path, endpoint_id: &str, keep: &[String]) -> rusqlite::Result<()> {

@@ -267,12 +267,26 @@ fn import_settings(
   Ok(normalized)
 }
 
+#[derive(Serialize)]
+struct MessagesResult {
+  messages: Vec<Message>,
+  total: i64,
+  has_more: bool,
+}
+
 #[tauri::command]
-fn list_messages(state: State<'_, AppState>) -> Result<Vec<Message>, String> {
+fn list_messages(
+  state: State<'_, AppState>,
+  limit: Option<i64>,
+  offset: Option<i64>,
+) -> Result<MessagesResult, String> {
   let settings = current_settings(&state)?;
   let endpoint = resolve_active_endpoint(&settings)?;
+  
+  let total = db::count_messages(&state.db_path, &endpoint.id).map_err(|err| err.to_string())?;
   let mut messages =
-    db::list_messages(&state.db_path, &endpoint.id).map_err(|err| err.to_string())?;
+    db::list_messages_paged(&state.db_path, &endpoint.id, limit, offset).map_err(|err| err.to_string())?;
+  
   let base_dir = resolve_download_dir(&state, &settings);
   for message in messages.iter_mut() {
     if message.kind == MessageKind::File.as_str() {
@@ -298,7 +312,16 @@ fn list_messages(state: State<'_, AppState>) -> Result<Vec<Message>, String> {
       message.download_exists = false;
     }
   }
-  Ok(messages)
+  
+  let current_offset = offset.unwrap_or(0);
+  let current_limit = limit.unwrap_or(total);
+  let has_more = current_offset + current_limit < total;
+  
+  Ok(MessagesResult {
+    messages,
+    total,
+    has_more,
+  })
 }
 
 #[tauri::command]
