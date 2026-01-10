@@ -622,18 +622,9 @@ async fn open_message_file(
 
 #[tauri::command]
 fn minimize_window(app: AppHandle, window: Window) -> Result<(), String> {
-  #[cfg(target_os = "windows")]
-  {
-    window
-      .hide()
-      .map_err(|err| format!("隐藏窗口失败: {err}"))?;
-  }
-  #[cfg(not(target_os = "windows"))]
-  {
-    window
-      .minimize()
-      .map_err(|err| format!("最小化失败: {err}"))?;
-  }
+  window
+    .hide()
+    .map_err(|err| format!("隐藏窗口失败: {err}"))?;
   #[cfg(target_os = "macos")]
   sync_dock_visibility_window(&app, &window);
   Ok(())
