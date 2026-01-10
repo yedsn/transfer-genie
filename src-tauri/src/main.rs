@@ -621,10 +621,13 @@ async fn open_message_file(
 }
 
 #[tauri::command]
-fn minimize_window(window: Window) -> Result<(), String> {
+fn minimize_window(app: AppHandle, window: Window) -> Result<(), String> {
   window
     .minimize()
-    .map_err(|err| format!("最小化失败: {err}"))
+    .map_err(|err| format!("最小化失败: {err}"))?;
+  #[cfg(target_os = "macos")]
+  sync_dock_visibility_window(&app, &window);
+  Ok(())
 }
 
 #[tauri::command]
@@ -1597,8 +1600,11 @@ async fn remove_history_entries(
 
 fn show_main_window(app: &AppHandle) {
   if let Some(window) = app.get_webview_window("main") {
+    let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_focus();
+    #[cfg(target_os = "macos")]
+    sync_dock_visibility_webview(app, &window);
   }
 }
 
@@ -1607,11 +1613,30 @@ fn toggle_main_window(app: &AppHandle) {
     let is_visible = window.is_visible().unwrap_or(true);
     if is_visible {
       let _ = window.hide();
+      #[cfg(target_os = "macos")]
+      sync_dock_visibility_webview(app, &window);
     } else {
+      let _ = window.unminimize();
       let _ = window.show();
       let _ = window.set_focus();
+      #[cfg(target_os = "macos")]
+      sync_dock_visibility_webview(app, &window);
     }
   }
+}
+
+#[cfg(target_os = "macos")]
+fn sync_dock_visibility_webview(app: &AppHandle, window: &tauri::WebviewWindow) {
+  let minimized = window.is_minimized().unwrap_or(false);
+  let visible = window.is_visible().unwrap_or(true);
+  let _ = app.set_dock_visibility(visible && !minimized);
+}
+
+#[cfg(target_os = "macos")]
+fn sync_dock_visibility_window(app: &AppHandle, window: &Window) {
+  let minimized = window.is_minimized().unwrap_or(false);
+  let visible = window.is_visible().unwrap_or(true);
+  let _ = app.set_dock_visibility(visible && !minimized);
 }
 
 fn start_sync_loop(app_handle: AppHandle) {
@@ -1723,6 +1748,8 @@ fn main() {
               let _ = event_window.hide();
               api.prevent_close();
             }
+            #[cfg(target_os = "macos")]
+            sync_dock_visibility_webview(&event_window.app_handle(), &event_window);
           });
         }
       }
