@@ -1462,7 +1462,7 @@ function renderMessages(messages, options = {}) {
         });
 
         const deleteButton = document.createElement('button');
-        deleteButton.className = 'button ghost small';
+        deleteButton.className = 'button ghost small delete-action';
         deleteButton.textContent = '删除';
         deleteButton.addEventListener('click', () => {
           menu.open = false;

@@ -465,30 +465,103 @@ body {
 .action-menu summary {
   list-style: none;
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 8px;
+  transition: all 0.2s ease;
 }
 
 .action-menu summary::-webkit-details-marker {
   display: none;
 }
 
+.action-menu summary:hover {
+  background: var(--panel-soft);
+  transform: none;
+}
+
+.action-menu summary img {
+  opacity: 0.7;
+  transition: opacity 0.2s ease;
+}
+
+.action-menu summary:hover img {
+  opacity: 1;
+}
+
+.action-menu[open] summary {
+  background: var(--panel-soft);
+}
+
+.action-menu[open] summary img {
+  opacity: 1;
+}
+
 .action-menu-list {
   position: absolute;
   right: 0;
-  top: calc(100% + 6px);
+  top: calc(100% + 8px);
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 12px;
-  box-shadow: var(--shadow);
-  padding: 6px;
+  box-shadow: 0 8px 24px rgba(15, 15, 25, 0.12), 0 2px 8px rgba(15, 15, 25, 0.08);
+  padding: 8px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  z-index: 10;
-  min-width: 120px;
+  gap: 4px;
+  z-index: 100;
+  min-width: 140px;
+  animation: menuFadeIn 0.2s ease;
+  overflow: hidden;
+}
+
+@keyframes menuFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .action-menu:not([open]) .action-menu-list {
   display: none;
+}
+
+.action-menu-list .button {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  transition: all 0.15s ease;
+  margin: 0;
+}
+
+.action-menu-list .button:hover {
+  background: var(--panel-soft);
+  transform: none;
+  color: var(--ink);
+}
+
+.action-menu-list .button:active {
+  transform: scale(0.98);
+}
+
+.action-menu-list .button.delete-action {
+  color: #d32f2f;
+}
+
+.action-menu-list .button.delete-action:hover {
+  background: #ffebee;
+  color: #c62828;
 }
 
 .selection-count {
