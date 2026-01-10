@@ -1443,7 +1443,12 @@ function renderMessages(messages, options = {}) {
 
         const summary = document.createElement('summary');
         summary.className = 'button ghost small';
-        summary.textContent = '更多';
+        const iconImg = document.createElement('img');
+        iconImg.src = 'icons/more.svg';
+        iconImg.alt = '更多';
+        iconImg.style.width = '16px';
+        iconImg.style.height = '16px';
+        summary.appendChild(iconImg);
 
         const menuList = document.createElement('div');
         menuList.className = 'action-menu-list';
