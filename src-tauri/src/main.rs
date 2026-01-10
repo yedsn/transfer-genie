@@ -5,7 +5,7 @@ mod webdav;
 
 use crate::db::DbMessage;
 use crate::filenames::{build_message_filename, parse_message_filename, MessageKind};
-use crate::types::{Message, Settings, SyncStatus};
+use crate::types::{Message, Settings, SyncStatus, WebDavEndpoint};
 use serde::{Deserialize, Serialize};
 use rand::Rng;
 use reqwest::Client;
@@ -21,7 +21,7 @@ use tauri::Window;
 struct AppState {
   settings_path: PathBuf,
   db_path: PathBuf,
-  files_dir: PathBuf,
+  files_base_dir: PathBuf,
   default_download_dir: PathBuf,
   settings: Mutex<Settings>,
   sync_status: Mutex<SyncStatus>,
@@ -37,6 +37,22 @@ struct HistoryEntry {
   size: i64,
   kind: String,
   original_name: String,
+}
+
+#[derive(Deserialize)]
+struct LegacySettings {
+  #[serde(default)]
+  webdav_url: String,
+  #[serde(default)]
+  username: String,
+  #[serde(default)]
+  password: String,
+  #[serde(default)]
+  sender_name: String,
+  #[serde(default)]
+  refresh_interval_secs: u64,
+  #[serde(default)]
+  download_dir: String,
 }
 
 #[derive(Serialize)]
@@ -83,12 +99,7 @@ fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
 
 #[tauri::command]
 fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<Settings, String> {
-  let mut normalized = settings.clone();
-  if normalized.refresh_interval_secs == 0 {
-    normalized.refresh_interval_secs = 5;
-  }
-  normalized.download_dir =
-    normalize_download_dir(&normalized.download_dir, &state.default_download_dir);
+  let normalized = normalize_settings(settings, &state.default_download_dir)?;
 
   write_settings(&state.settings_path, &normalized)?;
 
@@ -102,8 +113,10 @@ fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<Setti
 
 #[tauri::command]
 fn list_messages(state: State<'_, AppState>) -> Result<Vec<Message>, String> {
-  let mut messages = db::list_messages(&state.db_path).map_err(|err| err.to_string())?;
   let settings = current_settings(&state)?;
+  let endpoint = resolve_active_endpoint(&settings)?;
+  let mut messages =
+    db::list_messages(&state.db_path, &endpoint.id).map_err(|err| err.to_string())?;
   let base_dir = resolve_download_dir(&state, &settings);
   for message in messages.iter_mut() {
     if message.kind == MessageKind::File.as_str() {
@@ -120,17 +133,18 @@ fn list_messages(state: State<'_, AppState>) -> Result<Vec<Message>, String> {
 #[tauri::command]
 async fn send_text(state: State<'_, AppState>, text: String) -> Result<(), String> {
   let settings = current_settings(&state)?;
-  ensure_webdav_configured(&settings)?;
+  let endpoint = resolve_active_endpoint(&settings)?;
 
   let timestamp_ms = now_ms();
   let filename = build_message_filename(&settings.sender_name, "message.txt", timestamp_ms);
   let remote_path = format!("files/{}", filename);
   let data = text.clone().into_bytes();
 
-  webdav::ensure_directory(&state.http, &settings, "files").await?;
-  webdav::upload_file(&state.http, &settings, &remote_path, data.clone()).await?;
+  webdav::ensure_directory(&state.http, &endpoint, "files").await?;
+  webdav::upload_file(&state.http, &endpoint, &remote_path, data.clone()).await?;
 
   let message = DbMessage {
+    endpoint_id: endpoint.id.clone(),
     filename: filename.clone(),
     sender: settings.sender_name.clone(),
     timestamp_ms,
@@ -144,7 +158,7 @@ async fn send_text(state: State<'_, AppState>, text: String) -> Result<(), Strin
   };
 
   db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
-  let _ = append_history(&state, &settings, message_to_history(&message)).await;
+  let _ = append_history(&state, &endpoint, message_to_history(&message)).await;
   Ok(())
 }
 
@@ -156,7 +170,7 @@ async fn send_file(
   client_id: Option<String>,
 ) -> Result<(), String> {
   let settings = current_settings(&state)?;
-  ensure_webdav_configured(&settings)?;
+  let endpoint = resolve_active_endpoint(&settings)?;
 
   let file_path = PathBuf::from(path);
   let original_name = file_path
@@ -181,7 +195,7 @@ async fn send_file(
     })
     .unwrap_or_else(|| filename.clone());
 
-  webdav::ensure_directory(&state.http, &settings, "files").await?;
+  webdav::ensure_directory(&state.http, &endpoint, "files").await?;
   emit_upload_progress(
     &window,
     &client_id,
@@ -199,7 +213,7 @@ async fn send_file(
   let progress_original_name = original_name.clone();
   let upload_result = webdav::upload_file_with_progress(
     &state.http,
-    &settings,
+    &endpoint,
     &remote_path,
     data,
     move |sent, total| {
@@ -241,11 +255,13 @@ async fn send_file(
     None,
   );
 
-  let local_path = state.files_dir.join(&filename);
-  fs::create_dir_all(&state.files_dir).map_err(|err| format!("创建目录失败: {err}"))?;
+  let endpoint_dir = endpoint_files_dir(&state, &endpoint.id);
+  let local_path = endpoint_dir.join(&filename);
+  fs::create_dir_all(&endpoint_dir).map_err(|err| format!("创建目录失败: {err}"))?;
   fs::copy(&file_path, &local_path).map_err(|err| format!("保存本地文件失败: {err}"))?;
 
   let message = DbMessage {
+    endpoint_id: endpoint.id.clone(),
     filename: filename.clone(),
     sender: settings.sender_name.clone(),
     timestamp_ms,
@@ -259,7 +275,7 @@ async fn send_file(
   };
 
   db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
-  let _ = append_history(&state, &settings, message_to_history(&message)).await;
+  let _ = append_history(&state, &endpoint, message_to_history(&message)).await;
   Ok(())
 }
 
@@ -272,7 +288,7 @@ async fn download_message_file(
   conflict_action: Option<String>,
 ) -> Result<DownloadResult, String> {
   let settings = current_settings(&state)?;
-  ensure_webdav_configured(&settings)?;
+  let endpoint = resolve_active_endpoint(&settings)?;
 
   let base_dir = resolve_download_dir(&state, &settings);
   fs::create_dir_all(&base_dir).map_err(|err| format!("创建下载目录失败: {err}"))?;
@@ -295,7 +311,7 @@ async fn download_message_file(
   let window = window.clone();
   let bytes = match webdav::download_file_with_progress(
     &state.http,
-    &settings,
+    &endpoint,
     &remote_path,
     |received, total| {
       emit_download_progress(
@@ -328,7 +344,13 @@ async fn download_message_file(
   };
   ensure_parent_dir(&final_path)?;
   fs::write(&final_path, &bytes).map_err(|err| format!("保存文件失败: {err}"))?;
-  update_message_local_path(&state.db_path, &filename, &final_path, bytes.len() as i64)?;
+  update_message_local_path(
+    &state.db_path,
+    &endpoint.id,
+    &filename,
+    &final_path,
+    bytes.len() as i64,
+  )?;
 
   Ok(DownloadResult {
     status: "saved".to_string(),
@@ -345,7 +367,7 @@ async fn save_message_file_as(
   target_path: String,
 ) -> Result<DownloadResult, String> {
   let settings = current_settings(&state)?;
-  ensure_webdav_configured(&settings)?;
+  let endpoint = resolve_active_endpoint(&settings)?;
 
   if target_path.trim().is_empty() {
     return Err("未选择保存路径".to_string());
@@ -355,7 +377,7 @@ async fn save_message_file_as(
   let window = window.clone();
   let bytes = match webdav::download_file_with_progress(
     &state.http,
-    &settings,
+    &endpoint,
     &remote_path,
     |received, total| {
       emit_download_progress(
@@ -388,7 +410,13 @@ async fn save_message_file_as(
   };
   ensure_parent_dir(&final_path)?;
   fs::write(&final_path, &bytes).map_err(|err| format!("保存文件失败: {err}"))?;
-  update_message_local_path(&state.db_path, &filename, &final_path, bytes.len() as i64)?;
+  update_message_local_path(
+    &state.db_path,
+    &endpoint.id,
+    &filename,
+    &final_path,
+    bytes.len() as i64,
+  )?;
 
   Ok(DownloadResult {
     status: "saved".to_string(),
@@ -400,13 +428,13 @@ async fn save_message_file_as(
 #[tauri::command]
 async fn fetch_image_preview(state: State<'_, AppState>, filename: String) -> Result<String, String> {
   let settings = current_settings(&state)?;
-  ensure_webdav_configured(&settings)?;
+  let endpoint = resolve_active_endpoint(&settings)?;
 
   if filename.contains('/') || filename.contains('\\') {
     return Err("非法文件名".to_string());
   }
 
-  let preview_dir = state.files_dir.join("previews");
+  let preview_dir = endpoint_files_dir(&state, &endpoint.id).join("previews");
   fs::create_dir_all(&preview_dir).map_err(|err| format!("创建预览目录失败: {err}"))?;
 
   let target_path = preview_dir.join(&filename);
@@ -415,7 +443,7 @@ async fn fetch_image_preview(state: State<'_, AppState>, filename: String) -> Re
   }
 
   let remote_path = format!("files/{}", filename);
-  let bytes = webdav::download_file(&state.http, &settings, &remote_path).await?;
+  let bytes = webdav::download_file(&state.http, &endpoint, &remote_path).await?;
   fs::write(&target_path, &bytes).map_err(|err| format!("保存预览失败: {err}"))?;
   Ok(target_path.to_string_lossy().to_string())
 }
@@ -445,8 +473,9 @@ async fn delete_messages(
   }
 
   let settings = current_settings(&state)?;
+  let endpoint = resolve_active_endpoint(&settings)?;
   if delete_remote {
-    ensure_webdav_configured(&settings)?;
+    // resolved above
   }
 
   let mut failed: Vec<String> = Vec::new();
@@ -455,14 +484,14 @@ async fn delete_messages(
     succeeded.clear();
     for filename in &targets {
       let remote_path = format!("files/{}", filename);
-      match webdav::delete_file(&state.http, &settings, &remote_path, true).await {
+      match webdav::delete_file(&state.http, &endpoint, &remote_path, true).await {
         Ok(_) => succeeded.push(filename.clone()),
         Err(_) => failed.push(filename.clone()),
       }
     }
     if !succeeded.is_empty() {
       let success_set: HashSet<String> = succeeded.iter().cloned().collect();
-      remove_history_entries(&state, &settings, &success_set).await?;
+      remove_history_entries(&state, &endpoint, &success_set).await?;
     }
   }
 
@@ -476,7 +505,8 @@ async fn delete_messages(
 
   let mut messages = Vec::new();
   for filename in &deletable {
-    if let Some(message) = db::get_message(&state.db_path, filename).map_err(|err| err.to_string())?
+    if let Some(message) = db::get_message(&state.db_path, &endpoint.id, filename)
+      .map_err(|err| err.to_string())?
     {
       messages.push(message);
     }
@@ -492,17 +522,19 @@ async fn delete_messages(
     )?;
   }
 
-  let deleted = db::delete_messages(&state.db_path, &deletable).map_err(|err| err.to_string())?;
+  let deleted = db::delete_messages(&state.db_path, &endpoint.id, &deletable)
+    .map_err(|err| err.to_string())?;
   Ok(DeleteSummary { deleted, failed })
 }
 
 #[tauri::command]
 async fn cleanup_messages(state: State<'_, AppState>) -> Result<DeleteSummary, String> {
   let settings = current_settings(&state)?;
-  ensure_webdav_configured(&settings)?;
+  let endpoint = resolve_active_endpoint(&settings)?;
 
   let cutoff_ms = now_ms() - 30_i64 * 24 * 60 * 60 * 1000;
-  let messages = db::list_messages(&state.db_path).map_err(|err| err.to_string())?;
+  let messages =
+    db::list_messages(&state.db_path, &endpoint.id).map_err(|err| err.to_string())?;
   let candidates: Vec<Message> = messages
     .into_iter()
     .filter(|message| message.timestamp_ms < cutoff_ms)
@@ -519,7 +551,7 @@ async fn cleanup_messages(state: State<'_, AppState>) -> Result<DeleteSummary, S
   let mut succeeded: Vec<String> = Vec::new();
   for message in &candidates {
     let remote_path = format!("files/{}", message.filename);
-    match webdav::delete_file(&state.http, &settings, &remote_path, true).await {
+    match webdav::delete_file(&state.http, &endpoint, &remote_path, true).await {
       Ok(_) => succeeded.push(message.filename.clone()),
       Err(_) => failed.push(message.filename.clone()),
     }
@@ -527,7 +559,7 @@ async fn cleanup_messages(state: State<'_, AppState>) -> Result<DeleteSummary, S
 
   if !succeeded.is_empty() {
     let success_set: HashSet<String> = succeeded.iter().cloned().collect();
-    remove_history_entries(&state, &settings, &success_set).await?;
+    remove_history_entries(&state, &endpoint, &success_set).await?;
   }
 
   let success_set: HashSet<String> = succeeded.iter().cloned().collect();
@@ -544,7 +576,8 @@ async fn cleanup_messages(state: State<'_, AppState>) -> Result<DeleteSummary, S
     )?;
   }
 
-  let deleted = db::delete_messages(&state.db_path, &succeeded).map_err(|err| err.to_string())?;
+  let deleted = db::delete_messages(&state.db_path, &endpoint.id, &succeeded)
+    .map_err(|err| err.to_string())?;
   Ok(DeleteSummary { deleted, failed })
 }
 
@@ -570,13 +603,6 @@ fn current_settings(state: &State<'_, AppState>) -> Result<Settings, String> {
   Ok(settings.clone())
 }
 
-fn ensure_webdav_configured(settings: &Settings) -> Result<(), String> {
-  if settings.webdav_url.trim().is_empty() {
-    return Err("请先配置 WebDAV 地址".to_string());
-  }
-  Ok(())
-}
-
 fn now_ms() -> i64 {
   let duration = SystemTime::now()
     .duration_since(UNIX_EPOCH)
@@ -588,6 +614,94 @@ fn random_sender_name() -> String {
   let mut rng = rand::thread_rng();
   let value: u32 = rng.gen();
   format!("Device-{value:06x}")
+}
+
+fn generate_endpoint_id() -> String {
+  let mut rng = rand::thread_rng();
+  let value: u64 = rng.gen();
+  format!("endpoint-{value:016x}")
+}
+
+fn is_valid_endpoint_id(value: &str) -> bool {
+  let trimmed = value.trim();
+  !(trimmed.is_empty()
+    || trimmed.contains('/')
+    || trimmed.contains('\\')
+    || trimmed.contains(".."))
+}
+
+fn normalize_settings(
+  mut settings: Settings,
+  default_download_dir: &Path,
+) -> Result<Settings, String> {
+  if settings.refresh_interval_secs == 0 {
+    settings.refresh_interval_secs = 5;
+  }
+  if settings.sender_name.trim().is_empty() {
+    settings.sender_name = random_sender_name();
+  }
+  settings.download_dir =
+    normalize_download_dir(&settings.download_dir, default_download_dir);
+
+  let mut seen_ids = HashSet::new();
+  for endpoint in settings.webdav_endpoints.iter_mut() {
+    endpoint.url = endpoint.url.trim().to_string();
+    endpoint.username = endpoint.username.trim().to_string();
+    endpoint.name = endpoint.name.trim().to_string();
+    if !is_valid_endpoint_id(&endpoint.id) {
+      return Err("端点 ID 无效".to_string());
+    }
+    if !seen_ids.insert(endpoint.id.clone()) {
+      return Err("端点 ID 重复".to_string());
+    }
+    if endpoint.enabled && endpoint.url.is_empty() {
+      return Err("启用的 WebDAV 端点必须填写 URL".to_string());
+    }
+  }
+
+  let active_id = settings
+    .active_webdav_id
+    .as_deref()
+    .unwrap_or("")
+    .trim()
+    .to_string();
+  if active_id.is_empty() {
+    settings.active_webdav_id = None;
+  } else {
+    let active_ok = settings.webdav_endpoints.iter().any(|endpoint| {
+      endpoint.id == active_id && endpoint.enabled && !endpoint.url.is_empty()
+    });
+    settings.active_webdav_id = if active_ok {
+      Some(active_id)
+    } else {
+      None
+    };
+  }
+  Ok(settings)
+}
+
+fn resolve_active_endpoint(settings: &Settings) -> Result<WebDavEndpoint, String> {
+  let active_id = settings
+    .active_webdav_id
+    .as_deref()
+    .unwrap_or("")
+    .trim()
+    .to_string();
+  if active_id.is_empty() {
+    return Err("请先选择 WebDAV 端点".to_string());
+  }
+  let endpoint = settings
+    .webdav_endpoints
+    .iter()
+    .find(|item| item.id == active_id)
+    .ok_or_else(|| "当前 WebDAV 端点不存在".to_string())?;
+  if !endpoint.enabled {
+    return Err("当前 WebDAV 端点已禁用".to_string());
+  }
+  if endpoint.url.trim().is_empty() {
+    return Err("当前 WebDAV 地址为空".to_string());
+  }
+  Ok(endpoint.clone())
 }
 
 fn settings_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
@@ -606,7 +720,7 @@ fn db_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
   Ok(base.join("messages.sqlite"))
 }
 
-fn files_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
+fn files_base_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
   let base = app_handle
     .path()
     .app_data_dir()
@@ -631,22 +745,55 @@ fn normalize_download_dir(raw: &str, fallback: &Path) -> String {
   }
 }
 
+fn endpoint_files_dir(state: &AppState, endpoint_id: &str) -> PathBuf {
+  state.files_base_dir.join(endpoint_id)
+}
+
 fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, String> {
   if path.exists() {
     let data = fs::read_to_string(path).map_err(|err| format!("读取设置失败: {err}"))?;
-    let mut settings =
-      serde_json::from_str::<Settings>(&data).map_err(|err| format!("解析设置失败: {err}"))?;
-    let normalized = normalize_download_dir(&settings.download_dir, fallback_download_dir);
-    if settings.download_dir != normalized {
-      settings.download_dir = normalized;
-      write_settings(path, &settings)?;
-    }
-    Ok(settings)
+    let value =
+      serde_json::from_str::<serde_json::Value>(&data).map_err(|err| format!("解析设置失败: {err}"))?;
+    let settings = if value.get("webdav_endpoints").is_some() {
+      serde_json::from_value::<Settings>(value).map_err(|err| format!("解析设置失败: {err}"))?
+    } else {
+      let legacy =
+        serde_json::from_value::<LegacySettings>(value).map_err(|err| format!("解析设置失败: {err}"))?;
+      let mut endpoints = Vec::new();
+      let mut active_id = None;
+      let url = legacy.webdav_url.trim().to_string();
+      if !url.is_empty() {
+        let id = generate_endpoint_id();
+        endpoints.push(WebDavEndpoint {
+          id: id.clone(),
+          name: String::new(),
+          url,
+          username: legacy.username.trim().to_string(),
+          password: legacy.password,
+          enabled: true,
+        });
+        active_id = Some(id);
+      }
+      let sender_name = if legacy.sender_name.trim().is_empty() {
+        random_sender_name()
+      } else {
+        legacy.sender_name
+      };
+      Settings {
+        webdav_endpoints: endpoints,
+        active_webdav_id: active_id,
+        sender_name,
+        refresh_interval_secs: legacy.refresh_interval_secs,
+        download_dir: legacy.download_dir,
+      }
+    };
+    let normalized = normalize_settings(settings, fallback_download_dir)?;
+    write_settings(path, &normalized)?;
+    Ok(normalized)
   } else {
     let settings = Settings {
-      webdav_url: String::new(),
-      username: String::new(),
-      password: String::new(),
+      webdav_endpoints: Vec::new(),
+      active_webdav_id: None,
       sender_name: random_sender_name(),
       refresh_interval_secs: 5,
       download_dir: normalize_download_dir("", fallback_download_dir),
@@ -808,11 +955,13 @@ fn ensure_parent_dir(path: &Path) -> Result<(), String> {
 
 fn update_message_local_path(
   db_path: &Path,
+  endpoint_id: &str,
   filename: &str,
   local_path: &Path,
   size: i64,
 ) -> Result<(), String> {
-  let existing = db::get_message(db_path, filename).map_err(|err| err.to_string())?;
+  let existing =
+    db::get_message(db_path, endpoint_id, filename).map_err(|err| err.to_string())?;
   let mut message = existing.ok_or_else(|| "未找到消息记录".to_string())?;
   message.local_path = Some(local_path.to_string_lossy().to_string());
   if size > 0 {
@@ -905,15 +1054,16 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
     settings.clone()
   };
 
-  ensure_webdav_configured(&settings)?;
+  let endpoint = resolve_active_endpoint(&settings)?;
+  let endpoint_id = endpoint.id.clone();
 
-  let history = load_history(state, &settings).await?;
+  let history = load_history(state, &endpoint).await?;
   let mut history_map: HashMap<String, HistoryEntry> = history
     .into_iter()
     .map(|entry| (entry.filename.clone(), entry))
     .collect();
 
-  let entries = webdav::list_entries(&state.http, &settings, Some("files"), true).await?;
+  let entries = webdav::list_entries(&state.http, &endpoint, Some("files"), true).await?;
   let mut files_map: HashMap<String, crate::types::DavEntry> = HashMap::new();
   for entry in entries {
     if entry.is_collection {
@@ -931,7 +1081,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
   }
 
   let keep_list: Vec<String> = all_filenames.iter().cloned().collect();
-  db::prune_messages(&state.db_path, &keep_list).map_err(|err| err.to_string())?;
+  db::prune_messages(&state.db_path, &endpoint_id, &keep_list).map_err(|err| err.to_string())?;
 
   let mut new_count = 0usize;
   let mut new_history_entries: Vec<HistoryEntry> = Vec::new();
@@ -964,8 +1114,10 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
       continue;
     };
 
-    let existing = db::get_message(&state.db_path, &filename).map_err(|err| err.to_string())?;
+    let existing =
+      db::get_message(&state.db_path, &endpoint_id, &filename).map_err(|err| err.to_string())?;
     let mut message = existing.clone().unwrap_or(DbMessage {
+      endpoint_id: endpoint_id.clone(),
       filename: filename.clone(),
       sender,
       timestamp_ms,
@@ -1015,9 +1167,9 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
       MessageKind::Text => {
         if message.content.is_none() {
           let bytes = if file_entry.is_some() {
-            Some(webdav::download_file(&state.http, &settings, &remote_path).await?)
+            Some(webdav::download_file(&state.http, &endpoint, &remote_path).await?)
           } else {
-            webdav::download_optional_file(&state.http, &settings, &remote_path).await?
+            webdav::download_optional_file(&state.http, &endpoint, &remote_path).await?
           };
           if let Some(bytes) = bytes {
             let content = String::from_utf8_lossy(&bytes).to_string();
@@ -1064,7 +1216,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
     }
     let mut history: Vec<HistoryEntry> = history_map.into_values().collect();
     history.sort_by_key(|item| item.timestamp_ms);
-    save_history(state, &settings, &history).await?;
+    save_history(state, &endpoint, &history).await?;
   }
 
   Ok(new_count)
@@ -1083,23 +1235,23 @@ fn message_to_history(message: &DbMessage) -> HistoryEntry {
 
 async fn append_history(
   state: &AppState,
-  settings: &Settings,
+  endpoint: &WebDavEndpoint,
   entry: HistoryEntry,
 ) -> Result<(), String> {
-  let mut history = load_history(state, settings).await?;
+  let mut history = load_history(state, endpoint).await?;
   if history.iter().any(|item| item.filename == entry.filename) {
     return Ok(());
   }
   history.push(entry);
   history.sort_by_key(|item| item.timestamp_ms);
-  save_history(state, settings, &history).await
+  save_history(state, endpoint, &history).await
 }
 
 async fn load_history(
   state: &AppState,
-  settings: &Settings,
+  endpoint: &WebDavEndpoint,
 ) -> Result<Vec<HistoryEntry>, String> {
-  let bytes = webdav::download_optional_file(&state.http, settings, "history.json").await?;
+  let bytes = webdav::download_optional_file(&state.http, endpoint, "history.json").await?;
   match bytes {
     Some(data) => serde_json::from_slice::<Vec<HistoryEntry>>(&data)
       .map_err(|err| format!("解析历史记录失败: {err}")),
@@ -1109,25 +1261,25 @@ async fn load_history(
 
 async fn save_history(
   state: &AppState,
-  settings: &Settings,
+  endpoint: &WebDavEndpoint,
   history: &[HistoryEntry],
 ) -> Result<(), String> {
   let data =
     serde_json::to_vec_pretty(history).map_err(|err| format!("序列化历史记录失败: {err}"))?;
-  webdav::upload_file(&state.http, settings, "history.json", data).await
+  webdav::upload_file(&state.http, endpoint, "history.json", data).await
 }
 
 async fn remove_history_entries(
   state: &AppState,
-  settings: &Settings,
+  endpoint: &WebDavEndpoint,
   filenames: &HashSet<String>,
 ) -> Result<(), String> {
   if filenames.is_empty() {
     return Ok(());
   }
-  let mut history = load_history(state, settings).await?;
+  let mut history = load_history(state, endpoint).await?;
   history.retain(|entry| !filenames.contains(&entry.filename));
-  save_history(state, settings, &history).await
+  save_history(state, endpoint, &history).await
 }
 
 fn show_main_window(app: &AppHandle) {
@@ -1175,18 +1327,22 @@ fn main() {
     .setup(|app| {
       let settings_path = settings_path(&app.handle())?;
       let db_path = db_path(&app.handle())?;
-      let files_dir = files_dir(&app.handle())?;
+      let files_base_dir = files_base_dir(&app.handle())?;
       let default_download_dir = default_download_dir(&app.handle())?;
 
-      db::init_db(&db_path)?;
-      fs::create_dir_all(&files_dir).map_err(|err| format!("创建文件目录失败: {err}"))?;
-
       let settings = load_settings(&settings_path, &default_download_dir)?;
+      let migration_endpoint_id = settings
+        .active_webdav_id
+        .as_deref()
+        .or_else(|| settings.webdav_endpoints.first().map(|endpoint| endpoint.id.as_str()));
+
+      db::init_db(&db_path, migration_endpoint_id)?;
+      fs::create_dir_all(&files_base_dir).map_err(|err| format!("创建文件目录失败: {err}"))?;
 
       app.manage(AppState {
         settings_path,
         db_path,
-        files_dir,
+        files_base_dir,
         default_download_dir,
         settings: Mutex::new(settings),
         sync_status: Mutex::new(SyncStatus::idle()),

@@ -1,11 +1,30 @@
 use serde::{Deserialize, Serialize};
 
+fn default_endpoint_enabled() -> bool {
+  true
+}
+
 #[derive(Clone, Serialize, Deserialize)]
-pub struct Settings {
-  pub webdav_url: String,
+pub struct WebDavEndpoint {
+  pub id: String,
+  #[serde(default)]
+  pub name: String,
+  pub url: String,
   pub username: String,
   pub password: String,
+  #[serde(default = "default_endpoint_enabled")]
+  pub enabled: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Settings {
+  #[serde(default)]
+  pub webdav_endpoints: Vec<WebDavEndpoint>,
+  #[serde(default)]
+  pub active_webdav_id: Option<String>,
+  #[serde(default)]
   pub sender_name: String,
+  #[serde(default)]
   pub refresh_interval_secs: u64,
   #[serde(default)]
   pub download_dir: String,

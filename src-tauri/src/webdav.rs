@@ -1,4 +1,4 @@
-use crate::types::{DavEntry, Settings};
+use crate::types::{DavEntry, WebDavEndpoint};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use percent_encoding::percent_decode_str;
@@ -7,16 +7,16 @@ use quick_xml::Reader;
 use reqwest::{Body, Client, Method, RequestBuilder};
 use url::Url;
 
-fn apply_auth(request: RequestBuilder, settings: &Settings) -> RequestBuilder {
-  if settings.username.is_empty() && settings.password.is_empty() {
+fn apply_auth(request: RequestBuilder, endpoint: &WebDavEndpoint) -> RequestBuilder {
+  if endpoint.username.is_empty() && endpoint.password.is_empty() {
     request
   } else {
-    request.basic_auth(settings.username.clone(), Some(settings.password.clone()))
+    request.basic_auth(endpoint.username.clone(), Some(endpoint.password.clone()))
   }
 }
 
-fn base_url(settings: &Settings) -> Result<Url, String> {
-  let mut raw = settings.webdav_url.trim().to_string();
+fn base_url(endpoint: &WebDavEndpoint) -> Result<Url, String> {
+  let mut raw = endpoint.url.trim().to_string();
   if raw.is_empty() {
     return Err("WebDAV 地址为空".to_string());
   }
@@ -42,11 +42,11 @@ fn extract_filename(href: &str) -> String {
 
 pub async fn list_entries(
   client: &Client,
-  settings: &Settings,
+  endpoint: &WebDavEndpoint,
   prefix: Option<&str>,
   allow_missing: bool,
 ) -> Result<Vec<DavEntry>, String> {
-  let mut url = base_url(settings)?;
+  let mut url = base_url(endpoint)?;
   let prefix_trim = prefix.unwrap_or("").trim_matches('/');
   if !prefix_trim.is_empty() {
     let target = format!("{}/", prefix_trim);
@@ -70,7 +70,7 @@ pub async fn list_entries(
     .header("Content-Type", "application/xml")
     .body(body.to_string());
 
-  let response = apply_auth(request, settings)
+  let response = apply_auth(request, endpoint)
     .send()
     .await
     .map_err(|err| format!("WebDAV 请求失败: {err}"))?;
@@ -179,16 +179,16 @@ pub async fn list_entries(
 
 pub async fn download_file(
   client: &Client,
-  settings: &Settings,
+  endpoint: &WebDavEndpoint,
   remote_path: &str,
 ) -> Result<Vec<u8>, String> {
-  let mut url = base_url(settings)?;
+  let mut url = base_url(endpoint)?;
   url = url
     .join(remote_path)
     .map_err(|err| format!("文件地址无效: {err}"))?;
 
   let request = client.get(url);
-  let response = apply_auth(request, settings)
+  let response = apply_auth(request, endpoint)
     .send()
     .await
     .map_err(|err| format!("下载失败: {err}"))?;
@@ -207,20 +207,20 @@ pub async fn download_file(
 
 pub async fn download_file_with_progress<F>(
   client: &Client,
-  settings: &Settings,
+  endpoint: &WebDavEndpoint,
   remote_path: &str,
   mut on_progress: F,
 ) -> Result<Vec<u8>, String>
 where
   F: FnMut(u64, Option<u64>),
 {
-  let mut url = base_url(settings)?;
+  let mut url = base_url(endpoint)?;
   url = url
     .join(remote_path)
     .map_err(|err| format!("文件地址无效: {err}"))?;
 
   let request = client.get(url);
-  let response = apply_auth(request, settings)
+  let response = apply_auth(request, endpoint)
     .send()
     .await
     .map_err(|err| format!("下载失败: {err}"))?;
@@ -246,16 +246,16 @@ where
 
 pub async fn download_optional_file(
   client: &Client,
-  settings: &Settings,
+  endpoint: &WebDavEndpoint,
   remote_path: &str,
 ) -> Result<Option<Vec<u8>>, String> {
-  let mut url = base_url(settings)?;
+  let mut url = base_url(endpoint)?;
   url = url
     .join(remote_path)
     .map_err(|err| format!("文件地址无效: {err}"))?;
 
   let request = client.get(url);
-  let response = apply_auth(request, settings)
+  let response = apply_auth(request, endpoint)
     .send()
     .await
     .map_err(|err| format!("下载失败: {err}"))?;
@@ -277,17 +277,17 @@ pub async fn download_optional_file(
 
 pub async fn upload_file(
   client: &Client,
-  settings: &Settings,
+  endpoint: &WebDavEndpoint,
   remote_path: &str,
   data: Vec<u8>,
 ) -> Result<(), String> {
-  let mut url = base_url(settings)?;
+  let mut url = base_url(endpoint)?;
   url = url
     .join(remote_path)
     .map_err(|err| format!("上传地址无效: {err}"))?;
 
   let request = client.put(url).body(data);
-  let response = apply_auth(request, settings)
+  let response = apply_auth(request, endpoint)
     .send()
     .await
     .map_err(|err| format!("上传失败: {err}"))?;
@@ -301,7 +301,7 @@ pub async fn upload_file(
 
 pub async fn upload_file_with_progress<F>(
   client: &Client,
-  settings: &Settings,
+  endpoint: &WebDavEndpoint,
   remote_path: &str,
   data: Vec<u8>,
   mut on_progress: F,
@@ -309,7 +309,7 @@ pub async fn upload_file_with_progress<F>(
 where
   F: FnMut(u64, u64) + Send + 'static,
 {
-  let mut url = base_url(settings)?;
+  let mut url = base_url(endpoint)?;
   url = url
     .join(remote_path)
     .map_err(|err| format!("上传地址无效: {err}"))?;
@@ -332,7 +332,7 @@ where
 
   let body = Body::wrap_stream(stream);
   let request = client.put(url).body(body);
-  let response = apply_auth(request, settings)
+  let response = apply_auth(request, endpoint)
     .send()
     .await
     .map_err(|err| format!("上传失败: {err}"))?;
@@ -346,17 +346,17 @@ where
 
 pub async fn delete_file(
   client: &Client,
-  settings: &Settings,
+  endpoint: &WebDavEndpoint,
   remote_path: &str,
   allow_missing: bool,
 ) -> Result<(), String> {
-  let mut url = base_url(settings)?;
+  let mut url = base_url(endpoint)?;
   url = url
     .join(remote_path)
     .map_err(|err| format!("删除地址无效: {err}"))?;
 
   let request = client.request(Method::from_bytes(b"DELETE").map_err(|e| e.to_string())?, url);
-  let response = apply_auth(request, settings)
+  let response = apply_auth(request, endpoint)
     .send()
     .await
     .map_err(|err| format!("删除失败: {err}"))?;
@@ -370,17 +370,17 @@ pub async fn delete_file(
 
 pub async fn ensure_directory(
   client: &Client,
-  settings: &Settings,
+  endpoint: &WebDavEndpoint,
   remote_path: &str,
 ) -> Result<(), String> {
-  let mut url = base_url(settings)?;
+  let mut url = base_url(endpoint)?;
   let target = format!("{}/", remote_path.trim_matches('/'));
   url = url
     .join(&target)
     .map_err(|err| format!("目录地址无效: {err}"))?;
 
   let request = client.request(Method::from_bytes(b"MKCOL").map_err(|e| e.to_string())?, url);
-  let response = apply_auth(request, settings)
+  let response = apply_auth(request, endpoint)
     .send()
     .await
     .map_err(|err| format!("创建目录失败: {err}"))?;

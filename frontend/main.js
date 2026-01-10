@@ -19,9 +19,9 @@ const feed = document.querySelector('.feed');
 const tabButtons = Array.from(document.querySelectorAll('[data-tab-target]'));
 const tabPanels = Array.from(document.querySelectorAll('[data-tab-panel]'));
 
-const webdavUrlInput = document.getElementById('webdav-url');
-const webdavUserInput = document.getElementById('webdav-user');
-const webdavPassInput = document.getElementById('webdav-pass');
+const endpointSelect = document.getElementById('active-endpoint');
+const webdavList = document.getElementById('webdav-list');
+const addWebdavButton = document.getElementById('add-webdav');
 const senderNameInput = document.getElementById('sender-name');
 const refreshIntervalInput = document.getElementById('refresh-interval');
 const downloadDirInput = document.getElementById('download-dir');
@@ -36,6 +36,8 @@ const cleanupMessagesButton = document.getElementById('cleanup-messages');
 
 let refreshTimer = null;
 let didInitialSync = false;
+let webdavEndpoints = [];
+let activeEndpointId = null;
 const downloadProgress = new Map();
 const pendingUploads = new Map();
 let lastMessages = [];
@@ -85,18 +87,19 @@ function toFileSrc(path) {
 
 async function ensureImagePreview(filename, options = {}) {
   if (!filename) return null;
-  const webdavUrl = webdavUrlInput?.value.trim();
-  if (!webdavUrl) {
+  const activeEndpoint = getActiveEndpoint();
+  if (!activeEndpoint) {
     if (!options.quiet) {
-      setErrorStatus('请先配置 WebDAV 地址');
+      setErrorStatus('请先选择 WebDAV 端点');
     }
     return null;
   }
-  if (imagePreviewCache.has(filename)) {
-    return imagePreviewCache.get(filename);
+  const cacheKey = `${activeEndpointId || 'none'}:${filename}`;
+  if (imagePreviewCache.has(cacheKey)) {
+    return imagePreviewCache.get(cacheKey);
   }
-  if (imagePreviewInflight.has(filename)) {
-    return imagePreviewInflight.get(filename);
+  if (imagePreviewInflight.has(cacheKey)) {
+    return imagePreviewInflight.get(cacheKey);
   }
   if (!invoke) {
     if (!options.quiet) {
@@ -107,7 +110,7 @@ async function ensureImagePreview(filename, options = {}) {
   const task = invoke('fetch_image_preview', { filename })
     .then((path) => {
       if (path) {
-        imagePreviewCache.set(filename, path);
+        imagePreviewCache.set(cacheKey, path);
         return path;
       }
       return null;
@@ -120,9 +123,9 @@ async function ensureImagePreview(filename, options = {}) {
       return null;
     })
     .finally(() => {
-      imagePreviewInflight.delete(filename);
+      imagePreviewInflight.delete(cacheKey);
     });
-  imagePreviewInflight.set(filename, task);
+  imagePreviewInflight.set(cacheKey, task);
   return task;
 }
 
@@ -160,6 +163,224 @@ function setSuccessStatus(text) {
 function setErrorStatus(text) {
   syncStatus.textContent = text;
   syncStatus.style.color = '#d6452d';
+}
+
+function generateEndpointId() {
+  return `endpoint-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function getEndpointLabel(endpoint) {
+  const name = endpoint?.name?.trim();
+  if (name) {
+    return name;
+  }
+  const url = endpoint?.url?.trim() || '';
+  if (!url) {
+    return '未命名端点';
+  }
+  try {
+    const parsed = new URL(url);
+    const path = parsed.pathname && parsed.pathname !== '/' ? parsed.pathname.replace(/\/$/, '') : '';
+    return path ? `${parsed.host}${path}` : parsed.host;
+  } catch (error) {
+    return url;
+  }
+}
+
+function getActiveEndpoint() {
+  return webdavEndpoints.find(
+    (endpoint) => endpoint.id === activeEndpointId && endpoint.enabled && endpoint.url.trim(),
+  );
+}
+
+function renderEndpointSelect() {
+  if (!endpointSelect) return;
+  endpointSelect.innerHTML = '';
+  const enabledEndpoints = webdavEndpoints.filter(
+    (endpoint) => endpoint.enabled && endpoint.url.trim(),
+  );
+  if (enabledEndpoints.length === 0) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = '未启用 WebDAV 端点';
+    endpointSelect.appendChild(option);
+    endpointSelect.disabled = true;
+    return;
+  }
+  endpointSelect.disabled = false;
+  const hasActive = enabledEndpoints.some((endpoint) => endpoint.id === activeEndpointId);
+  if (!hasActive) {
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = '请选择 WebDAV 端点';
+    placeholder.disabled = true;
+    placeholder.selected = true;
+    endpointSelect.appendChild(placeholder);
+  }
+  enabledEndpoints.forEach((endpoint) => {
+    const option = document.createElement('option');
+    option.value = endpoint.id;
+    option.textContent = getEndpointLabel(endpoint);
+    if (endpoint.id === activeEndpointId) {
+      option.selected = true;
+    }
+    endpointSelect.appendChild(option);
+  });
+}
+
+function renderWebdavEndpoints() {
+  if (!webdavList) return;
+  webdavList.innerHTML = '';
+  if (webdavEndpoints.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'endpoint-empty';
+    empty.textContent = '暂无 WebDAV 端点';
+    webdavList.appendChild(empty);
+    return;
+  }
+  webdavEndpoints.forEach((endpoint) => {
+    const card = document.createElement('div');
+    card.className = 'endpoint-card';
+    card.classList.toggle('is-disabled', !endpoint.enabled);
+
+    const header = document.createElement('div');
+    header.className = 'endpoint-card-header';
+
+    const title = document.createElement('span');
+    title.className = 'endpoint-title';
+    title.textContent = getEndpointLabel(endpoint);
+
+    const removeButton = document.createElement('button');
+    removeButton.type = 'button';
+    removeButton.className = 'button ghost small';
+    removeButton.textContent = '移除';
+
+    header.appendChild(title);
+    header.appendChild(removeButton);
+
+    const fields = document.createElement('div');
+    fields.className = 'endpoint-fields';
+
+    const nameLabel = document.createElement('label');
+    nameLabel.textContent = '名称';
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.placeholder = '例如：公司网盘';
+    nameInput.value = endpoint.name || '';
+    nameLabel.appendChild(nameInput);
+
+    const urlLabel = document.createElement('label');
+    urlLabel.textContent = 'WebDAV URL';
+    const urlInput = document.createElement('input');
+    urlInput.type = 'text';
+    urlInput.placeholder = 'https://example.com/webdav/';
+    urlInput.value = endpoint.url || '';
+    urlLabel.appendChild(urlInput);
+
+    const userLabel = document.createElement('label');
+    userLabel.textContent = '用户名';
+    const userInput = document.createElement('input');
+    userInput.type = 'text';
+    userInput.value = endpoint.username || '';
+    userLabel.appendChild(userInput);
+
+    const passLabel = document.createElement('label');
+    passLabel.textContent = '密码';
+    const passInput = document.createElement('input');
+    passInput.type = 'password';
+    passInput.value = endpoint.password || '';
+    passLabel.appendChild(passInput);
+
+    fields.appendChild(nameLabel);
+    fields.appendChild(urlLabel);
+    fields.appendChild(userLabel);
+    fields.appendChild(passLabel);
+
+    const actions = document.createElement('div');
+    actions.className = 'endpoint-actions';
+
+    const enabledLabel = document.createElement('label');
+    enabledLabel.className = 'toggle';
+    const enabledInput = document.createElement('input');
+    enabledInput.type = 'checkbox';
+    enabledInput.checked = !!endpoint.enabled;
+    enabledLabel.appendChild(enabledInput);
+    enabledLabel.append('启用');
+
+    const activeLabel = document.createElement('label');
+    activeLabel.className = 'toggle';
+    const activeInput = document.createElement('input');
+    activeInput.type = 'radio';
+    activeInput.name = 'active-endpoint-radio';
+    activeInput.checked = endpoint.id === activeEndpointId;
+    activeInput.disabled = !endpoint.enabled;
+    activeLabel.appendChild(activeInput);
+    activeLabel.append('当前');
+
+    actions.appendChild(enabledLabel);
+    actions.appendChild(activeLabel);
+
+    nameInput.addEventListener('input', () => {
+      endpoint.name = nameInput.value;
+      title.textContent = getEndpointLabel(endpoint);
+      renderEndpointSelect();
+    });
+    urlInput.addEventListener('input', () => {
+      endpoint.url = urlInput.value;
+      title.textContent = getEndpointLabel(endpoint);
+      if (!endpoint.url.trim() && activeEndpointId === endpoint.id) {
+        activeEndpointId = null;
+        activeInput.checked = false;
+      }
+      renderEndpointSelect();
+    });
+    userInput.addEventListener('input', () => {
+      endpoint.username = userInput.value;
+    });
+    passInput.addEventListener('input', () => {
+      endpoint.password = passInput.value;
+    });
+    enabledInput.addEventListener('change', () => {
+      endpoint.enabled = enabledInput.checked;
+      card.classList.toggle('is-disabled', !endpoint.enabled);
+      activeInput.disabled = !endpoint.enabled;
+      if (!endpoint.enabled && activeEndpointId === endpoint.id) {
+        activeEndpointId = null;
+        activeInput.checked = false;
+      }
+      renderEndpointSelect();
+    });
+    activeInput.addEventListener('change', () => {
+      if (activeInput.checked) {
+        activeEndpointId = endpoint.id;
+        renderEndpointSelect();
+      }
+    });
+    removeButton.addEventListener('click', () => {
+      webdavEndpoints = webdavEndpoints.filter((item) => item.id !== endpoint.id);
+      if (activeEndpointId === endpoint.id) {
+        activeEndpointId = null;
+      }
+      renderWebdavEndpoints();
+      renderEndpointSelect();
+    });
+
+    card.appendChild(header);
+    card.appendChild(fields);
+    card.appendChild(actions);
+    webdavList.appendChild(card);
+  });
+}
+
+function collectEndpointPayload() {
+  return webdavEndpoints.map((endpoint) => ({
+    id: endpoint.id,
+    name: (endpoint.name || '').trim(),
+    url: (endpoint.url || '').trim(),
+    username: (endpoint.username || '').trim(),
+    password: endpoint.password || '',
+    enabled: !!endpoint.enabled,
+  }));
 }
 
 function closeImagePreview() {
@@ -1124,6 +1345,10 @@ async function loadMessages(options = {}) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
+    if (!getActiveEndpoint()) {
+      renderMessages([], { scrollToBottom: shouldScroll });
+      return;
+    }
     const messages = await invoke('list_messages');
     renderMessages(messages, { scrollToBottom: shouldScroll });
   } catch (error) {
@@ -1135,6 +1360,10 @@ async function loadSyncStatus() {
   try {
     if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
+      return;
+    }
+    if (!getActiveEndpoint()) {
+      setStatus('未选择 WebDAV 端点');
       return;
     }
     const status = await invoke('get_sync_status');
@@ -1163,6 +1392,43 @@ function startRefreshTimer(intervalSecs) {
   }, interval * 1000);
 }
 
+function applySettings(settings) {
+  const endpoints = Array.isArray(settings.webdav_endpoints)
+    ? settings.webdav_endpoints
+    : [];
+  webdavEndpoints = endpoints.map((endpoint) => ({
+    id: endpoint.id || generateEndpointId(),
+    name: endpoint.name || '',
+    url: endpoint.url || '',
+    username: endpoint.username || '',
+    password: endpoint.password || '',
+    enabled: endpoint.enabled !== false,
+  }));
+  activeEndpointId = settings.active_webdav_id || null;
+  if (
+    activeEndpointId &&
+    !webdavEndpoints.some(
+      (endpoint) =>
+        endpoint.id === activeEndpointId && endpoint.enabled && endpoint.url.trim(),
+    )
+  ) {
+    activeEndpointId = null;
+  }
+  if (senderNameInput) {
+    senderNameInput.value = settings.sender_name || '';
+  }
+  if (refreshIntervalInput) {
+    refreshIntervalInput.value = settings.refresh_interval_secs || 5;
+  }
+  if (downloadDirInput) {
+    downloadDirInput.value = settings.download_dir || '';
+    setHint(downloadDirHint, '');
+  }
+  renderWebdavEndpoints();
+  renderEndpointSelect();
+  startRefreshTimer(settings.refresh_interval_secs || 5);
+}
+
 async function loadSettings() {
   try {
     if (!invoke) {
@@ -1170,17 +1436,8 @@ async function loadSettings() {
       return;
     }
     const settings = await invoke('get_settings');
-    webdavUrlInput.value = settings.webdav_url || '';
-    webdavUserInput.value = settings.username || '';
-    webdavPassInput.value = settings.password || '';
-    senderNameInput.value = settings.sender_name || '';
-    refreshIntervalInput.value = settings.refresh_interval_secs || 5;
-    if (downloadDirInput) {
-      downloadDirInput.value = settings.download_dir || '';
-      setHint(downloadDirHint, '');
-    }
-    startRefreshTimer(settings.refresh_interval_secs || 5);
-    if (!didInitialSync && settings.webdav_url && settings.webdav_url.trim()) {
+    applySettings(settings);
+    if (!didInitialSync && getActiveEndpoint()) {
       didInitialSync = true;
       await manualRefresh();
     }
@@ -1190,10 +1447,19 @@ async function loadSettings() {
 }
 
 async function saveSettings() {
+  const endpoints = collectEndpointPayload();
+  for (const endpoint of endpoints) {
+    if (endpoint.enabled && !endpoint.url) {
+      setErrorStatus('启用的 WebDAV 端点必须填写 URL');
+      return;
+    }
+  }
+  const activeCandidate = endpoints.find(
+    (endpoint) => endpoint.id === activeEndpointId && endpoint.enabled && endpoint.url,
+  );
   const payload = {
-    webdav_url: webdavUrlInput.value.trim(),
-    username: webdavUserInput.value.trim(),
-    password: webdavPassInput.value,
+    webdav_endpoints: endpoints,
+    active_webdav_id: activeCandidate ? activeEndpointId : null,
     sender_name: senderNameInput.value.trim(),
     refresh_interval_secs: Number(refreshIntervalInput.value) || 5,
     download_dir: downloadDirInput ? downloadDirInput.value.trim() : '',
@@ -1204,10 +1470,20 @@ async function saveSettings() {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
+    const previousActive = activeEndpointId;
     const updated = await invoke('save_settings', { settings: payload });
     setSuccessStatus('设置已保存');
-    startRefreshTimer(updated.refresh_interval_secs || 5);
+    applySettings(updated);
     setHint(downloadDirHint, '下载目录已保存');
+    if (previousActive !== activeEndpointId && getActiveEndpoint()) {
+      setSelectionMode(false);
+      downloadProgress.clear();
+      downloadSpeed.clear();
+      pendingUploads.clear();
+      uploadSpeed.clear();
+      await manualRefresh();
+      didInitialSync = true;
+    }
   } catch (error) {
     setErrorStatus(`保存设置失败：${error}`);
   }
@@ -1216,6 +1492,10 @@ async function saveSettings() {
 async function sendText() {
   const text = textInput.value.trim();
   if (!text) {
+    return;
+  }
+  if (!getActiveEndpoint()) {
+    setErrorStatus('请先选择 WebDAV 端点');
     return;
   }
   try {
@@ -1237,6 +1517,10 @@ async function sendFile() {
   try {
     if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
+      return;
+    }
+    if (!getActiveEndpoint()) {
+      setErrorStatus('请先选择 WebDAV 端点');
       return;
     }
     if (!openDialog) {
@@ -1300,10 +1584,53 @@ async function chooseDownloadDir() {
   }
 }
 
+function addWebdavEndpoint() {
+  webdavEndpoints.push({
+    id: generateEndpointId(),
+    name: '',
+    url: '',
+    username: '',
+    password: '',
+    enabled: false,
+  });
+  renderWebdavEndpoints();
+}
+
+async function switchActiveEndpoint() {
+  const targetId = endpointSelect?.value;
+  if (!targetId || targetId === activeEndpointId) {
+    return;
+  }
+  try {
+    if (!invoke) {
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
+      return;
+    }
+    const settings = await invoke('get_settings');
+    settings.active_webdav_id = targetId;
+    const updated = await invoke('save_settings', { settings });
+    applySettings(updated);
+    setSelectionMode(false);
+    downloadProgress.clear();
+    downloadSpeed.clear();
+    pendingUploads.clear();
+    uploadSpeed.clear();
+    await manualRefresh();
+    didInitialSync = true;
+  } catch (error) {
+    setErrorStatus(`切换端点失败：${error}`);
+    renderEndpointSelect();
+  }
+}
+
 async function manualRefresh() {
   try {
     if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
+      return;
+    }
+    if (!getActiveEndpoint()) {
+      setErrorStatus('请先选择 WebDAV 端点');
       return;
     }
     await invoke('manual_refresh');
@@ -1391,6 +1718,12 @@ sendFileButton.addEventListener('click', sendFile);
 saveSettingsButton.addEventListener('click', saveSettings);
 if (chooseDownloadDirButton) {
   chooseDownloadDirButton.addEventListener('click', chooseDownloadDir);
+}
+if (addWebdavButton) {
+  addWebdavButton.addEventListener('click', addWebdavEndpoint);
+}
+if (endpointSelect) {
+  endpointSelect.addEventListener('change', switchActiveEndpoint);
 }
 if (toggleSelectionButton) {
   toggleSelectionButton.addEventListener('click', toggleSelectionMode);

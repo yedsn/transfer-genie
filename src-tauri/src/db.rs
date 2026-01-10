@@ -1,10 +1,11 @@
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, ToSql};
 use std::path::Path;
 
 use crate::types::Message;
 
 #[derive(Clone)]
 pub struct DbMessage {
+  pub endpoint_id: String,
   pub filename: String,
   pub sender: String,
   pub timestamp_ms: i64,
@@ -17,49 +18,124 @@ pub struct DbMessage {
   pub local_path: Option<String>,
 }
 
-pub fn init_db(path: &Path) -> Result<(), String> {
+pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), String> {
   if let Some(parent) = path.parent() {
-    std::fs::create_dir_all(parent).map_err(|err| format!("创建数据库目录失败: {err}"))?;
+    std::fs::create_dir_all(parent).map_err(|err| format!("幹秀方象垂朕村払移: {err}"))?;
   }
-  let conn = Connection::open(path).map_err(|err| format!("打开数据库失败: {err}"))?;
-  conn
-    .execute_batch(
-      "CREATE TABLE IF NOT EXISTS messages (\
-      filename TEXT PRIMARY KEY,\
-      sender TEXT NOT NULL,\
-      timestamp_ms INTEGER NOT NULL,\
-      size INTEGER NOT NULL,\
-      kind TEXT NOT NULL,\
-      original_name TEXT NOT NULL,\
-      etag TEXT,\
-      mtime TEXT,\
-      content TEXT,\
-      local_path TEXT\
-    );",
+  let mut conn = Connection::open(path).map_err(|err| format!("嬉蝕方象垂払移: {err}"))?;
+  let table_exists: Option<i64> = conn
+    .query_row(
+      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages'",
+      [],
+      |row| row.get(0),
     )
-    .map_err(|err| format!("初始化数据库失败: {err}"))?;
+    .optional()
+    .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+
+  if table_exists.is_none() {
+    conn
+      .execute_batch(
+        "CREATE TABLE IF NOT EXISTS messages (\
+        endpoint_id TEXT NOT NULL,\
+        filename TEXT NOT NULL,\
+        sender TEXT NOT NULL,\
+        timestamp_ms INTEGER NOT NULL,\
+        size INTEGER NOT NULL,\
+        kind TEXT NOT NULL,\
+        original_name TEXT NOT NULL,\
+        etag TEXT,\
+        mtime TEXT,\
+        content TEXT,\
+        local_path TEXT,\
+        PRIMARY KEY(endpoint_id, filename)\
+      );",
+      )
+      .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+    return Ok(());
+  }
+
+  let mut has_endpoint_id = false;
+  {
+    let mut stmt = conn
+      .prepare("PRAGMA table_info(messages)")
+      .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+    let rows = stmt
+      .query_map([], |row| row.get::<_, String>(1))
+      .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+    for row in rows {
+      if row.map_err(|err| format!("兜兵晒方象垂払移: {err}"))? == "endpoint_id" {
+        has_endpoint_id = true;
+        break;
+      }
+    }
+  }
+
+  if !has_endpoint_id {
+    let fallback_id = default_endpoint_id.unwrap_or("legacy");
+    let endpoint_id = if fallback_id.trim().is_empty() {
+      "legacy"
+    } else {
+      fallback_id
+    };
+    let tx = conn
+      .transaction()
+      .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+    tx.execute_batch(
+      "CREATE TABLE messages_new (\
+        endpoint_id TEXT NOT NULL,\
+        filename TEXT NOT NULL,\
+        sender TEXT NOT NULL,\
+        timestamp_ms INTEGER NOT NULL,\
+        size INTEGER NOT NULL,\
+        kind TEXT NOT NULL,\
+        original_name TEXT NOT NULL,\
+        etag TEXT,\
+        mtime TEXT,\
+        content TEXT,\
+        local_path TEXT,\
+        PRIMARY KEY(endpoint_id, filename)\
+      );",
+    )
+    .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+    tx.execute(
+      "INSERT INTO messages_new\
+        (endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path)\
+        SELECT ?1, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path FROM messages",
+      params![endpoint_id],
+    )
+    .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+    tx.execute_batch("DROP TABLE messages; ALTER TABLE messages_new RENAME TO messages;")
+      .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+    tx.commit()
+      .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+  }
   Ok(())
 }
 
-pub fn get_message(path: &Path, filename: &str) -> rusqlite::Result<Option<DbMessage>> {
+pub fn get_message(
+  path: &Path,
+  endpoint_id: &str,
+  filename: &str,
+) -> rusqlite::Result<Option<DbMessage>> {
   let conn = Connection::open(path)?;
   conn
     .query_row(
-      "SELECT filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path \
-       FROM messages WHERE filename = ?1",
-      [filename],
+      "SELECT endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path \
+       FROM messages WHERE endpoint_id = ?1 AND filename = ?2",
+      params![endpoint_id, filename],
       |row| {
         Ok(DbMessage {
-          filename: row.get(0)?,
-          sender: row.get(1)?,
-          timestamp_ms: row.get(2)?,
-          size: row.get(3)?,
-          kind: row.get(4)?,
-          original_name: row.get(5)?,
-          etag: row.get(6)?,
-          mtime: row.get(7)?,
-          content: row.get(8)?,
-          local_path: row.get(9)?,
+          endpoint_id: row.get(0)?,
+          filename: row.get(1)?,
+          sender: row.get(2)?,
+          timestamp_ms: row.get(3)?,
+          size: row.get(4)?,
+          kind: row.get(5)?,
+          original_name: row.get(6)?,
+          etag: row.get(7)?,
+          mtime: row.get(8)?,
+          content: row.get(9)?,
+          local_path: row.get(10)?,
         })
       },
     )
@@ -70,9 +146,9 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
   let conn = Connection::open(path)?;
   conn.execute(
     "INSERT INTO messages\
-      (filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path)\
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)\
-      ON CONFLICT(filename) DO UPDATE SET \
+      (endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path)\
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)\
+      ON CONFLICT(endpoint_id, filename) DO UPDATE SET \
         sender=excluded.sender,\
         timestamp_ms=excluded.timestamp_ms,\
         size=excluded.size,\
@@ -83,6 +159,7 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
         content=excluded.content,\
         local_path=excluded.local_path",
     params![
+      message.endpoint_id,
       message.filename,
       message.sender,
       message.timestamp_ms,
@@ -98,14 +175,14 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
   Ok(())
 }
 
-pub fn list_messages(path: &Path) -> rusqlite::Result<Vec<Message>> {
+pub fn list_messages(path: &Path, endpoint_id: &str) -> rusqlite::Result<Vec<Message>> {
   let conn = Connection::open(path)?;
   let mut stmt = conn.prepare(
     "SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path \
-     FROM messages ORDER BY timestamp_ms ASC",
+     FROM messages WHERE endpoint_id = ?1 ORDER BY timestamp_ms ASC",
   )?;
 
-  let rows = stmt.query_map([], |row| {
+  let rows = stmt.query_map([endpoint_id], |row| {
     Ok(Message {
       filename: row.get(0)?,
       sender: row.get(1)?,
@@ -126,22 +203,33 @@ pub fn list_messages(path: &Path) -> rusqlite::Result<Vec<Message>> {
   Ok(messages)
 }
 
-pub fn prune_messages(path: &Path, keep: &[String]) -> rusqlite::Result<()> {
+pub fn prune_messages(path: &Path, endpoint_id: &str, keep: &[String]) -> rusqlite::Result<()> {
   let conn = Connection::open(path)?;
   if keep.is_empty() {
-    conn.execute("DELETE FROM messages", [])?;
+    conn.execute("DELETE FROM messages WHERE endpoint_id = ?1", params![endpoint_id])?;
     return Ok(());
   }
   let placeholders = std::iter::repeat("?")
     .take(keep.len())
     .collect::<Vec<_>>()
     .join(",");
-  let sql = format!("DELETE FROM messages WHERE filename NOT IN ({placeholders})");
-  conn.execute(&sql, params_from_iter(keep.iter()))?;
+  let sql = format!(
+    "DELETE FROM messages WHERE endpoint_id = ?1 AND filename NOT IN ({placeholders})"
+  );
+  let mut params: Vec<&dyn ToSql> = Vec::with_capacity(keep.len() + 1);
+  params.push(&endpoint_id);
+  for item in keep {
+    params.push(item);
+  }
+  conn.execute(&sql, params_from_iter(params))?;
   Ok(())
 }
 
-pub fn delete_messages(path: &Path, filenames: &[String]) -> rusqlite::Result<usize> {
+pub fn delete_messages(
+  path: &Path,
+  endpoint_id: &str,
+  filenames: &[String],
+) -> rusqlite::Result<usize> {
   let conn = Connection::open(path)?;
   if filenames.is_empty() {
     return Ok(0);
@@ -150,11 +238,25 @@ pub fn delete_messages(path: &Path, filenames: &[String]) -> rusqlite::Result<us
     .take(filenames.len())
     .collect::<Vec<_>>()
     .join(",");
-  let sql = format!("DELETE FROM messages WHERE filename IN ({placeholders})");
-  conn.execute(&sql, params_from_iter(filenames.iter()))
+  let sql = format!(
+    "DELETE FROM messages WHERE endpoint_id = ?1 AND filename IN ({placeholders})"
+  );
+  let mut params: Vec<&dyn ToSql> = Vec::with_capacity(filenames.len() + 1);
+  params.push(&endpoint_id);
+  for item in filenames {
+    params.push(item);
+  }
+  conn.execute(&sql, params_from_iter(params))
 }
 
-pub fn delete_messages_before(path: &Path, cutoff_ms: i64) -> rusqlite::Result<usize> {
+pub fn delete_messages_before(
+  path: &Path,
+  endpoint_id: &str,
+  cutoff_ms: i64,
+) -> rusqlite::Result<usize> {
   let conn = Connection::open(path)?;
-  conn.execute("DELETE FROM messages WHERE timestamp_ms < ?1", params![cutoff_ms])
+  conn.execute(
+    "DELETE FROM messages WHERE endpoint_id = ?1 AND timestamp_ms < ?2",
+    params![endpoint_id, cutoff_ms],
+  )
 }
