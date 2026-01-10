@@ -38,26 +38,29 @@
 
 ## 4. 启动项目
 
-### Windows
-
 在项目根目录运行：
 
 ```
-cargo tauri dev --manifest-path src-tauri/Cargo.toml
-```
-
-### macOS
-
-在项目根目录运行：
-
-```
-cargo tauri dev --manifest-path src-tauri/Cargo.toml
+cargo tauri dev
 ```
 
 如果提示找不到 `tauri` 命令，请先执行 `cargo install tauri-cli --locked`，并重开终端。
 
-## 5. 常见问题
+## 5. 打包发布
+
+在项目根目录运行：
+
+```
+cargo tauri build
+```
+
+产物位置：
+- Windows: `target/release/bundle/`
+- macOS: `target/release/bundle/`
+
+## 6. 常见问题
 
 - **提示找不到 cargo**：Rust 工具链未安装或终端未重启。
 - **构建失败（Windows）**：检查 VS Build Tools 是否安装并勾选 C++ 桌面开发组件。
 - **无法启动窗口**：确认 WebView2 Runtime 是否可用。
+- **构建缓存问题**：如遇奇怪错误，尝试 `cargo clean` 后重新构建。
