@@ -810,6 +810,61 @@ function showCleanupConfirmDialog() {
   });
 }
 
+function showInfoDialog(options = {}) {
+  const titleText = options.title || '提示';
+  const messageText = options.message || '';
+  const confirmText = options.confirmLabel || '知道了';
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+
+    const dialog = document.createElement('div');
+    dialog.className = 'dialog';
+
+    const title = document.createElement('h3');
+    title.className = 'dialog-title';
+    title.textContent = titleText;
+
+    const message = document.createElement('p');
+    message.className = 'dialog-text';
+    message.textContent = messageText;
+
+    const actions = document.createElement('div');
+    actions.className = 'dialog-actions';
+
+    const confirmButton = document.createElement('button');
+    confirmButton.className = 'button primary small';
+    confirmButton.textContent = confirmText;
+
+    const close = () => {
+      document.removeEventListener('keydown', onKeyDown);
+      overlay.remove();
+      resolve();
+    };
+
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        close();
+      }
+    };
+
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) {
+        close();
+      }
+    });
+    confirmButton.addEventListener('click', close);
+
+    actions.appendChild(confirmButton);
+    dialog.appendChild(title);
+    dialog.appendChild(message);
+    dialog.appendChild(actions);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    document.addEventListener('keydown', onKeyDown);
+  });
+}
+
 function showPasswordDialog(options = {}) {
   const titleText = options.title || '请输入密码';
   const messageText = options.message || '此操作需要密码。';
@@ -896,7 +951,10 @@ function showPasswordDialog(options = {}) {
 
 async function copyTextToClipboard(text) {
   if (!text) {
-    setErrorStatus('没有可复制的内容');
+    await showInfoDialog({
+      title: '复制失败',
+      message: '没有可复制的内容',
+    });
     return;
   }
   try {
@@ -913,9 +971,15 @@ async function copyTextToClipboard(text) {
       document.execCommand('copy');
       document.body.removeChild(textarea);
     }
-    setSuccessStatus('已复制到剪贴板');
+    await showInfoDialog({
+      title: '复制成功',
+      message: '已复制到剪贴板',
+    });
   } catch (error) {
-    setErrorStatus(`复制失败：${error}`);
+    await showInfoDialog({
+      title: '复制失败',
+      message: String(error),
+    });
   }
 }
 
@@ -1066,7 +1130,10 @@ async function deleteSingleMessage(message) {
     return;
   }
   if (!invoke) {
-    setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
+    await showInfoDialog({
+      title: '删除失败',
+      message: '未检测到 Tauri API，请检查 app.withGlobalTauri 设置',
+    });
     return;
   }
   const choice = await showDeleteConfirmDialog(1);
@@ -1080,24 +1147,39 @@ async function deleteSingleMessage(message) {
     });
     const failed = result.failed || [];
     if (failed.length > 0) {
-      setErrorStatus('删除失败，请稍后再试');
+      await showInfoDialog({
+        title: '删除失败',
+        message: '删除失败，请稍后再试',
+      });
     } else {
-      setSuccessStatus('已删除 1 条消息');
+      await showInfoDialog({
+        title: '删除成功',
+        message: '已删除 1 条消息',
+      });
     }
     await loadMessages();
   } catch (error) {
-    setErrorStatus(`删除失败：${error}`);
+    await showInfoDialog({
+      title: '删除失败',
+      message: String(error),
+    });
   }
 }
 
 async function deleteSelectedMessages() {
   const filenames = Array.from(selectedMessages);
   if (!filenames.length) {
-    setErrorStatus('请先选择要删除的消息');
+    await showInfoDialog({
+      title: '删除失败',
+      message: '请先选择要删除的消息',
+    });
     return;
   }
   if (!invoke) {
-    setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
+    await showInfoDialog({
+      title: '删除失败',
+      message: '未检测到 Tauri API，请检查 app.withGlobalTauri 设置',
+    });
     return;
   }
   const choice = await showDeleteConfirmDialog(filenames.length);
@@ -1111,12 +1193,21 @@ async function deleteSelectedMessages() {
     });
     const failed = result.failed || [];
     if (failed.length > 0) {
-      setErrorStatus(`删除完成，${failed.length} 条处理失败`);
+      await showInfoDialog({
+        title: '删除完成',
+        message: `已删除 ${result.deleted || 0} 条消息，${failed.length} 条处理失败`,
+      });
     } else {
-      setSuccessStatus(`已删除 ${result.deleted || filenames.length} 条消息`);
+      await showInfoDialog({
+        title: '删除成功',
+        message: `已删除 ${result.deleted || filenames.length} 条消息`,
+      });
     }
   } catch (error) {
-    setErrorStatus(`删除失败：${error}`);
+    await showInfoDialog({
+      title: '删除失败',
+      message: String(error),
+    });
   } finally {
     setSelectionMode(false);
     await loadMessages();
@@ -1139,12 +1230,24 @@ async function cleanupMessages() {
     const failed = result.failed || [];
     if (failed.length > 0) {
       setErrorStatus(`清理完成，${failed.length} 条处理失败`);
+      await showInfoDialog({
+        title: '清理完成',
+        message: `已清理 ${result.deleted || 0} 条消息，${failed.length} 条失败。`,
+      });
     } else {
       setSuccessStatus(`已清理 ${result.deleted || 0} 条消息`);
+      await showInfoDialog({
+        title: '清理完成',
+        message: `已清理 ${result.deleted || 0} 条消息。`,
+      });
     }
     await loadMessages();
   } catch (error) {
     setErrorStatus(`清理失败：${error}`);
+    await showInfoDialog({
+      title: '清理失败',
+      message: String(error),
+    });
   }
 }
 function renderMessages(messages, options = {}) {

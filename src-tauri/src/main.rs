@@ -133,6 +133,7 @@ struct DeleteSummary {
 
 #[derive(Deserialize)]
 enum CleanupRange {
+  #[serde(rename = "all")]
   All,
   #[serde(rename = "before_7_days")]
   Before7Days,
