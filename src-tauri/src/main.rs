@@ -423,6 +423,116 @@ async fn send_file(
     timestamp_ms,
     size: total_bytes as i64,
     kind: MessageKind::File.as_str().to_string(),
+    original_name: original_name.clone(),
+    etag: None,
+    mtime: None,
+    content: None,
+    local_path: Some(local_path.to_string_lossy().to_string()),
+  };
+
+  db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
+  let _ = append_history(&state, &endpoint, message_to_history(&message)).await;
+  Ok(())
+}
+
+#[tauri::command]
+async fn send_file_data(
+  window: Window,
+  state: State<'_, AppState>,
+  data: Vec<u8>,
+  original_name: String,
+  client_id: Option<String>,
+) -> Result<(), String> {
+  let settings = current_settings(&state)?;
+  let endpoint = resolve_active_endpoint(&settings)?;
+
+  let total_bytes = data.len() as u64;
+  let timestamp_ms = now_ms();
+  let filename = build_message_filename(&settings.sender_name, &original_name, timestamp_ms);
+  let remote_path = format!("files/{}", filename);
+
+  let client_id = client_id
+    .and_then(|value| {
+      if value.trim().is_empty() {
+        None
+      } else {
+        Some(value)
+      }
+    })
+    .unwrap_or_else(|| filename.clone());
+
+  webdav::ensure_directory(&state.http, &endpoint, "files").await?;
+  emit_upload_progress(
+    &window,
+    &client_id,
+    Some(&filename),
+    Some(&original_name),
+    0,
+    total_bytes,
+    "progress",
+    None,
+  );
+
+  let progress_window = window.clone();
+  let progress_client_id = client_id.clone();
+  let progress_filename = filename.clone();
+  let progress_original_name = original_name.clone();
+  let upload_result = webdav::upload_file_with_progress(
+    &state.http,
+    &endpoint,
+    &remote_path,
+    data.clone(),
+    move |sent, total| {
+      emit_upload_progress(
+        &progress_window,
+        &progress_client_id,
+        Some(&progress_filename),
+        Some(&progress_original_name),
+        sent,
+        total,
+        "progress",
+        None,
+      );
+    },
+  )
+  .await;
+
+  if let Err(err) = upload_result {
+    emit_upload_progress(
+      &window,
+      &client_id,
+      Some(&filename),
+      Some(&original_name),
+      0,
+      total_bytes,
+      "error",
+      Some(err.clone()),
+    );
+    return Err(err);
+  }
+  emit_upload_progress(
+    &window,
+    &client_id,
+    Some(&filename),
+    Some(&original_name),
+    total_bytes,
+    total_bytes,
+    "complete",
+    None,
+  );
+
+  let endpoint_dir = endpoint_files_dir(&state, &endpoint.id);
+  let local_path = endpoint_dir.join(&filename);
+  fs::create_dir_all(&endpoint_dir).map_err(|err| format!("创建目录失败: {err}"))?;
+  fs::write(&local_path, &data).map_err(|err| format!("保存本地文件失败: {err}"))?;
+
+  let message = DbMessage {
+    endpoint_id: endpoint.id.clone(),
+    filename: filename.clone(),
+    sender: settings.sender_name.clone(),
+    timestamp_ms,
+    size: total_bytes as i64,
+    kind: MessageKind::File.as_str().to_string(),
     original_name,
     etag: None,
     mtime: None,
@@ -1872,6 +1982,7 @@ fn main() {
       list_messages,
       send_text,
       send_file,
+      send_file_data,
       download_message_file,
       fetch_image_preview,
       save_message_file_as,

@@ -2148,3 +2148,72 @@ if (listen) {
     }
   });
 }
+
+// 粘贴上传功能
+async function sendFileData(data, originalName) {
+  let clientId = null;
+  try {
+    if (!invoke) {
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
+      return;
+    }
+    if (!getActiveEndpoint()) {
+      setErrorStatus('请先选择 WebDAV 端点');
+      return;
+    }
+    clientId = `upload-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    pendingUploads.set(clientId, {
+      clientId,
+      originalName,
+      localPath: null,
+      timestamp_ms: Date.now(),
+      received: 0,
+      total: data.length,
+      status: 'progress',
+    });
+    renderMessages(lastMessages, { scrollToBottom: true });
+    await invoke('send_file_data', { data: Array.from(data), originalName, clientId });
+    if (clientId) {
+      pendingUploads.delete(clientId);
+      renderMessages(lastMessages);
+    }
+    await loadMessages({ scrollToBottom: true });
+    setSuccessStatus('发送成功');
+  } catch (error) {
+    if (clientId) {
+      pendingUploads.delete(clientId);
+      renderMessages(lastMessages);
+    }
+    setErrorStatus(`发送文件失败：${error}`);
+  }
+}
+
+function generatePastedFileName(mimeType) {
+  const now = new Date();
+  const timestamp = now.toISOString().replace(/[-:]/g, '').replace('T', '_').split('.')[0];
+  const ext = mimeType.split('/')[1] || 'bin';
+  return `pasted_${timestamp}.${ext}`;
+}
+
+document.addEventListener('paste', async (event) => {
+  // 如果在输入框中粘贴文本，不处理
+  if (event.target === textInput && !event.clipboardData.files.length) {
+    return;
+  }
+  
+  const items = event.clipboardData?.items;
+  if (!items || items.length === 0) return;
+  
+  for (const item of items) {
+    if (item.kind === 'file') {
+      event.preventDefault();
+      const file = item.getAsFile();
+      if (!file) continue;
+      
+      const arrayBuffer = await file.arrayBuffer();
+      const data = new Uint8Array(arrayBuffer);
+      const originalName = file.name || generatePastedFileName(file.type);
+      await sendFileData(data, originalName);
+    }
+  }
+});
