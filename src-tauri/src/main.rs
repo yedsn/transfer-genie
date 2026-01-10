@@ -1,4 +1,5 @@
-﻿mod db;
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod db;
 mod filenames;
 mod types;
 mod webdav;
@@ -22,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
-use tauri_plugin_shell::ShellExt;
+use tauri_plugin_opener::OpenerExt;
 use tokio::sync::Mutex as AsyncMutex;
 use tauri::Window;
 
@@ -576,8 +577,8 @@ async fn open_message_file(
   let download_path = base_dir.join(&sanitized_name);
   if download_path.is_file() {
     app
-      .shell()
-      .open(download_path.to_string_lossy().to_string(), None)
+      .opener()
+      .open_path(download_path.to_string_lossy().to_string(), None::<&str>)
       .map_err(|err| format!("打开文件失败: {err}"))?;
     return Ok(());
   }
@@ -595,8 +596,8 @@ async fn open_message_file(
       let wanted_has_ext = Path::new(&sanitized_name).extension().is_some();
       if local_has_ext || !wanted_has_ext {
         app
-          .shell()
-          .open(local_path.to_string_lossy().to_string(), None)
+          .opener()
+          .open_path(local_path.to_string_lossy().to_string(), None::<&str>)
           .map_err(|err| format!("打开文件失败: {err}"))?;
         return Ok(());
       }
@@ -610,8 +611,8 @@ async fn open_message_file(
         fs::copy(&local_path, &open_path).map_err(|err| format!("准备打开文件失败: {err}"))?;
       }
       app
-        .shell()
-        .open(open_path.to_string_lossy().to_string(), None)
+        .opener()
+        .open_path(open_path.to_string_lossy().to_string(), None::<&str>)
         .map_err(|err| format!("打开文件失败: {err}"))?;
       return Ok(());
     }
@@ -625,6 +626,8 @@ fn minimize_window(app: AppHandle, window: Window) -> Result<(), String> {
   window
     .hide()
     .map_err(|err| format!("隐藏窗口失败: {err}"))?;
+  #[cfg(not(target_os = "macos"))]
+  let _ = &app;
   #[cfg(target_os = "macos")]
   sync_dock_visibility_window(&app, &window);
   Ok(())
@@ -1764,7 +1767,7 @@ fn main() {
       Ok(())
     })
     .plugin(tauri_plugin_dialog::init())
-    .plugin(tauri_plugin_shell::init())
+    .plugin(tauri_plugin_opener::init())
     .invoke_handler(tauri::generate_handler![
       get_settings,
       save_settings,
@@ -1786,10 +1789,10 @@ fn main() {
     .build(tauri::generate_context!())
     .expect("error while building tauri application");
 
-  app.run(|app_handle, event| {
+  app.run(|_app_handle, _event| {
     #[cfg(target_os = "macos")]
-    if let tauri::RunEvent::Reopen { .. } = event {
-      show_main_window(app_handle);
+    if let tauri::RunEvent::Reopen { .. } = _event {
+      show_main_window(_app_handle);
     }
   });
 }

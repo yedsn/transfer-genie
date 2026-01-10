@@ -249,6 +249,7 @@ pub fn delete_messages(
   conn.execute(&sql, params_from_iter(params))
 }
 
+#[allow(dead_code)]
 pub fn delete_messages_before(
   path: &Path,
   endpoint_id: &str,

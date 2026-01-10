@@ -30,6 +30,26 @@ cargo tauri dev --manifest-path src-tauri/Cargo.toml
 - 确认已安装 Tauri CLI：`cargo --list | rg tauri`
 - 重开终端后再运行命令
 
+## 打包发布
+
+打包前准备：
+- 已安装 Rust/Cargo
+- 已安装 Tauri CLI：`cargo install tauri-cli --locked`
+
+Windows（输出 .exe）：
+```
+cargo tauri build --manifest-path src-tauri/Cargo.toml
+```
+
+macOS（输出 .dmg）：
+```
+cargo tauri build --manifest-path src-tauri/Cargo.toml
+```
+
+说明：
+- 需要在对应平台打包（Windows 产出 .exe，macOS 产出 .dmg）
+- 命令需在 `src-tauri` 可访问的环境中执行（例如项目根目录）
+
 ## 目录结构
 - `src-tauri/` Tauri 后端（Rust）
 - `frontend/` 前端页面（HTML/CSS/JS）
