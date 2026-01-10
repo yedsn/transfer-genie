@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_shell::ShellExt;
 use tokio::sync::Mutex as AsyncMutex;
 use tauri::Window;
 
@@ -549,6 +550,66 @@ async fn save_message_file_as(
     path: Some(final_path.to_string_lossy().to_string()),
     suggested_path: None,
   })
+}
+
+#[tauri::command]
+fn open_message_file(
+  app: AppHandle,
+  state: State<'_, AppState>,
+  filename: String,
+  original_name: String,
+) -> Result<(), String> {
+  if filename.trim().is_empty() {
+    return Err("文件名为空".to_string());
+  }
+  let settings = current_settings(&state)?;
+  let endpoint = resolve_active_endpoint(&settings)?;
+  let base_dir = resolve_download_dir(&state, &settings);
+  let sanitized_name = sanitize_filename(&original_name);
+  let download_path = base_dir.join(&sanitized_name);
+  if download_path.is_file() {
+    app
+      .shell()
+      .open(download_path.to_string_lossy().to_string(), None)
+      .map_err(|err| format!("打开文件失败: {err}"))?;
+    return Ok(());
+  }
+
+  let message = db::get_message(&state.db_path, &endpoint.id, &filename)
+    .map_err(|err| format!("读取消息失败: {err}"))?;
+  let local_path = message
+    .and_then(|entry| entry.local_path)
+    .filter(|path| !path.trim().is_empty())
+    .map(PathBuf::from);
+
+  if let Some(local_path) = local_path {
+    if local_path.is_file() {
+      let local_has_ext = local_path.extension().is_some();
+      let wanted_has_ext = Path::new(&sanitized_name).extension().is_some();
+      if local_has_ext || !wanted_has_ext {
+        app
+          .shell()
+          .open(local_path.to_string_lossy().to_string(), None)
+          .map_err(|err| format!("打开文件失败: {err}"))?;
+        return Ok(());
+      }
+
+      let open_dir = endpoint_files_dir(&state, &endpoint.id).join("open");
+      fs::create_dir_all(&open_dir).map_err(|err| format!("创建打开目录失败: {err}"))?;
+      let safe_prefix = filename.replace('%', "_");
+      let safe_name = sanitized_name.replace('%', "_");
+      let open_path = open_dir.join(format!("{}__{}", safe_prefix, safe_name));
+      if !open_path.is_file() {
+        fs::copy(&local_path, &open_path).map_err(|err| format!("准备打开文件失败: {err}"))?;
+      }
+      app
+        .shell()
+        .open(open_path.to_string_lossy().to_string(), None)
+        .map_err(|err| format!("打开文件失败: {err}"))?;
+      return Ok(());
+    }
+  }
+  Err("文件尚未下载".to_string())
 }
 
 #[tauri::command]
@@ -1641,6 +1702,7 @@ fn main() {
       Ok(())
     })
     .plugin(tauri_plugin_dialog::init())
+    .plugin(tauri_plugin_shell::init())
     .invoke_handler(tauri::generate_handler![
       get_settings,
       save_settings,
@@ -1652,6 +1714,7 @@ fn main() {
       download_message_file,
       fetch_image_preview,
       save_message_file_as,
+      open_message_file,
       delete_messages,
       cleanup_messages,
       manual_refresh,

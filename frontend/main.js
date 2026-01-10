@@ -80,6 +80,21 @@ function setErrorStatus(text) {
   syncStatus.style.color = '#d6452d';
 }
 
+async function openMessageFile(message) {
+  if (!invoke) {
+    setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
+    return;
+  }
+  try {
+    await invoke('open_message_file', {
+      filename: message.filename,
+      originalName: message.original_name,
+    });
+  } catch (error) {
+    setErrorStatus(`打开文件失败：${error}`);
+  }
+}
+
 function setRefreshLoading(loading) {
   if (!refreshButton) return;
   refreshButton.classList.toggle('is-loading', loading);
@@ -1048,6 +1063,18 @@ function renderMessages(messages, options = {}) {
       body.textContent = message.content || '';
     } else {
       body.textContent = message.original_name || message.filename || '';
+      body.addEventListener('click', (event) => {
+        if (selectionMode) {
+          return;
+        }
+        if (message.uploading) {
+          return;
+        }
+        if (event.target.closest('button, a, input, textarea, select, summary, details')) {
+          return;
+        }
+        openMessageFile(message);
+      });
     }
 
     const meta = document.createElement('div');

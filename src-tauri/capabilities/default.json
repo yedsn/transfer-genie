@@ -2,5 +2,5 @@
   "identifier": "main-window",
   "description": "主窗口权限，允许核心 IPC 与文件选择对话框。",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:default"]
+  "permissions": ["core:default", "dialog:default", "shell:allow-open"]
 }
