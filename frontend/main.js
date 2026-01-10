@@ -2190,9 +2190,16 @@ async function sendFileData(data, originalName) {
 
 function generatePastedFileName(mimeType) {
   const now = new Date();
-  const timestamp = now.toISOString().replace(/[-:]/g, '').replace('T', '_').split('.')[0];
+  const pad = (n, len = 2) => String(n).padStart(len, '0');
+  const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
   const ext = mimeType.split('/')[1] || 'bin';
-  return `pasted_${timestamp}.${ext}`;
+  return `image_${timestamp}.${ext}`;
+}
+
+function isDefaultPastedFileName(name) {
+  // 浏览器粘贴截图时的默认文件名
+  const defaultNames = ['image.png', 'image.jpeg', 'image.jpg', 'image.gif', 'image.webp', 'image.bmp'];
+  return !name || defaultNames.includes(name.toLowerCase());
 }
 
 document.addEventListener('paste', async (event) => {
@@ -2212,7 +2219,10 @@ document.addEventListener('paste', async (event) => {
       
       const arrayBuffer = await file.arrayBuffer();
       const data = new Uint8Array(arrayBuffer);
-      const originalName = file.name || generatePastedFileName(file.type);
+      // 如果是默认文件名（如 image.png），使用时间戳重新命名
+      const originalName = isDefaultPastedFileName(file.name)
+        ? generatePastedFileName(file.type)
+        : file.name;
       await sendFileData(data, originalName);
     }
   }
