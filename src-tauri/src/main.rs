@@ -1629,7 +1629,7 @@ fn start_sync_loop(app_handle: AppHandle) {
 }
 
 fn main() {
-  tauri::Builder::default()
+  let app = tauri::Builder::default()
     .setup(|app| {
       let settings_path = settings_path(&app.handle())?;
       let db_path = db_path(&app.handle())?;
@@ -1742,6 +1742,13 @@ fn main() {
       manual_refresh,
       get_sync_status
     ])
-    .run(tauri::generate_context!())
-    .expect("error while running tauri application");
+    .build(tauri::generate_context!())
+    .expect("error while building tauri application");
+
+  app.run(|app_handle, event| {
+    #[cfg(target_os = "macos")]
+    if let tauri::RunEvent::Reopen { .. } = event {
+      show_main_window(app_handle);
+    }
+  });
 }
