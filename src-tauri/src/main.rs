@@ -1700,6 +1700,10 @@ fn main() {
         let app_icon = load_app_icon().ok();
 
         let mut tray_builder = TrayIconBuilder::new().menu(&tray_menu);
+        #[cfg(target_os = "macos")]
+        {
+          tray_builder = tray_builder.show_menu_on_left_click(false);
+        }
         if let Some(icon) = app_icon.clone() {
           tray_builder = tray_builder.icon(icon);
         }
@@ -1717,7 +1721,9 @@ fn main() {
                 ..
               } = event
               {
-                if button == MouseButton::Left && button_state == MouseButtonState::Up {
+                let should_show = button == MouseButton::Left
+                  && (cfg!(target_os = "macos") || button_state == MouseButtonState::Up);
+                if should_show {
                   show_main_window(tray.app_handle());
                 }
               }
