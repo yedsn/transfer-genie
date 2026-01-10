@@ -1664,7 +1664,16 @@ fn start_sync_loop(app_handle: AppHandle) {
 }
 
 fn main() {
-  let app = tauri::Builder::default()
+  let mut builder = tauri::Builder::default();
+
+  #[cfg(desktop)]
+  {
+    builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+      show_main_window(app);
+    }));
+  }
+
+  let app = builder
     .setup(|app| {
       let settings_path = settings_path(&app.handle())?;
       let db_path = db_path(&app.handle())?;
