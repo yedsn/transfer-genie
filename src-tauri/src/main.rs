@@ -40,6 +40,13 @@ struct AppState {
 const EXPORT_VERSION: u8 = 1;
 const EXPORT_KDF_ITERATIONS: u32 = 100_000;
 
+#[cfg(desktop)]
+fn load_app_icon() -> Result<tauri::image::Image<'static>, String> {
+  tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))
+    .map(|image| image.to_owned())
+    .map_err(|err| format!("加载图标失败: {err}"))
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct HistoryEntry {
   filename: String,
@@ -610,22 +617,7 @@ async fn open_message_file(
     }
   }
 
-  let remote_path = format!("files/{}", filename);
-  let bytes = webdav::download_file(&state.http, &endpoint, &remote_path).await?;
-  ensure_parent_dir(&download_path)?;
-  fs::write(&download_path, &bytes).map_err(|err| format!("保存文件失败: {err}"))?;
-  update_message_local_path(
-    &state.db_path,
-    &endpoint.id,
-    &filename,
-    &download_path,
-    bytes.len() as i64,
-  )?;
-  app
-    .shell()
-    .open(download_path.to_string_lossy().to_string(), None)
-    .map_err(|err| format!("打开文件失败: {err}"))?;
-  Ok(())
+  Err("文件尚未下载".to_string())
 }
 
 #[tauri::command]
@@ -1667,15 +1659,19 @@ fn main() {
       #[cfg(desktop)]
       {
         use tauri::menu::{Menu, MenuItem};
-        use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+        use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
         use tauri_plugin_global_shortcut::{Code, Modifiers, ShortcutState};
 
         let show_item = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
         let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
         let tray_menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+        let app_icon = load_app_icon().ok();
 
-        TrayIconBuilder::new()
-          .menu(&tray_menu)
+        let mut tray_builder = TrayIconBuilder::new().menu(&tray_menu);
+        if let Some(icon) = app_icon.clone() {
+          tray_builder = tray_builder.icon(icon);
+        }
+        tray_builder
           .on_menu_event(|app, event: tauri::menu::MenuEvent| match event.id().as_ref() {
             "show" => show_main_window(app),
             "quit" => app.exit(0),
@@ -1683,8 +1679,15 @@ fn main() {
           })
           .on_tray_icon_event(
             |tray: &tauri::tray::TrayIcon<_>, event: tauri::tray::TrayIconEvent| {
-              if matches!(event, TrayIconEvent::Click { .. }) {
-                show_main_window(tray.app_handle());
+              if let TrayIconEvent::Click {
+                button,
+                button_state,
+                ..
+              } = event
+              {
+                if button == MouseButton::Left && button_state == MouseButtonState::Up {
+                  show_main_window(tray.app_handle());
+                }
               }
             },
           )
@@ -1704,6 +1707,9 @@ fn main() {
         )?;
 
         if let Some(window) = app.get_webview_window("main") {
+          if let Some(icon) = app_icon {
+            let _ = window.set_icon(icon);
+          }
           let event_window = window.clone();
           window.on_window_event(move |event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

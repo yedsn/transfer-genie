@@ -80,18 +80,63 @@ function setErrorStatus(text) {
   syncStatus.style.color = '#d6452d';
 }
 
+async function tryOpenMessageFile(message) {
+  if (!invoke) {
+    return { ok: false, error: '未检测到 Tauri API，请检查 app.withGlobalTauri 设置' };
+  }
+  const originalName = message.original_name || message.filename || '';
+  try {
+    await invoke('open_message_file', {
+      filename: message.filename,
+      originalName,
+    });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: String(error) };
+  }
+}
+
 async function openMessageFile(message) {
+  if (!message || message.kind !== 'file') {
+    return;
+  }
+  if (message.uploading) {
+    return;
+  }
+  if (!message.filename) {
+    return;
+  }
+  if (message.download_exists || (message.local_path && message.local_path.trim())) {
+    const opened = await tryOpenMessageFile(message);
+    if (opened.ok) {
+      return;
+    }
+    if (!opened.error || !opened.error.includes('文件不存在')) {
+      setErrorStatus(`打开失败：${opened.error}`);
+      return;
+    }
+  }
   if (!invoke) {
     setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
     return;
   }
   try {
-    await invoke('open_message_file', {
+    const result = await invoke('download_message_file', {
       filename: message.filename,
       originalName: message.original_name,
+      conflictAction: 'overwrite',
     });
+    if (result.status && result.status !== 'saved') {
+      setErrorStatus('下载失败');
+      return;
+    }
   } catch (error) {
-    setErrorStatus(`打开文件失败：${error}`);
+    setErrorStatus(`下载失败：${error}`);
+    return;
+  }
+  const opened = await tryOpenMessageFile(message);
+  if (!opened.ok) {
+    setErrorStatus(`打开失败：${opened.error}`);
   }
 }
 
