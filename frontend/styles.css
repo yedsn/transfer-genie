@@ -480,6 +480,29 @@ body {
   box-shadow: 0 0 0 2px rgba(255, 122, 47, 0.15), 0 10px 26px rgba(15, 15, 25, 0.06);
 }
 
+.composer-row.is-drag-over {
+  border-color: var(--accent);
+  background: linear-gradient(135deg, #fff5f0 0%, #fff9f5 100%);
+  box-shadow: 0 0 0 3px rgba(255, 122, 47, 0.25), 0 10px 26px rgba(15, 15, 25, 0.08);
+}
+
+.composer-row.is-drag-over::before {
+  content: "拖放文件到此处上传";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent-strong);
+  pointer-events: none;
+  z-index: 10;
+}
+
+.composer-row.is-drag-over > * {
+  opacity: 0.3;
+}
+
 textarea {
   width: 100%;
   min-height: 64px;

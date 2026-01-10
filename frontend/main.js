@@ -2072,3 +2072,79 @@ loadSettings();
 loadMessages({ scrollToBottom: true });
 loadSyncStatus();
 setActiveTab('home', { scrollToBottom: true });
+
+// 拖拽上传功能
+const composerRow = document.querySelector('.composer-row');
+
+async function sendFileByPath(path) {
+  let clientId = null;
+  try {
+    if (!invoke) {
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
+      return;
+    }
+    if (!getActiveEndpoint()) {
+      setErrorStatus('请先选择 WebDAV 端点');
+      return;
+    }
+    clientId = `upload-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const originalName = path.split(/[/\\]/).pop() || path;
+    pendingUploads.set(clientId, {
+      clientId,
+      originalName,
+      localPath: path,
+      timestamp_ms: Date.now(),
+      received: 0,
+      total: 0,
+      status: 'progress',
+    });
+    renderMessages(lastMessages, { scrollToBottom: true });
+    await invoke('send_file', { path, clientId });
+    if (clientId) {
+      pendingUploads.delete(clientId);
+      renderMessages(lastMessages);
+    }
+    await loadMessages({ scrollToBottom: true });
+    setSuccessStatus('发送成功');
+  } catch (error) {
+    if (clientId) {
+      pendingUploads.delete(clientId);
+      renderMessages(lastMessages);
+    }
+    setErrorStatus(`发送文件失败：${error}`);
+  }
+}
+
+function isPointInElement(x, y, element) {
+  if (!element) return false;
+  const rect = element.getBoundingClientRect();
+  return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+}
+
+function setDragOverState(active) {
+  if (composerRow) {
+    composerRow.classList.toggle('is-drag-over', active);
+  }
+}
+
+if (listen) {
+  listen('tauri://drag-enter', () => {
+    setDragOverState(true);
+  });
+
+  listen('tauri://drag-leave', () => {
+    setDragOverState(false);
+  });
+
+  listen('tauri://drag-drop', async (event) => {
+    setDragOverState(false);
+    const payload = event.payload || {};
+    const paths = payload.paths || [];
+    if (paths.length === 0) return;
+    
+    // 逐个发送文件
+    for (const filePath of paths) {
+      await sendFileByPath(filePath);
+    }
+  });
+}
