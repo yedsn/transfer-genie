@@ -66,12 +66,17 @@ TBD - created by archiving change add-webdav-transfer-client. Update Purpose aft
 - **AND** 选择改名时使用自动追加序号的文件名保存
 
 ### Requirement: 手动清理旧数据
-客户端 SHALL 在设置中提供手动清理功能，清理 30 天以前的本地与远端消息数据，并移除对应 history 记录。
+客户端 SHALL 在设置中提供手动清理功能，允许用户选择清理时间范围（全部、7天以前）以及清理范围（仅本地、包含 WebDAV 远端）。清理执行时 SHALL 删除匹配范围的本地消息记录与已下载文件；若包含 WebDAV 远端，则同时删除 WebDAV `files/` 对应文件与 `history.json` 条目。
 
-#### Scenario: 清理 30 天前数据
-- **WHEN** 用户在设置中触发清理
-- **THEN** 30 天前的本地消息记录与已下载文件被删除
-- **AND** 对应的远端 WebDAV 文件与 history 条目被删除。
+#### Scenario: 清理全部且仅本地
+- **WHEN** 用户选择清理时间范围为“全部”且范围为“仅本地”并确认清理
+- **THEN** 本地消息记录与已下载文件被删除
+- **AND** 远端 WebDAV 数据保持不变
+
+#### Scenario: 清理 7 天以前且包含 WebDAV
+- **WHEN** 用户选择清理时间范围为“7天以前”且范围为“包含 WebDAV 远端”并确认清理
+- **THEN** 本地 7 天以前的消息记录与已下载文件被删除
+- **AND** WebDAV `files/` 中对应文件与 `history.json` 条目被删除
 
 ### Requirement: Configuration import and export
 客户端 SHALL 允许用户将当前配置导出为文件，并从配置文件导入设置以覆盖现有配置。导出文件中的敏感字段 MUST 经过基于用户密码的加密处理。导入失败时客户端 SHALL 保持当前配置不变并提示错误。
