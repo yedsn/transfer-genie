@@ -68,8 +68,18 @@ struct LegacySettings {
 #[derive(Serialize, Deserialize)]
 struct ExportBundle {
   version: u8,
-  settings: Settings,
+  settings: ExportSettings,
   crypto: CryptoPayload,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ExportSettings {
+  #[serde(default)]
+  webdav_endpoints: Vec<WebDavEndpoint>,
+  #[serde(default)]
+  active_webdav_id: Option<String>,
+  #[serde(default)]
+  refresh_interval_secs: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -163,15 +173,19 @@ fn export_settings(
   let secrets = extract_export_secrets(&settings);
   let crypto = encrypt_export_secrets(&password, &secrets)?;
 
-  let mut sanitized = settings.clone();
-  for endpoint in sanitized.webdav_endpoints.iter_mut() {
+  let mut export_settings = ExportSettings {
+    webdav_endpoints: settings.webdav_endpoints.clone(),
+    active_webdav_id: settings.active_webdav_id.clone(),
+    refresh_interval_secs: settings.refresh_interval_secs,
+  };
+  for endpoint in export_settings.webdav_endpoints.iter_mut() {
     endpoint.username.clear();
     endpoint.password.clear();
   }
 
   let bundle = ExportBundle {
     version: EXPORT_VERSION,
-    settings: sanitized,
+    settings: export_settings,
     crypto,
   };
 
@@ -203,7 +217,14 @@ fn import_settings(
   let secrets: ExportSecrets = serde_json::from_slice(&secrets_bytes)
     .map_err(|err| format!("解析配置凭据失败: {err}"))?;
 
-  let mut settings = bundle.settings;
+  let existing = current_settings(&state)?;
+  let mut settings = Settings {
+    webdav_endpoints: bundle.settings.webdav_endpoints,
+    active_webdav_id: bundle.settings.active_webdav_id,
+    sender_name: existing.sender_name,
+    refresh_interval_secs: bundle.settings.refresh_interval_secs,
+    download_dir: existing.download_dir,
+  };
   apply_export_secrets(&mut settings, secrets)?;
   let normalized = normalize_settings(settings, &state.default_download_dir)?;
 
