@@ -621,6 +621,13 @@ async fn open_message_file(
 }
 
 #[tauri::command]
+fn minimize_window(window: Window) -> Result<(), String> {
+  window
+    .minimize()
+    .map_err(|err| format!("最小化失败: {err}"))
+}
+
+#[tauri::command]
 async fn fetch_image_preview(state: State<'_, AppState>, filename: String) -> Result<String, String> {
   let settings = current_settings(&state)?;
   let endpoint = resolve_active_endpoint(&settings)?;
@@ -1737,6 +1744,7 @@ fn main() {
       fetch_image_preview,
       save_message_file_as,
       open_message_file,
+      minimize_window,
       delete_messages,
       cleanup_messages,
       manual_refresh,

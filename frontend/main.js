@@ -80,6 +80,18 @@ function setErrorStatus(text) {
   syncStatus.style.color = '#d6452d';
 }
 
+async function minimizeAppWindow() {
+  if (!invoke) {
+    setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
+    return;
+  }
+  try {
+    await invoke('minimize_window');
+  } catch (error) {
+    setErrorStatus(`最小化失败：${error}`);
+  }
+}
+
 async function tryOpenMessageFile(message) {
   if (!invoke) {
     return { ok: false, error: '未检测到 Tauri API，请检查 app.withGlobalTauri 设置' };
@@ -1844,6 +1856,16 @@ if (textInput) {
     }
   });
 }
+
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape' || event.defaultPrevented) {
+    return;
+  }
+  if (document.querySelector('.dialog-overlay')) {
+    return;
+  }
+  minimizeAppWindow();
+});
 
 tabButtons.forEach((button) => {
   button.addEventListener('click', () => {
