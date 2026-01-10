@@ -34,6 +34,28 @@ cargo tauri dev
 
 ## 打包发布
 
+### 方法一：使用打包脚本（推荐）
+
+Windows 用户可以直接运行打包脚本：
+
+```batch
+scripts\update_local_exe.bat
+```
+
+脚本功能：
+- 可选择是否重新编译
+- 自动查找生成的 exe 文件
+- 复制到指定目录（默认：`D:\Program Files\TransferGenie文件传输助手`）
+- 自动打开安装目录
+
+自定义安装目录：
+
+```batch
+scripts\update_local_exe.bat "C:\你的自定义路径"
+```
+
+### 方法二：手动打包
+
 打包前准备：
 - 已安装 Rust/Cargo
 - 已安装 Tauri CLI：`cargo install tauri-cli --locked`
@@ -46,6 +68,7 @@ cargo tauri build
 
 说明：
 - 需要在对应平台打包（Windows 产出 .exe，macOS 产出 .dmg）
+- Windows 编译后的文件位于 `target\release\` 目录
 
 ## 目录结构
 
