@@ -1473,7 +1473,7 @@ function startRefreshTimer(intervalSecs) {
   }
   const interval = Math.max(1, Number(intervalSecs) || 5);
   refreshTimer = setInterval(() => {
-    loadMessages();
+    loadMessages({ scrollToBottom: false });
     loadSyncStatus();
   }, interval * 1000);
 }
