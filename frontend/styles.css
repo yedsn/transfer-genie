@@ -121,6 +121,7 @@ body {
   flex: 1;
   width: 100%;
   margin: 0;
+  position: relative;
 }
 
 .feed-toolbar {
@@ -261,6 +262,24 @@ body {
 .message-card.is-self.is-image .message-body {
   background: transparent;
   border-color: transparent;
+}
+
+.scroll-to-bottom {
+  position: absolute;
+  right: 40px;
+  bottom: calc(var(--composer-offset, 88px) + 30px);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 12px;
+  background: #ffffff;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  box-shadow: 0 10px 24px rgba(15, 15, 25, 0.12);
+}
+
+.scroll-to-bottom:hover {
+  color: var(--ink);
 }
 
 .message-meta {

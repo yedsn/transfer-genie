@@ -13,6 +13,9 @@ const textInput = document.getElementById('text-input');
 const sendTextButton = document.getElementById('send-text');
 const sendFileButton = document.getElementById('send-file');
 const saveSettingsButton = document.getElementById('save-settings');
+const scrollToBottomButton = document.getElementById('scroll-to-bottom');
+const composer = document.querySelector('.composer');
+const feed = document.querySelector('.feed');
 const tabButtons = Array.from(document.querySelectorAll('[data-tab-target]'));
 const tabPanels = Array.from(document.querySelectorAll('[data-tab-panel]'));
 
@@ -386,11 +389,31 @@ function toggleSelectedMessage(filename, checked) {
   updateSelectionBar();
 }
 
+function isMessageListAtBottom() {
+  if (!messageList) return true;
+  const threshold = 16;
+  return (
+    messageList.scrollTop + messageList.clientHeight >= messageList.scrollHeight - threshold
+  );
+}
+
+function updateScrollToBottomButton() {
+  if (!scrollToBottomButton) return;
+  scrollToBottomButton.hidden = isMessageListAtBottom();
+}
+
 function scrollMessageListToBottom() {
   if (!messageList) return;
   requestAnimationFrame(() => {
     messageList.scrollTop = messageList.scrollHeight;
+    updateScrollToBottomButton();
   });
+}
+
+function syncComposerOffset() {
+  if (!composer || !feed) return;
+  const offset = Math.round(composer.offsetHeight + 12);
+  feed.style.setProperty('--composer-offset', `${offset}px`);
 }
 
 function setActiveTab(name, options = {}) {
@@ -786,6 +809,7 @@ function renderMessages(messages, options = {}) {
   lastMessages = Array.isArray(messages) ? messages : [];
   const merged = mergeMessages(lastMessages);
   const { scrollToBottom = false } = options;
+  const previousScrollTop = messageList ? messageList.scrollTop : 0;
   const available = new Set(merged.map((message) => message.filename));
   selectedMessages.forEach((filename) => {
     if (!available.has(filename)) {
@@ -799,6 +823,7 @@ function renderMessages(messages, options = {}) {
     empty.className = 'message-card';
     empty.textContent = '暂无消息';
     messageList.appendChild(empty);
+    updateScrollToBottomButton();
     return;
   }
 
@@ -1061,6 +1086,12 @@ function renderMessages(messages, options = {}) {
   });
   if (scrollToBottom) {
     scrollMessageListToBottom();
+  } else {
+    if (messageList) {
+      const maxScrollTop = Math.max(0, messageList.scrollHeight - messageList.clientHeight);
+      messageList.scrollTop = Math.min(previousScrollTop, maxScrollTop);
+    }
+    updateScrollToBottomButton();
   }
 }
 function mergeMessages(messages) {
@@ -1083,14 +1114,18 @@ function mergeMessages(messages) {
   return merged;
 }
 
-async function loadMessages() {
+async function loadMessages(options = {}) {
+  const shouldScroll =
+    typeof options.scrollToBottom === 'boolean'
+      ? options.scrollToBottom
+      : isMessageListAtBottom();
   try {
     if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
     const messages = await invoke('list_messages');
-    renderMessages(messages, { scrollToBottom: true });
+    renderMessages(messages, { scrollToBottom: shouldScroll });
   } catch (error) {
     setErrorStatus(`加载消息失败：${error}`);
   }
@@ -1190,7 +1225,7 @@ async function sendText() {
     }
     await invoke('send_text', { text });
     textInput.value = '';
-    await loadMessages();
+    await loadMessages({ scrollToBottom: true });
     setSuccessStatus('发送成功');
   } catch (error) {
     setErrorStatus(`发送失败：${error}`);
@@ -1233,7 +1268,7 @@ async function sendFile() {
       pendingUploads.delete(clientId);
       renderMessages(lastMessages);
     }
-    await loadMessages();
+    await loadMessages({ scrollToBottom: true });
     setSuccessStatus('发送成功');
   } catch (error) {
     if (clientId) {
@@ -1370,6 +1405,17 @@ if (cleanupMessagesButton) {
   cleanupMessagesButton.addEventListener('click', cleanupMessages);
 }
 
+if (scrollToBottomButton) {
+  scrollToBottomButton.addEventListener('click', scrollMessageListToBottom);
+}
+
+if (messageList) {
+  messageList.addEventListener('scroll', updateScrollToBottomButton);
+}
+
+syncComposerOffset();
+window.addEventListener('resize', syncComposerOffset);
+
 if (textInput) {
   textInput.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && !event.shiftKey) {
@@ -1387,6 +1433,6 @@ tabButtons.forEach((button) => {
 });
 
 loadSettings();
-loadMessages();
+loadMessages({ scrollToBottom: true });
 loadSyncStatus();
 setActiveTab('home', { scrollToBottom: true });
