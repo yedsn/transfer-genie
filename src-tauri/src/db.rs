@@ -16,6 +16,7 @@ pub struct DbMessage {
   pub mtime: Option<String>,
   pub content: Option<String>,
   pub local_path: Option<String>,
+  pub file_hash: Option<String>,
 }
 
 pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), String> {
@@ -47,6 +48,7 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
         mtime TEXT,\
         content TEXT,\
         local_path TEXT,\
+        file_hash TEXT,\
         PRIMARY KEY(endpoint_id, filename)\
       );",
       )
@@ -93,14 +95,15 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
         mtime TEXT,\
         content TEXT,\
         local_path TEXT,\
+        file_hash TEXT,\
         PRIMARY KEY(endpoint_id, filename)\
       );",
     )
     .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
     tx.execute(
       "INSERT INTO messages_new\
-        (endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path)\
-        SELECT ?1, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path FROM messages",
+        (endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, file_hash)\
+        SELECT ?1, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, NULL FROM messages",
       params![endpoint_id],
     )
     .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
@@ -109,6 +112,30 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
     tx.commit()
       .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
   }
+
+  // 检查是否有 file_hash 列，如果没有则添加
+  let mut has_file_hash = false;
+  {
+    let mut stmt = conn
+      .prepare("PRAGMA table_info(messages)")
+      .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+    let rows = stmt
+      .query_map([], |row| row.get::<_, String>(1))
+      .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+    for row in rows {
+      if row.map_err(|err| format!("兜兵晒方象垂払移: {err}"))? == "file_hash" {
+        has_file_hash = true;
+        break;
+      }
+    }
+  }
+
+  if !has_file_hash {
+    conn
+      .execute("ALTER TABLE messages ADD COLUMN file_hash TEXT", [])
+      .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+  }
+
   Ok(())
 }
 
@@ -120,7 +147,7 @@ pub fn get_message(
   let conn = Connection::open(path)?;
   conn
     .query_row(
-      "SELECT endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path \
+      "SELECT endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, file_hash \
        FROM messages WHERE endpoint_id = ?1 AND filename = ?2",
       params![endpoint_id, filename],
       |row| {
@@ -136,6 +163,7 @@ pub fn get_message(
           mtime: row.get(8)?,
           content: row.get(9)?,
           local_path: row.get(10)?,
+          file_hash: row.get(11)?,
         })
       },
     )
@@ -146,8 +174,8 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
   let conn = Connection::open(path)?;
   conn.execute(
     "INSERT INTO messages\
-      (endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path)\
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)\
+      (endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, file_hash)\
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)\
       ON CONFLICT(endpoint_id, filename) DO UPDATE SET \
         sender=excluded.sender,\
         timestamp_ms=excluded.timestamp_ms,\
@@ -157,7 +185,8 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
         etag=excluded.etag,\
         mtime=excluded.mtime,\
         content=excluded.content,\
-        local_path=excluded.local_path",
+        local_path=excluded.local_path,\
+        file_hash=excluded.file_hash",
     params![
       message.endpoint_id,
       message.filename,
@@ -170,6 +199,7 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
       message.mtime,
       message.content,
       message.local_path,
+      message.file_hash,
     ],
   )?;
   Ok(())
@@ -178,7 +208,7 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
 pub fn list_messages(path: &Path, endpoint_id: &str) -> rusqlite::Result<Vec<Message>> {
   let conn = Connection::open(path)?;
   let mut stmt = conn.prepare(
-    "SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path \
+    "SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, file_hash \
      FROM messages WHERE endpoint_id = ?1 ORDER BY timestamp_ms ASC",
   )?;
 
@@ -192,6 +222,7 @@ pub fn list_messages(path: &Path, endpoint_id: &str) -> rusqlite::Result<Vec<Mes
       original_name: row.get(5)?,
       content: row.get(6)?,
       local_path: row.get(7)?,
+      file_hash: row.get(8)?,
       download_exists: false,
     })
   })?;

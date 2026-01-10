@@ -16,7 +16,7 @@ use rand::rngs::OsRng;
 use rand::{Rng, RngCore};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use sha2::{Sha256, Digest};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -278,7 +278,22 @@ fn list_messages(state: State<'_, AppState>) -> Result<Vec<Message>, String> {
     if message.kind == MessageKind::File.as_str() {
       let file_name = sanitize_filename(&message.original_name);
       let target_path = base_dir.join(file_name);
-      message.download_exists = target_path.exists();
+      // 优先使用哈希值判断文件是否已下载
+      if let Some(ref expected_hash) = message.file_hash {
+        if target_path.is_file() {
+          // 文件存在，检查哈希值是否匹配
+          if let Some(actual_hash) = compute_file_hash_from_path(&target_path) {
+            message.download_exists = &actual_hash == expected_hash;
+          } else {
+            message.download_exists = false;
+          }
+        } else {
+          message.download_exists = false;
+        }
+      } else {
+        // 没有哈希值（旧数据），回退到检查文件是否存在
+        message.download_exists = target_path.exists();
+      }
     } else {
       message.download_exists = false;
     }
@@ -311,6 +326,7 @@ async fn send_text(state: State<'_, AppState>, text: String) -> Result<(), Strin
     mtime: None,
     content: Some(text),
     local_path: None,
+    file_hash: None,
   };
 
   db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
@@ -337,6 +353,7 @@ async fn send_file(
 
   let data = fs::read(&file_path).map_err(|err| format!("读取文件失败: {err}"))?;
   let total_bytes = data.len() as u64;
+  let file_hash = compute_file_hash(&data);
   let timestamp_ms = now_ms();
   let filename = build_message_filename(&settings.sender_name, &original_name, timestamp_ms);
   let remote_path = format!("files/{}", filename);
@@ -428,6 +445,7 @@ async fn send_file(
     mtime: None,
     content: None,
     local_path: Some(local_path.to_string_lossy().to_string()),
+    file_hash: Some(file_hash),
   };
 
   db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
@@ -447,6 +465,7 @@ async fn send_file_data(
   let endpoint = resolve_active_endpoint(&settings)?;
 
   let total_bytes = data.len() as u64;
+  let file_hash = compute_file_hash(&data);
   let timestamp_ms = now_ms();
   let filename = build_message_filename(&settings.sender_name, &original_name, timestamp_ms);
   let remote_path = format!("files/{}", filename);
@@ -538,6 +557,7 @@ async fn send_file_data(
     mtime: None,
     content: None,
     local_path: Some(local_path.to_string_lossy().to_string()),
+    file_hash: Some(file_hash),
   };
 
   db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
@@ -610,12 +630,14 @@ async fn download_message_file(
   };
   ensure_parent_dir(&final_path)?;
   fs::write(&final_path, &bytes).map_err(|err| format!("保存文件失败: {err}"))?;
+  let file_hash = compute_file_hash(&bytes);
   update_message_local_path(
     &state.db_path,
     &endpoint.id,
     &filename,
     &final_path,
     bytes.len() as i64,
+    Some(file_hash),
   )?;
 
   Ok(DownloadResult {
@@ -676,12 +698,14 @@ async fn save_message_file_as(
   };
   ensure_parent_dir(&final_path)?;
   fs::write(&final_path, &bytes).map_err(|err| format!("保存文件失败: {err}"))?;
+  let file_hash = compute_file_hash(&bytes);
   update_message_local_path(
     &state.db_path,
     &endpoint.id,
     &filename,
     &final_path,
     bytes.len() as i64,
+    Some(file_hash),
   )?;
 
   Ok(DownloadResult {
@@ -1332,6 +1356,17 @@ fn sanitize_filename(name: &str) -> String {
     .to_string()
 }
 
+fn compute_file_hash(data: &[u8]) -> String {
+  let mut hasher = Sha256::new();
+  hasher.update(data);
+  let result = hasher.finalize();
+  format!("{:x}", result)
+}
+
+fn compute_file_hash_from_path(path: &Path) -> Option<String> {
+  fs::read(path).ok().map(|data| compute_file_hash(&data))
+}
+
 fn normalize_path(path: &Path) -> PathBuf {
   path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
@@ -1441,6 +1476,7 @@ fn update_message_local_path(
   filename: &str,
   local_path: &Path,
   size: i64,
+  file_hash: Option<String>,
 ) -> Result<(), String> {
   let existing =
     db::get_message(db_path, endpoint_id, filename).map_err(|err| err.to_string())?;
@@ -1448,6 +1484,9 @@ fn update_message_local_path(
   message.local_path = Some(local_path.to_string_lossy().to_string());
   if size > 0 {
     message.size = size;
+  }
+  if file_hash.is_some() {
+    message.file_hash = file_hash;
   }
   db::upsert_message(db_path, &message).map_err(|err| err.to_string())?;
   Ok(())
@@ -1610,6 +1649,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
       mtime: None,
       content: None,
       local_path: None,
+      file_hash: None,
     });
 
     if let Some(history) = history_entry {
