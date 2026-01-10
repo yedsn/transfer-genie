@@ -81,3 +81,49 @@ TBD - created by archiving change add-webdav-transfer-client. Update Purpose aft
 - **WHEN** 用户选择文件消息的另存为动作
 - **THEN** 系统保存对话框打开并默认填入原始文件名
 
+### Requirement: 聊天式布局与排序
+客户端 SHALL 以时间顺序显示消息列表，最新消息位于底部；输入框 SHALL 固定在主内容底部；加载或刷新消息列表后 SHALL 自动滚动到最新消息。
+
+#### Scenario: 初次加载滚动到最新
+- **WHEN** 消息列表加载或刷新完成
+- **THEN** 列表按时间顺序展示且最新消息在底部
+- **AND** 滚动位置显示最新消息。
+
+### Requirement: 消息选择与多选删除
+客户端 SHALL 在每条消息的“更多”菜单中提供“删除”动作，并进入可多选的选择模式。
+
+#### Scenario: 进入选择并批量删除
+- **WHEN** 用户从某条消息的“更多”菜单选择“删除”
+- **THEN** 客户端进入选择模式且该消息默认被选中
+- **AND** 用户可以选择其它消息并确认删除。
+
+### Requirement: 删除范围与效果
+客户端 SHALL 在删除确认时提示删除范围（仅本地或本地+远端）。
+
+仅本地删除时，系统 SHALL 删除本地消息记录，并删除文件消息对应的本地已下载文件。
+
+本地+远端删除时，系统 SHALL 删除 WebDAV `files/` 中对应文件，并从远端 `history.json` 移除条目，同时删除本地消息记录与已下载文件。
+
+#### Scenario: 仅本地删除
+- **WHEN** 用户确认仅本地删除
+- **THEN** 选中的消息从本地列表移除
+- **AND** 文件消息对应的本地已下载文件被删除。
+
+#### Scenario: 本地+远端删除
+- **WHEN** 用户确认本地+远端删除
+- **THEN** 远端 WebDAV 文件与 history 条目被删除
+- **AND** 本地消息记录与已下载文件被删除。
+
+#### Scenario: 远端删除失败
+- **WHEN** 远端删除失败
+- **THEN** 客户端提示错误并保留失败的消息记录。
+
+### Requirement: WebDAV endpoint switching
+客户端 SHALL 在首页提供 WebDAV 端点切换入口，仅显示已启用端点。
+客户端在切换端点后 SHALL 立即使用新端点执行同步并更新消息列表。
+
+#### Scenario: Switch active endpoint from home
+- **WHEN** 用户在首页切换至另一个已启用的 WebDAV 端点
+- **THEN** 客户端更新活动端点并触发一次立即同步
+- **AND** 消息列表刷新为该端点的内容
+

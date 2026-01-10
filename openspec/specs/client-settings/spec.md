@@ -4,13 +4,25 @@
 TBD - created by archiving change add-webdav-transfer-client. Update Purpose after archive.
 ## Requirements
 ### Requirement: WebDAV connection settings
-客户端 SHALL 允许用户配置 WebDAV 端点 URL 与认证凭据，并持久化保存。
-客户端 SHALL 使用已保存的设置进行所有同步与上传操作，并在认证或连接失败时显示错误状态。
+客户端 SHALL 允许用户配置多个 WebDAV 端点（包含名称、URL 与认证凭据），并持久化保存。
+客户端 SHALL 支持为每个端点设置启用状态，并仅允许启用的端点被设置为当前活动端点。
+客户端 SHALL 使用当前活动端点进行所有同步与上传操作，并在认证或连接失败时显示错误状态。
 
-#### Scenario: Save WebDAV settings
-- **WHEN** 用户保存 WebDAV URL 与认证信息
-- **THEN** 后续同步使用该设置
-- **AND** 连接失败时在界面提示错误
+#### Scenario: Save multiple WebDAV endpoints
+- **WHEN** 用户新增或编辑多个 WebDAV 端点并保存
+- **THEN** 端点列表与认证信息被持久化并在重启后可用
+
+#### Scenario: Update WebDAV endpoint name
+- **WHEN** 用户为 WebDAV 端点设置或修改名称并保存
+- **THEN** 端点名称在列表与切换入口中展示
+
+#### Scenario: Select active WebDAV endpoint
+- **WHEN** 用户选择某个已启用端点作为当前活动端点
+- **THEN** 后续同步与上传使用该端点
+
+#### Scenario: Disable active WebDAV endpoint
+- **WHEN** 用户将当前活动端点设为禁用
+- **THEN** 客户端清除活动端点并提示用户选择另一个已启用端点
 
 ### Requirement: Sender name configuration
 客户端 SHALL 在首次启动时生成一个随机发送者名称，并允许用户在设置中修改。
@@ -52,4 +64,12 @@ TBD - created by archiving change add-webdav-transfer-client. Update Purpose aft
 - **WHEN** 下载目标目录存在同名文件
 - **THEN** 客户端提示“覆盖/改名/取消”
 - **AND** 选择改名时使用自动追加序号的文件名保存
+
+### Requirement: 手动清理旧数据
+客户端 SHALL 在设置中提供手动清理功能，清理 30 天以前的本地与远端消息数据，并移除对应 history 记录。
+
+#### Scenario: 清理 30 天前数据
+- **WHEN** 用户在设置中触发清理
+- **THEN** 30 天前的本地消息记录与已下载文件被删除
+- **AND** 对应的远端 WebDAV 文件与 history 条目被删除。
 
