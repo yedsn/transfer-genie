@@ -1637,6 +1637,7 @@ async function loadMessages(options = {}) {
       ? options.scrollToBottom
       : isMessageListAtBottom();
   const loadMore = options.loadMore || false;
+  const checkNew = options.checkNew || false; // 新增：检查新消息模式
   
   try {
     if (!invoke) {
@@ -1668,8 +1669,55 @@ async function loadMessages(options = {}) {
         totalMessages = result.total;
         renderMessages(lastMessages, { scrollToBottom: false, preserveScroll: true });
       }
+    } else if (checkNew) {
+      // 定时刷新模式：只检查新消息
+      const result = await invoke('list_messages', { limit: PAGE_SIZE, offset: 0 });
+      const newMessages = result.messages || [];
+      
+      if (newMessages.length === 0) {
+        // 没有任何消息
+        if (lastMessages.length > 0) {
+          lastMessages = [];
+          totalMessages = 0;
+          hasMoreMessages = false;
+          currentOffset = 0;
+          renderMessages([], { scrollToBottom: shouldScroll });
+        }
+        return;
+      }
+      
+      if (lastMessages.length === 0) {
+        // 本地没有消息，直接使用服务器返回的消息
+        lastMessages = newMessages;
+        totalMessages = result.total || 0;
+        hasMoreMessages = result.has_more || false;
+        renderMessages(lastMessages, { scrollToBottom: shouldScroll });
+        return;
+      }
+      
+      // 找出真正的新消息（不在当前列表中的）
+      // 注意：消息按时间正序排列，最新的在数组末尾
+      const existingFilenames = new Set(lastMessages.map(msg => msg.filename));
+      const actualNewMessages = newMessages.filter(msg => !existingFilenames.has(msg.filename));
+      
+      if (actualNewMessages.length > 0) {
+        // 有新消息，添加到列表末尾（最新消息在后面）
+        lastMessages = [...lastMessages, ...actualNewMessages];
+        totalMessages = result.total || 0;
+        hasMoreMessages = result.has_more || false;
+        
+        // 如果当前在底部，自动滚动到底部显示新消息
+        const autoScroll = isMessageListAtBottom();
+        renderMessages(lastMessages, { scrollToBottom: autoScroll });
+      } else {
+        // 没有新消息，但可能总数变化了（比如有消息被删除）
+        if (totalMessages !== result.total) {
+          totalMessages = result.total || 0;
+          hasMoreMessages = result.has_more || false;
+        }
+      }
     } else {
-      // 初始加载或刷新：加载最新的消息
+      // 初始加载或手动刷新：加载最新的消息
       currentOffset = 0;
       const result = await invoke('list_messages', { limit: PAGE_SIZE, offset: 0 });
       lastMessages = result.messages || [];
@@ -1714,7 +1762,8 @@ function startRefreshTimer(intervalSecs) {
   }
   const interval = Math.max(1, Number(intervalSecs) || 5);
   refreshTimer = setInterval(() => {
-    loadMessages();
+    // 使用 checkNew 模式进行增量更新，不清空现有数据
+    loadMessages({ checkNew: true });
     loadSyncStatus();
   }, interval * 1000);
 }
@@ -2100,7 +2149,8 @@ if (listen) {
       downloadProgress.delete(filename);
       downloadSpeed.delete(filename);
       updateProgressUI(filename);
-      loadMessages();
+      // 下载完成后使用增量更新，避免打断用户浏览
+      loadMessages({ checkNew: true });
       return;
     }
     if (payload.status === 'error') {
@@ -2140,7 +2190,8 @@ if (listen) {
       pendingUploads.delete(clientId);
       uploadSpeed.delete(clientId);
       renderMessages(lastMessages);
-      loadMessages();
+      // 上传完成后使用增量更新，避免打断用户浏览
+      loadMessages({ checkNew: true });
       return;
     }
     if (payload.status === 'error') {
