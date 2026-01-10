@@ -349,6 +349,41 @@ body {
   border: 1px solid #c7ddf6;
 }
 
+.sending-tag {
+  font-size: 12px;
+  color: #2a6aa6;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.send-success-tag {
+  font-size: 12px;
+  color: #2d8a4e;
+}
+
+.send-failed-tag {
+  font-size: 12px;
+  color: #d32f2f;
+  cursor: help;
+}
+
+.message-card.is-sending .message-body {
+  opacity: 0.85;
+}
+
+.message-card.is-sending[data-send-status="failed"] .message-body {
+  border-color: #ffcdd2;
+  background: #fff5f5;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
 .message-card.is-file .downloaded-tag,
 .message-card.is-file .downloading-tag,
 .message-card.is-file .uploading-tag {

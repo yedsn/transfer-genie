@@ -43,11 +43,19 @@ let webdavEndpoints = [];
 let activeEndpointId = null;
 const downloadProgress = new Map();
 const pendingUploads = new Map();
+const pendingSends = new Map(); // 待发送消息的状态管理
 let lastMessages = [];
 const downloadSpeed = new Map();
 const uploadSpeed = new Map();
 let selectionMode = false;
 const selectedMessages = new Set();
+
+// 发送状态常量
+const SEND_STATUS = {
+  SENDING: 'sending',
+  SUCCESS: 'success',
+  FAILED: 'failed',
+};
 
 // 分页相关状态
 const PAGE_SIZE = 10;
@@ -1351,11 +1359,53 @@ function renderMessages(messages, options = {}) {
     actions.className = 'message-actions';
 
     if (message.kind === 'text') {
-      const copyButton = document.createElement('button');
-      copyButton.className = 'button ghost small';
-      copyButton.textContent = '复制';
-      copyButton.addEventListener('click', () => copyTextToClipboard(message.content || ''));
-      actions.appendChild(copyButton);
+      // 显示发送状态
+      if (message.sending) {
+        item.classList.add('is-sending');
+        item.dataset.sendStatus = message.sendStatus;
+        
+        const statusTag = document.createElement('span');
+        if (message.sendStatus === SEND_STATUS.SENDING) {
+          statusTag.className = 'sending-tag';
+          statusTag.textContent = '发送中...';
+        } else if (message.sendStatus === SEND_STATUS.SUCCESS) {
+          statusTag.className = 'send-success-tag';
+          statusTag.textContent = '已发送';
+        } else if (message.sendStatus === SEND_STATUS.FAILED) {
+          statusTag.className = 'send-failed-tag';
+          statusTag.textContent = '发送失败';
+          statusTag.title = message.sendError || '';
+          
+          // 添加重试按钮
+          const retryButton = document.createElement('button');
+          retryButton.className = 'button ghost small';
+          retryButton.textContent = '重试';
+          retryButton.addEventListener('click', () => {
+            pendingSends.delete(message.filename);
+            textInput.value = message.content || '';
+            renderMessages(lastMessages);
+            sendText();
+          });
+          actions.appendChild(retryButton);
+          
+          // 添加取消按钮
+          const cancelButton = document.createElement('button');
+          cancelButton.className = 'button ghost small';
+          cancelButton.textContent = '取消';
+          cancelButton.addEventListener('click', () => {
+            pendingSends.delete(message.filename);
+            renderMessages(lastMessages);
+          });
+          actions.appendChild(cancelButton);
+        }
+        actions.appendChild(statusTag);
+      } else {
+        const copyButton = document.createElement('button');
+        copyButton.className = 'button ghost small';
+        copyButton.textContent = '复制';
+        copyButton.addEventListener('click', () => copyTextToClipboard(message.content || ''));
+        actions.appendChild(copyButton);
+      }
     } else {
       if (message.uploading) {
         item.classList.add('is-uploading');
@@ -1542,6 +1592,26 @@ function renderMessages(messages, options = {}) {
 }
 function mergeMessages(messages) {
   const merged = [...messages];
+  
+  // 合并待发送的文本消息
+  pendingSends.forEach((send) => {
+    merged.push({
+      filename: send.tempId,
+      sender: send.sender,
+      timestamp_ms: send.timestamp_ms,
+      size: send.text.length,
+      kind: 'text',
+      original_name: 'message.txt',
+      content: send.text,
+      local_path: null,
+      download_exists: false,
+      sending: true,
+      sendStatus: send.status,
+      sendError: send.error,
+    });
+  });
+  
+  // 合并待上传的文件
   pendingUploads.forEach((upload) => {
     merged.push({
       filename: upload.clientId,
@@ -1556,6 +1626,7 @@ function mergeMessages(messages) {
       uploading: true,
     });
   });
+  
   merged.sort((a, b) => (a.timestamp_ms || 0) - (b.timestamp_ms || 0));
   return merged;
 }
@@ -1834,16 +1905,48 @@ async function sendText() {
     setErrorStatus('请先选择 WebDAV 端点');
     return;
   }
+  if (!invoke) {
+    setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
+    return;
+  }
+  
+  // 生成临时 ID 用于追踪
+  const tempId = `temp-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const senderName = senderNameInput?.value.trim() || '我';
+  
+  // 乐观更新：立即显示消息
+  pendingSends.set(tempId, {
+    tempId,
+    text,
+    sender: senderName,
+    timestamp_ms: Date.now(),
+    status: SEND_STATUS.SENDING,
+    error: null,
+  });
+  textInput.value = '';
+  renderMessages(lastMessages, { scrollToBottom: true });
+  
   try {
-    if (!invoke) {
-      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
-      return;
-    }
     await invoke('send_text', { text });
-    textInput.value = '';
-    await loadMessages({ scrollToBottom: true });
-    setSuccessStatus('发送成功');
+    // 发送成功：更新状态
+    const entry = pendingSends.get(tempId);
+    if (entry) {
+      entry.status = SEND_STATUS.SUCCESS;
+      renderMessages(lastMessages, { scrollToBottom: true });
+      // 短暂显示成功状态后移除
+      setTimeout(() => {
+        pendingSends.delete(tempId);
+        loadMessages({ scrollToBottom: true });
+      }, 1500);
+    }
   } catch (error) {
+    // 发送失败：更新状态
+    const entry = pendingSends.get(tempId);
+    if (entry) {
+      entry.status = SEND_STATUS.FAILED;
+      entry.error = String(error);
+      renderMessages(lastMessages, { scrollToBottom: true });
+    }
     setErrorStatus(`发送失败：${error}`);
   }
 }
