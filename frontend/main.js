@@ -30,6 +30,7 @@ const downloadDirHint = document.getElementById('download-dir-hint');
 const toggleSelectionButton = document.getElementById('toggle-selection');
 const selectionBar = document.getElementById('selection-bar');
 const selectionCount = document.getElementById('selection-count');
+const selectAllButton = document.getElementById('select-all');
 const deleteSelectedButton = document.getElementById('delete-selected');
 const cancelSelectionButton = document.getElementById('cancel-selection');
 const cleanupMessagesButton = document.getElementById('cleanup-messages');
@@ -523,11 +524,15 @@ function setHint(element, text) {
 function updateSelectionBar() {
   if (!selectionBar || !selectionCount || !deleteSelectedButton) return;
   const count = selectedMessages.size;
+  const selectableCount = selectionMode ? getSelectableMessages().length : 0;
   selectionBar.hidden = !selectionMode;
   selectionBar.style.display = selectionMode ? 'flex' : 'none';
   selectionCount.hidden = !selectionMode;
   selectionCount.textContent = `已选中 ${count} 项`;
   deleteSelectedButton.disabled = count === 0;
+  if (selectAllButton) {
+    selectAllButton.disabled = selectableCount === 0;
+  }
 }
 
 function updateSelectionToggleLabel() {
@@ -557,6 +562,21 @@ function toggleSelectedMessage(filename, checked) {
     selectedMessages.delete(filename);
   }
   updateSelectionBar();
+}
+
+function getSelectableMessages() {
+  return mergeMessages(lastMessages).filter((message) => !message.uploading);
+}
+
+function selectAllMessages() {
+  if (!selectionMode) {
+    setSelectionMode(true);
+  }
+  selectedMessages.clear();
+  const selectable = getSelectableMessages();
+  selectable.forEach((message) => selectedMessages.add(message.filename));
+  updateSelectionBar();
+  renderMessages(lastMessages);
 }
 
 function isMessageListAtBottom() {
@@ -667,6 +687,25 @@ function showDeleteConfirmDialog(count) {
   });
 }
 
+function createDialogOption(name, value, labelText, checked) {
+  const label = document.createElement('label');
+  label.className = 'dialog-option';
+
+  const input = document.createElement('input');
+  input.type = 'radio';
+  input.name = name;
+  input.value = value;
+  input.checked = checked;
+
+  const text = document.createElement('span');
+  text.textContent = labelText;
+
+  label.appendChild(input);
+  label.appendChild(text);
+
+  return { label, input };
+}
+
 function showCleanupConfirmDialog() {
   return new Promise((resolve) => {
     const overlay = document.createElement('div');
@@ -681,7 +720,45 @@ function showCleanupConfirmDialog() {
 
     const message = document.createElement('p');
     message.className = 'dialog-text';
-    message.textContent = '将删除 30 天前的本地与远端消息数据，是否继续？';
+    message.textContent = '请选择清理时间范围与清理范围。';
+
+    const rangeGroup = document.createElement('div');
+    rangeGroup.className = 'dialog-options-group';
+
+    const rangeTitle = document.createElement('div');
+    rangeTitle.className = 'dialog-subtitle';
+    rangeTitle.textContent = '时间范围';
+
+    const rangeAll = createDialogOption('cleanup-range', 'all', '全部', false);
+    const rangeBefore = createDialogOption('cleanup-range', 'before_7_days', '7天以前', true);
+
+    rangeGroup.appendChild(rangeTitle);
+    rangeGroup.appendChild(rangeAll.label);
+    rangeGroup.appendChild(rangeBefore.label);
+
+    const scopeGroup = document.createElement('div');
+    scopeGroup.className = 'dialog-options-group';
+
+    const scopeTitle = document.createElement('div');
+    scopeTitle.className = 'dialog-subtitle';
+    scopeTitle.textContent = '清理范围';
+
+    const scopeLocal = createDialogOption('cleanup-scope', 'local_only', '仅本地', true);
+    const scopeRemote = createDialogOption(
+      'cleanup-scope',
+      'with_remote',
+      '包含 WebDAV 远端',
+      false,
+    );
+
+    scopeGroup.appendChild(scopeTitle);
+    scopeGroup.appendChild(scopeLocal.label);
+    scopeGroup.appendChild(scopeRemote.label);
+
+    const options = document.createElement('div');
+    options.className = 'dialog-options';
+    options.appendChild(rangeGroup);
+    options.appendChild(scopeGroup);
 
     const actions = document.createElement('div');
     actions.className = 'dialog-actions';
@@ -702,22 +779,30 @@ function showCleanupConfirmDialog() {
 
     const onKeyDown = (event) => {
       if (event.key === 'Escape') {
-        cleanup(false);
+        cleanup(null);
       }
     };
 
     overlay.addEventListener('click', (event) => {
       if (event.target === overlay) {
-        cleanup(false);
+        cleanup(null);
       }
     });
-    confirmButton.addEventListener('click', () => cleanup(true));
-    cancelButton.addEventListener('click', () => cleanup(false));
+    confirmButton.addEventListener('click', () => {
+      const range = rangeGroup.querySelector('input[name="cleanup-range"]:checked')?.value;
+      const scope = scopeGroup.querySelector('input[name="cleanup-scope"]:checked')?.value;
+      if (!range || !scope) {
+        return;
+      }
+      cleanup({ range, scope });
+    });
+    cancelButton.addEventListener('click', () => cleanup(null));
 
     actions.appendChild(confirmButton);
     actions.appendChild(cancelButton);
     dialog.appendChild(title);
     dialog.appendChild(message);
+    dialog.appendChild(options);
     dialog.appendChild(actions);
     overlay.appendChild(dialog);
     document.body.appendChild(overlay);
@@ -1042,12 +1127,15 @@ async function cleanupMessages() {
     setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
     return;
   }
-  const confirmed = await showCleanupConfirmDialog();
-  if (!confirmed) {
+  const options = await showCleanupConfirmDialog();
+  if (!options) {
     return;
   }
   try {
-    const result = await invoke('cleanup_messages');
+    const result = await invoke('cleanup_messages', {
+      range: options.range,
+      scope: options.scope,
+    });
     const failed = result.failed || [];
     if (failed.length > 0) {
       setErrorStatus(`清理完成，${failed.length} 条处理失败`);
@@ -1820,6 +1908,9 @@ if (endpointSelect) {
 }
 if (toggleSelectionButton) {
   toggleSelectionButton.addEventListener('click', toggleSelectionMode);
+}
+if (selectAllButton) {
+  selectAllButton.addEventListener('click', selectAllMessages);
 }
 if (deleteSelectedButton) {
   deleteSelectedButton.addEventListener('click', deleteSelectedMessages);

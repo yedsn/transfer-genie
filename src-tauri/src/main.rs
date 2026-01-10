@@ -26,6 +26,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 use tokio::sync::Mutex as AsyncMutex;
 use tauri::Window;
+#[cfg(desktop)]
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
 struct AppState {
   settings_path: PathBuf,
@@ -36,10 +38,13 @@ struct AppState {
   sync_status: Mutex<SyncStatus>,
   sync_guard: AsyncMutex<()>,
   http: Client,
+  hotkey_enabled: Mutex<bool>,
 }
 
 const EXPORT_VERSION: u8 = 1;
 const EXPORT_KDF_ITERATIONS: u32 = 100_000;
+const HOTKEY_SHORTCUT: &str = "alt+t";
+const HOTKEY_MENU_ID: &str = "toggle-hotkey";
 
 #[cfg(desktop)]
 fn load_app_icon() -> Result<tauri::image::Image<'static>, String> {
@@ -124,6 +129,21 @@ struct DownloadResult {
 struct DeleteSummary {
   deleted: usize,
   failed: Vec<String>,
+}
+
+#[derive(Deserialize)]
+enum CleanupRange {
+  All,
+  #[serde(rename = "before_7_days")]
+  Before7Days,
+}
+
+#[derive(Deserialize)]
+enum CleanupScope {
+  #[serde(rename = "local_only")]
+  LocalOnly,
+  #[serde(rename = "with_remote")]
+  WithRemote,
 }
 
 #[derive(Clone, Serialize)]
@@ -736,16 +756,26 @@ async fn delete_messages(
 }
 
 #[tauri::command]
-async fn cleanup_messages(state: State<'_, AppState>) -> Result<DeleteSummary, String> {
+async fn cleanup_messages(
+  state: State<'_, AppState>,
+  range: CleanupRange,
+  scope: CleanupScope,
+) -> Result<DeleteSummary, String> {
   let settings = current_settings(&state)?;
   let endpoint = resolve_active_endpoint(&settings)?;
 
-  let cutoff_ms = now_ms() - 30_i64 * 24 * 60 * 60 * 1000;
+  let cutoff_ms = match range {
+    CleanupRange::All => None,
+    CleanupRange::Before7Days => Some(now_ms() - 7_i64 * 24 * 60 * 60 * 1000),
+  };
   let messages =
     db::list_messages(&state.db_path, &endpoint.id).map_err(|err| err.to_string())?;
   let candidates: Vec<Message> = messages
     .into_iter()
-    .filter(|message| message.timestamp_ms < cutoff_ms)
+    .filter(|message| match cutoff_ms {
+      Some(cutoff) => message.timestamp_ms < cutoff,
+      None => true,
+    })
     .collect();
 
   if candidates.is_empty() {
@@ -755,38 +785,60 @@ async fn cleanup_messages(state: State<'_, AppState>) -> Result<DeleteSummary, S
     });
   }
 
-  let mut failed: Vec<String> = Vec::new();
-  let mut succeeded: Vec<String> = Vec::new();
-  for message in &candidates {
-    let remote_path = format!("files/{}", message.filename);
-    match webdav::delete_file(&state.http, &endpoint, &remote_path, true).await {
-      Ok(_) => succeeded.push(message.filename.clone()),
-      Err(_) => failed.push(message.filename.clone()),
+  match scope {
+    CleanupScope::LocalOnly => {
+      for message in &candidates {
+        delete_local_files_for_entry(
+          &state,
+          &settings,
+          &message.kind,
+          &message.original_name,
+          message.local_path.as_deref(),
+        )?;
+      }
+      let filenames: Vec<String> = candidates.iter().map(|message| message.filename.clone()).collect();
+      let deleted = db::delete_messages(&state.db_path, &endpoint.id, &filenames)
+        .map_err(|err| err.to_string())?;
+      Ok(DeleteSummary {
+        deleted,
+        failed: Vec::new(),
+      })
+    }
+    CleanupScope::WithRemote => {
+      let mut failed: Vec<String> = Vec::new();
+      let mut succeeded: Vec<String> = Vec::new();
+      for message in &candidates {
+        let remote_path = format!("files/{}", message.filename);
+        match webdav::delete_file(&state.http, &endpoint, &remote_path, true).await {
+          Ok(_) => succeeded.push(message.filename.clone()),
+          Err(_) => failed.push(message.filename.clone()),
+        }
+      }
+
+      if !succeeded.is_empty() {
+        let success_set: HashSet<String> = succeeded.iter().cloned().collect();
+        remove_history_entries(&state, &endpoint, &success_set).await?;
+      }
+
+      let success_set: HashSet<String> = succeeded.iter().cloned().collect();
+      for message in &candidates {
+        if !success_set.contains(&message.filename) {
+          continue;
+        }
+        delete_local_files_for_entry(
+          &state,
+          &settings,
+          &message.kind,
+          &message.original_name,
+          message.local_path.as_deref(),
+        )?;
+      }
+
+      let deleted = db::delete_messages(&state.db_path, &endpoint.id, &succeeded)
+        .map_err(|err| err.to_string())?;
+      Ok(DeleteSummary { deleted, failed })
     }
   }
-
-  if !succeeded.is_empty() {
-    let success_set: HashSet<String> = succeeded.iter().cloned().collect();
-    remove_history_entries(&state, &endpoint, &success_set).await?;
-  }
-
-  let success_set: HashSet<String> = succeeded.iter().cloned().collect();
-  for message in &candidates {
-    if !success_set.contains(&message.filename) {
-      continue;
-    }
-    delete_local_files_for_entry(
-      &state,
-      &settings,
-      &message.kind,
-      &message.original_name,
-      message.local_path.as_deref(),
-    )?;
-  }
-
-  let deleted = db::delete_messages(&state.db_path, &endpoint.id, &succeeded)
-    .map_err(|err| err.to_string())?;
-  Ok(DeleteSummary { deleted, failed })
 }
 
 #[tauri::command]
@@ -1628,6 +1680,24 @@ fn toggle_main_window(app: &AppHandle) {
   }
 }
 
+#[cfg(desktop)]
+fn set_hotkey_enabled(app: &AppHandle, enabled: bool) -> Result<(), String> {
+  let global_shortcut = app.global_shortcut();
+  let is_registered = global_shortcut.is_registered(HOTKEY_SHORTCUT);
+  if enabled {
+    if !is_registered {
+      global_shortcut
+        .register(HOTKEY_SHORTCUT)
+        .map_err(|err| err.to_string())?;
+    }
+  } else if is_registered {
+    global_shortcut
+      .unregister(HOTKEY_SHORTCUT)
+      .map_err(|err| err.to_string())?;
+  }
+  Ok(())
+}
+
 #[cfg(target_os = "macos")]
 fn sync_dock_visibility_webview(app: &AppHandle, window: &tauri::WebviewWindow) {
   let minimized = window.is_minimized().unwrap_or(false);
@@ -1698,6 +1768,7 @@ fn main() {
         sync_status: Mutex::new(SyncStatus::idle()),
         sync_guard: AsyncMutex::new(()),
         http: Client::new(),
+        hotkey_enabled: Mutex::new(true),
       });
 
       #[cfg(desktop)]
@@ -1707,8 +1778,10 @@ fn main() {
         use tauri_plugin_global_shortcut::{Code, Modifiers, ShortcutState};
 
         let show_item = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
+        let hotkey_item =
+          MenuItem::with_id(app, HOTKEY_MENU_ID, "禁用快捷键", true, None::<&str>)?;
         let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-        let tray_menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+        let tray_menu = Menu::with_items(app, &[&show_item, &hotkey_item, &quit_item])?;
         let app_icon = load_app_icon().ok();
 
         let mut tray_builder = TrayIconBuilder::new().menu(&tray_menu);
@@ -1720,9 +1793,22 @@ fn main() {
           tray_builder = tray_builder.icon(icon);
         }
         tray_builder
-          .on_menu_event(|app, event: tauri::menu::MenuEvent| match event.id().as_ref() {
+          .on_menu_event(move |app, event: tauri::menu::MenuEvent| match event.id().as_ref() {
             "show" => show_main_window(app),
             "quit" => app.exit(0),
+            HOTKEY_MENU_ID => {
+              let state = app.state::<AppState>();
+              let Ok(mut enabled) = state.hotkey_enabled.lock() else {
+                return;
+              };
+              let next = !*enabled;
+              if set_hotkey_enabled(app, next).is_err() {
+                return;
+              }
+              *enabled = next;
+              let label = if next { "禁用快捷键" } else { "启用快捷键" };
+              let _ = hotkey_item.set_text(label);
+            }
             _ => {}
           })
           .on_tray_icon_event(
@@ -1745,7 +1831,7 @@ fn main() {
 
         app.handle().plugin(
           tauri_plugin_global_shortcut::Builder::new()
-            .with_shortcuts(["alt+t"])?
+            .with_shortcuts([HOTKEY_SHORTCUT])?
             .with_handler(|app, shortcut, event| {
               if event.state == ShortcutState::Pressed
                 && shortcut.matches(Modifiers::ALT, Code::KeyT)

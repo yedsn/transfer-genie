@@ -22,6 +22,7 @@
                   <select id="active-endpoint" class="endpoint-select"></select>
                 </div>
                 <div id="selection-bar" class="selection-bar" hidden>
+                  <button id="select-all" class="button ghost small" type="button">全选</button>
                   <button id="delete-selected" class="button small" type="button">删除</button>
                   <button id="cancel-selection" class="button ghost small" type="button">取消</button>
                 </div>
@@ -100,7 +101,7 @@
               </div>
               <div class="settings-actions">
                 <button id="cleanup-messages" class="button ghost" type="button">清理旧数据</button>
-                <span class="field-hint">将删除 30 天前的本地与远端消息</span>
+                <span class="field-hint">可选择时间范围与清理范围（仅本地或包含 WebDAV 远端）</span>
               </div>
             </div>
           </section>
