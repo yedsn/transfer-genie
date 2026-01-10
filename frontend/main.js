@@ -9,6 +9,8 @@ const convertFileSrc =
 const messageList = document.getElementById('message-list');
 const syncStatus = document.getElementById('sync-status');
 const refreshButton = document.getElementById('refresh-btn');
+const refreshLabel = refreshButton ? refreshButton.querySelector('.refresh-label') : null;
+const refreshLabelDefault = refreshLabel ? refreshLabel.textContent : '';
 const textInput = document.getElementById('text-input');
 const sendTextButton = document.getElementById('send-text');
 const sendFileButton = document.getElementById('send-file');
@@ -165,6 +167,15 @@ function setSuccessStatus(text) {
 function setErrorStatus(text) {
   syncStatus.textContent = text;
   syncStatus.style.color = '#d6452d';
+}
+
+function setRefreshLoading(loading) {
+  if (!refreshButton) return;
+  refreshButton.classList.toggle('is-loading', loading);
+  refreshButton.disabled = loading;
+  if (refreshLabel) {
+    refreshLabel.textContent = loading ? '刷新中...' : refreshLabelDefault || '刷新';
+  }
 }
 
 function generateEndpointId() {
@@ -1473,7 +1484,7 @@ function startRefreshTimer(intervalSecs) {
   }
   const interval = Math.max(1, Number(intervalSecs) || 5);
   refreshTimer = setInterval(() => {
-    loadMessages({ scrollToBottom: false });
+    loadMessages();
     loadSyncStatus();
   }, interval * 1000);
 }
@@ -1799,11 +1810,14 @@ async function manualRefresh() {
       setErrorStatus('请先选择 WebDAV 端点');
       return;
     }
+    setRefreshLoading(true);
     await invoke('manual_refresh');
     await loadMessages();
     await loadSyncStatus();
   } catch (error) {
     setErrorStatus(`手动刷新失败：${error}`);
+  } finally {
+    setRefreshLoading(false);
   }
 }
 
