@@ -52,19 +52,19 @@ echo.
 echo [2/3] 查找生成的 exe 文件...
 
 set "EXE_FILE="
-set "BUNDLE_DIR=%PROJECT_DIR%src-tauri\target\release\bundle"
-set "RELEASE_DIR=%PROJECT_DIR%target\release"
+set "RELEASE_DIR=%PROJECT_DIR%\target\release"
+set "BUNDLE_DIR=%RELEASE_DIR%\bundle"
 
-:: 优先查找 bundle 目录中的 exe
-if exist "%BUNDLE_DIR%\nsis\Transfer Genie_0.1.0_x64-setup.exe" (
-    set "EXE_FILE=%BUNDLE_DIR%\nsis\Transfer Genie_0.1.0_x64-setup.exe"
-    set "EXE_TYPE=installer"
-) else if exist "%RELEASE_DIR%\transfer-genie.exe" (
+:: 优先查找 release 目录中的 exe（portable 版本）
+if exist "%RELEASE_DIR%\transfer-genie.exe" (
     set "EXE_FILE=%RELEASE_DIR%\transfer-genie.exe"
     set "EXE_TYPE=portable"
 ) else if exist "%RELEASE_DIR%\Transfer Genie.exe" (
     set "EXE_FILE=%RELEASE_DIR%\Transfer Genie.exe"
     set "EXE_TYPE=portable"
+) else if exist "%BUNDLE_DIR%\nsis\Transfer Genie_0.1.0_x64-setup.exe" (
+    set "EXE_FILE=%BUNDLE_DIR%\nsis\Transfer Genie_0.1.0_x64-setup.exe"
+    set "EXE_TYPE=installer"
 )
 
 if "!EXE_FILE!"=="" (
@@ -73,8 +73,8 @@ if "!EXE_FILE!"=="" (
     echo 请先运行 'cargo tauri build' 进行编译。
     echo.
     echo 查找路径:
-    echo   - %BUNDLE_DIR%\nsis\
     echo   - %RELEASE_DIR%\
+    echo   - %BUNDLE_DIR%\nsis\
     pause
     exit /b 1
 )
