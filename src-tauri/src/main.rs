@@ -6,9 +6,16 @@ mod webdav;
 use crate::db::DbMessage;
 use crate::filenames::{build_message_filename, parse_message_filename, MessageKind};
 use crate::types::{Message, Settings, SyncStatus, WebDavEndpoint};
-use serde::{Deserialize, Serialize};
-use rand::Rng;
+use aes_gcm::aead::Aead;
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
+use pbkdf2::pbkdf2_hmac;
+use rand::rngs::OsRng;
+use rand::{Rng, RngCore};
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -28,6 +35,9 @@ struct AppState {
   sync_guard: AsyncMutex<()>,
   http: Client,
 }
+
+const EXPORT_VERSION: u8 = 1;
+const EXPORT_KDF_ITERATIONS: u32 = 100_000;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct HistoryEntry {
@@ -53,6 +63,35 @@ struct LegacySettings {
   refresh_interval_secs: u64,
   #[serde(default)]
   download_dir: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ExportBundle {
+  version: u8,
+  settings: Settings,
+  crypto: CryptoPayload,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CryptoPayload {
+  kdf: String,
+  cipher: String,
+  iterations: u32,
+  salt: String,
+  nonce: String,
+  ciphertext: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ExportSecrets {
+  endpoints: Vec<EndpointSecret>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct EndpointSecret {
+  id: String,
+  username: String,
+  password: String,
 }
 
 #[derive(Serialize)]
@@ -103,6 +142,72 @@ fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<Setti
 
   write_settings(&state.settings_path, &normalized)?;
 
+  let mut guard = state
+    .settings
+    .lock()
+    .map_err(|_| "写入设置失败".to_string())?;
+  *guard = normalized.clone();
+  Ok(normalized)
+}
+
+#[tauri::command]
+fn export_settings(
+  state: State<'_, AppState>,
+  path: String,
+  password: String,
+) -> Result<(), String> {
+  if path.trim().is_empty() {
+    return Err("未选择导出路径".to_string());
+  }
+  let settings = current_settings(&state)?;
+  let secrets = extract_export_secrets(&settings);
+  let crypto = encrypt_export_secrets(&password, &secrets)?;
+
+  let mut sanitized = settings.clone();
+  for endpoint in sanitized.webdav_endpoints.iter_mut() {
+    endpoint.username.clear();
+    endpoint.password.clear();
+  }
+
+  let bundle = ExportBundle {
+    version: EXPORT_VERSION,
+    settings: sanitized,
+    crypto,
+  };
+
+  let data = serde_json::to_string_pretty(&bundle)
+    .map_err(|err| format!("序列化配置失败: {err}"))?;
+  let target_path = PathBuf::from(path);
+  ensure_parent_dir(&target_path)?;
+  fs::write(&target_path, data).map_err(|err| format!("写入导出文件失败: {err}"))?;
+  Ok(())
+}
+
+#[tauri::command]
+fn import_settings(
+  state: State<'_, AppState>,
+  path: String,
+  password: String,
+) -> Result<Settings, String> {
+  if path.trim().is_empty() {
+    return Err("未选择导入文件".to_string());
+  }
+  let data = fs::read(&path).map_err(|err| format!("读取导入文件失败: {err}"))?;
+  let bundle: ExportBundle =
+    serde_json::from_slice(&data).map_err(|err| format!("解析导入文件失败: {err}"))?;
+  if bundle.version != EXPORT_VERSION {
+    return Err("不支持的配置版本".to_string());
+  }
+
+  let secrets_bytes = decrypt_export_secrets(&password, &bundle.crypto)?;
+  let secrets: ExportSecrets = serde_json::from_slice(&secrets_bytes)
+    .map_err(|err| format!("解析配置凭据失败: {err}"))?;
+
+  let mut settings = bundle.settings;
+  apply_export_secrets(&mut settings, secrets)?;
+  let normalized = normalize_settings(settings, &state.default_download_dir)?;
+
+  write_settings(&state.settings_path, &normalized)?;
   let mut guard = state
     .settings
     .lock()
@@ -678,6 +783,117 @@ fn normalize_settings(
     };
   }
   Ok(settings)
+}
+
+fn extract_export_secrets(settings: &Settings) -> ExportSecrets {
+  let endpoints = settings
+    .webdav_endpoints
+    .iter()
+    .map(|endpoint| EndpointSecret {
+      id: endpoint.id.clone(),
+      username: endpoint.username.clone(),
+      password: endpoint.password.clone(),
+    })
+    .collect();
+  ExportSecrets { endpoints }
+}
+
+fn encrypt_export_secrets(password: &str, secrets: &ExportSecrets) -> Result<CryptoPayload, String> {
+  if password.trim().is_empty() {
+    return Err("密码不能为空".to_string());
+  }
+  let payload = serde_json::to_vec(secrets)
+    .map_err(|err| format!("序列化配置凭据失败: {err}"))?;
+
+  let mut salt = [0u8; 16];
+  OsRng.fill_bytes(&mut salt);
+  let mut nonce_bytes = [0u8; 12];
+  OsRng.fill_bytes(&mut nonce_bytes);
+
+  let key = derive_export_key(password, &salt, EXPORT_KDF_ITERATIONS)?;
+  let cipher =
+    Aes256Gcm::new_from_slice(&key).map_err(|_| "生成加密密钥失败".to_string())?;
+  let nonce = Nonce::from_slice(&nonce_bytes);
+  let ciphertext = cipher
+    .encrypt(nonce, payload.as_ref())
+    .map_err(|_| "加密失败".to_string())?;
+
+  Ok(CryptoPayload {
+    kdf: "pbkdf2-sha256".to_string(),
+    cipher: "aes-256-gcm".to_string(),
+    iterations: EXPORT_KDF_ITERATIONS,
+    salt: BASE64.encode(salt),
+    nonce: BASE64.encode(nonce_bytes),
+    ciphertext: BASE64.encode(ciphertext),
+  })
+}
+
+fn decrypt_export_secrets(password: &str, crypto: &CryptoPayload) -> Result<Vec<u8>, String> {
+  if password.trim().is_empty() {
+    return Err("密码不能为空".to_string());
+  }
+  if crypto.kdf != "pbkdf2-sha256" || crypto.cipher != "aes-256-gcm" {
+    return Err("不支持的加密格式".to_string());
+  }
+  if crypto.iterations == 0 {
+    return Err("配置文件迭代次数无效".to_string());
+  }
+
+  let salt = decode_export_base64("salt", &crypto.salt)?;
+  let nonce_bytes = decode_export_base64("nonce", &crypto.nonce)?;
+  let ciphertext = decode_export_base64("ciphertext", &crypto.ciphertext)?;
+  if nonce_bytes.len() != 12 {
+    return Err("配置文件 nonce 无效".to_string());
+  }
+
+  let key = derive_export_key(password, &salt, crypto.iterations)?;
+  let cipher =
+    Aes256Gcm::new_from_slice(&key).map_err(|_| "生成解密密钥失败".to_string())?;
+  let nonce = Nonce::from_slice(&nonce_bytes);
+  cipher
+    .decrypt(nonce, ciphertext.as_ref())
+    .map_err(|_| "解密失败，请检查密码".to_string())
+}
+
+fn apply_export_secrets(settings: &mut Settings, secrets: ExportSecrets) -> Result<(), String> {
+  let mut map: HashMap<String, EndpointSecret> = HashMap::new();
+  for secret in secrets.endpoints {
+    let id = secret.id.trim();
+    if id.is_empty() {
+      return Err("配置文件端点缺少 ID".to_string());
+    }
+    if map.insert(secret.id.clone(), secret).is_some() {
+      return Err("配置文件端点凭据重复".to_string());
+    }
+  }
+
+  for endpoint in settings.webdav_endpoints.iter_mut() {
+    let secret = map.get(&endpoint.id).ok_or_else(|| {
+      format!("配置文件缺少端点凭据: {}", endpoint.id)
+    })?;
+    endpoint.username = secret.username.clone();
+    endpoint.password = secret.password.clone();
+  }
+  Ok(())
+}
+
+fn derive_export_key(
+  password: &str,
+  salt: &[u8],
+  iterations: u32,
+) -> Result<[u8; 32], String> {
+  if iterations == 0 {
+    return Err("配置文件迭代次数无效".to_string());
+  }
+  let mut key = [0u8; 32];
+  pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, iterations, &mut key);
+  Ok(key)
+}
+
+fn decode_export_base64(label: &str, value: &str) -> Result<Vec<u8>, String> {
+  BASE64
+    .decode(value.as_bytes())
+    .map_err(|_| format!("配置文件 {label} 无效"))
 }
 
 fn resolve_active_endpoint(settings: &Settings) -> Result<WebDavEndpoint, String> {
@@ -1407,6 +1623,8 @@ fn main() {
     .invoke_handler(tauri::generate_handler![
       get_settings,
       save_settings,
+      export_settings,
+      import_settings,
       list_messages,
       send_text,
       send_file,

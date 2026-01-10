@@ -33,6 +33,8 @@ const selectionCount = document.getElementById('selection-count');
 const deleteSelectedButton = document.getElementById('delete-selected');
 const cancelSelectionButton = document.getElementById('cancel-selection');
 const cleanupMessagesButton = document.getElementById('cleanup-messages');
+const exportSettingsButton = document.getElementById('export-settings');
+const importSettingsButton = document.getElementById('import-settings');
 
 let refreshTimer = null;
 let didInitialSync = false;
@@ -776,6 +778,90 @@ function showCleanupConfirmDialog() {
   });
 }
 
+function showPasswordDialog(options = {}) {
+  const titleText = options.title || '请输入密码';
+  const messageText = options.message || '此操作需要密码。';
+  const confirmText = options.confirmLabel || '确定';
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+
+    const dialog = document.createElement('div');
+    dialog.className = 'dialog';
+
+    const title = document.createElement('h3');
+    title.className = 'dialog-title';
+    title.textContent = titleText;
+
+    const message = document.createElement('p');
+    message.className = 'dialog-text';
+    message.textContent = messageText;
+
+    const input = document.createElement('input');
+    input.className = 'dialog-input';
+    input.type = 'password';
+    input.placeholder = '请输入密码';
+    input.autocomplete = 'new-password';
+
+    const actions = document.createElement('div');
+    actions.className = 'dialog-actions';
+
+    const confirmButton = document.createElement('button');
+    confirmButton.className = 'button primary small';
+    confirmButton.textContent = confirmText;
+    confirmButton.disabled = true;
+
+    const cancelButton = document.createElement('button');
+    cancelButton.className = 'button ghost small';
+    cancelButton.textContent = '取消';
+
+    const cleanup = (value) => {
+      document.removeEventListener('keydown', onKeyDown);
+      overlay.remove();
+      resolve(value);
+    };
+
+    const confirm = () => {
+      const value = input.value.trim();
+      if (!value) {
+        return;
+      }
+      cleanup(value);
+    };
+
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        cleanup(null);
+      }
+      if (event.key === 'Enter') {
+        confirm();
+      }
+    };
+
+    input.addEventListener('input', () => {
+      confirmButton.disabled = input.value.trim().length === 0;
+    });
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) {
+        cleanup(null);
+      }
+    });
+    confirmButton.addEventListener('click', confirm);
+    cancelButton.addEventListener('click', () => cleanup(null));
+
+    actions.appendChild(confirmButton);
+    actions.appendChild(cancelButton);
+    dialog.appendChild(title);
+    dialog.appendChild(message);
+    dialog.appendChild(input);
+    dialog.appendChild(actions);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    document.addEventListener('keydown', onKeyDown);
+    setTimeout(() => input.focus(), 0);
+  });
+}
+
 async function copyTextToClipboard(text) {
   if (!text) {
     setErrorStatus('没有可复制的内容');
@@ -1489,6 +1575,86 @@ async function saveSettings() {
   }
 }
 
+async function exportSettings() {
+  try {
+    if (!invoke) {
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
+      return;
+    }
+    if (!saveDialog) {
+      setErrorStatus('未检测到保存对话框插件，请确认已启用 dialog 插件');
+      return;
+    }
+    const target = await saveDialog({
+      defaultPath: 'transfer-genie-settings.json',
+      filters: [{ name: 'Transfer Genie 配置', extensions: ['json'] }],
+    });
+    if (!target) {
+      return;
+    }
+    const password = await showPasswordDialog({
+      title: '导出配置',
+      message: '请输入导出密码，导入时需要输入同一密码。',
+      confirmLabel: '导出',
+    });
+    if (!password) {
+      return;
+    }
+    await invoke('export_settings', { path: target, password });
+    setSuccessStatus(`配置已导出到 ${target}`.trim());
+  } catch (error) {
+    setErrorStatus(`导出配置失败：${error}`);
+  }
+}
+
+async function importSettings() {
+  try {
+    if (!invoke) {
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
+      return;
+    }
+    if (!openDialog) {
+      setErrorStatus('未检测到对话框插件，请确认已启用 dialog 插件');
+      return;
+    }
+    const selected = await openDialog({
+      multiple: false,
+      directory: false,
+      filters: [{ name: 'Transfer Genie 配置', extensions: ['json'] }],
+    });
+    if (!selected) {
+      return;
+    }
+    const path = Array.isArray(selected) ? selected[0] : selected;
+    if (!path) {
+      return;
+    }
+    const password = await showPasswordDialog({
+      title: '导入配置',
+      message: '请输入导入密码，导入将覆盖当前设置。',
+      confirmLabel: '导入',
+    });
+    if (!password) {
+      return;
+    }
+    const previousActive = activeEndpointId;
+    const updated = await invoke('import_settings', { path, password });
+    applySettings(updated);
+    setSuccessStatus('配置已导入并生效');
+    if (previousActive !== activeEndpointId && getActiveEndpoint()) {
+      setSelectionMode(false);
+      downloadProgress.clear();
+      downloadSpeed.clear();
+      pendingUploads.clear();
+      uploadSpeed.clear();
+      await manualRefresh();
+      didInitialSync = true;
+    }
+  } catch (error) {
+    setErrorStatus(`导入配置失败：${error}`);
+  }
+}
+
 async function sendText() {
   const text = textInput.value.trim();
   if (!text) {
@@ -1736,6 +1902,12 @@ if (cancelSelectionButton) {
 }
 if (cleanupMessagesButton) {
   cleanupMessagesButton.addEventListener('click', cleanupMessages);
+}
+if (exportSettingsButton) {
+  exportSettingsButton.addEventListener('click', exportSettings);
+}
+if (importSettingsButton) {
+  importSettingsButton.addEventListener('click', importSettings);
 }
 
 if (scrollToBottomButton) {

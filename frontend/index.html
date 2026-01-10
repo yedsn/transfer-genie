@@ -89,6 +89,13 @@
               </label>
               <button id="save-settings" class="button primary">保存设置</button>
               <div class="settings-actions">
+                <div class="settings-actions-row">
+                  <button id="export-settings" class="button ghost" type="button">导出配置</button>
+                  <button id="import-settings" class="button ghost" type="button">导入配置</button>
+                </div>
+                <span class="field-hint">导出文件会加密 WebDAV 凭据，导入将覆盖当前配置</span>
+              </div>
+              <div class="settings-actions">
                 <button id="cleanup-messages" class="button ghost" type="button">清理旧数据</button>
                 <span class="field-hint">将删除 30 天前的本地与远端消息</span>
               </div>
