@@ -925,16 +925,22 @@ input {
 .tab-button {
   border: none;
   background: transparent;
-  border-radius: 14px;
-  padding: 8px 12px;
+  border-radius: 0;
+  padding: 10px 14px;
   cursor: pointer;
   font-family: inherit;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
+  gap: 5px;
   color: var(--muted);
-  transition: transform 0.2s ease, background 0.2s ease, color 0.2s ease;
+  transition: all 0.25s ease;
+  position: relative;
+}
+
+.tab-button:hover {
+  background: transparent;
+  transform: translateY(-1px);
 }
 
 .tab-button.is-active {
@@ -944,25 +950,40 @@ input {
   box-shadow: none;
 }
 
+.tab-button.is-active:hover {
+  background: transparent;
+  transform: translateY(-1px);
+}
+
+.tab-icon {
+  width: 24px;
+  height: 24px;
+  opacity: 0.65;
+  transition: all 0.25s ease;
+  filter: brightness(0) saturate(100%) invert(43%) sepia(6%) saturate(320%) hue-rotate(240deg) brightness(96%) contrast(86%);
+}
+
+.tab-button:hover .tab-icon {
+  opacity: 0.85;
+  transform: scale(1.05);
+}
+
+.tab-button.is-active .tab-icon {
+  opacity: 1;
+  transform: scale(1.05);
+  filter: brightness(0) saturate(100%) invert(54%) sepia(95%) saturate(1391%) hue-rotate(350deg) brightness(96%) contrast(94%);
+}
+
 .tab-label {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: 0.2px;
+  transition: color 0.25s ease;
 }
 
 .tab-caption {
   display: none;
-}
-
-.tab-button::after {
-  content: "";
-  width: 18px;
-  height: 2px;
-  border-radius: 999px;
-  background: transparent;
-}
-
-.tab-button.is-active::after {
-  background: var(--accent);
 }
 
 @keyframes panel-reveal {
