@@ -1013,6 +1013,79 @@ fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
   Ok(status.clone())
 }
 
+#[derive(Serialize)]
+pub struct SpeedTestResult {
+  upload_speed_mbps: f64,
+  download_speed_mbps: f64,
+}
+
+#[tauri::command]
+async fn test_webdav_speed(
+  state: State<'_, AppState>,
+  endpoint: WebDavEndpoint,
+) -> Result<SpeedTestResult, String> {
+  use crate::webdav;
+  use std::time::Instant;
+
+  // 创建 1MB 的测试数据
+  const TEST_SIZE: usize = 1024 * 1024; // 1MB
+  let test_data: Vec<u8> = (0..TEST_SIZE).map(|i| (i % 256) as u8).collect();
+  const ROUNDS: usize = 3; // 测试3轮并取平均值
+
+  let mut upload_speeds = Vec::new();
+  let mut download_speeds = Vec::new();
+
+  // 进行多轮测试
+  for round in 0..ROUNDS {
+    let test_filename = format!("_speed_test_{}_{}.tmp", now_ms(), round);
+
+    // 测试上传速度
+    let upload_start = Instant::now();
+    webdav::upload_file(&state.http, &endpoint, &test_filename, test_data.clone())
+      .await
+      .map_err(|err| format!("上传测试失败（第{}轮）: {err}", round + 1))?;
+    let upload_duration = upload_start.elapsed();
+    let upload_seconds = upload_duration.as_secs_f64();
+    if upload_seconds > 0.0 {
+      let speed = (TEST_SIZE as f64 / upload_seconds) / (1024.0 * 1024.0);
+      upload_speeds.push(speed);
+    }
+
+    // 测试下载速度
+    let download_start = Instant::now();
+    let _downloaded = webdav::download_file(&state.http, &endpoint, &test_filename)
+      .await
+      .map_err(|err| format!("下载测试失败（第{}轮）: {err}", round + 1))?;
+    let download_duration = download_start.elapsed();
+    let download_seconds = download_duration.as_secs_f64();
+    if download_seconds > 0.0 {
+      let speed = (TEST_SIZE as f64 / download_seconds) / (1024.0 * 1024.0);
+      download_speeds.push(speed);
+    }
+
+    // 清理测试文件
+    let _ = webdav::delete_file(&state.http, &endpoint, &test_filename, true).await;
+  }
+
+  // 计算平均值
+  let upload_speed_mbps = if !upload_speeds.is_empty() {
+    upload_speeds.iter().sum::<f64>() / upload_speeds.len() as f64
+  } else {
+    0.0
+  };
+
+  let download_speed_mbps = if !download_speeds.is_empty() {
+    download_speeds.iter().sum::<f64>() / download_speeds.len() as f64
+  } else {
+    0.0
+  };
+
+  Ok(SpeedTestResult {
+    upload_speed_mbps,
+    download_speed_mbps,
+  })
+}
+
 fn current_settings(state: &State<'_, AppState>) -> Result<Settings, String> {
   let settings = state
     .settings
@@ -2054,7 +2127,8 @@ fn main() {
       delete_messages,
       cleanup_messages,
       manual_refresh,
-      get_sync_status
+      get_sync_status,
+      test_webdav_speed
     ])
     .build(tauri::generate_context!())
     .expect("error while building tauri application");

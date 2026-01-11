@@ -819,6 +819,12 @@ input {
   gap: 12px;
 }
 
+.endpoint-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .endpoint-header h3 {
   margin: 0;
   font-size: 16px;
@@ -880,6 +886,35 @@ input {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.speed-test-result {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  background: var(--panel-soft);
+  border-radius: 8px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.speed-test-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.speed-test-label {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.speed-test-value {
+  color: var(--ink);
+  font-weight: 600;
+  font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', monospace;
 }
 
 .toggle {

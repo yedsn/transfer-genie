@@ -22,6 +22,7 @@ const tabPanels = Array.from(document.querySelectorAll('[data-tab-panel]'));
 const endpointSelect = document.getElementById('active-endpoint');
 const webdavList = document.getElementById('webdav-list');
 const addWebdavButton = document.getElementById('add-webdav');
+const batchSpeedTestButton = document.getElementById('batch-speed-test');
 const senderNameInput = document.getElementById('sender-name');
 const refreshIntervalInput = document.getElementById('refresh-interval');
 const downloadDirInput = document.getElementById('download-dir');
@@ -253,6 +254,7 @@ function renderWebdavEndpoints() {
   webdavEndpoints.forEach((endpoint) => {
     const card = document.createElement('div');
     card.className = 'endpoint-card';
+    card.dataset.endpointId = endpoint.id;
     card.classList.toggle('is-disabled', !endpoint.enabled);
 
     const header = document.createElement('div');
@@ -329,8 +331,19 @@ function renderWebdavEndpoints() {
     activeLabel.appendChild(activeInput);
     activeLabel.append('当前');
 
+    const speedTestButton = document.createElement('button');
+    speedTestButton.type = 'button';
+    speedTestButton.className = 'button ghost small';
+    speedTestButton.textContent = '测速';
+    speedTestButton.disabled = !endpoint.url.trim();
+
+    const speedTestResult = document.createElement('div');
+    speedTestResult.className = 'speed-test-result';
+    speedTestResult.style.display = 'none';
+
     actions.appendChild(enabledLabel);
     actions.appendChild(activeLabel);
+    actions.appendChild(speedTestButton);
 
     nameInput.addEventListener('input', () => {
       endpoint.name = nameInput.value;
@@ -340,6 +353,7 @@ function renderWebdavEndpoints() {
     urlInput.addEventListener('input', () => {
       endpoint.url = urlInput.value;
       title.textContent = getEndpointLabel(endpoint);
+      speedTestButton.disabled = !endpoint.url.trim();
       if (!endpoint.url.trim() && activeEndpointId === endpoint.id) {
         activeEndpointId = null;
         activeInput.checked = false;
@@ -377,9 +391,56 @@ function renderWebdavEndpoints() {
       renderEndpointSelect();
     });
 
+    speedTestButton.addEventListener('click', async () => {
+      if (!endpoint.url.trim()) {
+        setErrorStatus('请先填写 WebDAV URL');
+        return;
+      }
+      speedTestButton.disabled = true;
+      speedTestButton.textContent = '测速中...';
+      speedTestResult.style.display = 'none';
+
+      try {
+        const result = await invoke('test_webdav_speed', {
+          endpoint: {
+            id: endpoint.id,
+            name: endpoint.name,
+            url: endpoint.url,
+            username: endpoint.username,
+            password: endpoint.password,
+            enabled: endpoint.enabled,
+          },
+        });
+
+        const uploadSpeed = result.upload_speed_mbps || 0;
+        const downloadSpeed = result.download_speed_mbps || 0;
+        speedTestResult.innerHTML = `
+          <div class="speed-test-item">
+            <span class="speed-test-label">上传：</span>
+            <span class="speed-test-value">${uploadSpeed.toFixed(2)} MB/s</span>
+          </div>
+          <div class="speed-test-item">
+            <span class="speed-test-label">下载：</span>
+            <span class="speed-test-value">${downloadSpeed.toFixed(2)} MB/s</span>
+          </div>
+        `;
+        speedTestResult.style.display = 'flex';
+        setSuccessStatus('测速完成');
+      } catch (error) {
+        speedTestResult.innerHTML = '';
+        speedTestResult.style.display = 'none';
+        setErrorStatus(`测速失败：${error}`);
+      } finally {
+        speedTestButton.disabled = false;
+        speedTestButton.textContent = '测速';
+      }
+    });
+
+
     card.appendChild(header);
     card.appendChild(fields);
     card.appendChild(actions);
+    card.appendChild(speedTestResult);
     webdavList.appendChild(card);
   });
 }
@@ -2181,6 +2242,86 @@ function addWebdavEndpoint() {
   renderWebdavEndpoints();
 }
 
+async function batchSpeedTest() {
+  if (!batchSpeedTestButton) return;
+
+  // 获取所有已填写 URL 的端点
+  const validEndpoints = webdavEndpoints.filter(
+    (endpoint) => endpoint.url && endpoint.url.trim(),
+  );
+
+  if (validEndpoints.length === 0) {
+    setErrorStatus('没有可测试的端点（请至少填写一个端点的 URL）');
+    return;
+  }
+
+  batchSpeedTestButton.disabled = true;
+  batchSpeedTestButton.textContent = `批量测速中（${validEndpoints.length}）...`;
+
+  // 为每个端点找到对应的卡片和按钮
+  const testPromises = validEndpoints.map(async (endpoint) => {
+    const card = document.querySelector(`[data-endpoint-id="${endpoint.id}"]`);
+    if (!card) return;
+
+    // 找到测速按钮（在 actions 中的最后一个按钮）
+    const actions = card.querySelector('.endpoint-actions');
+    if (!actions) return;
+    const buttons = Array.from(actions.querySelectorAll('.button.ghost.small[type="button"]'));
+    const speedTestButton = buttons[buttons.length - 1]; // 最后一个按钮是测速按钮
+    const speedTestResult = card.querySelector('.speed-test-result');
+
+    if (speedTestButton && speedTestResult) {
+      speedTestButton.disabled = true;
+      speedTestButton.textContent = '测速中...';
+      speedTestResult.style.display = 'none';
+
+      try {
+        const result = await invoke('test_webdav_speed', {
+          endpoint: {
+            id: endpoint.id,
+            name: endpoint.name,
+            url: endpoint.url,
+            username: endpoint.username,
+            password: endpoint.password,
+            enabled: endpoint.enabled,
+          },
+        });
+
+        const uploadSpeed = result.upload_speed_mbps || 0;
+        const downloadSpeed = result.download_speed_mbps || 0;
+        speedTestResult.innerHTML = `
+          <div class="speed-test-item">
+            <span class="speed-test-label">上传：</span>
+            <span class="speed-test-value">${uploadSpeed.toFixed(2)} MB/s</span>
+          </div>
+          <div class="speed-test-item">
+            <span class="speed-test-label">下载：</span>
+            <span class="speed-test-value">${downloadSpeed.toFixed(2)} MB/s</span>
+          </div>
+        `;
+        speedTestResult.style.display = 'flex';
+      } catch (error) {
+        speedTestResult.innerHTML = '';
+        speedTestResult.style.display = 'none';
+        // 批量测速时不在状态栏显示单个错误，只显示在结果区域
+      } finally {
+        speedTestButton.disabled = false;
+        speedTestButton.textContent = '测速';
+      }
+    }
+  });
+
+  try {
+    await Promise.all(testPromises);
+    setSuccessStatus(`批量测速完成（${validEndpoints.length} 个端点）`);
+  } catch (error) {
+    setErrorStatus(`批量测速失败：${error}`);
+  } finally {
+    batchSpeedTestButton.disabled = false;
+    batchSpeedTestButton.textContent = '批量测速';
+  }
+}
+
 async function switchActiveEndpoint() {
   const targetId = endpointSelect?.value;
   if (!targetId || targetId === activeEndpointId) {
@@ -2311,6 +2452,9 @@ if (chooseDownloadDirButton) {
 }
 if (addWebdavButton) {
   addWebdavButton.addEventListener('click', addWebdavEndpoint);
+}
+if (batchSpeedTestButton) {
+  batchSpeedTestButton.addEventListener('click', batchSpeedTest);
 }
 if (endpointSelect) {
   endpointSelect.addEventListener('change', switchActiveEndpoint);
