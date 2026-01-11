@@ -1425,6 +1425,34 @@ function renderMessages(messages, options = {}) {
         copyButton.appendChild(copyIcon);
         copyButton.addEventListener('click', () => copyTextToClipboard(message.content || ''));
         actions.appendChild(copyButton);
+
+        const menu = document.createElement('details');
+        menu.className = 'action-menu';
+
+        const summary = document.createElement('summary');
+        summary.className = 'button ghost small icon-only';
+        const iconImg = document.createElement('img');
+        iconImg.src = 'icons/more.svg';
+        iconImg.alt = '更多';
+        iconImg.style.width = '16px';
+        iconImg.style.height = '16px';
+        summary.appendChild(iconImg);
+
+        const menuList = document.createElement('div');
+        menuList.className = 'action-menu-list';
+
+        const deleteButton = document.createElement('button');
+        deleteButton.className = 'button ghost small delete-action';
+        deleteButton.textContent = '删除';
+        deleteButton.addEventListener('click', () => {
+          menu.open = false;
+          deleteSingleMessage(message);
+        });
+
+        menuList.appendChild(deleteButton);
+        menu.appendChild(summary);
+        menu.appendChild(menuList);
+        actions.appendChild(menu);
       }
     } else {
       if (message.uploading) {
