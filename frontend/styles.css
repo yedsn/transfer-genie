@@ -1046,6 +1046,7 @@ input {
 
 .tab-button {
   border: none;
+  outline: none;
   background: transparent;
   border-radius: 0;
   padding: 10px 14px;
