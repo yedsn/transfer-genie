@@ -2316,6 +2316,24 @@ if (messageList) {
 syncComposerOffset();
 window.addEventListener('resize', syncComposerOffset);
 
+// 点击外部区域关闭更多菜单
+document.addEventListener('click', (event) => {
+  const target = event.target;
+  
+  // 如果点击的是summary元素或其子元素，不处理（让默认行为执行）
+  if (target.closest('.action-menu summary')) {
+    return;
+  }
+  
+  // 关闭所有打开的菜单（如果点击不在菜单内部）
+  const openMenus = document.querySelectorAll('.action-menu[open]');
+  openMenus.forEach((menu) => {
+    if (!menu.contains(target)) {
+      menu.open = false;
+    }
+  });
+});
+
 if (textInput) {
   textInput.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && !event.shiftKey) {
