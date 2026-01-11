@@ -563,11 +563,16 @@ body {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  z-index: 100;
+  z-index: 500;
   width: max-content;
   min-width: 120px;
   animation: menuFadeIn 0.2s ease;
   overflow: hidden;
+}
+
+.action-menu-list.menu-up {
+  top: auto;
+  bottom: calc(100% + 8px);
 }
 
 @keyframes menuFadeIn {

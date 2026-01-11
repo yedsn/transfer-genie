@@ -1280,6 +1280,21 @@ async function cleanupMessages() {
     });
   }
 }
+function shouldShowMenuAbove(item) {
+  if (!messageList || !item) return false;
+  
+  const itemRect = item.getBoundingClientRect();
+  const listRect = messageList.getBoundingClientRect();
+  
+  // 计算菜单的大概高度（约100px）
+  const menuHeight = 100;
+  const spaceBelow = listRect.bottom - itemRect.bottom;
+  const spaceAbove = itemRect.top - listRect.top;
+  
+  // 如果下方空间不足，且上方空间足够，则在上方显示
+  return spaceBelow < menuHeight && spaceAbove >= menuHeight;
+}
+
 function renderMessages(messages, options = {}) {
   lastMessages = Array.isArray(messages) ? messages : [];
   const merged = mergeMessages(lastMessages);
@@ -1453,6 +1468,18 @@ function renderMessages(messages, options = {}) {
         menu.appendChild(summary);
         menu.appendChild(menuList);
         actions.appendChild(menu);
+        
+        // 检测菜单是否应该在图标上方显示
+        menu.addEventListener('toggle', () => {
+          // 使用setTimeout确保DOM已更新
+          setTimeout(() => {
+            if (menu.open && shouldShowMenuAbove(item)) {
+              menuList.classList.add('menu-up');
+            } else {
+              menuList.classList.remove('menu-up');
+            }
+          }, 0);
+        });
       }
     } else {
       if (message.uploading) {
@@ -1527,6 +1554,18 @@ function renderMessages(messages, options = {}) {
         menu.appendChild(summary);
         menu.appendChild(menuList);
         actions.appendChild(menu);
+        
+        // 检测菜单是否应该在图标上方显示
+        menu.addEventListener('toggle', () => {
+          // 使用setTimeout确保DOM已更新
+          setTimeout(() => {
+            if (menu.open && shouldShowMenuAbove(item)) {
+              menuList.classList.add('menu-up');
+            } else {
+              menuList.classList.remove('menu-up');
+            }
+          }, 0);
+        });
       }
     }
 
