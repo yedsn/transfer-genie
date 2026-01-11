@@ -41,7 +41,7 @@ body {
 .app {
   width: 100%;
   margin: 0;
-  padding: 0 0 var(--tabbar-height);
+  padding: 0 0 calc(var(--tabbar-height) + 20px);
   display: flex;
   flex-direction: column;
   gap: 0;
@@ -1223,7 +1223,7 @@ input {
   }
 
   .app {
-    padding: 0 0 var(--tabbar-height);
+    padding: 0 0 calc(var(--tabbar-height) + 20px);
   }
 
   .topbar {
