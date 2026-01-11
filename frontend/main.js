@@ -1401,8 +1401,13 @@ function renderMessages(messages, options = {}) {
         actions.appendChild(statusTag);
       } else {
         const copyButton = document.createElement('button');
-        copyButton.className = 'button ghost small';
-        copyButton.textContent = '复制';
+        copyButton.className = 'button ghost small icon-only';
+        const copyIcon = document.createElement('img');
+        copyIcon.src = 'icons/copy.svg';
+        copyIcon.alt = '复制';
+        copyIcon.style.width = '16px';
+        copyIcon.style.height = '16px';
+        copyButton.appendChild(copyIcon);
         copyButton.addEventListener('click', () => copyTextToClipboard(message.content || ''));
         actions.appendChild(copyButton);
       }
@@ -1422,8 +1427,13 @@ function renderMessages(messages, options = {}) {
 
         if (!message.download_exists) {
           const downloadButton = document.createElement('button');
-          downloadButton.className = 'button primary small download-action';
-          downloadButton.textContent = '下载';
+          downloadButton.className = 'button primary small icon-only download-action';
+          const downloadIcon = document.createElement('img');
+          downloadIcon.src = 'icons/download.svg';
+          downloadIcon.alt = '下载';
+          downloadIcon.style.width = '16px';
+          downloadIcon.style.height = '16px';
+          downloadButton.appendChild(downloadIcon);
           downloadButton.addEventListener('click', () => downloadMessageFile(message));
           actions.appendChild(downloadButton);
 
@@ -1442,7 +1452,7 @@ function renderMessages(messages, options = {}) {
         menu.className = 'action-menu';
 
         const summary = document.createElement('summary');
-        summary.className = 'button ghost small';
+        summary.className = 'button ghost small icon-only';
         const iconImg = document.createElement('img');
         iconImg.src = 'icons/more.svg';
         iconImg.alt = '更多';

@@ -282,6 +282,7 @@ body {
 
 .message-meta {
   font-size: 12px;
+  width: 80px;
   color: var(--muted);
 }
 
@@ -297,6 +298,54 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.button.icon-only {
+  border-radius: 0;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  transition: background 0.2s ease;
+  transform: none;
+}
+
+.button.icon-only.ghost {
+  border: none;
+}
+
+.button.icon-only.primary {
+  background: transparent;
+  border: none;
+}
+
+.button.icon-only:hover {
+  background: var(--panel-soft);
+  transform: none;
+}
+
+.button.icon-only img {
+  display: block;
+  opacity: 0.7;
+  transition: opacity 0.2s ease, filter 0.2s ease;
+}
+
+.button.icon-only:hover img {
+  opacity: 1;
+}
+
+.button.icon-only.primary img {
+  opacity: 1;
+  filter: brightness(0) saturate(100%) invert(54%) sepia(95%) saturate(1391%) hue-rotate(350deg) brightness(96%) contrast(94%);
+}
+
+.button.icon-only.primary:hover img {
+  opacity: 1;
+  filter: brightness(0) saturate(100%) invert(54%) sepia(95%) saturate(1391%) hue-rotate(350deg) brightness(96%) contrast(94%);
 }
 
 .message-select {
@@ -507,14 +556,15 @@ body {
   top: calc(100% + 8px);
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 12px;
-  box-shadow: 0 8px 24px rgba(15, 15, 25, 0.12), 0 2px 8px rgba(15, 15, 25, 0.08);
-  padding: 8px;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(15, 15, 25, 0.1), 0 2px 4px rgba(15, 15, 25, 0.06);
+  padding: 4px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
   z-index: 100;
-  min-width: 140px;
+  width: max-content;
+  min-width: 120px;
   animation: menuFadeIn 0.2s ease;
   overflow: hidden;
 }
@@ -536,13 +586,18 @@ body {
 
 .action-menu-list .button {
   width: 100%;
+  display: block;
   justify-content: flex-start;
   text-align: left;
   padding: 8px 12px;
-  border-radius: 8px;
+  border-radius: 6px;
   font-size: 13px;
+  font-weight: 500;
   transition: all 0.15s ease;
   margin: 0;
+  border: none;
+  background: transparent;
+  box-sizing: border-box;
 }
 
 .action-menu-list .button:hover {
@@ -553,6 +608,7 @@ body {
 
 .action-menu-list .button:active {
   transform: scale(0.98);
+  background: #e8e8e8;
 }
 
 .action-menu-list .button.delete-action {
@@ -562,6 +618,11 @@ body {
 .action-menu-list .button.delete-action:hover {
   background: #ffebee;
   color: #c62828;
+}
+
+.action-menu-list .button.delete-action:active {
+  background: #ffcdd2;
+  color: #b71c1c;
 }
 
 .selection-count {
@@ -627,7 +688,7 @@ textarea {
   max-height: 160px;
   border: none;
   background: transparent;
-  padding: 8px 64px 18px 8px;
+  padding: 8px 140px 18px 8px;
   font-family: inherit;
   resize: none;
   font-size: 14px;
@@ -642,6 +703,61 @@ textarea {
   position: absolute;
   right: 8px;
   bottom: 8px;
+}
+
+.composer-actions .icon-button {
+  border-radius: 50px;
+  padding: 4px 12px;
+  height: auto;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  transition: background 0.2s ease, border-color 0.2s ease;
+  transform: none;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.composer-actions .icon-button.primary {
+  background: transparent;
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.composer-actions .icon-button:hover {
+  background: var(--panel-soft);
+  transform: none;
+}
+
+.composer-actions .icon-button.primary:hover {
+  background: rgba(255, 122, 47, 0.1);
+}
+
+.composer-actions .icon-button img {
+  display: block;
+  flex-shrink: 0;
+  opacity: 0.7;
+  transition: opacity 0.2s ease, filter 0.2s ease;
+}
+
+.composer-actions .icon-button:hover img {
+  opacity: 1;
+}
+
+.composer-actions .icon-button.primary img {
+  opacity: 1;
+  filter: brightness(0) saturate(100%) invert(54%) sepia(95%) saturate(1391%) hue-rotate(350deg) brightness(96%) contrast(94%);
+}
+
+.composer-actions .icon-button.primary:hover img {
+  opacity: 1;
+  filter: brightness(0) saturate(100%) invert(54%) sepia(95%) saturate(1391%) hue-rotate(350deg) brightness(96%) contrast(94%);
 }
 
 label {
