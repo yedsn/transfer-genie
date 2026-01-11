@@ -1563,7 +1563,7 @@ async fn run_sync(state: &AppState, source: &str) -> Result<SyncStatus, String> 
       .map_err(|_| "更新同步状态失败".to_string())?;
     status.running = true;
     status.last_error = None;
-    status.last_result = Some(format!("同步中：{source}"));
+    status.last_result = Some(format!("同步中：{source}..."));
   }
 
   let result = sync_once(state).await;

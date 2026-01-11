@@ -1762,7 +1762,7 @@ async function loadSyncStatus() {
       return;
     }
     if (status.running) {
-      setStatus(status.last_result || '同步中');
+      setStatus(status.last_result || '同步中...');
     } else {
       setSuccessStatus(status.last_result || '已同步');
     }
