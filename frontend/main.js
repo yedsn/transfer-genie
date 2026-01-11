@@ -825,6 +825,30 @@ function showCleanupConfirmDialog() {
   });
 }
 
+function showToast(message, type = 'info') {
+  let container = document.getElementById('toast-container');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'toast-container';
+    container.className = 'toast-container';
+    document.body.appendChild(container);
+  }
+
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.textContent = message;
+
+  container.appendChild(toast);
+
+  setTimeout(() => {
+    toast.style.opacity = '0';
+    toast.style.transform = 'translateY(-12px) scale(0.96)';
+    setTimeout(() => {
+      toast.remove();
+    }, 250);
+  }, 2000);
+}
+
 function showInfoDialog(options = {}) {
   const titleText = options.title || '提示';
   const messageText = options.message || '';
@@ -966,10 +990,7 @@ function showPasswordDialog(options = {}) {
 
 async function copyTextToClipboard(text) {
   if (!text) {
-    await showInfoDialog({
-      title: '复制失败',
-      message: '没有可复制的内容',
-    });
+    showToast('没有可复制的内容', 'error');
     return;
   }
   try {
@@ -986,15 +1007,9 @@ async function copyTextToClipboard(text) {
       document.execCommand('copy');
       document.body.removeChild(textarea);
     }
-    await showInfoDialog({
-      title: '复制成功',
-      message: '已复制到剪贴板',
-    });
+    showToast('已复制到剪贴板', 'success');
   } catch (error) {
-    await showInfoDialog({
-      title: '复制失败',
-      message: String(error),
-    });
+    showToast(`复制失败：${String(error)}`, 'error');
   }
 }
 
