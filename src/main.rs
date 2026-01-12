@@ -800,6 +800,21 @@ async fn open_message_file(
 }
 
 #[tauri::command]
+async fn open_download_dir(
+  app: AppHandle,
+  state: State<'_, AppState>,
+) -> Result<(), String> {
+  let settings = current_settings(&state)?;
+  let base_dir = resolve_download_dir(&state, &settings);
+  fs::create_dir_all(&base_dir).map_err(|err| format!("创建下载目录失败: {err}"))?;
+  app
+    .opener()
+    .open_path(base_dir.to_string_lossy().to_string(), None::<&str>)
+    .map_err(|err| format!("打开下载目录失败: {err}"))?;
+  Ok(())
+}
+
+#[tauri::command]
 fn minimize_window(app: AppHandle, window: Window) -> Result<(), String> {
   window
     .hide()
@@ -2123,6 +2138,7 @@ fn main() {
       fetch_image_preview,
       save_message_file_as,
       open_message_file,
+      open_download_dir,
       minimize_window,
       delete_messages,
       cleanup_messages,

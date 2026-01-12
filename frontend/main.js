@@ -9,6 +9,7 @@ const syncStatus = document.getElementById('sync-status');
 const refreshButton = document.getElementById('refresh-btn');
 const refreshLabel = refreshButton ? refreshButton.querySelector('.refresh-label') : null;
 const refreshLabelDefault = refreshLabel ? refreshLabel.textContent : '';
+const openDownloadDirButton = document.getElementById('open-download-dir');
 const textInput = document.getElementById('text-input');
 const sendTextButton = document.getElementById('send-text');
 const sendFileButton = document.getElementById('send-file');
@@ -2230,6 +2231,18 @@ async function chooseDownloadDir() {
   }
 }
 
+async function openDownloadDir() {
+  try {
+    if (!invoke) {
+      setErrorStatus('未检测到 Tauri API，请确认应用环境正常');
+      return;
+    }
+    await invoke('open_download_dir');
+  } catch (error) {
+    setErrorStatus(`打开下载目录失败：${error}`);
+  }
+}
+
 function addWebdavEndpoint() {
   webdavEndpoints.push({
     id: generateEndpointId(),
@@ -2444,6 +2457,9 @@ if (listen) {
 }
 
 refreshButton.addEventListener('click', manualRefresh);
+if (openDownloadDirButton) {
+  openDownloadDirButton.addEventListener('click', openDownloadDir);
+}
 sendTextButton.addEventListener('click', sendText);
 sendFileButton.addEventListener('click', sendFile);
 saveSettingsButton.addEventListener('click', saveSettings);
