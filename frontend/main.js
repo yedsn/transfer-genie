@@ -714,7 +714,7 @@ function showDeleteConfirmDialog(count) {
 
     const message = document.createElement('p');
     message.className = 'dialog-text';
-    message.textContent = `将删除 ${count} 条消息，选择删除范围。`;
+    message.textContent = `选择删除范围：仅本地删除将删除本地文件但保留消息记录，本地+远端删除将完全删除消息。`;
 
     const actions = document.createElement('div');
     actions.className = 'dialog-actions';
@@ -1244,10 +1244,17 @@ async function deleteSingleMessage(message) {
         message: '删除失败，请稍后再试',
       });
     } else {
-      await showInfoDialog({
-        title: '删除成功',
-        message: '已删除 1 条消息',
-      });
+      if (choice === 'remote') {
+        await showInfoDialog({
+          title: '删除成功',
+          message: '已删除 1 条消息',
+        });
+      } else {
+        await showInfoDialog({
+          title: '删除成功',
+          message: '已删除本地文件',
+        });
+      }
     }
     await loadMessages();
   } catch (error) {
@@ -1290,10 +1297,17 @@ async function deleteSelectedMessages() {
         message: `已删除 ${result.deleted || 0} 条消息，${failed.length} 条处理失败`,
       });
     } else {
-      await showInfoDialog({
-        title: '删除成功',
-        message: `已删除 ${result.deleted || filenames.length} 条消息`,
-      });
+      if (choice === 'remote') {
+        await showInfoDialog({
+          title: '删除成功',
+          message: `已删除 ${result.deleted || filenames.length} 条消息`,
+        });
+      } else {
+        await showInfoDialog({
+          title: '删除成功',
+          message: `已删除 ${result.deleted || filenames.length} 个文件的本地副本`,
+        });
+      }
     }
   } catch (error) {
     await showInfoDialog({

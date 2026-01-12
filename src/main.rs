@@ -896,36 +896,65 @@ async fn delete_messages(
     }
   }
 
-  let deletable = if delete_remote { succeeded } else { targets };
-  if deletable.is_empty() {
-    return Ok(DeleteSummary {
-      deleted: 0,
-      failed,
-    });
-  }
-
-  let mut messages = Vec::new();
-  for filename in &deletable {
-    if let Some(message) = db::get_message(&state.db_path, &endpoint.id, filename)
-      .map_err(|err| err.to_string())?
-    {
-      messages.push(message);
+  if delete_remote {
+    // 删除远程和本地：删除本地文件并删除消息记录
+    let deletable = succeeded;
+    if deletable.is_empty() {
+      return Ok(DeleteSummary {
+        deleted: 0,
+        failed,
+      });
     }
-  }
 
-  for message in &messages {
-    delete_local_files_for_entry(
-      &state,
-      &settings,
-      &message.kind,
-      &message.original_name,
-      message.local_path.as_deref(),
-    )?;
-  }
+    let mut messages = Vec::new();
+    for filename in &deletable {
+      if let Some(message) = db::get_message(&state.db_path, &endpoint.id, filename)
+        .map_err(|err| err.to_string())?
+      {
+        messages.push(message);
+      }
+    }
 
-  let deleted = db::delete_messages(&state.db_path, &endpoint.id, &deletable)
-    .map_err(|err| err.to_string())?;
-  Ok(DeleteSummary { deleted, failed })
+    for message in &messages {
+      delete_local_files_for_entry(
+        &state,
+        &settings,
+        &message.kind,
+        &message.original_name,
+        message.local_path.as_deref(),
+      )?;
+    }
+
+    let deleted = db::delete_messages(&state.db_path, &endpoint.id, &deletable)
+      .map_err(|err| err.to_string())?;
+    Ok(DeleteSummary { deleted, failed })
+  } else {
+    // 仅本地删除：只删除本地文件，保留消息记录（清空 local_path 和 file_hash）
+    let mut messages = Vec::new();
+    for filename in &targets {
+      if let Some(message) = db::get_message(&state.db_path, &endpoint.id, filename)
+        .map_err(|err| err.to_string())?
+      {
+        messages.push(message);
+      }
+    }
+
+    for message in &messages {
+      delete_local_files_for_entry(
+        &state,
+        &settings,
+        &message.kind,
+        &message.original_name,
+        message.local_path.as_deref(),
+      )?;
+      clear_message_local_path(&state.db_path, &endpoint.id, &message.filename)?;
+    }
+
+    Ok(DeleteSummary {
+      deleted: targets.len(),
+      failed: Vec::new(),
+    })
+  }
 }
 
 #[tauri::command]
@@ -1599,6 +1628,20 @@ fn update_message_local_path(
   if file_hash.is_some() {
     message.file_hash = file_hash;
   }
+  db::upsert_message(db_path, &message).map_err(|err| err.to_string())?;
+  Ok(())
+}
+
+fn clear_message_local_path(
+  db_path: &Path,
+  endpoint_id: &str,
+  filename: &str,
+) -> Result<(), String> {
+  let existing =
+    db::get_message(db_path, endpoint_id, filename).map_err(|err| err.to_string())?;
+  let mut message = existing.ok_or_else(|| "未找到消息记录".to_string())?;
+  message.local_path = None;
+  message.file_hash = None;
   db::upsert_message(db_path, &message).map_err(|err| err.to_string())?;
   Ok(())
 }
