@@ -2362,6 +2362,36 @@ async function switchActiveEndpoint() {
   }
 }
 
+async function updateMessageDownloadStatus(filename) {
+  try {
+    if (!invoke || !getActiveEndpoint()) {
+      return;
+    }
+    // 重新加载当前页的消息列表以获取最新的下载状态
+    const result = await invoke('list_messages', { limit: PAGE_SIZE, offset: currentOffset });
+    const updatedMessages = result.messages || [];
+    
+    // 创建消息映射以便快速查找
+    const messageMap = new Map(updatedMessages.map(msg => [msg.filename, msg]));
+    
+    // 如果目标消息在当前页返回的消息中，更新 lastMessages 数组中对应的消息
+    if (messageMap.has(filename)) {
+      const updatedMessage = messageMap.get(filename);
+      lastMessages = lastMessages.map(msg => {
+        if (msg.filename === filename) {
+          return updatedMessage;
+        }
+        return msg;
+      });
+      
+      // 重新渲染消息列表，保留滚动位置
+      renderMessages(lastMessages, { preserveScroll: true });
+    }
+  } catch (error) {
+    console.error('更新下载状态失败：', error);
+  }
+}
+
 async function manualRefresh() {
   try {
     if (!invoke) {
@@ -2400,8 +2430,8 @@ if (listen) {
       downloadProgress.delete(filename);
       downloadSpeed.delete(filename);
       updateProgressUI(filename);
-      // 下载完成后使用增量更新，避免打断用户浏览
-      loadMessages({ checkNew: true });
+      // 下载完成后重新获取消息以更新下载状态
+      updateMessageDownloadStatus(filename);
       return;
     }
     if (payload.status === 'error') {
