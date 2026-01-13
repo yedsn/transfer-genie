@@ -187,8 +187,8 @@ fn save_settings(app: AppHandle, state: State<'_, AppState>, settings: Settings)
   {
     // 设置开机自启动
     if let Err(err) = set_autostart(&app, normalized.auto_start) {
-      eprintln!("设置开机自启动失败: {}", err);
-      // 不阻止设置保存，只记录错误
+      // 自启动设置失败时返回错误，让用户知道设置失败
+      return Err(format!("设置开机自启动失败: {err}"));
     }
   }
 
