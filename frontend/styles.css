@@ -925,6 +925,45 @@ input {
   color: var(--muted);
 }
 
+.toggle-left {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  white-space: nowrap;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--ink);
+}
+
+.toggle-label {
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fffdf9;
+}
+
+.settings-group-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.settings-group-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
 .settings-actions {
   display: flex;
   flex-direction: column;

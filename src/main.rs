@@ -18,6 +18,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
 use std::collections::{HashMap, HashSet};
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -177,10 +178,19 @@ fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
 }
 
 #[tauri::command]
-fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<Settings, String> {
+fn save_settings(app: AppHandle, state: State<'_, AppState>, settings: Settings) -> Result<Settings, String> {
   let normalized = normalize_settings(settings, &state.default_download_dir)?;
 
   write_settings(&state.settings_path, &normalized)?;
+
+  #[cfg(desktop)]
+  {
+    // 设置开机自启动
+    if let Err(err) = set_autostart(&app, normalized.auto_start) {
+      eprintln!("设置开机自启动失败: {}", err);
+      // 不阻止设置保存，只记录错误
+    }
+  }
 
   let mut guard = state
     .settings
@@ -254,6 +264,7 @@ fn import_settings(
     sender_name: existing.sender_name,
     refresh_interval_secs: bundle.settings.refresh_interval_secs,
     download_dir: existing.download_dir,
+    auto_start: existing.auto_start,
   };
   apply_export_secrets(&mut settings, secrets)?;
   let normalized = normalize_settings(settings, &state.default_download_dir)?;
@@ -1431,6 +1442,7 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
         sender_name,
         refresh_interval_secs: legacy.refresh_interval_secs,
         download_dir: legacy.download_dir,
+        auto_start: false,
       }
     };
     let normalized = normalize_settings(settings, fallback_download_dir)?;
@@ -1443,6 +1455,7 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
       sender_name: random_sender_name(),
       refresh_interval_secs: 5,
       download_dir: normalize_download_dir("", fallback_download_dir),
+      auto_start: false,
     };
     write_settings(path, &settings)?;
     Ok(settings)
@@ -1983,6 +1996,128 @@ fn toggle_main_window(app: &AppHandle) {
       sync_dock_visibility_webview(app, &window);
     }
   }
+}
+
+#[cfg(desktop)]
+fn set_autostart(_app: &AppHandle, enabled: bool) -> Result<(), String> {
+  let exe = env::current_exe().map_err(|err| format!("获取可执行文件路径失败: {err}"))?;
+  let exe_str = exe.to_str().ok_or("可执行文件路径无效")?;
+
+  #[cfg(target_os = "windows")]
+  {
+    use winreg::enums::*;
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let run = hkcu.open_subkey_with_flags("Software\\Microsoft\\Windows\\CurrentVersion\\Run", KEY_WRITE)
+      .map_err(|err| format!("打开注册表失败: {err}"))?;
+
+    if enabled {
+      run.set_value("transfer-genie", &exe_str.to_string())
+        .map_err(|err| format!("设置自启动失败: {err}"))?;
+    } else {
+      let _ = run.delete_value("transfer-genie");
+    }
+  }
+
+  #[cfg(target_os = "macos")]
+  {
+    use std::process::Command;
+
+    let home = env::var("HOME").map_err(|_| "无法获取 HOME 目录")?;
+    let plist_path = format!("{}/Library/LaunchAgents/com.transfer-genie.plist", home);
+    
+    // 获取当前用户 ID
+    let uid_output = Command::new("id")
+      .args(&["-u"])
+      .output()
+      .map_err(|_| "无法获取用户 ID")?;
+    let uid = String::from_utf8_lossy(&uid_output.stdout).trim().to_string();
+    let domain_target = format!("gui/{}", uid);
+
+    if enabled {
+      let plist_content = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.transfer-genie</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>"#,
+        exe_str.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+      );
+
+      fs::create_dir_all(Path::new(&plist_path).parent().unwrap())
+        .map_err(|err| format!("创建目录失败: {err}"))?;
+      fs::write(&plist_path, plist_content)
+        .map_err(|err| format!("写入 plist 文件失败: {err}"))?;
+
+      // 先尝试卸载（如果存在）
+      let _ = Command::new("launchctl")
+        .args(&["bootout", &domain_target, &plist_path])
+        .output();
+      
+      // 使用 bootstrap 加载（macOS 10.11+ 推荐方式）
+      let output = Command::new("launchctl")
+        .args(&["bootstrap", &domain_target, &plist_path])
+        .output();
+      
+      match output {
+        Ok(result) if result.status.success() => {
+          // 成功
+        }
+        Ok(result) => {
+          let stderr = String::from_utf8_lossy(&result.stderr);
+          // 如果是因为已经存在，这不算错误
+          if !stderr.contains("Service is already bootstrapped") {
+            eprintln!("警告：设置自启动时出现错误: {}", stderr);
+          }
+        }
+        Err(e) => {
+          eprintln!("警告：无法执行 launchctl 命令: {}", e);
+        }
+      }
+    } else {
+      // 使用 bootout 卸载
+      let _ = Command::new("launchctl")
+        .args(&["bootout", &domain_target, &plist_path])
+        .output();
+      let _ = fs::remove_file(&plist_path);
+    }
+  }
+
+  #[cfg(target_os = "linux")]
+  {
+    use std::process::Command;
+
+    let desktop_file = format!(
+      "{}/.config/autostart/transfer-genie.desktop",
+      env::var("HOME").map_err(|_| "无法获取 HOME 目录")?
+    );
+
+    if enabled {
+      let desktop_content = format!(
+        "[Desktop Entry]\nType=Application\nName=Transfer Genie\nExec={}\nHidden=false\nNoDisplay=false\nX-GNOME-Autostart-enabled=true\n",
+        exe_str
+      );
+
+      fs::create_dir_all(Path::new(&desktop_file).parent().unwrap())
+        .map_err(|err| format!("创建目录失败: {err}"))?;
+      fs::write(&desktop_file, desktop_content)
+        .map_err(|err| format!("写入 desktop 文件失败: {err}"))?;
+    } else {
+      let _ = fs::remove_file(&desktop_file);
+    }
+  }
+
+  Ok(())
 }
 
 #[cfg(desktop)]

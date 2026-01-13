@@ -28,6 +28,8 @@ pub struct Settings {
   pub refresh_interval_secs: u64,
   #[serde(default)]
   pub download_dir: String,
+  #[serde(default)]
+  pub auto_start: bool,
 }
 
 #[derive(Clone, Serialize)]

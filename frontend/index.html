@@ -85,35 +85,58 @@
                 <div id="webdav-list" class="endpoint-list"></div>
                 <span class="field-hint">仅启用的端点可在首页选择。</span>
               </div>
-              <label>
-                发送者名称
-                <input id="sender-name" type="text" />
-              </label>
-              <label>
-                刷新间隔（秒）
-                <input id="refresh-interval" type="number" min="1" step="1" />
-              </label>
-              <label>
-                下载目录
-                <div class="field-row">
-                  <input id="download-dir" type="text" placeholder="系统默认下载目录" />
-                  <button id="choose-download-dir" class="button ghost small" type="button">
-                    选择
-                  </button>
+
+              <div class="settings-group">
+                <h3 class="settings-group-title">基本设置</h3>
+                <div class="settings-group-content">
+                  <label>
+                    发送者名称
+                    <input id="sender-name" type="text" />
+                  </label>
+                  <label>
+                    刷新间隔（秒）
+                    <input id="refresh-interval" type="number" min="1" step="1" />
+                  </label>
+                  <label>
+                    下载目录
+                    <div class="field-row">
+                      <input id="download-dir" type="text" placeholder="系统默认下载目录" />
+                      <button id="choose-download-dir" class="button ghost small" type="button">
+                        选择
+                      </button>
+                    </div>
+                    <span id="download-dir-hint" class="field-hint"></span>
+                  </label>
                 </div>
-                <span id="download-dir-hint" class="field-hint"></span>
-              </label>
-              <button id="save-settings" class="button primary">保存设置</button>
-              <div class="settings-actions">
-                <div class="settings-actions-row">
-                  <button id="export-settings" class="button ghost" type="button">导出配置</button>
-                  <button id="import-settings" class="button ghost" type="button">导入配置</button>
-                </div>
-                <span class="field-hint">导出文件会加密 WebDAV 凭据，导入将覆盖当前配置</span>
               </div>
-              <div class="settings-actions">
-                <button id="cleanup-messages" class="button ghost" type="button">清理旧数据</button>
-                <span class="field-hint">可选择时间范围与清理范围（仅本地或包含 WebDAV 远端）</span>
+
+              <div class="settings-group">
+                <h3 class="settings-group-title">系统设置</h3>
+                <div class="settings-group-content">
+                  <label class="toggle-left">
+                    <span class="toggle-label">开机自启动</span>
+                    <input id="auto-start" type="checkbox" />
+                  </label>
+                </div>
+              </div>
+
+              <button id="save-settings" class="button primary">保存设置</button>
+
+              <div class="settings-group">
+                <h3 class="settings-group-title">数据管理</h3>
+                <div class="settings-group-content">
+                  <div class="settings-actions">
+                    <div class="settings-actions-row">
+                      <button id="export-settings" class="button ghost" type="button">导出配置</button>
+                      <button id="import-settings" class="button ghost" type="button">导入配置</button>
+                    </div>
+                    <span class="field-hint">导出文件会加密 WebDAV 凭据，导入将覆盖当前配置</span>
+                  </div>
+                  <div class="settings-actions">
+                    <button id="cleanup-messages" class="button ghost" type="button">清理旧数据</button>
+                    <span class="field-hint">可选择时间范围与清理范围（仅本地或包含 WebDAV 远端）</span>
+                  </div>
+                </div>
               </div>
             </div>
           </section>

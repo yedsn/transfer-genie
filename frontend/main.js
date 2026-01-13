@@ -29,6 +29,7 @@ const refreshIntervalInput = document.getElementById('refresh-interval');
 const downloadDirInput = document.getElementById('download-dir');
 const chooseDownloadDirButton = document.getElementById('choose-download-dir');
 const downloadDirHint = document.getElementById('download-dir-hint');
+const autoStartInput = document.getElementById('auto-start');
 const toggleSelectionButton = document.getElementById('toggle-selection');
 const selectionBar = document.getElementById('selection-bar');
 const selectionCount = document.getElementById('selection-count');
@@ -1973,6 +1974,9 @@ function applySettings(settings) {
     downloadDirInput.value = settings.download_dir || '';
     setHint(downloadDirHint, '');
   }
+  if (autoStartInput) {
+    autoStartInput.checked = settings.auto_start || false;
+  }
   renderWebdavEndpoints();
   renderEndpointSelect();
   startRefreshTimer(settings.refresh_interval_secs || 5);
@@ -2012,6 +2016,7 @@ async function saveSettings() {
     sender_name: senderNameInput.value.trim(),
     refresh_interval_secs: Number(refreshIntervalInput.value) || 5,
     download_dir: downloadDirInput ? downloadDirInput.value.trim() : '',
+    auto_start: autoStartInput ? autoStartInput.checked : false,
   };
 
   try {
