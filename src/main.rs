@@ -2067,21 +2067,18 @@ fn set_autostart(_app: &AppHandle, enabled: bool) -> Result<(), String> {
       // 使用 bootstrap 加载（macOS 10.11+ 推荐方式）
       let output = Command::new("launchctl")
         .args(&["bootstrap", &domain_target, &plist_path])
-        .output();
+        .output()
+        .map_err(|e| format!("无法执行 launchctl 命令: {e}"))?;
       
-      match output {
-        Ok(result) if result.status.success() => {
-          // 成功
-        }
-        Ok(result) => {
-          let stderr = String::from_utf8_lossy(&result.stderr);
-          // 如果是因为已经存在，这不算错误
-          if !stderr.contains("Service is already bootstrapped") {
-            eprintln!("警告：设置自启动时出现错误: {}", stderr);
-          }
-        }
-        Err(e) => {
-          eprintln!("警告：无法执行 launchctl 命令: {}", e);
+      if output.status.success() {
+        // 成功
+      } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // 如果是因为已经存在，这不算错误（先卸载再加载可能仍然存在）
+        if stderr.contains("Service is already bootstrapped") || stderr.is_empty() {
+          // 服务已存在，视为成功
+        } else {
+          return Err(format!("设置自启动失败: {}", stderr));
         }
       }
     } else {
