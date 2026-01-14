@@ -2071,6 +2071,7 @@ fn toggle_main_window(app: &AppHandle) {
       let _ = window.unminimize();
       let _ = window.show();
       let _ = window.set_focus();
+      let _ = window.emit("trigger-show", ());
       #[cfg(target_os = "macos")]
       sync_dock_visibility_webview(app, &window);
     }

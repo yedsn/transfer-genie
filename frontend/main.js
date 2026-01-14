@@ -2745,13 +2745,6 @@ function handleWindowFocus() {
   focusHomeComposer();
 }
 
-window.addEventListener('focus', handleWindowFocus);
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') {
-    handleWindowFocus();
-  }
-});
-
 loadSettings();
 loadMessages({ scrollToBottom: true });
 loadSyncStatus();
@@ -2799,12 +2792,6 @@ async function sendFileByPath(path) {
   }
 }
 
-function isPointInElement(x, y, element) {
-  if (!element) return false;
-  const rect = element.getBoundingClientRect();
-  return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
-}
-
 function setDragOverState(active) {
   if (composerRow) {
     composerRow.classList.toggle('is-drag-over', active);
@@ -2812,8 +2799,15 @@ function setDragOverState(active) {
 }
 
 if (listen) {
-  listen('tauri://focus', handleWindowFocus);
+  // 全局快捷键的特定监听器
+  listen('trigger-show', handleWindowFocus);
 
+  // 用于非侵入性操作的通用焦点监听器
+  listen('tauri://focus', () => {
+    loadSyncStatus();
+  });
+
+  // 拖放事件监听器
   listen('tauri://drag-enter', () => {
     setDragOverState(true);
   });
@@ -2828,7 +2822,6 @@ if (listen) {
     const paths = payload.paths || [];
     if (paths.length === 0) return;
     
-    // 逐个发送文件
     for (const filePath of paths) {
       await sendFileByPath(filePath);
     }
