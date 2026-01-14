@@ -30,6 +30,7 @@ const downloadDirInput = document.getElementById('download-dir');
 const chooseDownloadDirButton = document.getElementById('choose-download-dir');
 const downloadDirHint = document.getElementById('download-dir-hint');
 const autoStartInput = document.getElementById('auto-start');
+const sendHotkeyInputs = document.querySelectorAll('input[name="send-hotkey"]');
 const toggleSelectionButton = document.getElementById('toggle-selection');
 const selectionBar = document.getElementById('selection-bar');
 const selectionCount = document.getElementById('selection-count');
@@ -59,6 +60,12 @@ const SEND_STATUS = {
   SUCCESS: 'success',
   FAILED: 'failed',
 };
+
+const SEND_HOTKEY = {
+  ENTER: 'enter',
+  CTRL_ENTER: 'ctrl_enter',
+};
+let sendHotkey = SEND_HOTKEY.ENTER;
 
 // 分页相关状态
 const PAGE_SIZE = 10;
@@ -98,6 +105,35 @@ function setErrorStatus(text) {
   syncStatus.textContent = text;
   syncStatus.style.color = '#d6452d';
 }
+
+function normalizeSendHotkey(value) {
+  const normalized = (value || '').toLowerCase().trim();
+  if (normalized === SEND_HOTKEY.CTRL_ENTER || normalized === 'ctrl+enter') {
+    return SEND_HOTKEY.CTRL_ENTER;
+  }
+  return SEND_HOTKEY.ENTER;
+}
+
+function updateComposerHint() {
+  if (!textInput) return;
+  if (sendHotkey === SEND_HOTKEY.CTRL_ENTER) {
+    textInput.placeholder = '输入消息...（Enter 换行，Ctrl+Enter 发送）';
+  } else {
+    textInput.placeholder = '输入消息...（Enter 发送，Ctrl+Enter 换行）';
+  }
+}
+
+function setSendHotkey(value) {
+  sendHotkey = normalizeSendHotkey(value);
+  if (sendHotkeyInputs && sendHotkeyInputs.length > 0) {
+    sendHotkeyInputs.forEach((input) => {
+      input.checked = input.value === sendHotkey;
+    });
+  }
+  updateComposerHint();
+}
+
+setSendHotkey(sendHotkey);
 
 async function minimizeAppWindow() {
   if (!invoke) {
@@ -1997,6 +2033,7 @@ function applySettings(settings) {
   if (autoStartInput) {
     autoStartInput.checked = settings.auto_start || false;
   }
+  setSendHotkey(settings.send_hotkey || SEND_HOTKEY.ENTER);
   renderWebdavEndpoints();
   renderEndpointSelect();
   startRefreshTimer(settings.refresh_interval_secs || 5);
@@ -2036,6 +2073,7 @@ async function saveSettings() {
     sender_name: senderNameInput.value.trim(),
     refresh_interval_secs: Number(refreshIntervalInput.value) || 5,
     download_dir: downloadDirInput ? downloadDirInput.value.trim() : '',
+    send_hotkey: sendHotkey,
     auto_start: autoStartInput ? autoStartInput.checked : false,
   };
 
@@ -2541,6 +2579,15 @@ if (addWebdavButton) {
 if (batchSpeedTestButton) {
   batchSpeedTestButton.addEventListener('click', batchSpeedTest);
 }
+if (sendHotkeyInputs && sendHotkeyInputs.length > 0) {
+  sendHotkeyInputs.forEach((input) => {
+    input.addEventListener('change', () => {
+      if (input.checked) {
+        setSendHotkey(input.value);
+      }
+    });
+  });
+}
 if (endpointSelect) {
   endpointSelect.addEventListener('change', switchActiveEndpoint);
 }
@@ -2604,7 +2651,22 @@ document.addEventListener('click', (event) => {
 
 if (textInput) {
   textInput.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter' && !event.shiftKey) {
+    if (event.key !== 'Enter') {
+      return;
+    }
+    const isCtrlLike = event.ctrlKey || event.metaKey;
+    const isAlt = event.altKey;
+    const isShift = event.shiftKey;
+
+    if (sendHotkey === SEND_HOTKEY.ENTER) {
+      if (!isCtrlLike && !isAlt && !isShift) {
+        event.preventDefault();
+        sendText();
+      }
+      return;
+    }
+
+    if (isCtrlLike && !isAlt) {
       event.preventDefault();
       sendText();
     }

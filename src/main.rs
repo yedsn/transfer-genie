@@ -46,6 +46,8 @@ const EXPORT_VERSION: u8 = 1;
 const EXPORT_KDF_ITERATIONS: u32 = 100_000;
 const HOTKEY_SHORTCUT: &str = "alt+t";
 const HOTKEY_MENU_ID: &str = "toggle-hotkey";
+const DEFAULT_SEND_HOTKEY: &str = "enter";
+const SEND_HOTKEY_CTRL_ENTER: &str = "ctrl_enter";
 
 #[cfg(desktop)]
 fn load_app_icon() -> Result<tauri::image::Image<'static>, String> {
@@ -95,6 +97,8 @@ struct ExportSettings {
   active_webdav_id: Option<String>,
   #[serde(default)]
   refresh_interval_secs: u64,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  send_hotkey: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -217,6 +221,7 @@ fn export_settings(
     webdav_endpoints: settings.webdav_endpoints.clone(),
     active_webdav_id: settings.active_webdav_id.clone(),
     refresh_interval_secs: settings.refresh_interval_secs,
+    send_hotkey: Some(settings.send_hotkey.clone()),
   };
   for endpoint in export_settings.webdav_endpoints.iter_mut() {
     endpoint.username.clear();
@@ -263,6 +268,10 @@ fn import_settings(
     active_webdav_id: bundle.settings.active_webdav_id,
     sender_name: existing.sender_name,
     refresh_interval_secs: bundle.settings.refresh_interval_secs,
+    send_hotkey: bundle
+      .settings
+      .send_hotkey
+      .unwrap_or_else(|| existing.send_hotkey.clone()),
     download_dir: existing.download_dir,
     auto_start: existing.auto_start,
   };
@@ -1186,6 +1195,13 @@ fn normalize_settings(
   if settings.sender_name.trim().is_empty() {
     settings.sender_name = random_sender_name();
   }
+  let hotkey_raw = settings.send_hotkey.trim().to_lowercase();
+  settings.send_hotkey = match hotkey_raw.as_str() {
+    DEFAULT_SEND_HOTKEY => DEFAULT_SEND_HOTKEY.to_string(),
+    SEND_HOTKEY_CTRL_ENTER => SEND_HOTKEY_CTRL_ENTER.to_string(),
+    "ctrl+enter" => SEND_HOTKEY_CTRL_ENTER.to_string(),
+    _ => DEFAULT_SEND_HOTKEY.to_string(),
+  };
   settings.download_dir =
     normalize_download_dir(&settings.download_dir, default_download_dir);
 
@@ -1442,6 +1458,7 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
         sender_name,
         refresh_interval_secs: legacy.refresh_interval_secs,
         download_dir: legacy.download_dir,
+        send_hotkey: DEFAULT_SEND_HOTKEY.to_string(),
         auto_start: false,
       }
     };
@@ -1455,6 +1472,7 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
       sender_name: random_sender_name(),
       refresh_interval_secs: 5,
       download_dir: normalize_download_dir("", fallback_download_dir),
+      send_hotkey: DEFAULT_SEND_HOTKEY.to_string(),
       auto_start: false,
     };
     write_settings(path, &settings)?;

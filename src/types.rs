@@ -4,6 +4,10 @@ fn default_endpoint_enabled() -> bool {
   true
 }
 
+fn default_send_hotkey() -> String {
+  "enter".to_string()
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct WebDavEndpoint {
   pub id: String,
@@ -28,6 +32,8 @@ pub struct Settings {
   pub refresh_interval_secs: u64,
   #[serde(default)]
   pub download_dir: String,
+  #[serde(default = "default_send_hotkey")]
+  pub send_hotkey: String,
   #[serde(default)]
   pub auto_start: bool,
 }

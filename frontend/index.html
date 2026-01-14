@@ -97,6 +97,28 @@
                     刷新间隔（秒）
                     <input id="refresh-interval" type="number" min="1" step="1" />
                   </label>
+                  <div class="settings-choice">
+                    <div class="settings-choice-header">
+                      <span class="settings-choice-title">发送快捷键</span>
+                      <span class="settings-choice-subtitle">选择发送与换行的组合</span>
+                    </div>
+                    <div class="settings-choice-row">
+                      <label class="radio-card">
+                        <input type="radio" name="send-hotkey" value="enter" checked />
+                        <div class="radio-card-text">
+                          <span class="radio-card-title">回车发送</span>
+                          <span class="radio-card-sub">Ctrl+Enter 换行</span>
+                        </div>
+                      </label>
+                      <label class="radio-card">
+                        <input type="radio" name="send-hotkey" value="ctrl_enter" />
+                        <div class="radio-card-text">
+                          <span class="radio-card-title">Ctrl+Enter 发送</span>
+                          <span class="radio-card-sub">Enter 换行</span>
+                        </div>
+                      </label>
+                    </div>
+                  </div>
                   <label>
                     下载目录
                     <div class="field-row">
