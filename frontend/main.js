@@ -678,6 +678,15 @@ function scrollMessageListToBottom() {
   });
 }
 
+function focusTextInput() {
+  if (!textInput) return;
+  textInput.focus({ preventScroll: true });
+  if (typeof textInput.setSelectionRange === 'function') {
+    const valueLength = textInput.value.length;
+    textInput.setSelectionRange(valueLength, valueLength);
+  }
+}
+
 function syncComposerOffset() {
   if (!composer || !feed) return;
   const offset = Math.round(composer.offsetHeight + 12);
@@ -686,6 +695,7 @@ function syncComposerOffset() {
 
 function setActiveTab(name, options = {}) {
   const target = name || 'home';
+  const { scrollToBottom = false, focusInput = false } = options;
   tabButtons.forEach((button) => {
     const isActive = button.dataset.tabTarget === target;
     button.classList.toggle('is-active', isActive);
@@ -696,9 +706,19 @@ function setActiveTab(name, options = {}) {
     panel.classList.toggle('is-active', isActive);
     panel.setAttribute('aria-hidden', isActive ? 'false' : 'true');
   });
-  if (target === 'home' && options.scrollToBottom) {
-    scrollMessageListToBottom();
+  if (target === 'home') {
+    if (scrollToBottom) {
+      scrollMessageListToBottom();
+    }
+    if (focusInput) {
+      focusTextInput();
+    }
   }
+}
+
+function focusHomeComposer(options = {}) {
+  const scrollToBottom = options.scrollToBottom !== false;
+  setActiveTab('home', { scrollToBottom, focusInput: true });
 }
 
 function showDeleteConfirmDialog(count) {
@@ -2604,14 +2624,28 @@ document.addEventListener('keydown', (event) => {
 tabButtons.forEach((button) => {
   button.addEventListener('click', () => {
     const target = button.dataset.tabTarget;
-    setActiveTab(target, { scrollToBottom: target === 'home' });
+    setActiveTab(target, {
+      scrollToBottom: target === 'home',
+      focusInput: target === 'home',
+    });
   });
+});
+
+function handleWindowFocus() {
+  focusHomeComposer();
+}
+
+window.addEventListener('focus', handleWindowFocus);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    handleWindowFocus();
+  }
 });
 
 loadSettings();
 loadMessages({ scrollToBottom: true });
 loadSyncStatus();
-setActiveTab('home', { scrollToBottom: true });
+focusHomeComposer();
 
 // 拖拽上传功能
 const composerRow = document.querySelector('.composer-row');
@@ -2668,6 +2702,8 @@ function setDragOverState(active) {
 }
 
 if (listen) {
+  listen('tauri://focus', handleWindowFocus);
+
   listen('tauri://drag-enter', () => {
     setDragOverState(true);
   });
