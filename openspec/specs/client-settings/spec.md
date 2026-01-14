@@ -95,3 +95,22 @@ TBD - created by archiving change add-webdav-transfer-client. Update Purpose aft
 - **THEN** 客户端提示错误
 - **AND** 当前配置保持不变
 
+### Requirement: 全局快捷键配置
+设置界面 SHALL 提供全局快捷键配置，默认显示 Alt+T；用户 SHALL 能选择包含修饰键的组合或关闭全局快捷键。保存时 SHALL 校验格式并持久化；导入/导出配置 SHALL 包含该字段并向后兼容旧版本（缺省时使用默认）。
+
+#### Scenario: 显示默认快捷键
+- **WHEN** 用户首次打开设置
+- **THEN** 全局快捷键显示为 Alt+T 且处于启用状态
+
+#### Scenario: 更新快捷键组合
+- **WHEN** 用户选择新的合法组合并保存
+- **THEN** 设置保存成功并在后续使用新组合
+
+#### Scenario: 关闭全局快捷键
+- **WHEN** 用户关闭全局快捷键后保存
+- **THEN** 设置保存成功并标记快捷键为禁用
+
+#### Scenario: 格式校验
+- **WHEN** 用户输入不含修饰键或为空的组合
+- **THEN** 系统阻止保存并提示需要选择合法组合
+
