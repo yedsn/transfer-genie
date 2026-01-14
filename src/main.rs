@@ -28,7 +28,7 @@ use tauri_plugin_opener::OpenerExt;
 use tokio::sync::Mutex as AsyncMutex;
 use tauri::Window;
 #[cfg(desktop)]
-use tauri_plugin_global_shortcut::GlobalShortcutExt;
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 
 struct AppState {
   settings_path: PathBuf,
@@ -39,15 +39,19 @@ struct AppState {
   sync_status: Mutex<SyncStatus>,
   sync_guard: AsyncMutex<()>,
   http: Client,
-  hotkey_enabled: Mutex<bool>,
+  registered_hotkey: Mutex<Option<Shortcut>>,
 }
 
 const EXPORT_VERSION: u8 = 1;
 const EXPORT_KDF_ITERATIONS: u32 = 100_000;
-const HOTKEY_SHORTCUT: &str = "alt+t";
+const DEFAULT_GLOBAL_HOTKEY: &str = "alt+t";
 const HOTKEY_MENU_ID: &str = "toggle-hotkey";
 const DEFAULT_SEND_HOTKEY: &str = "enter";
 const SEND_HOTKEY_CTRL_ENTER: &str = "ctrl_enter";
+
+fn default_export_global_hotkey_enabled() -> bool {
+  true
+}
 
 #[cfg(desktop)]
 fn load_app_icon() -> Result<tauri::image::Image<'static>, String> {
@@ -97,6 +101,10 @@ struct ExportSettings {
   active_webdav_id: Option<String>,
   #[serde(default)]
   refresh_interval_secs: u64,
+  #[serde(default = "default_export_global_hotkey_enabled")]
+  global_hotkey_enabled: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  global_hotkey: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   send_hotkey: Option<String>,
 }
@@ -185,6 +193,9 @@ fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
 fn save_settings(app: AppHandle, state: State<'_, AppState>, settings: Settings) -> Result<Settings, String> {
   let normalized = normalize_settings(settings, &state.default_download_dir)?;
 
+  #[cfg(desktop)]
+  update_global_hotkey_registration(&app, &state, &normalized)?;
+
   write_settings(&state.settings_path, &normalized)?;
 
   #[cfg(desktop)]
@@ -221,6 +232,8 @@ fn export_settings(
     webdav_endpoints: settings.webdav_endpoints.clone(),
     active_webdav_id: settings.active_webdav_id.clone(),
     refresh_interval_secs: settings.refresh_interval_secs,
+    global_hotkey_enabled: settings.global_hotkey_enabled,
+    global_hotkey: Some(settings.global_hotkey.clone()),
     send_hotkey: Some(settings.send_hotkey.clone()),
   };
   for endpoint in export_settings.webdav_endpoints.iter_mut() {
@@ -244,6 +257,7 @@ fn export_settings(
 
 #[tauri::command]
 fn import_settings(
+  app: AppHandle,
   state: State<'_, AppState>,
   path: String,
   password: String,
@@ -268,6 +282,11 @@ fn import_settings(
     active_webdav_id: bundle.settings.active_webdav_id,
     sender_name: existing.sender_name,
     refresh_interval_secs: bundle.settings.refresh_interval_secs,
+    global_hotkey_enabled: bundle.settings.global_hotkey_enabled,
+    global_hotkey: bundle
+      .settings
+      .global_hotkey
+      .unwrap_or_else(|| existing.global_hotkey.clone()),
     send_hotkey: bundle
       .settings
       .send_hotkey
@@ -277,6 +296,9 @@ fn import_settings(
   };
   apply_export_secrets(&mut settings, secrets)?;
   let normalized = normalize_settings(settings, &state.default_download_dir)?;
+
+  #[cfg(desktop)]
+  update_global_hotkey_registration(&app, &state, &normalized)?;
 
   write_settings(&state.settings_path, &normalized)?;
   let mut guard = state
@@ -1177,6 +1199,32 @@ fn generate_endpoint_id() -> String {
   format!("endpoint-{value:016x}")
 }
 
+fn normalize_global_hotkey(raw: &str) -> Option<String> {
+  let trimmed = raw.trim().to_lowercase();
+  if trimmed.is_empty() {
+    return None;
+  }
+  let parts: Vec<String> = trimmed
+    .split('+')
+    .map(str::trim)
+    .filter(|part| !part.is_empty())
+    .map(|part| part.to_string())
+    .collect();
+  if parts.len() < 2 {
+    return None;
+  }
+  let has_modifier = parts.iter().any(|part| {
+    matches!(
+      part.as_str(),
+      "ctrl" | "control" | "cmd" | "command" | "super" | "win" | "meta" | "alt" | "shift"
+    )
+  });
+  if !has_modifier {
+    return None;
+  }
+  Some(parts.join("+"))
+}
+
 fn is_valid_endpoint_id(value: &str) -> bool {
   let trimmed = value.trim();
   !(trimmed.is_empty()
@@ -1194,6 +1242,15 @@ fn normalize_settings(
   }
   if settings.sender_name.trim().is_empty() {
     settings.sender_name = random_sender_name();
+  }
+  let normalized_hotkey = normalize_global_hotkey(&settings.global_hotkey);
+  if settings.global_hotkey_enabled {
+    let Some(hotkey) = normalized_hotkey else {
+      return Err("全局快捷键格式无效，需要包含修饰键（如 Ctrl+Alt+T）".to_string());
+    };
+    settings.global_hotkey = hotkey;
+  } else {
+    settings.global_hotkey = normalized_hotkey.unwrap_or_else(|| DEFAULT_GLOBAL_HOTKEY.to_string());
   }
   let hotkey_raw = settings.send_hotkey.trim().to_lowercase();
   settings.send_hotkey = match hotkey_raw.as_str() {
@@ -1458,6 +1515,8 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
         sender_name,
         refresh_interval_secs: legacy.refresh_interval_secs,
         download_dir: legacy.download_dir,
+        global_hotkey_enabled: true,
+        global_hotkey: DEFAULT_GLOBAL_HOTKEY.to_string(),
         send_hotkey: DEFAULT_SEND_HOTKEY.to_string(),
         auto_start: false,
       }
@@ -1472,6 +1531,8 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
       sender_name: random_sender_name(),
       refresh_interval_secs: 5,
       download_dir: normalize_download_dir("", fallback_download_dir),
+      global_hotkey_enabled: true,
+      global_hotkey: DEFAULT_GLOBAL_HOTKEY.to_string(),
       send_hotkey: DEFAULT_SEND_HOTKEY.to_string(),
       auto_start: false,
     };
@@ -2136,20 +2197,39 @@ fn set_autostart(_app: &AppHandle, enabled: bool) -> Result<(), String> {
 }
 
 #[cfg(desktop)]
-fn set_hotkey_enabled(app: &AppHandle, enabled: bool) -> Result<(), String> {
-  let global_shortcut = app.global_shortcut();
-  let is_registered = global_shortcut.is_registered(HOTKEY_SHORTCUT);
-  if enabled {
-    if !is_registered {
-      global_shortcut
-        .register(HOTKEY_SHORTCUT)
-        .map_err(|err| err.to_string())?;
+fn update_global_hotkey_registration(
+  app: &AppHandle,
+  state: &AppState,
+  settings: &Settings,
+) -> Result<(), String> {
+  let mut current = state
+    .registered_hotkey
+    .lock()
+    .map_err(|_| "更新全局快捷键失败".to_string())?;
+  let manager = app.global_shortcut();
+
+  if let Some(active) = current.clone() {
+    if manager.is_registered(active.clone()) {
+      manager
+        .unregister(active)
+        .map_err(|err| format!("注销全局快捷键失败: {err}"))?;
     }
-  } else if is_registered {
-    global_shortcut
-      .unregister(HOTKEY_SHORTCUT)
-      .map_err(|err| err.to_string())?;
   }
+
+  if settings.global_hotkey_enabled {
+    let hotkey = normalize_global_hotkey(&settings.global_hotkey)
+      .ok_or_else(|| "全局快捷键格式无效，需要包含修饰键（如 Ctrl+Alt+T）".to_string())?;
+    let shortcut = hotkey
+      .parse::<Shortcut>()
+      .map_err(|err| format!("快捷键解析失败: {err}"))?;
+    manager
+      .register(shortcut.clone())
+      .map_err(|err| format!("注册全局快捷键失败: {err}"))?;
+    *current = Some(shortcut);
+  } else {
+    *current = None;
+  }
+
   Ok(())
 }
 
@@ -2223,18 +2303,32 @@ fn main() {
         sync_status: Mutex::new(SyncStatus::idle()),
         sync_guard: AsyncMutex::new(()),
         http: Client::new(),
-        hotkey_enabled: Mutex::new(true),
+        registered_hotkey: Mutex::new(None),
       });
 
       #[cfg(desktop)]
       {
         use tauri::menu::{Menu, MenuItem};
         use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-        use tauri_plugin_global_shortcut::{Code, Modifiers, ShortcutState};
+        use tauri_plugin_global_shortcut::ShortcutState;
 
         let show_item = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
+        let initial_hotkey_label = {
+          let state = app.state::<AppState>();
+          state
+            .settings
+            .lock()
+            .map(|settings| {
+              if settings.global_hotkey_enabled {
+                "禁用快捷键"
+              } else {
+                "启用快捷键"
+              }
+            })
+            .unwrap_or("禁用快捷键")
+        };
         let hotkey_item =
-          MenuItem::with_id(app, HOTKEY_MENU_ID, "禁用快捷键", true, None::<&str>)?;
+          MenuItem::with_id(app, HOTKEY_MENU_ID, initial_hotkey_label, true, None::<&str>)?;
         let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
         let tray_menu = Menu::with_items(app, &[&show_item, &hotkey_item, &quit_item])?;
         let app_icon = load_app_icon().ok();
@@ -2253,15 +2347,32 @@ fn main() {
             "quit" => app.exit(0),
             HOTKEY_MENU_ID => {
               let state = app.state::<AppState>();
-              let Ok(mut enabled) = state.hotkey_enabled.lock() else {
+              let (mut settings_copy, settings_path) = {
+                let Ok(settings) = state.settings.lock() else {
+                  return;
+                };
+                (settings.clone(), state.settings_path.clone())
+              };
+              settings_copy.global_hotkey_enabled = !settings_copy.global_hotkey_enabled;
+
+              if let Err(err) =
+                update_global_hotkey_registration(app, &state, &settings_copy)
+              {
+                eprintln!("更新全局快捷键失败: {err}");
                 return;
               };
-              let next = !*enabled;
-              if set_hotkey_enabled(app, next).is_err() {
-                return;
+
+              if let Err(err) = write_settings(&settings_path, &settings_copy) {
+                eprintln!("写入快捷键设置失败: {err}");
+              } else if let Ok(mut guard) = state.settings.lock() {
+                *guard = settings_copy.clone();
               }
-              *enabled = next;
-              let label = if next { "禁用快捷键" } else { "启用快捷键" };
+
+              let label = if settings_copy.global_hotkey_enabled {
+                "禁用快捷键"
+              } else {
+                "启用快捷键"
+              };
               let _ = hotkey_item.set_text(label);
             }
             _ => {}
@@ -2286,16 +2397,35 @@ fn main() {
 
         app.handle().plugin(
           tauri_plugin_global_shortcut::Builder::new()
-            .with_shortcuts([HOTKEY_SHORTCUT])?
             .with_handler(|app, shortcut, event| {
-              if event.state == ShortcutState::Pressed
-                && shortcut.matches(Modifiers::ALT, Code::KeyT)
-              {
-                toggle_main_window(app);
+              if event.state != ShortcutState::Pressed {
+                return;
+              }
+              let state = app.state::<AppState>();
+              let Ok(active) = state.registered_hotkey.lock() else {
+                return;
+              };
+              if let Some(current) = active.as_ref() {
+                if *shortcut == *current {
+                  toggle_main_window(app);
+                }
               }
             })
             .build(),
         )?;
+
+        {
+          let state = app.state::<AppState>();
+          let settings = match state.settings.lock() {
+            Ok(guard) => guard.clone(),
+            Err(_) => return Ok(()),
+          };
+          if let Err(err) =
+            update_global_hotkey_registration(&app.handle(), &state, &settings)
+          {
+            eprintln!("注册全局快捷键失败: {err}");
+          }
+        }
 
         if let Some(window) = app.get_webview_window("main") {
           if let Some(icon) = app_icon {

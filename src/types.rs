@@ -8,6 +8,14 @@ fn default_send_hotkey() -> String {
   "enter".to_string()
 }
 
+fn default_global_hotkey_enabled() -> bool {
+  true
+}
+
+fn default_global_hotkey() -> String {
+  "alt+t".to_string()
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct WebDavEndpoint {
   pub id: String,
@@ -34,6 +42,10 @@ pub struct Settings {
   pub download_dir: String,
   #[serde(default = "default_send_hotkey")]
   pub send_hotkey: String,
+  #[serde(default = "default_global_hotkey_enabled")]
+  pub global_hotkey_enabled: bool,
+  #[serde(default = "default_global_hotkey")]
+  pub global_hotkey: String,
   #[serde(default)]
   pub auto_start: bool,
 }

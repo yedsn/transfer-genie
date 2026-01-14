@@ -30,6 +30,8 @@ const downloadDirInput = document.getElementById('download-dir');
 const chooseDownloadDirButton = document.getElementById('choose-download-dir');
 const downloadDirHint = document.getElementById('download-dir-hint');
 const autoStartInput = document.getElementById('auto-start');
+const globalHotkeyInput = document.getElementById('global-hotkey');
+const globalHotkeyEnabledInput = document.getElementById('global-hotkey-enabled');
 const sendHotkeyInputs = document.querySelectorAll('input[name="send-hotkey"]');
 const toggleSelectionButton = document.getElementById('toggle-selection');
 const selectionBar = document.getElementById('selection-bar');
@@ -60,6 +62,8 @@ const SEND_STATUS = {
   SUCCESS: 'success',
   FAILED: 'failed',
 };
+
+const DEFAULT_GLOBAL_HOTKEY = 'alt+t';
 
 const SEND_HOTKEY = {
   ENTER: 'enter',
@@ -134,6 +138,30 @@ function setSendHotkey(value) {
 }
 
 setSendHotkey(sendHotkey);
+
+function normalizeGlobalHotkey(value) {
+  if (!value) return '';
+  const normalized = value.toLowerCase().trim();
+  const parts = normalized
+    .split('+')
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length < 2) return '';
+  const hasModifier = parts.some((part) =>
+    ['ctrl', 'control', 'alt', 'shift', 'meta', 'super', 'win', 'cmd', 'command'].includes(part),
+  );
+  if (!hasModifier) return '';
+  return parts.join('+');
+}
+
+function isValidGlobalHotkey(value) {
+  return !!normalizeGlobalHotkey(value);
+}
+
+function syncGlobalHotkeyInputState() {
+  if (!globalHotkeyInput || !globalHotkeyEnabledInput) return;
+  globalHotkeyInput.disabled = !globalHotkeyEnabledInput.checked;
+}
 
 async function minimizeAppWindow() {
   if (!invoke) {
@@ -2033,6 +2061,13 @@ function applySettings(settings) {
   if (autoStartInput) {
     autoStartInput.checked = settings.auto_start || false;
   }
+  if (globalHotkeyInput) {
+    globalHotkeyInput.value = (settings.global_hotkey || DEFAULT_GLOBAL_HOTKEY).toLowerCase();
+  }
+  if (globalHotkeyEnabledInput) {
+    globalHotkeyEnabledInput.checked = settings.global_hotkey_enabled !== false;
+  }
+  syncGlobalHotkeyInputState();
   setSendHotkey(settings.send_hotkey || SEND_HOTKEY.ENTER);
   renderWebdavEndpoints();
   renderEndpointSelect();
@@ -2064,6 +2099,14 @@ async function saveSettings() {
       return;
     }
   }
+  const globalHotkeyEnabled = globalHotkeyEnabledInput ? globalHotkeyEnabledInput.checked : true;
+  const normalizedGlobalHotkey = normalizeGlobalHotkey(
+    (globalHotkeyInput ? globalHotkeyInput.value : DEFAULT_GLOBAL_HOTKEY) || '',
+  );
+  if (globalHotkeyEnabled && !normalizedGlobalHotkey) {
+    setErrorStatus('全局快捷键需包含修饰键，例如 Ctrl+Alt+T');
+    return;
+  }
   const activeCandidate = endpoints.find(
     (endpoint) => endpoint.id === activeEndpointId && endpoint.enabled && endpoint.url,
   );
@@ -2073,6 +2116,8 @@ async function saveSettings() {
     sender_name: senderNameInput.value.trim(),
     refresh_interval_secs: Number(refreshIntervalInput.value) || 5,
     download_dir: downloadDirInput ? downloadDirInput.value.trim() : '',
+    global_hotkey_enabled: globalHotkeyEnabled,
+    global_hotkey: normalizedGlobalHotkey || DEFAULT_GLOBAL_HOTKEY,
     send_hotkey: sendHotkey,
     auto_start: autoStartInput ? autoStartInput.checked : false,
   };
@@ -2578,6 +2623,9 @@ if (addWebdavButton) {
 }
 if (batchSpeedTestButton) {
   batchSpeedTestButton.addEventListener('click', batchSpeedTest);
+}
+if (globalHotkeyEnabledInput) {
+  globalHotkeyEnabledInput.addEventListener('change', syncGlobalHotkeyInputState);
 }
 if (sendHotkeyInputs && sendHotkeyInputs.length > 0) {
   sendHotkeyInputs.forEach((input) => {
