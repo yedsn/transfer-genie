@@ -45,6 +45,7 @@ const importSettingsButton = document.getElementById('import-settings');
 const backupWebdavButton = document.getElementById('backup-webdav');
 const restoreWebdavButton = document.getElementById('restore-webdav');
 const openLogDirButton = document.getElementById('open-log-dir');
+const openDataDirButton = document.getElementById('open-data-dir');
 
 let refreshTimer = null;
 let didInitialSync = false;
@@ -2585,6 +2586,18 @@ async function openLogDir() {
   }
 }
 
+async function openDataDir() {
+  try {
+    if (!invoke) {
+      setErrorStatus('未检测到 Tauri API，请确认应用环境正常');
+      return;
+    }
+    await invoke('open_data_dir');
+  } catch (error) {
+    setErrorStatus(`打开数据目录失败：${error}`);
+  }
+}
+
 function addWebdavEndpoint() {
   webdavEndpoints.push({
     id: generateEndpointId(),
@@ -2888,6 +2901,9 @@ if (restoreWebdavButton) {
 }
 if (openLogDirButton) {
   openLogDirButton.addEventListener('click', openLogDir);
+}
+if (openDataDirButton) {
+  openDataDirButton.addEventListener('click', openDataDir);
 }
 
 if (scrollToBottomButton) {

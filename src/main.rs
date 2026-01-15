@@ -873,6 +873,19 @@ fn open_log_dir(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_data_dir(app: AppHandle) -> Result<(), String> {
+  let data_dir = app
+    .path()
+    .app_data_dir()
+    .map_err(|e| format!("无法解析数据目录: {}", e))?;
+
+  app
+    .opener()
+    .open_path(data_dir.to_string_lossy(), None::<&str>)
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn minimize_window(app: AppHandle, window: Window) -> Result<(), String> {
   window
     .hide()
@@ -2685,6 +2698,7 @@ fn main() {
       open_message_file,
       open_download_dir,
       open_log_dir,
+      open_data_dir,
       minimize_window,
       delete_messages,
       cleanup_messages,
