@@ -1,5 +1,11 @@
-use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use rand::Rng;
+
+const SAFE_FILENAME: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageKind {
@@ -25,7 +31,7 @@ pub struct ParsedFilename {
 }
 
 pub fn encode_component(value: &str) -> String {
-  utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
+  utf8_percent_encode(value, SAFE_FILENAME).to_string()
 }
 
 pub fn decode_component(value: &str) -> String {
@@ -72,8 +78,13 @@ mod tests {
 
   #[test]
   fn encode_decode_round_trip() {
-    let input = "设备 A/测试";
+    let input = "设备 A/测试.txt";
     let encoded = encode_component(input);
+    // . should not be encoded
+    assert!(encoded.contains(".txt"));
+    // / should be encoded
+    assert!(!encoded.contains("/"));
+    
     let decoded = decode_component(&encoded);
     assert_eq!(decoded, input);
   }
