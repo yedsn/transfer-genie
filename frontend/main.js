@@ -42,6 +42,8 @@ const cancelSelectionButton = document.getElementById('cancel-selection');
 const cleanupMessagesButton = document.getElementById('cleanup-messages');
 const exportSettingsButton = document.getElementById('export-settings');
 const importSettingsButton = document.getElementById('import-settings');
+const backupWebdavButton = document.getElementById('backup-webdav');
+const restoreWebdavButton = document.getElementById('restore-webdav');
 
 let refreshTimer = null;
 let didInitialSync = false;
@@ -1224,6 +1226,64 @@ function showDownloadConflictDialog(filename) {
   });
 }
 
+function showConfirmationDialog(options = {}) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+
+    const dialog = document.createElement('div');
+    dialog.className = 'dialog';
+
+    const title = document.createElement('h3');
+    title.className = 'dialog-title';
+    title.textContent = options.title || '确认操作';
+
+    const message = document.createElement('p');
+    message.className = 'dialog-text';
+    message.textContent = options.message || '确定要继续吗？';
+
+    const actions = document.createElement('div');
+    actions.className = 'dialog-actions';
+
+    const confirmButton = document.createElement('button');
+    confirmButton.className = 'button primary small';
+    confirmButton.textContent = options.confirmLabel || '确认';
+
+    const cancelButton = document.createElement('button');
+    cancelButton.className = 'button ghost small';
+    cancelButton.textContent = '取消';
+
+    const cleanup = (confirmed) => {
+      document.removeEventListener('keydown', onKeyDown);
+      overlay.remove();
+      resolve(confirmed);
+    };
+
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        cleanup(false);
+      }
+    };
+
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) {
+        cleanup(false);
+      }
+    });
+    confirmButton.addEventListener('click', () => cleanup(true));
+    cancelButton.addEventListener('click', () => cleanup(false));
+
+    actions.appendChild(confirmButton);
+    actions.appendChild(cancelButton);
+    dialog.appendChild(title);
+    dialog.appendChild(message);
+    dialog.appendChild(actions);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    document.addEventListener('keydown', onKeyDown);
+  });
+}
+
 async function downloadMessageFile(message) {
   try {
     console.info('[download] click', {
@@ -2226,6 +2286,82 @@ async function importSettings() {
   }
 }
 
+async function backupWebdav() {
+  try {
+    if (!invoke) {
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
+      return;
+    }
+    if (!getActiveEndpoint()) {
+      setErrorStatus('请先选择 WebDAV 端点');
+      return;
+    }
+    if (!saveDialog) {
+      setErrorStatus('未检测到保存对话框插件，请确认已启用 dialog 插件');
+      return;
+    }
+    const now = new Date();
+    const timestamp = `${now.getFullYear()}${(now.getMonth() + 1).toString().padStart(2, '0')}${now.getDate().toString().padStart(2, '0')}`;
+    const target = await saveDialog({
+      defaultPath: `transfer-genie-webdav-backup-${timestamp}.zip`,
+      filters: [{ name: 'Zip Archive', extensions: ['zip'] }],
+    });
+    if (!target) {
+      return;
+    }
+    setStatus('正在备份 WebDAV 数据...');
+    await invoke('backup_webdav', { path: target });
+    showToast(`WebDAV 数据已备份到 ${target}`, 'success');
+  } catch (error) {
+    setErrorStatus(`备份失败：${error}`);
+    showToast(`备份失败：${error}`, 'error');
+  }
+}
+
+async function restoreWebdav() {
+  try {
+    if (!invoke) {
+      setErrorStatus('未���测到 Tauri API，请检查 app.withGlobalTauri 设置');
+      return;
+    }
+    if (!getActiveEndpoint()) {
+      setErrorStatus('请先选择 WebDAV 端点');
+      return;
+    }
+    if (!openDialog) {
+      setErrorStatus('未检测到对话框插件，请确认已启用 dialog 插件');
+      return;
+    }
+    const selected = await openDialog({
+      multiple: false,
+      directory: false,
+      filters: [{ name: 'Zip Archive', extensions: ['zip'] }],
+    });
+    if (!selected) {
+      return;
+    }
+    const path = Array.isArray(selected) ? selected[0] : selected;
+    if (!path) {
+      return;
+    }
+    const confirmed = await showConfirmationDialog({
+      title: '确认恢复',
+      message: '恢复将覆盖当前 WebDAV 端点上的所有数据。此操作无法撤销。确定要继续吗？',
+      confirmLabel: '恢复并覆盖',
+    });
+    if (!confirmed) {
+      return;
+    }
+    setStatus('正在从备份恢复 WebDAV 数据...');
+    await invoke('restore_webdav', { path });
+    showToast('WebDAV 数据已恢复', 'success');
+    await manualRefresh();
+  } catch (error) {
+    setErrorStatus(`恢复失败：${error}`);
+    showToast(`恢复失败：${error}`, 'error');
+  }
+}
+
 async function sendText() {
   const text = textInput.value.trim();
   if (!text) {
@@ -2659,6 +2795,12 @@ if (exportSettingsButton) {
 }
 if (importSettingsButton) {
   importSettingsButton.addEventListener('click', importSettings);
+}
+if (backupWebdavButton) {
+  backupWebdavButton.addEventListener('click', backupWebdav);
+}
+if (restoreWebdavButton) {
+  restoreWebdavButton.addEventListener('click', restoreWebdav);
 }
 
 if (scrollToBottomButton) {

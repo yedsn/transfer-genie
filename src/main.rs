@@ -1172,6 +1172,104 @@ async fn test_webdav_speed(
   })
 }
 
+#[tauri::command]
+async fn backup_webdav(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    use std::io::Write;
+    use zip::write::{FileOptions, ZipWriter};
+    use std::fs::File;
+
+    let settings = current_settings(&state)?;
+    let endpoint = resolve_active_endpoint(&settings)?;
+
+    let file = File::create(&path).map_err(|e| format!("创建备份文件失败: {}", e))?;
+    let mut zip = ZipWriter::new(file);
+    let options: FileOptions<'_, ()> = FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    // 1. 添加 history.json
+    if let Ok(Some(history_data)) = webdav::download_optional_file(&state.http, &endpoint, "history.json").await {
+        zip.start_file("history.json", options)
+            .map_err(|e| format!("创建 zip entry 失败: {}", e))?;
+        zip.write_all(&history_data)
+            .map_err(|e| format!("写入 history.json 到 zip 失败: {}", e))?;
+    }
+
+    // 2. 添加 files/ 目录下的所有文件
+    let entries = webdav::list_entries(&state.http, &endpoint, Some("files"), true).await?;
+    for entry in entries {
+        if entry.is_collection {
+            continue;
+        }
+        let remote_path = format!("files/{}", entry.filename);
+        if let Ok(file_data) = webdav::download_file(&state.http, &endpoint, &remote_path).await {
+            let zip_path = format!("files/{}", entry.filename);
+            zip.start_file(&zip_path, options)
+                .map_err(|e| format!("创建 zip entry 失败: {}", e))?;
+            zip.write_all(&file_data)
+                .map_err(|e| format!("写入 {} 到 zip 失败: {}", zip_path, e))?;
+        }
+    }
+
+    zip.finish().map_err(|e| format!("完成 zip 文件失败: {}", e))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn restore_webdav(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    use std::fs::File;
+    use zip::ZipArchive;
+    use std::io::{Read, Cursor};
+
+    let settings = current_settings(&state)?;
+    let endpoint = resolve_active_endpoint(&settings)?;
+
+    let data = fs::read(&path).map_err(|e| format!("读取备份文件失败: {}", e))?;
+    let reader = Cursor::new(data);
+    let mut archive = ZipArchive::new(reader).map_err(|e| format!("解析备份文件失败: {}", e))?;
+
+    // 验证 history.json 是否存在
+    archive.by_name("history.json").map_err(|_| "备份文件无效: 缺少 history.json".to_string())?;
+
+    // 清理远程 files 目录
+    let existing_files = webdav::list_entries(&state.http, &endpoint, Some("files"), true).await?;
+    for entry in existing_files {
+        if !entry.is_collection {
+            let remote_path = format!("files/{}", entry.filename);
+            webdav::delete_file(&state.http, &endpoint, &remote_path, true).await?;
+        }
+    }
+     webdav::delete_file(&state.http, &endpoint, "history.json", true).await?;
+
+
+    // 收集所有文件数据
+    let mut files_to_upload = Vec::new();
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i).map_err(|e| format!("读取 zip entry 失败: {}", e))?;
+        let outpath = match file.enclosed_name() {
+            Some(path) => path.to_owned(),
+            None => continue,
+        };
+
+        if !(*file.name()).ends_with('/') {
+            let mut data = Vec::new();
+            file.read_to_end(&mut data).map_err(|e| format!("读取 zip 数据失败: {}", e))?;
+            if let Some(remote_path) = outpath.to_str() {
+                files_to_upload.push((remote_path.to_string(), data));
+            }
+        }
+    }
+    
+    // 确保目录存在 (只做一次)
+    webdav::ensure_directory(&state.http, &endpoint, "files").await?;
+
+    // 上传文件
+    for (remote_path, data) in files_to_upload {
+        webdav::upload_file(&state.http, &endpoint, &remote_path, data).await?;
+    }
+
+    Ok(())
+}
+
 fn current_settings(state: &State<'_, AppState>) -> Result<Settings, String> {
   let settings = state
     .settings
@@ -2469,7 +2567,9 @@ fn main() {
       cleanup_messages,
       manual_refresh,
       get_sync_status,
-      test_webdav_speed
+      test_webdav_speed,
+      backup_webdav,
+      restore_webdav
     ])
     .build(tauri::generate_context!())
     .expect("error while building tauri application");
