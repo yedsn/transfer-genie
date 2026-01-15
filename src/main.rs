@@ -11,13 +11,16 @@ use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use log::LevelFilter;
 use pbkdf2::pbkdf2_hmac;
 use rand::rngs::OsRng;
 use rand::{Rng, RngCore};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use sha2::{Sha256, Digest};
+use log::info;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use tauri_plugin_log::{Target, TargetKind};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -857,6 +860,19 @@ async fn open_download_dir(
 }
 
 #[tauri::command]
+fn open_log_dir(app: AppHandle) -> Result<(), String> {
+  let log_dir = app
+    .path()
+    .app_log_dir()
+    .map_err(|e| format!("无法解析日志目录: {}", e))?;
+
+  app
+    .opener()
+    .open_path(log_dir.to_string_lossy(), None::<&str>)
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn minimize_window(app: AppHandle, window: Window) -> Result<(), String> {
   window
     .hide()
@@ -1172,51 +1188,147 @@ async fn test_webdav_speed(
   })
 }
 
+// Helper function to recursively list all entries because the server does not support Depth: infinity.
+async fn recursive_list_webdav(
+    http: &Client,
+    endpoint: &WebDavEndpoint,
+    path: &str,
+) -> Result<Vec<crate::types::DavEntry>, String> {
+    let mut all_entries = Vec::new();
+    let mut dirs_to_visit = vec![path.to_string()];
+    let mut visited_dirs = std::collections::HashSet::new();
+
+    while let Some(dir_path) = dirs_to_visit.pop() {
+        if !visited_dirs.insert(dir_path.clone()) {
+            continue;
+        }
+
+        let list_path = if dir_path.is_empty() { None } else { Some(dir_path.as_str()) };
+        
+        info!("WebDAV backup: Listing contents of '/'{}", &dir_path);
+        let entries = match webdav::list_entries(http, endpoint, list_path, true).await {
+            Ok(entries) => entries,
+            Err(e) => {
+                info!("WebDAV backup: Failed to list directory '{}': {}", &dir_path, e);
+                continue;
+            }
+        };
+
+        for entry in entries {
+            if entry.remote_path == dir_path {
+                continue;
+            }
+
+            if entry.is_collection {
+                // The list_entries logic ensures remote_path is clean and relative to root.
+                // We just need to make sure we don't infinitely recurse if the server returns "."
+                if entry.remote_path != dir_path {
+                    dirs_to_visit.push(entry.remote_path.clone());
+                }
+            }
+            all_entries.push(entry);
+        }
+    }
+    Ok(all_entries)
+}
+
 #[tauri::command]
 async fn backup_webdav(state: State<'_, AppState>, path: String) -> Result<(), String> {
     use std::io::Write;
-    use zip::write::{FileOptions, ZipWriter};
-    use std::fs::File;
+    use zip::write::{FileOptions};
 
     let settings = current_settings(&state)?;
     let endpoint = resolve_active_endpoint(&settings)?;
 
-    let file = File::create(&path).map_err(|e| format!("创建备份文件失败: {}", e))?;
-    let mut zip = ZipWriter::new(file);
+    info!("--- Starting WebDAV Backup ---");
+    info!("Target file: {}", &path);
+
+    // 1. Scanning
+    info!("Step 1: Scanning WebDAV directories...");
+    let entries = recursive_list_webdav(&state.http, &endpoint, "").await?;
+    let total_entries = entries.len();
+    info!("Scan complete. Found {} items (files + directories).", total_entries);
+
+    // Log the list of paths found
+    info!("--- Scanned Path List ---");
+    for (i, entry) in entries.iter().enumerate() {
+        info!("[{}] Path: '{}', IsDir: {}", i, entry.remote_path, entry.is_collection);
+    }
+    info!("-------------------------");
+
+    if total_entries == 0 {
+        info!("WARNING: No files found to backup. The generated zip file will be empty.");
+    }
+
+    // 2. Preparing Zip
+    info!("Step 2: Creating zip file...");
+    let file = std::fs::File::create(&path).map_err(|e| format!("创建备份文件失败: {}", e))?;
+    let mut zip = zip::ZipWriter::new(file);
     let options: FileOptions<'_, ()> = FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-    // 1. 添加 history.json
-    if let Ok(Some(history_data)) = webdav::download_optional_file(&state.http, &endpoint, "history.json").await {
-        zip.start_file("history.json", options)
-            .map_err(|e| format!("创建 zip entry 失败: {}", e))?;
-        zip.write_all(&history_data)
-            .map_err(|e| format!("写入 history.json 到 zip 失败: {}", e))?;
-    }
+    // 3. Downloading and Zipping
+    info!("Step 3: Downloading and archiving files...");
+    let mut success_count = 0;
+    let mut fail_count = 0;
+    let mut skipped_count = 0;
 
-    // 2. 添加 files/ 目录下的所有文件
-    let entries = webdav::list_entries(&state.http, &endpoint, Some("files"), true).await?;
-    for entry in entries {
+    for (index, entry) in entries.iter().enumerate() {
+        // Log progress every 10 items
+        if index % 10 == 0 {
+             info!("Processing item {}/{}", index + 1, total_entries);
+        }
+
         if entry.is_collection {
+            if !entry.remote_path.is_empty() {
+                // info!("Creating directory: '{}'", &entry.remote_path);
+                if let Err(e) = zip.add_directory(&entry.remote_path, options) {
+                     info!("Failed to add directory '{}': {}", &entry.remote_path, e);
+                }
+            }
             continue;
         }
-        let remote_path = format!("files/{}", entry.filename);
-        if let Ok(file_data) = webdav::download_file(&state.http, &endpoint, &remote_path).await {
-            let zip_path = format!("files/{}", entry.filename);
-            zip.start_file(&zip_path, options)
-                .map_err(|e| format!("创建 zip entry 失败: {}", e))?;
-            zip.write_all(&file_data)
-                .map_err(|e| format!("写入 {} 到 zip 失败: {}", zip_path, e))?;
+        
+        let remote_path = &entry.remote_path;
+        if remote_path.is_empty() {
+            skipped_count += 1;
+            continue;
+        }
+
+        // info!("Downloading: '{}'", remote_path);
+        match webdav::download_file(&state.http, &endpoint, remote_path).await {
+            Ok(file_data) => {
+                if let Err(e) = zip.start_file(remote_path, options) {
+                    info!("Error starting zip entry '{}': {}", remote_path, e);
+                    fail_count += 1;
+                    continue;
+                }
+                if let Err(e) = zip.write_all(&file_data) {
+                    info!("Error writing zip data '{}': {}", remote_path, e);
+                    fail_count += 1;
+                    continue;
+                }
+                success_count += 1;
+            }
+            Err(e) => {
+                info!("Failed to download '{}': {}", remote_path, e);
+                fail_count += 1;
+            }
         }
     }
 
+    // 4. Finishing
+    info!("Step 4: Finalizing zip file...");
     zip.finish().map_err(|e| format!("完成 zip 文件失败: {}", e))?;
+    
+    info!("--- WebDAV Backup Finished ---");
+    info!("Total: {}, Success: {}, Failed: {}, Skipped: {}", total_entries, success_count, fail_count, skipped_count);
 
     Ok(())
 }
 
 #[tauri::command]
 async fn restore_webdav(state: State<'_, AppState>, path: String) -> Result<(), String> {
-    use std::fs::File;
+    
     use zip::ZipArchive;
     use std::io::{Read, Cursor};
 
@@ -2546,6 +2658,16 @@ fn main() {
       start_sync_loop(app.handle().clone());
       Ok(())
     })
+    .plugin(
+      tauri_plugin_log::Builder::default()
+        .targets([
+          Target::new(TargetKind::Stdout),
+          Target::new(TargetKind::Webview),
+          Target::new(TargetKind::LogDir { file_name: Some("app.log".into()) }),
+        ])
+        .level(LevelFilter::Info)
+        .build(),
+    )
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_opener::init())
     .invoke_handler(tauri::generate_handler![
@@ -2562,6 +2684,7 @@ fn main() {
       save_message_file_as,
       open_message_file,
       open_download_dir,
+      open_log_dir,
       minimize_window,
       delete_messages,
       cleanup_messages,
