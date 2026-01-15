@@ -1080,6 +1080,35 @@ input {
   transition: transform 0.2s ease;
 }
 
+.button.has-spinner {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.button.has-spinner:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.button.has-spinner:disabled:hover {
+  transform: none;
+}
+
+.button-spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid rgba(0, 0, 0, 0.15);
+  border-top-color: var(--accent-strong);
+  display: none;
+  animation: spin 0.8s linear infinite;
+}
+
+.button.has-spinner.is-loading .button-spinner {
+  display: inline-block;
+}
+
 .refresh-button {
   display: inline-flex;
   align-items: center;
@@ -1412,6 +1441,24 @@ input {
   border-color: #fecaca;
   color: #991b1b;
   box-shadow: 0 8px 32px rgba(239, 68, 68, 0.12), 0 2px 8px rgba(239, 68, 68, 0.08);
+}
+
+.toast.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.toast.loading::before {
+  content: "";
+  display: block;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid rgba(0, 0, 0, 0.1);
+  border-top-color: var(--accent);
+  animation: spin 0.8s linear infinite;
 }
 
 @keyframes toastSlideIn {

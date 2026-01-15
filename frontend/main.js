@@ -999,6 +999,30 @@ function showToast(message, type = 'info') {
   }, 2000);
 }
 
+function showLoadingToast(message) {
+  let container = document.getElementById('toast-container');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'toast-container';
+    container.className = 'toast-container';
+    document.body.appendChild(container);
+  }
+
+  const toast = document.createElement('div');
+  toast.className = 'toast loading';
+  toast.textContent = message;
+
+  container.appendChild(toast);
+
+  return () => {
+    toast.style.opacity = '0';
+    toast.style.transform = 'translateY(-12px) scale(0.96)';
+    setTimeout(() => {
+      toast.remove();
+    }, 250);
+  };
+}
+
 function showInfoDialog(options = {}) {
   const titleText = options.title || '提示';
   const messageText = options.message || '';
@@ -2288,6 +2312,7 @@ async function importSettings() {
 }
 
 async function backupWebdav() {
+  const originalText = backupWebdavButton ? backupWebdavButton.textContent : '备份';
   try {
     if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
@@ -2310,16 +2335,40 @@ async function backupWebdav() {
     if (!target) {
       return;
     }
+
+    if (backupWebdavButton) {
+      backupWebdavButton.classList.add('is-loading');
+      backupWebdavButton.disabled = true;
+      backupWebdavButton.textContent = '备份中...';
+    }
     setStatus('正在备份 WebDAV 数据...');
+
     await invoke('backup_webdav', { path: target });
-    showToast(`WebDAV 数据已备份到 ${target}`, 'success');
+    
+    setSuccessStatus('备份成功');
+    // showToast(`WebDAV 数据已备份到 ${target}`, 'success');
+    await showInfoDialog({
+      title: '备份成功',
+      message: `WebDAV 数据已成功备份到：\n${target}`,
+    });
   } catch (error) {
     setErrorStatus(`备份失败：${error}`);
     showToast(`备份失败：${error}`, 'error');
+    await showInfoDialog({
+      title: '备份失败',
+      message: String(error),
+    });
+  } finally {
+    if (backupWebdavButton) {
+      backupWebdavButton.classList.remove('is-loading');
+      backupWebdavButton.disabled = false;
+      backupWebdavButton.textContent = originalText;
+    }
   }
 }
 
 async function restoreWebdav() {
+  const originalText = restoreWebdavButton ? restoreWebdavButton.textContent : '恢复';
   try {
     if (!invoke) {
       setErrorStatus('未���测到 Tauri API，请检查 app.withGlobalTauri 设置');
@@ -2353,13 +2402,35 @@ async function restoreWebdav() {
     if (!confirmed) {
       return;
     }
+
+    if (restoreWebdavButton) {
+      restoreWebdavButton.classList.add('is-loading');
+      restoreWebdavButton.disabled = true;
+      restoreWebdavButton.textContent = '恢复中...';
+    }
     setStatus('正在从备份恢复 WebDAV 数据...');
+
     await invoke('restore_webdav', { path });
-    showToast('WebDAV 数据已恢复', 'success');
+    
+    setSuccessStatus('恢复成功');
+    await showInfoDialog({
+      title: '恢复成功',
+      message: 'WebDAV 数据已成功恢复',
+    });
     await manualRefresh();
   } catch (error) {
     setErrorStatus(`恢复失败：${error}`);
     showToast(`恢复失败：${error}`, 'error');
+    await showInfoDialog({
+      title: '恢复失败',
+      message: String(error),
+    });
+  } finally {
+    if (restoreWebdavButton) {
+      restoreWebdavButton.classList.remove('is-loading');
+      restoreWebdavButton.disabled = false;
+      restoreWebdavButton.textContent = originalText;
+    }
   }
 }
 

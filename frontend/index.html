@@ -165,8 +165,14 @@
                   </div>
                   <div class="settings-actions">
                     <div class="settings-actions-row">
-                      <button id="backup-webdav" class="button ghost" type="button">备份 WebDAV</button>
-                      <button id="restore-webdav" class="button ghost" type="button">恢复 WebDAV</button>
+                      <button id="backup-webdav" class="button ghost has-spinner" type="button">
+                        <span>备份 WebDAV</span>
+                        <span class="button-spinner"></span>
+                      </button>
+                      <button id="restore-webdav" class="button ghost has-spinner" type="button">
+                        <span>恢复 WebDAV</span>
+                        <span class="button-spinner"></span>
+                      </button>
                     </div>
                     <span class="field-hint">将 WebDAV 数据打包成 zip 文件，或从 zip 文件恢复</span>
                   </div>
