@@ -62,6 +62,8 @@ pub struct Message {
   pub local_path: Option<String>,
   pub file_hash: Option<String>,
   pub download_exists: bool,
+  #[serde(default)]
+  pub marked: bool,
 }
 
 #[derive(Clone, Serialize)]

@@ -263,6 +263,48 @@ body {
   border-color: #c8ebc0;
 }
 
+.message-card.is-marked .message-body {
+  background-color: #fff5ed;
+  border-color: var(--accent);
+}
+
+.message-card.is-self.is-marked .message-body {
+  background-color: #fff5ed;
+  border-color: var(--accent-strong);
+}
+
+.mark-action img {
+  opacity: 0.45 !important;
+  filter: grayscale(1);
+}
+
+.button.ghost.has-marked {
+  color: var(--accent-strong);
+  border-color: var(--accent);
+  background: #fff5ed;
+}
+
+.button.ghost.has-marked img {
+  filter: invert(54%) sepia(95%) saturate(1391%) hue-rotate(350deg) brightness(96%) contrast(94%); /* Matches --accent #ff7a2f */
+  opacity: 1;
+}
+
+#filter-marked.is-active {
+    background-color: var(--accent-strong);
+    color: white;
+    border-color: var(--accent-strong);
+}
+
+#filter-marked.is-active img {
+    filter: brightness(0) invert(1);
+    opacity: 1;
+}
+
+.mark-action.is-marked img {
+  opacity: 1;
+  filter: invert(54%) sepia(95%) saturate(1391%) hue-rotate(350deg) brightness(96%) contrast(94%); /* Matches --accent #ff7a2f */
+}
+
 .scroll-to-bottom {
   position: absolute;
   right: 40px;
@@ -347,6 +389,15 @@ body {
 .button.icon-only.primary:hover img {
   opacity: 1;
   filter: brightness(0) saturate(100%) invert(54%) sepia(95%) saturate(1391%) hue-rotate(350deg) brightness(96%) contrast(94%);
+}
+
+.button.icon-only.active {
+    background: var(--accent);
+    border-radius: 6px; 
+}
+.button.icon-only.active img {
+    opacity: 1;
+    filter: brightness(0) invert(1);
 }
 
 .message-select {

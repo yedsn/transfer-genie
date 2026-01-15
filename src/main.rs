@@ -71,6 +71,8 @@ struct HistoryEntry {
   size: i64,
   kind: String,
   original_name: String,
+  #[serde(default)]
+  marked: bool,
 }
 
 #[derive(Deserialize)]
@@ -317,6 +319,68 @@ struct MessagesResult {
   messages: Vec<Message>,
   total: i64,
   has_more: bool,
+  marked_count: i64,
+}
+
+#[tauri::command]
+async fn mark_message(state: State<'_, AppState>, filename: String) -> Result<(), String> {
+  set_message_marked(&state, filename, true).await
+}
+
+#[tauri::command]
+async fn unmark_message(state: State<'_, AppState>, filename: String) -> Result<(), String> {
+  set_message_marked(&state, filename, false).await
+}
+
+async fn set_message_marked(
+  state: &AppState,
+  filename: String,
+  marked: bool,
+) -> Result<(), String> {
+  let settings = current_settings(state)?;
+  let endpoint = resolve_active_endpoint(&settings)?;
+
+  // 1. Update local DB
+  let existing = db::get_message(&state.db_path, &endpoint.id, &filename)
+    .map_err(|err| err.to_string())?;
+  
+  if let Some(mut message) = existing {
+    message.marked = marked;
+    db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
+  } else {
+    return Err("未找到消息".to_string());
+  }
+
+  // 2. Update remote history.json
+  let _guard = state.sync_guard.lock().await; 
+  
+  let mut history = load_history(state, &endpoint).await?;
+  let mut changed = false;
+  let mut found = false;
+  
+  for entry in history.iter_mut() {
+    if entry.filename == filename {
+      if entry.marked != marked {
+        entry.marked = marked;
+        changed = true;
+      }
+      found = true;
+      break;
+    }
+  }
+  
+  // If not found in history but exists locally, maybe we should add it to history?
+  // But history usually contains what's on remote. If it's local only, it shouldn't be in history.json yet?
+  // But sync_once adds local messages to history if they are missing? 
+  // Wait, sync_once adds *downloaded* messages to history. 
+  // If I sent a message, it is added to history.
+  // If I just mark a message, it should be in history.
+  
+  if changed {
+    save_history(state, &endpoint, &history).await?;
+  }
+
+  Ok(())
 }
 
 #[tauri::command]
@@ -324,13 +388,23 @@ fn list_messages(
   state: State<'_, AppState>,
   limit: Option<i64>,
   offset: Option<i64>,
+  only_marked: Option<bool>,
 ) -> Result<MessagesResult, String> {
   let settings = current_settings(&state)?;
   let endpoint = resolve_active_endpoint(&settings)?;
   
-  let total = db::count_messages(&state.db_path, &endpoint.id).map_err(|err| err.to_string())?;
+  let marked_filter = only_marked.unwrap_or(false);
+  let total = db::count_messages(&state.db_path, &endpoint.id, marked_filter).map_err(|err| err.to_string())?;
+  
+  // Always get the total count of marked messages for the badge
+  let marked_count = if marked_filter {
+    total
+  } else {
+    db::count_messages(&state.db_path, &endpoint.id, true).map_err(|err| err.to_string())?
+  };
+
   let mut messages =
-    db::list_messages_paged(&state.db_path, &endpoint.id, limit, offset).map_err(|err| err.to_string())?;
+    db::list_messages_paged(&state.db_path, &endpoint.id, limit, offset, marked_filter).map_err(|err| err.to_string())?;
   
   let base_dir = resolve_download_dir(&state, &settings);
   for message in messages.iter_mut() {
@@ -366,6 +440,7 @@ fn list_messages(
     messages,
     total,
     has_more,
+    marked_count,
   })
 }
 
@@ -395,6 +470,7 @@ async fn send_text(state: State<'_, AppState>, text: String) -> Result<(), Strin
     content: Some(text),
     local_path: None,
     file_hash: None,
+    marked: false,
   };
 
   db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
@@ -514,6 +590,7 @@ async fn send_file(
     content: None,
     local_path: Some(local_path.to_string_lossy().to_string()),
     file_hash: Some(file_hash),
+    marked: false,
   };
 
   db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
@@ -626,6 +703,7 @@ async fn send_file_data(
     content: None,
     local_path: Some(local_path.to_string_lossy().to_string()),
     file_hash: Some(file_hash),
+    marked: false,
   };
 
   db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
@@ -1395,7 +1473,7 @@ async fn restore_webdav(state: State<'_, AppState>, path: String) -> Result<(), 
     Ok(())
 }
 
-fn current_settings(state: &State<'_, AppState>) -> Result<Settings, String> {
+fn current_settings(state: &AppState) -> Result<Settings, String> {
   let settings = state
     .settings
     .lock()
@@ -2081,7 +2159,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
     let history_entry = history_map.get(&filename);
 
     let parsed = parse_message_filename(&filename);
-    let (sender, timestamp_ms, kind, original_name, size_hint) = if let Some(history) = history_entry
+    let (sender, timestamp_ms, kind, original_name, size_hint, marked) = if let Some(history) = history_entry
     {
       (
         history.sender.clone(),
@@ -2089,6 +2167,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
         history.kind.clone(),
         history.original_name.clone(),
         history.size,
+        history.marked,
       )
     } else if let Some(parsed) = parsed.as_ref() {
       (
@@ -2099,6 +2178,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
         file_entry
           .and_then(|entry| entry.size)
           .unwrap_or(0) as i64,
+        false,
       )
     } else {
       continue;
@@ -2119,6 +2199,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
       content: None,
       local_path: None,
       file_hash: None,
+      marked,
     });
 
     if let Some(history) = history_entry {
@@ -2129,6 +2210,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
       if history.size > 0 {
         message.size = history.size;
       }
+      message.marked = history.marked;
     }
 
     if let Some(entry) = file_entry {
@@ -2188,6 +2270,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
         || existing.original_name != message.original_name
         || existing.content != message.content
         || existing.local_path != message.local_path
+        || existing.marked != message.marked
       {
         should_upsert = true;
       }
@@ -2221,6 +2304,7 @@ fn message_to_history(message: &DbMessage) -> HistoryEntry {
     size: message.size,
     kind: message.kind.clone(),
     original_name: message.original_name.clone(),
+    marked: message.marked,
   }
 }
 
@@ -2706,7 +2790,9 @@ fn main() {
       get_sync_status,
       test_webdav_speed,
       backup_webdav,
-      restore_webdav
+      restore_webdav,
+      mark_message,
+      unmark_message
     ])
     .build(tauri::generate_context!())
     .expect("error while building tauri application");
@@ -2717,4 +2803,33 @@ fn main() {
       show_main_window(_app_handle);
     }
   });
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn test_history_entry_serde() {
+    let entry = HistoryEntry {
+      filename: "test.txt".to_string(),
+      sender: "me".to_string(),
+      timestamp_ms: 1234567890,
+      size: 100,
+      kind: "text".to_string(),
+      original_name: "test.txt".to_string(),
+      marked: true,
+    };
+    
+    let json = serde_json::to_string(&entry).unwrap();
+    assert!(json.contains("\"marked\":true"));
+    
+    let deserialized: HistoryEntry = serde_json::from_str(&json).unwrap();
+    assert_eq!(deserialized.marked, true);
+    
+    // Test default
+    let json_old = r#"{"filename":"test.txt","sender":"me","timestamp_ms":1234567890,"size":100,"kind":"text","original_name":"test.txt"}"#;
+    let deserialized_old: HistoryEntry = serde_json::from_str(json_old).unwrap();
+    assert_eq!(deserialized_old.marked, false);
+  }
 }

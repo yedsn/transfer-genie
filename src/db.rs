@@ -17,6 +17,7 @@ pub struct DbMessage {
   pub content: Option<String>,
   pub local_path: Option<String>,
   pub file_hash: Option<String>,
+  pub marked: bool,
 }
 
 pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), String> {
@@ -136,6 +137,29 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
       .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
   }
 
+  // 检查是否有 marked 列，如果没有则添加
+  let mut has_marked = false;
+  {
+    let mut stmt = conn
+      .prepare("PRAGMA table_info(messages)")
+      .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+    let rows = stmt
+      .query_map([], |row| row.get::<_, String>(1))
+      .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+    for row in rows {
+      if row.map_err(|err| format!("兜兵晒方象垂払移: {err}"))? == "marked" {
+        has_marked = true;
+        break;
+      }
+    }
+  }
+
+  if !has_marked {
+    conn
+      .execute("ALTER TABLE messages ADD COLUMN marked BOOLEAN NOT NULL DEFAULT 0", [])
+      .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+  }
+
   Ok(())
 }
 
@@ -147,7 +171,7 @@ pub fn get_message(
   let conn = Connection::open(path)?;
   conn
     .query_row(
-      "SELECT endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, file_hash \
+      "SELECT endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, file_hash, marked \
        FROM messages WHERE endpoint_id = ?1 AND filename = ?2",
       params![endpoint_id, filename],
       |row| {
@@ -164,6 +188,7 @@ pub fn get_message(
           content: row.get(9)?,
           local_path: row.get(10)?,
           file_hash: row.get(11)?,
+          marked: row.get(12)?,
         })
       },
     )
@@ -174,8 +199,8 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
   let conn = Connection::open(path)?;
   conn.execute(
     "INSERT INTO messages\
-      (endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, file_hash)\
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)\
+      (endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, file_hash, marked)\
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)\
       ON CONFLICT(endpoint_id, filename) DO UPDATE SET \
         sender=excluded.sender,\
         timestamp_ms=excluded.timestamp_ms,\
@@ -186,7 +211,8 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
         mtime=excluded.mtime,\
         content=excluded.content,\
         local_path=excluded.local_path,\
-        file_hash=excluded.file_hash",
+        file_hash=excluded.file_hash,\
+        marked=excluded.marked",
     params![
       message.endpoint_id,
       message.filename,
@@ -200,13 +226,14 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
       message.content,
       message.local_path,
       message.file_hash,
+      message.marked,
     ],
   )?;
   Ok(())
 }
 
 pub fn list_messages(path: &Path, endpoint_id: &str) -> rusqlite::Result<Vec<Message>> {
-  list_messages_paged(path, endpoint_id, None, None)
+  list_messages_paged(path, endpoint_id, None, None, false)
 }
 
 pub fn list_messages_paged(
@@ -214,27 +241,37 @@ pub fn list_messages_paged(
   endpoint_id: &str,
   limit: Option<i64>,
   offset: Option<i64>,
+  only_marked: bool,
 ) -> rusqlite::Result<Vec<Message>> {
   let conn = Connection::open(path)?;
   
+  let where_clause = if only_marked {
+    "WHERE endpoint_id = ?1 AND marked = 1"
+  } else {
+    "WHERE endpoint_id = ?1"
+  };
+
   // 使用子查询实现：先按时间倒序取最新的 N 条，再按时间正序返回
   let sql = match (limit, offset) {
     (Some(lim), Some(off)) => format!(
       "SELECT * FROM (\
-        SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, file_hash \
-        FROM messages WHERE endpoint_id = ?1 ORDER BY timestamp_ms DESC LIMIT {} OFFSET {}\
+        SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, file_hash, marked \
+        FROM messages {} ORDER BY timestamp_ms DESC LIMIT {} OFFSET {}\
       ) ORDER BY timestamp_ms ASC",
-      lim, off
+      where_clause, lim, off
     ),
     (Some(lim), None) => format!(
       "SELECT * FROM (\
-        SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, file_hash \
-        FROM messages WHERE endpoint_id = ?1 ORDER BY timestamp_ms DESC LIMIT {}\
+        SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, file_hash, marked \
+        FROM messages {} ORDER BY timestamp_ms DESC LIMIT {}\
       ) ORDER BY timestamp_ms ASC",
-      lim
+      where_clause, lim
     ),
-    _ => "SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, file_hash \
-          FROM messages WHERE endpoint_id = ?1 ORDER BY timestamp_ms ASC".to_string(),
+    _ => format!(
+      "SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, file_hash, marked \
+       FROM messages {} ORDER BY timestamp_ms ASC",
+      where_clause
+    ),
   };
   
   let mut stmt = conn.prepare(&sql)?;
@@ -250,6 +287,7 @@ pub fn list_messages_paged(
       local_path: row.get(7)?,
       file_hash: row.get(8)?,
       download_exists: false,
+      marked: row.get(9)?,
     })
   })?;
 
@@ -260,10 +298,15 @@ pub fn list_messages_paged(
   Ok(messages)
 }
 
-pub fn count_messages(path: &Path, endpoint_id: &str) -> rusqlite::Result<i64> {
+pub fn count_messages(path: &Path, endpoint_id: &str, only_marked: bool) -> rusqlite::Result<i64> {
   let conn = Connection::open(path)?;
+  let sql = if only_marked {
+    "SELECT COUNT(*) FROM messages WHERE endpoint_id = ?1 AND marked = 1"
+  } else {
+    "SELECT COUNT(*) FROM messages WHERE endpoint_id = ?1"
+  };
   conn.query_row(
-    "SELECT COUNT(*) FROM messages WHERE endpoint_id = ?1",
+    &sql,
     params![endpoint_id],
     |row| row.get(0),
   )

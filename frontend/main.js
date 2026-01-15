@@ -46,6 +46,8 @@ const backupWebdavButton = document.getElementById('backup-webdav');
 const restoreWebdavButton = document.getElementById('restore-webdav');
 const openLogDirButton = document.getElementById('open-log-dir');
 const openDataDirButton = document.getElementById('open-data-dir');
+const filterMarkedButton = document.getElementById('filter-marked');
+const markedFilterLabel = document.getElementById('marked-filter-label');
 
 let refreshTimer = null;
 let didInitialSync = false;
@@ -58,6 +60,7 @@ let lastMessages = [];
 const downloadSpeed = new Map();
 const uploadSpeed = new Map();
 let selectionMode = false;
+let markedFilterActive = false;
 const selectedMessages = new Set();
 
 // 发送状态常量
@@ -1527,6 +1530,42 @@ async function cleanupMessages() {
     });
   }
 }
+
+async function toggleMessageMarked(message) {
+  if (!message || !message.filename) return;
+  if (!invoke) return;
+  
+  const newMarked = !message.marked;
+  // Optimistic update
+  message.marked = newMarked;
+  
+  // Update count optimistically
+  let currentLabel = markedFilterLabel?.textContent || '已标记 (0)';
+  let match = currentLabel.match(/\((\d+)\)/);
+  let currentCount = match ? parseInt(match[1], 10) : 0;
+  updateMarkedBadge(currentCount + (newMarked ? 1 : -1));
+
+  renderMessages(lastMessages); // Re-render to update UI immediately
+  
+  try {
+    const command = newMarked ? 'mark_message' : 'unmark_message';
+    await invoke(command, { filename: message.filename });
+  } catch (error) {
+    // Revert on error
+    message.marked = !newMarked;
+    updateMarkedBadge(currentCount); // Revert count
+    renderMessages(lastMessages);
+    showToast(`操作失败: ${error}`, 'error');
+  }
+}
+
+function updateMarkedBadge(count) {
+  if (!markedFilterLabel || !filterMarkedButton) return;
+  const validCount = Math.max(0, count);
+  markedFilterLabel.textContent = `已标记 (${validCount})`;
+  filterMarkedButton.classList.toggle('has-marked', validCount > 0);
+}
+
 function shouldShowMenuAbove(item) {
   if (!messageList || !item) return false;
   
@@ -1584,6 +1623,7 @@ function renderMessages(messages, options = {}) {
     item.classList.toggle('is-file', isFile);
     item.classList.toggle('is-text', !isFile);
     item.classList.toggle('is-self', isSelf);
+    item.classList.toggle('is-marked', !!message.marked);
     item.classList.toggle('with-selection', selectionMode);
     item.dataset.filename = message.filename;
     item.classList.toggle('is-selected', selectedMessages.has(message.filename));
@@ -1677,6 +1717,18 @@ function renderMessages(messages, options = {}) {
         }
         actions.appendChild(statusTag);
       } else {
+        const markButton = document.createElement('button');
+        markButton.className = 'button ghost small icon-only mark-action';
+        markButton.classList.toggle('is-marked', !!message.marked);
+        const markIcon = document.createElement('img');
+        markIcon.src = 'icons/mark.svg';
+        markIcon.alt = '标记';
+        markIcon.style.width = '16px';
+        markIcon.style.height = '16px';
+        markButton.appendChild(markIcon);
+        markButton.addEventListener('click', () => toggleMessageMarked(message));
+        actions.appendChild(markButton);
+
         const copyButton = document.createElement('button');
         copyButton.className = 'button ghost small icon-only';
         const copyIcon = document.createElement('img');
@@ -1741,6 +1793,18 @@ function renderMessages(messages, options = {}) {
         if (isDownloading) {
           item.classList.add('is-downloading');
         }
+
+        const markButton = document.createElement('button');
+        markButton.className = 'button ghost small icon-only mark-action';
+        markButton.classList.toggle('is-marked', !!message.marked);
+        const markIcon = document.createElement('img');
+        markIcon.src = 'icons/mark.svg';
+        markIcon.alt = '标记';
+        markIcon.style.width = '16px';
+        markIcon.style.height = '16px';
+        markButton.appendChild(markIcon);
+        markButton.addEventListener('click', () => toggleMessageMarked(message));
+        actions.appendChild(markButton);
 
         if (!message.download_exists) {
           const downloadButton = document.createElement('button');
@@ -2002,9 +2066,13 @@ async function loadMessages(options = {}) {
       if (isLoadingMore || !hasMoreMessages) return;
       isLoadingMore = true;
       const newOffset = currentOffset + PAGE_SIZE;
-      const result = await invoke('list_messages', { limit: PAGE_SIZE, offset: newOffset });
+      const result = await invoke('list_messages', { limit: PAGE_SIZE, offset: newOffset, onlyMarked: markedFilterActive });
       isLoadingMore = false;
       
+      if (result.marked_count !== undefined) {
+        updateMarkedBadge(result.marked_count);
+      }
+
       if (result.messages && result.messages.length > 0) {
         // 将新加载的消息添加到开头
         lastMessages = [...result.messages, ...lastMessages];
@@ -2015,7 +2083,12 @@ async function loadMessages(options = {}) {
       }
     } else if (checkNew) {
       // 定时刷新模式：只检查新消息
-      const result = await invoke('list_messages', { limit: PAGE_SIZE, offset: 0 });
+      const result = await invoke('list_messages', { limit: PAGE_SIZE, offset: 0, onlyMarked: markedFilterActive });
+      
+      if (result.marked_count !== undefined) {
+        updateMarkedBadge(result.marked_count);
+      }
+
       const newMessages = result.messages || [];
       
       if (newMessages.length === 0) {
@@ -2050,7 +2123,7 @@ async function loadMessages(options = {}) {
         totalMessages = result.total || 0;
         hasMoreMessages = result.has_more || false;
         
-        // 如果当前在底部，自动滚动到底部显示新消息
+        // 如果当前在底部，自动滚动到底��显示新消息
         const autoScroll = isMessageListAtBottom();
         renderMessages(lastMessages, { scrollToBottom: autoScroll });
       } else {
@@ -2063,7 +2136,12 @@ async function loadMessages(options = {}) {
     } else {
       // 初始加载或手动刷新：加载最新的消息
       currentOffset = 0;
-      const result = await invoke('list_messages', { limit: PAGE_SIZE, offset: 0 });
+      const result = await invoke('list_messages', { limit: PAGE_SIZE, offset: 0, onlyMarked: markedFilterActive });
+      
+      if (result.marked_count !== undefined) {
+        updateMarkedBadge(result.marked_count);
+      }
+
       lastMessages = result.messages || [];
       totalMessages = result.total || 0;
       hasMoreMessages = result.has_more || false;
@@ -3152,3 +3230,14 @@ document.addEventListener('paste', async (event) => {
     }
   }
 });
+
+if (filterMarkedButton) {
+  filterMarkedButton.addEventListener('click', () => {
+    markedFilterActive = !markedFilterActive;
+    filterMarkedButton.classList.toggle('is-active', markedFilterActive);
+    currentOffset = 0;
+    lastMessages = [];
+    hasMoreMessages = false;
+    loadMessages();
+  });
+}
