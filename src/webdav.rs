@@ -88,7 +88,7 @@ pub async fn list_entries(
   // info!("Entries: {:#?}", entries);
 
   let request_path = prefix.unwrap_or("").trim_matches('/');
-  let final_entries: Vec<DavEntry> = entries
+  Ok(entries
     .into_iter()
     .filter(|entry| {
       let is_self = entry.remote_path.trim_matches('/') == request_path;
@@ -96,15 +96,7 @@ pub async fn list_entries(
       let is_empty = entry.filename.is_empty();
       !is_self && !is_empty
     })
-    .collect();
-
-  // info!("--- list_entries result summary ---");
-  for (i, entry) in final_entries.iter().enumerate() {
-      // info!("[{}] Name: '{}', RemotePath: '{}', IsDir: {}", i, entry.filename, entry.remote_path, entry.is_collection);
-  }
-  // info!("-----------------------------------");
-
-  Ok(final_entries)
+    .collect())
 }
 
 

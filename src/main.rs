@@ -384,7 +384,6 @@ async fn set_message_marked(
   
   let mut history = load_history(state, &endpoint).await?;
   let mut changed = false;
-  let mut found = false;
   
   for entry in history.iter_mut() {
     if entry.filename == filename {
@@ -392,7 +391,6 @@ async fn set_message_marked(
         entry.marked = marked;
         changed = true;
       }
-      found = true;
       break;
     }
   }
@@ -1446,7 +1444,7 @@ async fn restore_webdav(window: Window, state: State<'_, AppState>, path: String
     
     use zip::ZipArchive;
     use std::io::Read;
-    use futures_util::StreamExt;
+    
     use bytes::Bytes;
 
     let settings = current_settings(&state)?;
