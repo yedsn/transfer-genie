@@ -2114,16 +2114,36 @@ async function loadMessages(options = {}) {
       
       // 找出真正的新消息（不在当前列表中的）
       // 注意：消息按时间正序排列，最新的在数组末尾
+      // 找出真正的新消息以及需要更新状态的消息
+      const newMessagesMap = new Map(newMessages.map(msg => [msg.filename, msg]));
+      let stateChanged = false;
+      
+      // 1. 更新现有消息的状态（标记状态、下载状态等）
+      lastMessages = lastMessages.map(oldMsg => {
+        if (newMessagesMap.has(oldMsg.filename)) {
+          const newMsg = newMessagesMap.get(oldMsg.filename);
+          // 检查是否有属性变更
+          if (oldMsg.marked !== newMsg.marked || oldMsg.download_exists !== newMsg.download_exists) {
+            stateChanged = true;
+            return { ...oldMsg, ...newMsg };
+          }
+        }
+        return oldMsg;
+      });
+
       const existingFilenames = new Set(lastMessages.map(msg => msg.filename));
       const actualNewMessages = newMessages.filter(msg => !existingFilenames.has(msg.filename));
       
-      if (actualNewMessages.length > 0) {
+      if (actualNewMessages.length > 0 || stateChanged) {
         // 有新消息，添加到列表末尾（最新消息在后面）
-        lastMessages = [...lastMessages, ...actualNewMessages];
+        if (actualNewMessages.length > 0) {
+          lastMessages = [...lastMessages, ...actualNewMessages];
+        }
         totalMessages = result.total || 0;
         hasMoreMessages = result.has_more || false;
         
         // 如果当前在底部，自动滚动到底��显示新消息
+        // 如果当前在底部，或者由于状态更新触发，自动滚动/重新渲染
         const autoScroll = isMessageListAtBottom();
         renderMessages(lastMessages, { scrollToBottom: autoScroll });
       } else {
