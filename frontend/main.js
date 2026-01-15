@@ -2328,7 +2328,8 @@ async function backupWebdav() {
       return;
     }
     const now = new Date();
-    const timestamp = `${now.getFullYear()}${(now.getMonth() + 1).toString().padStart(2, '0')}${now.getDate().toString().padStart(2, '0')}`;
+    const pad = (n) => n.toString().padStart(2, '0');
+    const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
     const target = await saveDialog({
       defaultPath: `transfer-genie-webdav-backup-${timestamp}.zip`,
       filters: [{ name: 'Zip Archive', extensions: ['zip'] }],
