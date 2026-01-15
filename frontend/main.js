@@ -2938,6 +2938,42 @@ if (listen) {
       }
     }
   });
+
+  listen('webdav-backup-progress', (event) => {
+    const payload = event.payload || {};
+    const { current, total, state } = payload;
+    
+    if (state === 'finished') {
+       return;
+    }
+    
+    const percent = total > 0 ? Math.round((current / total) * 100) : 0;
+    const text = state === 'scanning' ? '扫描中...' : 
+                 state === 'downloading' ? `备份中 ${percent}%` :
+                 state;
+                 
+    if (backupWebdavButton) {
+        backupWebdavButton.textContent = text;
+    }
+  });
+
+  listen('webdav-restore-progress', (event) => {
+    const payload = event.payload || {};
+    const { current, total, state } = payload;
+    
+    if (state === 'finished') {
+       return;
+    }
+    
+    const percent = total > 0 ? Math.round((current / total) * 100) : 0;
+    const text = state === 'scanning' ? '清理旧数据...' : 
+                 state === 'uploading' ? `恢复中 ${percent}%` :
+                 state;
+                 
+    if (restoreWebdavButton) {
+        restoreWebdavButton.textContent = text;
+    }
+  });
 }
 
 refreshButton.addEventListener('click', manualRefresh);

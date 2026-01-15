@@ -185,6 +185,34 @@ struct UploadProgress {
   error: Option<String>,
 }
 
+#[derive(Clone, Serialize)]
+struct BackupRestoreProgress {
+  filename: String,
+  current: u64,
+  total: u64,
+  state: String,
+}
+
+fn emit_backup_restore_progress(
+  window: &Window,
+  event_name: &str,
+  filename: &str,
+  current: u64,
+  total: u64,
+  state: &str,
+) {
+  let payload = BackupRestoreProgress {
+    filename: filename.to_string(),
+    current,
+    total,
+    state: state.to_string(),
+  };
+  
+  if let Err(e) = window.emit(event_name, payload) {
+    log::warn!("Failed to emit {}: {}", event_name, e);
+  }
+}
+
 #[tauri::command]
 fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
   let settings = state
@@ -1324,152 +1352,211 @@ async fn recursive_list_webdav(
 }
 
 #[tauri::command]
-async fn backup_webdav(state: State<'_, AppState>, path: String) -> Result<(), String> {
+async fn backup_webdav(window: Window, state: State<'_, AppState>, path: String) -> Result<(), String> {
     use std::io::Write;
-    use zip::write::{FileOptions};
+    use zip::write::FileOptions;
+    use futures_util::StreamExt;
 
     let settings = current_settings(&state)?;
     let endpoint = resolve_active_endpoint(&settings)?;
 
     info!("--- Starting WebDAV Backup ---");
-    info!("Target file: {}", &path);
+    emit_backup_restore_progress(&window, "webdav-backup-progress", "", 0, 0, "scanning");
 
     // 1. Scanning
-    info!("Step 1: Scanning WebDAV directories...");
     let entries = recursive_list_webdav(&state.http, &endpoint, "").await?;
-    let total_entries = entries.len();
-    info!("Scan complete. Found {} items (files + directories).", total_entries);
-
-    // Log the list of paths found
-    info!("--- Scanned Path List ---");
-    for (i, entry) in entries.iter().enumerate() {
-        info!("[{}] Path: '{}', IsDir: {}", i, entry.remote_path, entry.is_collection);
-    }
-    info!("-------------------------");
+    let total_entries = entries.len() as u64;
 
     if total_entries == 0 {
-        info!("WARNING: No files found to backup. The generated zip file will be empty.");
+        emit_backup_restore_progress(&window, "webdav-backup-progress", "", 0, 0, "finished");
+        return Ok(());
     }
 
     // 2. Preparing Zip
-    info!("Step 2: Creating zip file...");
     let file = std::fs::File::create(&path).map_err(|e| format!("创建备份文件失败: {}", e))?;
     let mut zip = zip::ZipWriter::new(file);
     let options: FileOptions<'_, ()> = FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-    // 3. Downloading and Zipping
-    info!("Step 3: Downloading and archiving files...");
-    let mut success_count = 0;
-    let mut fail_count = 0;
-    let mut skipped_count = 0;
+    // 3. Process Entries
+    let temp_dir = state.files_base_dir.join("temp_backup");
+    if !temp_dir.exists() {
+        fs::create_dir_all(&temp_dir).map_err(|e| format!("无法创建临时目录: {}", e))?;
+    }
 
     for (index, entry) in entries.iter().enumerate() {
-        // Log progress every 10 items
-        if index % 10 == 0 {
-             info!("Processing item {}/{}", index + 1, total_entries);
-        }
+        let current_progress = (index + 1) as u64;
+        emit_backup_restore_progress(&window, "webdav-backup-progress", &entry.filename, current_progress, total_entries, "downloading");
 
         if entry.is_collection {
             if !entry.remote_path.is_empty() {
-                // info!("Creating directory: '{}'", &entry.remote_path);
                 if let Err(e) = zip.add_directory(&entry.remote_path, options) {
-                     info!("Failed to add directory '{}': {}", &entry.remote_path, e);
+                     log::warn!("Failed to add directory '{}': {}", &entry.remote_path, e);
                 }
             }
-            continue;
-        }
-        
-        let remote_path = &entry.remote_path;
-        if remote_path.is_empty() {
-            skipped_count += 1;
             continue;
         }
 
-        // info!("Downloading: '{}'", remote_path);
-        match webdav::download_file(&state.http, &endpoint, remote_path).await {
-            Ok(file_data) => {
+        let remote_path = &entry.remote_path;
+        if remote_path.is_empty() {
+            continue;
+        }
+
+        // Stream download to temp file
+        let temp_file_path = temp_dir.join(format!("backup_{}.tmp", index));
+        
+        let download_result = webdav::download_file_stream(&state.http, &endpoint, remote_path).await;
+        match download_result {
+            Ok((mut stream, _)) => {
+                // Use std::fs::File (Blocking write) as tokio::fs is not enabled
+                let mut temp_file = std::fs::File::create(&temp_file_path).map_err(|e| format!("创���临时文件失败: {}", e))?;
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.map_err(|e| format!("下载流中断: {}", e))?;
+                    temp_file.write_all(&chunk).map_err(|e| format!("写入临时文件失败: {}", e))?;
+                }
+                temp_file.flush().map_err(|e| format!("刷新临时文件失败: {}", e))?;
+                drop(temp_file); 
+
+                // Write to Zip (Sync)
+                let mut input_file = std::fs::File::open(&temp_file_path).map_err(|e| format!("读取临时文件失败: {}", e))?;
                 if let Err(e) = zip.start_file(remote_path, options) {
-                    info!("Error starting zip entry '{}': {}", remote_path, e);
-                    fail_count += 1;
-                    continue;
+                    let _ = std::fs::remove_file(&temp_file_path);
+                    return Err(format!("Zip start_file failed: {}", e));
                 }
-                if let Err(e) = zip.write_all(&file_data) {
-                    info!("Error writing zip data '{}': {}", remote_path, e);
-                    fail_count += 1;
-                    continue;
+                if let Err(e) = std::io::copy(&mut input_file, &mut zip) {
+                    let _ = std::fs::remove_file(&temp_file_path);
+                    return Err(format!("写入 Zip 失败: {}", e));
                 }
-                success_count += 1;
-            }
+                let _ = std::fs::remove_file(&temp_file_path);
+            },
             Err(e) => {
-                info!("Failed to download '{}': {}", remote_path, e);
-                fail_count += 1;
+                log::warn!("Skipping file '{}' due to download error: {}", remote_path, e);
             }
         }
     }
 
-    // 4. Finishing
-    info!("Step 4: Finalizing zip file...");
     zip.finish().map_err(|e| format!("完成 zip 文件失败: {}", e))?;
-    
-    info!("--- WebDAV Backup Finished ---");
-    info!("Total: {}, Success: {}, Failed: {}, Skipped: {}", total_entries, success_count, fail_count, skipped_count);
+    let _ = std::fs::remove_dir_all(&temp_dir);
 
+    emit_backup_restore_progress(&window, "webdav-backup-progress", "", total_entries, total_entries, "finished");
     Ok(())
 }
 
 #[tauri::command]
-async fn restore_webdav(state: State<'_, AppState>, path: String) -> Result<(), String> {
+async fn restore_webdav(window: Window, state: State<'_, AppState>, path: String) -> Result<(), String> {
     
     use zip::ZipArchive;
-    use std::io::{Read, Cursor};
+    use std::io::Read;
+    use futures_util::StreamExt;
+    use bytes::Bytes;
 
     let settings = current_settings(&state)?;
     let endpoint = resolve_active_endpoint(&settings)?;
+    
+    emit_backup_restore_progress(&window, "webdav-restore-progress", "", 0, 0, "scanning");
 
-    let data = fs::read(&path).map_err(|e| format!("读取备份文件失败: {}", e))?;
-    let reader = Cursor::new(data);
-    let mut archive = ZipArchive::new(reader).map_err(|e| format!("解析备份文件失败: {}", e))?;
+    // 清理远程 files 目录 (递归删除所有一级子项)
+    let existing_files = webdav::list_entries(&state.http, &endpoint, Some("files"), true).await?;
+    for entry in existing_files {
+        // remote_path is relative to root, e.g. "files/foo.txt" or "files/subdir"
+        let remote_path = entry.remote_path;
+        // Skip if it's "files" itself (though list_entries filters usually)
+        if remote_path == "files" || remote_path == "files/" {
+            continue;
+        }
+        let _ = webdav::delete_file(&state.http, &endpoint, &remote_path, true).await;
+    }
+    let _ = webdav::delete_file(&state.http, &endpoint, "history.json", true).await;
+
+    // 收集所有文件数据
+    let file = std::fs::File::open(&path).map_err(|e| format!("读取备份文件失败: {}", e))?;
+    let mut archive = ZipArchive::new(file).map_err(|e| format!("解析备份文件失败: {}", e))?;
+    let len = archive.len();
 
     // 验证 history.json 是否存在
     archive.by_name("history.json").map_err(|_| "备份文件无效: 缺少 history.json".to_string())?;
-
-    // 清理远程 files 目录
-    let existing_files = webdav::list_entries(&state.http, &endpoint, Some("files"), true).await?;
-    for entry in existing_files {
-        if !entry.is_collection {
-            let remote_path = format!("files/{}", entry.filename);
-            webdav::delete_file(&state.http, &endpoint, &remote_path, true).await?;
-        }
-    }
-     webdav::delete_file(&state.http, &endpoint, "history.json", true).await?;
-
-
-    // 收集所有文件数据
-    let mut files_to_upload = Vec::new();
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i).map_err(|e| format!("读取 zip entry 失败: {}", e))?;
-        let outpath = match file.enclosed_name() {
-            Some(path) => path.to_owned(),
-            None => continue,
-        };
-
-        if !(*file.name()).ends_with('/') {
-            let mut data = Vec::new();
-            file.read_to_end(&mut data).map_err(|e| format!("读取 zip 数据失败: {}", e))?;
-            if let Some(remote_path) = outpath.to_str() {
-                files_to_upload.push((remote_path.to_string(), data));
-            }
-        }
-    }
     
     // 确保目录存在 (只做一次)
     webdav::ensure_directory(&state.http, &endpoint, "files").await?;
-
-    // 上传文件
-    for (remote_path, data) in files_to_upload {
-        webdav::upload_file(&state.http, &endpoint, &remote_path, data).await?;
+    
+    let temp_dir = state.files_base_dir.join("temp_restore");
+    if !temp_dir.exists() {
+        fs::create_dir_all(&temp_dir).map_err(|e| format!("无法创建临时目录: {}", e))?;
     }
 
+    for i in 0..len {
+        let current_progress = (i + 1) as u64;
+         // Block to read zip entry info
+        let (filename, is_dir, size) = {
+             let file = archive.by_index(i).map_err(|e| format!("读取 zip entry 失败: {}", e))?;
+             (file.name().to_string(), file.is_dir(), file.size())
+        };
+        
+        emit_backup_restore_progress(&window, "webdav-restore-progress", &filename, current_progress, len as u64, "uploading");
+
+        if is_dir {
+             if !filename.is_empty() {
+                 let _ = webdav::ensure_directory(&state.http, &endpoint, &filename).await;
+             }
+             continue;
+        }
+
+        // Extract to temp file
+        let temp_file_path = temp_dir.join(format!("restore_{}.tmp", i));
+        {
+            let mut z_file = archive.by_index(i).unwrap();
+            let mut t_file = std::fs::File::create(&temp_file_path).map_err(|e| format!("创建临时文件失败: {}", e))?;
+            std::io::copy(&mut z_file, &mut t_file).map_err(|e| format!("解压文件失败: {}", e))?;
+        }
+
+        // Create a channel-based stream
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, String>>(2);
+        let path_clone = temp_file_path.clone();
+        
+        // Spawn blocking read thread
+        std::thread::spawn(move || {
+            let mut file = match std::fs::File::open(&path_clone) {
+                Ok(f) => f,
+                Err(e) => {
+                    let _ = tx.blocking_send(Err(e.to_string()));
+                    return;
+                }
+            };
+            let mut buf = [0u8; 64 * 1024];
+            loop {
+                match file.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let bytes = Bytes::copy_from_slice(&buf[..n]);
+                        if tx.blocking_send(Ok(bytes)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.blocking_send(Err(e.to_string()));
+                        break;
+                    }
+                }
+            }
+        });
+        
+        let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+            match rx.recv().await {
+                Some(item) => Some((item, rx)),
+                None => None,
+            }
+        });
+
+        // Upload
+        if let Err(e) = webdav::upload_file_stream(&state.http, &endpoint, &filename, stream, size).await {
+             let _ = std::fs::remove_file(&temp_file_path);
+             return Err(format!("上传失败 {}: {}", filename, e));
+        }
+        let _ = std::fs::remove_file(&temp_file_path);
+    }
+    
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    emit_backup_restore_progress(&window, "webdav-restore-progress", "", len as u64, len as u64, "finished");
     Ok(())
 }
 

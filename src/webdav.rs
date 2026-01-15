@@ -313,6 +313,65 @@ where
   Ok(bytes)
 }
 
+pub async fn download_file_stream(
+  client: &Client,
+  endpoint: &WebDavEndpoint,
+  remote_path: &str,
+) -> Result<(impl futures_util::Stream<Item = reqwest::Result<Bytes>>, Option<u64>), String> {
+  let mut url = base_url(endpoint)?;
+  url = url
+    .join(remote_path)
+    .map_err(|err| format!("文件地址无效: {err}"))?;
+
+  let request = client.get(url);
+  let response = apply_auth(request, endpoint)
+    .send()
+    .await
+    .map_err(|err| format!("下载失败: {err}"))?;
+
+  let status = response.status();
+  if !status.is_success() {
+    return Err(format!("下载失败: HTTP {}", status));
+  }
+  let len = response.content_length();
+  Ok((response.bytes_stream(), len))
+}
+
+pub async fn upload_file_stream<S, E>(
+  client: &Client,
+  endpoint: &WebDavEndpoint,
+  remote_path: &str,
+  stream: S,
+  content_length: u64,
+) -> Result<(), String>
+where
+  S: futures_util::Stream<Item = Result<Bytes, E>> + Send + Sync + 'static,
+  E: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+  let mut url = base_url(endpoint)?;
+  url = url
+    .join(remote_path)
+    .map_err(|err| format!("上传地址无效: {err}"))?;
+
+  // Explicitly set Content-Length to avoid "411 Length Required"
+  let body = Body::wrap_stream(stream);
+  let request = client
+    .put(url)
+    .header("Content-Length", content_length.to_string())
+    .body(body);
+    
+  let response = apply_auth(request, endpoint)
+    .send()
+    .await
+    .map_err(|err| format!("上传失败: {err}"))?;
+
+  let status = response.status();
+  if !status.is_success() {
+    return Err(format!("上传失败: HTTP {}", status));
+  }
+  Ok(())
+}
+
 pub async fn download_optional_file(
   client: &Client,
   endpoint: &WebDavEndpoint,
