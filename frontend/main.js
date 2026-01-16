@@ -2090,6 +2090,26 @@ function renderMessages(messages, options = {}) {
             flowChart: false, 
             sequenceDiagram: false,
           });
+
+          // Add copy button to code blocks
+          const container = document.getElementById(item.id);
+          if (container) {
+            container.querySelectorAll('pre').forEach(pre => {
+               if (pre.querySelector('.code-copy-btn')) return;
+               
+               const button = document.createElement('button');
+               button.className = 'code-copy-btn';
+               button.textContent = '复制';
+               button.addEventListener('click', (e) => {
+                 e.stopPropagation();
+                 const code = pre.querySelector('code');
+                 const text = code ? code.innerText : pre.innerText;
+                 copyTextToClipboard(text); // Reuse existing function
+               });
+               pre.appendChild(button);
+               pre.style.position = 'relative'; // Ensure button positioning works
+            });
+          }
         } catch (e) {
           console.error("Failed to render markdown for", item.id, e);
           const el = document.getElementById(item.id);

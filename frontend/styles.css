@@ -801,6 +801,31 @@ body {
   margin-bottom: 0;
 }
 
+.code-copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  background: rgba(255, 255, 255, 0.8);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--muted);
+  opacity: 0;
+  transition: opacity 0.2s, background 0.2s;
+}
+
+.message-body.markdown-body pre:hover .code-copy-btn {
+  opacity: 1;
+}
+
+.code-copy-btn:hover {
+  background: #fff;
+  color: var(--ink);
+  border-color: var(--ink);
+}
+
 .composer-actions {
   display: flex;
   gap: 6px;
