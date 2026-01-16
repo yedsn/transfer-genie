@@ -58,7 +58,8 @@ pub fn parse_message_filename(filename: &str) -> Option<ParsedFilename> {
   let timestamp_ms: i64 = ts_str.parse().ok()?;
   let sender = decode_component(sender_enc);
   let original_name = decode_component(name_enc);
-  let kind = if original_name.to_lowercase().ends_with(".txt") {
+  let name_lower = original_name.to_lowercase();
+  let kind = if name_lower.ends_with(".txt") || name_lower.ends_with(".md") {
     MessageKind::Text
   } else {
     MessageKind::File

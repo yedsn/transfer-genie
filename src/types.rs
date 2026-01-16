@@ -64,6 +64,8 @@ pub struct Message {
   pub download_exists: bool,
   #[serde(default)]
   pub marked: bool,
+  #[serde(default)]
+  pub format: String,
 }
 
 #[derive(Clone, Serialize)]

@@ -18,6 +18,7 @@ pub struct DbMessage {
   pub local_path: Option<String>,
   pub file_hash: Option<String>,
   pub marked: bool,
+  pub format: String,
 }
 
 pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), String> {
@@ -160,6 +161,29 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
       .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
   }
 
+  // 检查是否有 format 列，如果没有则添加
+  let mut has_format = false;
+  {
+    let mut stmt = conn
+      .prepare("PRAGMA table_info(messages)")
+      .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+    let rows = stmt
+      .query_map([], |row| row.get::<_, String>(1))
+      .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+    for row in rows {
+      if row.map_err(|err| format!("兜兵晒方象垂払移: {err}"))? == "format" {
+        has_format = true;
+        break;
+      }
+    }
+  }
+
+  if !has_format {
+    conn
+      .execute("ALTER TABLE messages ADD COLUMN format TEXT NOT NULL DEFAULT 'text'", [])
+      .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+  }
+
   Ok(())
 }
 
@@ -171,7 +195,7 @@ pub fn get_message(
   let conn = Connection::open(path)?;
   conn
     .query_row(
-      "SELECT endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, file_hash, marked \
+      "SELECT endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, file_hash, marked, format \
        FROM messages WHERE endpoint_id = ?1 AND filename = ?2",
       params![endpoint_id, filename],
       |row| {
@@ -189,6 +213,7 @@ pub fn get_message(
           local_path: row.get(10)?,
           file_hash: row.get(11)?,
           marked: row.get(12)?,
+          format: row.get(13)?,
         })
       },
     )
@@ -199,8 +224,8 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
   let conn = Connection::open(path)?;
   conn.execute(
     "INSERT INTO messages\
-      (endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, file_hash, marked)\
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)\
+      (endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, file_hash, marked, format)\
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)\
       ON CONFLICT(endpoint_id, filename) DO UPDATE SET \
         sender=excluded.sender,\
         timestamp_ms=excluded.timestamp_ms,\
@@ -212,7 +237,8 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
         content=excluded.content,\
         local_path=excluded.local_path,\
         file_hash=excluded.file_hash,\
-        marked=excluded.marked",
+        marked=excluded.marked,\
+        format=excluded.format",
     params![
       message.endpoint_id,
       message.filename,
@@ -227,6 +253,7 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
       message.local_path,
       message.file_hash,
       message.marked,
+      message.format,
     ],
   )?;
   Ok(())
@@ -255,20 +282,20 @@ pub fn list_messages_paged(
   let sql = match (limit, offset) {
     (Some(lim), Some(off)) => format!(
       "SELECT * FROM (\
-        SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, file_hash, marked \
+        SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, file_hash, marked, format \
         FROM messages {} ORDER BY timestamp_ms DESC LIMIT {} OFFSET {}\
       ) ORDER BY timestamp_ms ASC",
       where_clause, lim, off
     ),
     (Some(lim), None) => format!(
       "SELECT * FROM (\
-        SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, file_hash, marked \
+        SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, file_hash, marked, format \
         FROM messages {} ORDER BY timestamp_ms DESC LIMIT {}\
       ) ORDER BY timestamp_ms ASC",
       where_clause, lim
     ),
     _ => format!(
-      "SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, file_hash, marked \
+      "SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, file_hash, marked, format \
        FROM messages {} ORDER BY timestamp_ms ASC",
       where_clause
     ),
@@ -288,6 +315,7 @@ pub fn list_messages_paged(
       file_hash: row.get(8)?,
       download_exists: false,
       marked: row.get(9)?,
+      format: row.get(10)?,
     })
   })?;
 

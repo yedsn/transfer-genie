@@ -11,6 +11,8 @@ const refreshLabel = refreshButton ? refreshButton.querySelector('.refresh-label
 const refreshLabelDefault = refreshLabel ? refreshLabel.textContent : '';
 const openDownloadDirButton = document.getElementById('open-download-dir');
 const textInput = document.getElementById('text-input');
+const markdownEditorContainer = document.getElementById('markdown-editor');
+const formatInputs = document.querySelectorAll('input[name="message-format"]');
 const sendTextButton = document.getElementById('send-text');
 const sendFileButton = document.getElementById('send-file');
 const saveSettingsButton = document.getElementById('save-settings');
@@ -77,6 +79,62 @@ const SEND_HOTKEY = {
   CTRL_ENTER: 'ctrl_enter',
 };
 let sendHotkey = SEND_HOTKEY.ENTER;
+
+// Markdown Editor instance
+let mdEditor = null;
+let currentFormat = 'text';
+
+function initMarkdownEditor() {
+  if (mdEditor) return;
+  
+  mdEditor = editormd("markdown-editor", {
+    width: "100%",
+    height: 200,
+    path: "lib/editor.md/lib/",
+    placeholder: "使用 Markdown 输入消息...",
+    watch: false,
+    toolbar: true,
+    codeFold: true,
+    searchReplace: true,
+    toolbarIcons: function() {
+      return ["bold", "italic", "quote", "|", "h1", "h2", "h3", "|", "list-ul", "list-ol", "|", "link", "code", "code-block", "table", "datetime", "|", "watch", "preview", "clear", "help"];
+    },
+    onload: function() {
+      const cm = this.cm;
+      cm.on("keydown", (cm, event) => {
+        if (event.key === 'Enter') {
+          const isCtrlLike = event.ctrlKey || event.metaKey;
+          if (isCtrlLike) {
+            event.preventDefault();
+            sendText();
+          }
+        }
+      });
+    }
+  });
+}
+
+function switchFormat(format) {
+  currentFormat = format;
+  if (format === 'markdown') {
+    textInput.style.display = 'none';
+    markdownEditorContainer.style.display = 'block';
+    initMarkdownEditor();
+  } else {
+    textInput.style.display = 'block';
+    markdownEditorContainer.style.display = 'none';
+  }
+}
+
+if (formatInputs) {
+  formatInputs.forEach(input => {
+    input.addEventListener('change', () => {
+      if (input.checked) {
+        switchFormat(input.value);
+      }
+    });
+  });
+}
 
 // 分页相关状态
 const PAGE_SIZE = 10;
@@ -750,6 +808,13 @@ function scrollMessageListToBottom() {
 }
 
 function focusTextInput() {
+  if (currentFormat === 'markdown' && mdEditor) {
+    // editormd doesn't always have a simple focus() but we can try its cm instance
+    if (mdEditor.cm) {
+        mdEditor.cm.focus();
+    }
+    return;
+  }
   if (!textInput) return;
   textInput.focus({ preventScroll: true });
   if (typeof textInput.setSelectionRange === 'function') {
@@ -1596,6 +1661,8 @@ function renderMessages(messages, options = {}) {
   updateSelectionBar();
   messageList.innerHTML = '';
   
+  const markdownRenderQueue = [];
+
   // 添加"加载更多"提示
   if (hasMoreMessages) {
     const loadMoreItem = document.createElement('li');
@@ -1651,7 +1718,19 @@ function renderMessages(messages, options = {}) {
     const body = document.createElement('div');
     body.className = 'message-body';
     if (message.kind === 'text') {
-      body.textContent = message.content || '';
+      if (message.format === 'markdown') {
+        body.classList.add('markdown-body');
+        // Generate a safe unique ID
+        const uniqueId = `md-msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        body.id = uniqueId;
+        
+        markdownRenderQueue.push({
+          id: uniqueId,
+          content: message.content || '',
+        });
+      } else {
+        body.textContent = message.content || '';
+      }
     } else {
       body.textContent = message.original_name || message.filename || '';
       body.addEventListener('click', (event) => {
@@ -1699,7 +1778,20 @@ function renderMessages(messages, options = {}) {
           retryButton.textContent = '重试';
           retryButton.addEventListener('click', () => {
             pendingSends.delete(message.filename);
-            textInput.value = message.content || '';
+            const formatToUse = message.format || 'text';
+            
+            // Switch format UI
+            const radio = document.querySelector(`input[name="message-format"][value="${formatToUse}"]`);
+            if (radio) {
+              radio.checked = true;
+              switchFormat(formatToUse);
+            }
+
+            if (formatToUse === 'markdown' && mdEditor) {
+              mdEditor.setMarkdown(message.content || '');
+            } else {
+              textInput.value = message.content || '';
+            }
             renderMessages(lastMessages);
             sendText();
           });
@@ -1982,6 +2074,31 @@ function renderMessages(messages, options = {}) {
     }
     messageList.appendChild(item);
   });
+  
+  // Render pending markdown messages
+  if (markdownRenderQueue.length > 0 && window.editormd) {
+    // execute after DOM update
+    setTimeout(() => {
+      markdownRenderQueue.forEach(item => {
+        try {
+          editormd.markdownToHTML(item.id, {
+            markdown: item.content,
+            htmlDecode: "style,script,iframe",
+            emoji: true,
+            taskList: true,
+            tex: false, 
+            flowChart: false, 
+            sequenceDiagram: false,
+          });
+        } catch (e) {
+          console.error("Failed to render markdown for", item.id, e);
+          const el = document.getElementById(item.id);
+          if (el) el.textContent = item.content;
+        }
+      });
+    }, 0);
+  }
+
   if (scrollToBottom) {
     scrollMessageListToBottom();
   } else if (preserveScroll && messageList) {
@@ -2004,18 +2121,19 @@ function mergeMessages(messages) {
   // 合并待发送的文本消息
   pendingSends.forEach((send) => {
     merged.push({
-      filename: send.tempId,
+      filename: send.filename || send.tempId,
       sender: send.sender,
       timestamp_ms: send.timestamp_ms,
-      size: send.text.length,
+      size: send.size || (send.text ? send.text.length : 0),
       kind: 'text',
-      original_name: 'message.txt',
-      content: send.text,
+      original_name: send.format === 'markdown' ? 'message.md' : 'message.txt',
+      content: send.content || send.text,
       local_path: null,
       download_exists: false,
       sending: true,
-      sendStatus: send.status,
-      sendError: send.error,
+      sendStatus: send.sendStatus || send.status,
+      sendError: send.sendError || send.error,
+      format: send.format || 'text',
     });
   });
   
@@ -2535,56 +2653,73 @@ async function restoreWebdav() {
 }
 
 async function sendText() {
-  const text = textInput.value.trim();
-  if (!text) {
-    return;
-  }
-  if (!getActiveEndpoint()) {
-    setErrorStatus('请先选择 WebDAV 端点');
-    return;
-  }
   if (!invoke) {
     setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
     return;
   }
   
-  // 生成临时 ID 用于追踪
-  const tempId = `temp-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const senderName = senderNameInput?.value.trim() || '我';
+  let text = '';
+  if (currentFormat === 'markdown' && mdEditor) {
+    text = mdEditor.getMarkdown();
+  } else {
+    text = textInput.value;
+  }
+
+  if (!text || !text.trim()) {
+    return;
+  }
+
+  const settings = await invoke('get_settings');
+  const activeEndpoint = settings.webdav_endpoints.find(
+    (e) => e.id === settings.active_webdav_id,
+  );
+  if (!activeEndpoint) {
+    setErrorStatus('请先选择 WebDAV 端点');
+    return;
+  }
+
+  const timestamp_ms = Date.now();
+  const filename = `sending-${timestamp_ms}`;
   
-  // 乐观更新：立即显示消息
-  pendingSends.set(tempId, {
-    tempId,
-    text,
-    sender: senderName,
-    timestamp_ms: Date.now(),
-    status: SEND_STATUS.SENDING,
-    error: null,
+  // 模拟发送中的状态
+  pendingSends.set(filename, {
+    filename,
+    sender: '我',
+    timestamp_ms,
+    size: new Blob([text]).size,
+    kind: 'text',
+    content: text,
+    sending: true,
+    sendStatus: SEND_STATUS.SENDING,
+    format: currentFormat,
   });
-  textInput.value = '';
-  renderMessages(lastMessages, { scrollToBottom: true });
+
+  if (currentFormat === 'markdown' && mdEditor) {
+    mdEditor.setMarkdown('');
+  } else {
+    textInput.value = '';
+  }
   
+  renderMessages(lastMessages);
+  scrollMessageListToBottom();
+
   try {
-    await invoke('send_text', { text });
-    // 发送成功：更新状态
-    const entry = pendingSends.get(tempId);
-    if (entry) {
-      entry.status = SEND_STATUS.SUCCESS;
-      renderMessages(lastMessages, { scrollToBottom: true });
-      // 短暂显示成功状态后移除
-      setTimeout(() => {
-        pendingSends.delete(tempId);
-        loadMessages({ scrollToBottom: true });
-      }, 1500);
-    }
+    await invoke('send_text', { text, format: currentFormat });
+    pendingSends.set(filename, {
+      ...pendingSends.get(filename),
+      sendStatus: SEND_STATUS.SUCCESS,
+    });
+    setTimeout(() => {
+      pendingSends.delete(filename);
+      loadMessages();
+    }, 1000);
   } catch (error) {
-    // 发送失败：更新状态
-    const entry = pendingSends.get(tempId);
-    if (entry) {
-      entry.status = SEND_STATUS.FAILED;
-      entry.error = String(error);
-      renderMessages(lastMessages, { scrollToBottom: true });
-    }
+    pendingSends.set(filename, {
+      ...pendingSends.get(filename),
+      sendStatus: SEND_STATUS.FAILED,
+      sendError: String(error),
+    });
+    renderMessages(lastMessages);
     setErrorStatus(`发送失败：${error}`);
   }
 }

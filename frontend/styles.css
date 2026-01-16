@@ -694,8 +694,47 @@ body {
 }
 
 .composer {
-  padding: 5px 0 0;
-  flex-shrink: 0;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  padding: 12px 16px;
+  position: sticky;
+  bottom: 0;
+  z-index: 10;
+}
+
+.composer-toolbar {
+  margin-bottom: 8px;
+  display: flex;
+  justify-content: flex-start;
+}
+
+.format-toggle {
+  display: flex;
+  gap: 4px;
+  background: var(--panel-soft);
+  padding: 2px;
+  border-radius: 6px;
+}
+
+.radio-tab {
+  cursor: pointer;
+  padding: 4px 12px;
+  border-radius: 4px;
+  font-size: 12px;
+  transition: all 0.2s;
+  flex-direction: row;
+  align-items: center;
+}
+
+.radio-tab input {
+  display: none;
+}
+
+.radio-tab:has(input:checked) {
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+  color: var(--accent);
+  font-weight: 600;
 }
 
 .composer-row {
@@ -703,7 +742,7 @@ body {
   align-items: stretch;
   gap: 2px;
   padding: 2px;
-  height: 120px;
+  min-height: 80px;
   border-radius: 5px;
   border: 1px solid var(--border);
   background: #fffdf9;
@@ -716,33 +755,21 @@ body {
   box-shadow: 0 0 0 2px rgba(255, 122, 47, 0.15), 0 10px 26px rgba(15, 15, 25, 0.06);
 }
 
-.composer-row.is-drag-over {
-  border-color: var(--accent);
-  background: linear-gradient(135deg, #fff5f0 0%, #fff9f5 100%);
-  box-shadow: 0 0 0 3px rgba(255, 122, 47, 0.25), 0 10px 26px rgba(15, 15, 25, 0.08);
+#editor-container {
+  flex: 1;
+  min-width: 0;
 }
 
-.composer-row.is-drag-over::before {
-  content: "拖放文件到此处上传";
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--accent-strong);
-  pointer-events: none;
-  z-index: 10;
-}
-
-.composer-row.is-drag-over > * {
-  opacity: 0.3;
-}
-
-textarea {
+#markdown-editor {
+  border: none;
   width: 100%;
-  min-height: 64px;
-  max-height: 160px;
+  height: 200px;
+}
+
+.composer textarea {
+  width: 100%;
+  min-height: 120px;
+  max-height: 300px;
   border: none;
   background: transparent;
   padding: 8px 140px 18px 8px;
@@ -753,6 +780,27 @@ textarea {
   outline: none;
 }
 
+.message-body.markdown-body {
+  padding: 10px 12px;
+  background: #ffffff;
+  border: 1px solid var(--border);
+}
+
+/* Fix editormd preview styles inside message card */
+.message-body.markdown-body.editormd-html-preview {
+  padding: 10px 12px;
+  width: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 15px;
+  color: var(--ink);
+  line-height: 1.6;
+}
+
+.message-body.markdown-body p:last-child {
+  margin-bottom: 0;
+}
+
 .composer-actions {
   display: flex;
   gap: 6px;
@@ -760,6 +808,7 @@ textarea {
   position: absolute;
   right: 8px;
   bottom: 8px;
+  z-index: 100;
 }
 
 .composer-actions .icon-button {

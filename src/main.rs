@@ -73,6 +73,8 @@ struct HistoryEntry {
   original_name: String,
   #[serde(default)]
   marked: bool,
+  #[serde(default)]
+  format: String,
 }
 
 #[derive(Deserialize)]
@@ -471,12 +473,16 @@ fn list_messages(
 }
 
 #[tauri::command]
-async fn send_text(state: State<'_, AppState>, text: String) -> Result<(), String> {
+async fn send_text(state: State<'_, AppState>, text: String, format: Option<String>) -> Result<(), String> {
   let settings = current_settings(&state)?;
   let endpoint = resolve_active_endpoint(&settings)?;
 
+  let format = format.unwrap_or_else(|| "text".to_string());
+  let is_markdown = format == "markdown";
+  let extension = if is_markdown { "message.md" } else { "message.txt" };
+
   let timestamp_ms = now_ms();
-  let filename = build_message_filename(&settings.sender_name, "message.txt", timestamp_ms);
+  let filename = build_message_filename(&settings.sender_name, extension, timestamp_ms);
   let remote_path = format!("files/{}", filename);
   let data = text.clone().into_bytes();
 
@@ -490,13 +496,14 @@ async fn send_text(state: State<'_, AppState>, text: String) -> Result<(), Strin
     timestamp_ms,
     size: data.len() as i64,
     kind: MessageKind::Text.as_str().to_string(),
-    original_name: "message.txt".to_string(),
+    original_name: extension.to_string(),
     etag: None,
     mtime: None,
     content: Some(text),
     local_path: None,
     file_hash: None,
     marked: false,
+    format,
   };
 
   db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
@@ -617,6 +624,7 @@ async fn send_file(
     local_path: Some(local_path.to_string_lossy().to_string()),
     file_hash: Some(file_hash),
     marked: false,
+    format: "text".to_string(),
   };
 
   db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
@@ -730,6 +738,7 @@ async fn send_file_data(
     local_path: Some(local_path.to_string_lossy().to_string()),
     file_hash: Some(file_hash),
     marked: false,
+    format: "text".to_string(),
   };
 
   db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
@@ -2244,7 +2253,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
     let history_entry = history_map.get(&filename);
 
     let parsed = parse_message_filename(&filename);
-    let (sender, timestamp_ms, kind, original_name, size_hint, marked) = if let Some(history) = history_entry
+    let (sender, timestamp_ms, kind, original_name, size_hint, marked, format) = if let Some(history) = history_entry
     {
       (
         history.sender.clone(),
@@ -2253,8 +2262,14 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
         history.original_name.clone(),
         history.size,
         history.marked,
+        history.format.clone(),
       )
     } else if let Some(parsed) = parsed.as_ref() {
+      let format = if parsed.original_name.to_lowercase().ends_with(".md") {
+        "markdown".to_string()
+      } else {
+        "text".to_string()
+      };
       (
         parsed.sender.clone(),
         parsed.timestamp_ms,
@@ -2264,6 +2279,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
           .and_then(|entry| entry.size)
           .unwrap_or(0) as i64,
         false,
+        format,
       )
     } else {
       continue;
@@ -2285,6 +2301,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
       local_path: None,
       file_hash: None,
       marked,
+      format,
     });
 
     if let Some(history) = history_entry {
@@ -2296,6 +2313,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
         message.size = history.size;
       }
       message.marked = history.marked;
+      message.format = history.format.clone();
     }
 
     if let Some(entry) = file_entry {
@@ -2390,6 +2408,7 @@ fn message_to_history(message: &DbMessage) -> HistoryEntry {
     kind: message.kind.clone(),
     original_name: message.original_name.clone(),
     marked: message.marked,
+    format: message.format.clone(),
   }
 }
 
