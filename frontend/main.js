@@ -2102,12 +2102,22 @@ function renderMessages(messages, options = {}) {
                button.textContent = '复制';
                button.addEventListener('click', (e) => {
                  e.stopPropagation();
-                 const code = pre.querySelector('code');
-                 const text = code ? code.innerText : pre.innerText;
-                 copyTextToClipboard(text); // Reuse existing function
+                 let text = '';
+                 const list = pre.querySelector('ol.linenums');
+                 if (list) {
+                    const lines = [];
+                    list.querySelectorAll('li').forEach(li => {
+                        lines.push(li.textContent.replace(/\n$/, '')); 
+                    });
+                    text = lines.join('\n');
+                 } else {
+                    const code = pre.querySelector('code');
+                    text = code ? code.textContent : pre.textContent;
+                 }
+                 copyTextToClipboard(text); 
                });
                pre.appendChild(button);
-               pre.style.position = 'relative'; // Ensure button positioning works
+               pre.style.position = 'relative';
             });
           }
         } catch (e) {
