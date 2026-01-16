@@ -92,7 +92,7 @@ function initMarkdownEditor() {
     height: 200,
     path: "lib/editor.md/lib/",
     placeholder: "使用 Markdown 输入消息...",
-    watch: false,
+    watch: true,
     toolbar: true,
     codeFold: true,
     searchReplace: true,
