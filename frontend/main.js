@@ -3297,3 +3297,10 @@ if (filterMarkedButton) {
     loadMessages();
   });
 }
+
+document.addEventListener('click', (event) => {
+  const openMenu = document.querySelector('details.action-menu[open]');
+  if (openMenu && !openMenu.contains(event.target)) {
+    openMenu.open = false;
+  }
+});
