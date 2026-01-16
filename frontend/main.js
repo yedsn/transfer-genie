@@ -3298,7 +3298,7 @@ if (filterMarkedButton) {
   });
 }
 
-document.addEventListener('click', (event) => {
+document.addEventListener('mousedown', (event) => {
   const openMenu = document.querySelector('details.action-menu[open]');
   if (openMenu && !openMenu.contains(event.target)) {
     openMenu.open = false;
