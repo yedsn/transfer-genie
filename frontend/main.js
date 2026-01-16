@@ -108,6 +108,10 @@ function initMarkdownEditor() {
             event.preventDefault();
             sendText();
           }
+        } else if (event.key === 'Escape') {
+          if (!event.defaultPrevented) {
+            minimizeAppWindow();
+          }
         }
       });
     }
