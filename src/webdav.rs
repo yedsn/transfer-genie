@@ -2,7 +2,6 @@ use crate::types::{DavEntry, WebDavEndpoint};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use log::info;
-use percent_encoding::percent_decode_str;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use reqwest::{Body, Client, Method, RequestBuilder};
@@ -209,26 +208,26 @@ fn finalize_entry(entry: &mut DavEntry, endpoint: &WebDavEndpoint) -> Result<(),
     }
 
     let base = base_url(endpoint)?;
-    // Decode base path and href for accurate comparison and substring operations
-    let base_path_decoded = percent_decode_str(base.path()).decode_utf8_lossy().to_string();
-    let href_decoded = percent_decode_str(&entry.href).decode_utf8_lossy().to_string();
+    // Keep base path and href encoded for consistent filename handling
+    let base_path_encoded = base.path().to_string();
+    let href_encoded = entry.href.clone();
     
     // Extract the path part if href is a full URL, otherwise use it as is (absolute path)
     let href_path = if let Ok(href_url) = Url::parse(&entry.href) {
-        percent_decode_str(href_url.path()).decode_utf8_lossy().to_string()
+        href_url.path().to_string()
     } else {
-        href_decoded
+        href_encoded
     };
 
     // Calculate the relative path by removing the base path prefix
-    if href_path.starts_with(&base_path_decoded) {
-        entry.remote_path = href_path[base_path_decoded.len()..].trim_matches('/').to_string();
+    if href_path.starts_with(&base_path_encoded) {
+        entry.remote_path = href_path[base_path_encoded.len()..].trim_matches('/').to_string();
     } else {
         // Fallback: if it's not under base_path, just use the trimmed absolute path
         entry.remote_path = href_path.trim_matches('/').to_string();
     }
 
-    // Extract filename from the path
+    // Extract filename from the path (it will remain encoded)
     entry.filename = href_path.trim_end_matches('/').split('/').last().unwrap_or("").to_string();
     
     Ok(())
