@@ -511,6 +511,36 @@ async fn send_text(state: State<'_, AppState>, text: String, format: Option<Stri
   Ok(())
 }
 
+fn is_image_file(filename: &str) -> bool {
+  let lower = filename.to_lowercase();
+  lower.ends_with(".png")
+    || lower.ends_with(".jpg")
+    || lower.ends_with(".jpeg")
+    || lower.ends_with(".gif")
+    || lower.ends_with(".webp")
+    || lower.ends_with(".bmp")
+}
+
+fn generate_thumbnail(data: &[u8]) -> Result<Vec<u8>, String> {
+  use image::io::Reader as ImageReader;
+  use std::io::Cursor;
+
+  let img = ImageReader::new(Cursor::new(data))
+    .with_guessed_format()
+    .map_err(|e| format!("无法识别图片格式: {}", e))?
+    .decode()
+    .map_err(|e| format!("图片解码失败: {}", e))?;
+
+  let thumbnail = img.thumbnail(200, 200);
+  let mut buf = Cursor::new(Vec::new());
+  // Always use JPEG for thumbnails for consistency and small size
+  thumbnail
+    .write_to(&mut buf, image::ImageFormat::Jpeg)
+    .map_err(|e| format!("缩略图生成失败: {}", e))?;
+
+  Ok(buf.into_inner())
+}
+
 #[tauri::command]
 async fn send_file(
   window: Window,
@@ -565,7 +595,7 @@ async fn send_file(
     &state.http,
     &endpoint,
     &remote_path,
-    data,
+    data.clone(),
     move |sent, total| {
       emit_upload_progress(
         &progress_window,
@@ -609,6 +639,20 @@ async fn send_file(
   let local_path = endpoint_dir.join(&filename);
   fs::create_dir_all(&endpoint_dir).map_err(|err| format!("创建目录失败: {err}"))?;
   fs::copy(&file_path, &local_path).map_err(|err| format!("保存本地文件失败: {err}"))?;
+
+  // Generate and upload thumbnail if it's an image
+  if is_image_file(&original_name) {
+    if let Ok(thumb_data) = generate_thumbnail(&data) {
+      let thumb_remote_path = format!("files/.thumbs/{}", filename);
+      let _ = webdav::ensure_directory(&state.http, &endpoint, "files/.thumbs").await;
+      let _ = webdav::upload_file(&state.http, &endpoint, &thumb_remote_path, thumb_data.clone()).await;
+      
+      // Save local thumbnail cache
+      let thumb_local_dir = endpoint_dir.join(".thumbs");
+      let _ = fs::create_dir_all(&thumb_local_dir);
+      let _ = fs::write(thumb_local_dir.join(&filename), thumb_data);
+    }
+  }
 
   let message = DbMessage {
     endpoint_id: endpoint.id.clone(),
@@ -724,6 +768,20 @@ async fn send_file_data(
   fs::create_dir_all(&endpoint_dir).map_err(|err| format!("创建目录失败: {err}"))?;
   fs::write(&local_path, &data).map_err(|err| format!("保存本地文件失败: {err}"))?;
 
+  // Generate and upload thumbnail if it's an image
+  if is_image_file(&original_name) {
+    if let Ok(thumb_data) = generate_thumbnail(&data) {
+      let thumb_remote_path = format!("files/.thumbs/{}", filename);
+      let _ = webdav::ensure_directory(&state.http, &endpoint, "files/.thumbs").await;
+      let _ = webdav::upload_file(&state.http, &endpoint, &thumb_remote_path, thumb_data.clone()).await;
+      
+      // Save local thumbnail cache
+      let thumb_local_dir = endpoint_dir.join(".thumbs");
+      let _ = fs::create_dir_all(&thumb_local_dir);
+      let _ = fs::write(thumb_local_dir.join(&filename), thumb_data);
+    }
+  }
+
   let message = DbMessage {
     endpoint_id: endpoint.id.clone(),
     filename: filename.clone(),
@@ -744,6 +802,34 @@ async fn send_file_data(
   db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
   let _ = append_history(&state, &endpoint, message_to_history(&message)).await;
   Ok(())
+}
+
+#[tauri::command]
+async fn get_thumbnail(
+  state: State<'_, AppState>,
+  filename: String,
+) -> Result<String, String> {
+  let settings = current_settings(&state)?;
+  let endpoint = resolve_active_endpoint(&settings)?;
+  
+  let endpoint_dir = endpoint_files_dir(&state, &endpoint.id);
+  let thumb_local_path = endpoint_dir.join(".thumbs").join(&filename);
+  
+  if thumb_local_path.exists() {
+    return Ok(thumb_local_path.to_string_lossy().to_string());
+  }
+  
+  // Try to download from server
+  let thumb_remote_path = format!("files/.thumbs/{}", filename);
+  match webdav::download_optional_file(&state.http, &endpoint, &thumb_remote_path).await? {
+    Some(data) => {
+      let thumb_local_dir = endpoint_dir.join(".thumbs");
+      let _ = fs::create_dir_all(&thumb_local_dir);
+      fs::write(&thumb_local_path, &data).map_err(|e| format!("写入缩略图缓存失败: {}", e))?;
+      Ok(thumb_local_path.to_string_lossy().to_string())
+    }
+    None => Err("缩略图不存在".to_string()),
+  }
 }
 
 #[tauri::command]
@@ -2896,6 +2982,7 @@ fn main() {
             send_text,
             send_file,
             send_file_data,
+            get_thumbnail,
             download_message_file,
             save_message_file_as,
             save_local_data,

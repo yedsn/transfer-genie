@@ -279,6 +279,12 @@ function normalizeGlobalHotkey(value) {
   return parts.join('+');
 }
 
+function isImagePath(path) {
+    if (!path) return false;
+    const lower = path.toLowerCase();
+    return lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.gif') || lower.endsWith('.webp') || lower.endsWith('.bmp');
+}
+
 function isValidGlobalHotkey(value) {
   return !!normalizeGlobalHotkey(value);
 }
@@ -1963,6 +1969,34 @@ function renderPreviewContent(message) {
     }
   } else {
     messagePreviewBody.classList.remove('is-markdown');
+    
+    const isImage = isImagePath(message.original_name || message.filename);
+    const tauriConvert = window.__TAURI__?.tauri?.convertFileSrc || window.__TAURI__?.path?.convertFileSrc || window.__TAURI__?.core?.convertFileSrc;
+
+    if (isImage && tauriConvert) {
+      const imgContainer = document.createElement('div');
+      imgContainer.className = 'message-preview-image-wrap';
+      
+      const img = document.createElement('img');
+      img.className = 'message-preview-image';
+      
+      if (message.local_path) {
+        img.src = tauriConvert(message.local_path);
+      } else {
+        // Try thumbnail first
+        invoke('get_thumbnail', { filename: message.filename })
+          .then(path => {
+            if (!img.getAttribute('src')) {
+              img.src = tauriConvert(path);
+            }
+          })
+          .catch(() => {});
+      }
+      
+      imgContainer.appendChild(img);
+      messagePreviewBody.appendChild(imgContainer);
+    }
+
     const title = document.createElement('div');
     title.className = 'message-preview-file-title';
     title.textContent = message.original_name || message.filename || '文件';
@@ -2106,7 +2140,36 @@ function renderMessages(messages, options = {}) {
         body.textContent = message.content || '';
       }
     } else {
-      body.textContent = message.original_name || message.filename || '';
+      const isImage = isImagePath(message.original_name || message.filename);
+      if (isImage) {
+        body.classList.add('is-image-message');
+        const thumbImg = document.createElement('img');
+        thumbImg.className = 'message-thumbnail';
+        thumbImg.alt = '缩略图';
+        // Add loading placeholder
+        body.innerHTML = '';
+        body.appendChild(thumbImg);
+        
+        const tauriConvert = window.__TAURI__?.tauri?.convertFileSrc || window.__TAURI__?.path?.convertFileSrc || window.__TAURI__?.core?.convertFileSrc;
+        
+        invoke('get_thumbnail', { filename: message.filename })
+          .then(path => {
+            if (tauriConvert) {
+              thumbImg.src = tauriConvert(path);
+            }
+          })
+          .catch(err => {
+            console.warn('Load thumbnail failed', err);
+            body.textContent = message.original_name || message.filename || '';
+          });
+          
+        body.addEventListener('dblclick', () => {
+          openMessagePreview(message);
+        });
+      } else {
+        body.textContent = message.original_name || message.filename || '';
+      }
+      
       body.addEventListener('click', (event) => {
         if (selectionMode) {
           return;
@@ -3201,12 +3264,6 @@ async function selectFiles() {
   }
 }
 
-function isImagePath(path) {
-    if (!path) return false;
-    const lower = path.toLowerCase();
-    return lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.gif') || lower.endsWith('.webp') || lower.endsWith('.bmp');
-}
-
 function renderSelectedFiles() {
   const container = document.getElementById('selected-files-container');
   if (!container) return;
@@ -3230,6 +3287,20 @@ function renderSelectedFiles() {
             img.className = 'selected-file-preview';
             img.src = tauriConvert(path);
             fileItem.appendChild(img);
+            
+            // Double click to preview
+            img.addEventListener('dblclick', () => {
+              const filename = path.split(/[/\\]/).pop() || path;
+              openMessagePreview({
+                kind: 'file',
+                filename: filename,
+                original_name: filename,
+                local_path: path,
+                size: 0, // Unknown here
+                sender: '本地',
+                timestamp_ms: Date.now()
+              });
+            });
         } else {
             fileItem.style.backgroundColor = 'red'; // Visual debug hint
         }
