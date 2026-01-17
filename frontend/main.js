@@ -1699,7 +1699,27 @@ async function toggleMessageMarked(message) {
   let currentCount = match ? parseInt(match[1], 10) : 0;
   updateMarkedBadge(currentCount + (newMarked ? 1 : -1));
 
-  renderMessages(lastMessages); // Re-render to update UI immediately
+  // Direct DOM update instead of full re-render to prevent scrolling jumps
+  const cardSelector = `.message-card[data-filename="${escapeSelector(message.filename)}"]`;
+  const card = document.querySelector(cardSelector);
+  if (card) {
+    card.classList.toggle('is-marked', newMarked);
+    const markBtn = card.querySelector('.mark-action');
+    if (markBtn) {
+      markBtn.classList.toggle('is-marked', newMarked);
+    }
+    
+    // If we are in "Marked Only" mode and we unmark a message, remove it nicely
+    if (markedFilterActive && !newMarked) {
+        card.remove();
+        if (messageList.children.length === 0) {
+             renderMessages([]); // Show empty state
+        }
+    }
+  } else {
+      // Fallback if not found (unlikely)
+      renderMessages(lastMessages);
+  }
   
   try {
     const command = newMarked ? 'mark_message' : 'unmark_message';
@@ -1708,7 +1728,22 @@ async function toggleMessageMarked(message) {
     // Revert on error
     message.marked = !newMarked;
     updateMarkedBadge(currentCount); // Revert count
-    renderMessages(lastMessages);
+    
+    if (card) {
+        card.classList.toggle('is-marked', !newMarked);
+        const markBtn = card.querySelector('.mark-action');
+        if (markBtn) {
+            markBtn.classList.toggle('is-marked', !newMarked);
+        }
+        // If we removed it, we can't easily put it back without re-render or complex logic.
+        // For simplicity, just re-render on error if we messed up the list structure.
+        if (markedFilterActive && !newMarked) { // We tried to mark it but failed? No, we tried to UNmark.
+             // If we unmarked and removed it, and now revert (mark again), we need to show it.
+             renderMessages(lastMessages);
+        }
+    } else {
+        renderMessages(lastMessages);
+    }
     showToast(`操作失败: ${error}`, 'error');
   }
 }
