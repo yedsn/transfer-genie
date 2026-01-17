@@ -711,7 +711,7 @@ body {
   position: relative;
   display: inline-flex;
   gap: 0;
-  background-color: var(--panel-soft);
+  background-color: #fafafa;
   padding: 2px;
   border-radius: 8px;
   border: 1px solid var(--border);
@@ -755,7 +755,8 @@ body {
 .composer-body {
   border-radius: 5px;
   border: 1px solid var(--border);
-  background: #fffdf9;
+  /* background: #fffdf9; */
+  background: #fff;
   box-shadow: 0 10px 26px rgba(15, 15, 25, 0.06);
   position: relative;
   display: flex;
