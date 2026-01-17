@@ -1945,3 +1945,51 @@ body.preview-open {
   background: transparent;
   max-width: none;
 }
+
+.selected-files {
+  display: none;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px;
+  padding: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.selected-file-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  background-color: var(--panel-soft);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--ink);
+  border: 1px solid var(--border);
+}
+
+.selected-file-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.remove-file-btn {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: none;
+  background-color: var(--border);
+  color: var(--muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.remove-file-btn:hover {
+  background-color: #d32f2f;
+  color: white;
+}

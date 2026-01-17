@@ -57,6 +57,8 @@ const messagePreviewActions = document.getElementById('message-preview-actions')
 const messagePreviewClose = document.querySelector('.message-preview-close');
 const messagePreviewBackdrop = messagePreview ? messagePreview.querySelector('.message-preview-backdrop') : null;
 
+let selectedFiles = [];
+
 let refreshTimer = null;
 let didInitialSync = false;
 let webdavEndpoints = [];
@@ -3070,7 +3072,7 @@ async function sendText() {
     text = textInput.value;
   }
 
-  if (!text || !text.trim()) {
+  if (!text.trim() && selectedFiles.length === 0) {
     return;
   }
 
@@ -3083,53 +3085,91 @@ async function sendText() {
     return;
   }
 
-  const timestamp_ms = Date.now();
-  const filename = `sending-${timestamp_ms}`;
-  
-  // 模拟发送中的状态
-  pendingSends.set(filename, {
-    filename,
-    sender: '我',
-    timestamp_ms,
-    size: new Blob([text]).size,
-    kind: 'text',
-    content: text,
-    sending: true,
-    sendStatus: SEND_STATUS.SENDING,
-    format: currentFormat,
-  });
+  if (text.trim()) {
+      const timestamp_ms = Date.now();
+      const filename = `sending-${timestamp_ms}`;
+      
+      pendingSends.set(filename, {
+        filename,
+        sender: '我',
+        timestamp_ms,
+        size: new Blob([text]).size,
+        kind: 'text',
+        content: text,
+        sending: true,
+        sendStatus: SEND_STATUS.SENDING,
+        format: currentFormat,
+      });
 
-  if (currentFormat === 'markdown' && mdEditor) {
-    mdEditor.setMarkdown('');
-  } else {
-    textInput.value = '';
+      if (currentFormat === 'markdown' && mdEditor) {
+        mdEditor.setMarkdown('');
+      } else {
+        textInput.value = '';
+      }
+      
+      renderMessages(lastMessages);
+      scrollMessageListToBottom();
+
+      try {
+        await invoke('send_text', { text, format: currentFormat });
+        pendingSends.set(filename, {
+          ...pendingSends.get(filename),
+          sendStatus: SEND_STATUS.SUCCESS,
+        });
+        setTimeout(() => {
+          pendingSends.delete(filename);
+          loadMessages();
+        }, 1000);
+      } catch (error) {
+        pendingSends.set(filename, {
+          ...pendingSends.get(filename),
+          sendStatus: SEND_STATUS.FAILED,
+          sendError: String(error),
+        });
+        renderMessages(lastMessages);
+        setErrorStatus(`发送失败：${error}`);
+      }
   }
   
-  renderMessages(lastMessages);
-  scrollMessageListToBottom();
-
-  try {
-    await invoke('send_text', { text, format: currentFormat });
-    pendingSends.set(filename, {
-      ...pendingSends.get(filename),
-      sendStatus: SEND_STATUS.SUCCESS,
-    });
-    setTimeout(() => {
-      pendingSends.delete(filename);
-      loadMessages();
-    }, 1000);
-  } catch (error) {
-    pendingSends.set(filename, {
-      ...pendingSends.get(filename),
-      sendStatus: SEND_STATUS.FAILED,
-      sendError: String(error),
-    });
-    renderMessages(lastMessages);
-    setErrorStatus(`发送失败：${error}`);
+  if (selectedFiles.length > 0) {
+    const filesToUpload = [...selectedFiles];
+    selectedFiles = [];
+    renderSelectedFiles();
+    
+    for (const path of filesToUpload) {
+        let clientId = null;
+        try {
+            clientId = `upload-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+            const originalName = path.split(/[/\\]/).pop() || path;
+            pendingUploads.set(clientId, {
+              clientId,
+              originalName,
+              localPath: path,
+              timestamp_ms: Date.now(),
+              received: 0,
+              total: 0,
+              status: 'progress',
+            });
+            renderMessages(lastMessages, { scrollToBottom: true });
+            await invoke('send_file', { path, clientId });
+            if (clientId) {
+              pendingUploads.delete(clientId);
+              renderMessages(lastMessages);
+            }
+            await loadMessages({ scrollToBottom: true });
+            setSuccessStatus('发送成功');
+        } catch (error) {
+            if (clientId) {
+              pendingUploads.delete(clientId);
+              renderMessages(lastMessages);
+            }
+            setErrorStatus(`发送文件失败：${error}`);
+        }
+    }
   }
 }
 
-async function sendFile() {
+async function selectFiles() {
   let clientId = null;
   try {
     if (!invoke) {
@@ -3144,39 +3184,61 @@ async function sendFile() {
       setErrorStatus('未检测到对话框插件，请确认已启用 dialog 插件');
       return;
     }
-    const selected = await openDialog({ multiple: false, directory: false });
+    const selected = await openDialog({ multiple: true, directory: false });
     if (!selected) {
       return;
     }
-    const path = Array.isArray(selected) ? selected[0] : selected;
-    if (!path) {
-      return;
+    const paths = Array.isArray(selected) ? selected : [selected];
+    for (const path of paths) {
+        if (path && !selectedFiles.includes(path)) {
+            selectedFiles.push(path);
+        }
     }
-    clientId = `upload-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const originalName = path.split(/[/\\]/).pop() || path;
-    pendingUploads.set(clientId, {
-      clientId,
-      originalName,
-      localPath: path,
-      timestamp_ms: Date.now(),
-      received: 0,
-      total: 0,
-      status: 'progress',
-    });
-    renderMessages(lastMessages, { scrollToBottom: true });
-    await invoke('send_file', { path, clientId });
-    if (clientId) {
-      pendingUploads.delete(clientId);
-      renderMessages(lastMessages);
-    }
-    await loadMessages({ scrollToBottom: true });
-    setSuccessStatus('发送成功');
+    renderSelectedFiles();
   } catch (error) {
-    if (clientId) {
-      pendingUploads.delete(clientId);
-      renderMessages(lastMessages);
-    }
-    setErrorStatus(`发送文件失败：${error}`);
+    setErrorStatus(`选择文件失败：${error}`);
+  }
+}
+
+function renderSelectedFiles() {
+  const container = document.getElementById('selected-files-container');
+  if (!container) return;
+
+  container.innerHTML = '';
+  if (selectedFiles.length === 0) {
+    container.style.display = 'none';
+    return;
+  }
+  
+  container.style.display = 'grid';
+
+  selectedFiles.forEach((path, index) => {
+    const fileItem = document.createElement('div');
+    fileItem.className = 'selected-file-item';
+
+    const fileName = document.createElement('span');
+    fileName.className = 'selected-file-name';
+    fileName.textContent = path.split(/[/\\]/).pop() || path;
+    
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'remove-file-btn';
+    removeBtn.textContent = '×';
+    removeBtn.title = '移除';
+    removeBtn.type = 'button';
+    removeBtn.addEventListener('click', () => {
+      removeSelectedFile(index);
+    });
+
+    fileItem.appendChild(fileName);
+    fileItem.appendChild(removeBtn);
+    container.appendChild(fileItem);
+  });
+}
+
+function removeSelectedFile(index) {
+  if (index >= 0 && index < selectedFiles.length) {
+    selectedFiles.splice(index, 1);
+    renderSelectedFiles();
   }
 }
 
@@ -3521,7 +3583,7 @@ if (openDownloadDirButton) {
   openDownloadDirButton.addEventListener('click', openDownloadDir);
 }
 sendTextButton.addEventListener('click', sendText);
-sendFileButton.addEventListener('click', sendFile);
+sendFileButton.addEventListener('click', selectFiles);
 saveSettingsButton.addEventListener('click', saveSettings);
 if (chooseDownloadDirButton) {
   chooseDownloadDirButton.addEventListener('click', chooseDownloadDir);
