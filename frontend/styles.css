@@ -782,7 +782,7 @@ body {
 
 .message-body.markdown-body {
   padding: 8px 12px;
-  background: #ffffff;
+  background: #ffffff !important;
   border: 1px solid var(--border);
   font-size: 14px;
   line-height: 1.5;
@@ -790,15 +790,24 @@ body {
 }
 
 .message-card.is-self .message-body.markdown-body {
-  background: #dff5d5;
+  background: #dff5d5 !important;
   border-color: #c8ebc0;
+}
+
+.message-card.is-marked .message-body.markdown-body {
+  background-color: #fff5ed !important;
+  border-color: var(--accent);
+}
+
+.message-card.is-self.is-marked .message-body.markdown-body {
+  background-color: #fff5ed !important;
+  border-color: var(--accent-strong);
 }
 
 /* Override editormd-html-preview defaults for chat bubbles */
 .markdown-body.editormd-html-preview {
   padding: 8px 12px !important;
   width: auto !important;
-  background: transparent !important;
   border: none !important;
   font-family: inherit !important;
 }
