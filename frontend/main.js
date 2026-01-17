@@ -1327,6 +1327,55 @@ async function saveDiagramAsImage(container) {
   }
 }
 
+// Function to inject save/copy buttons into a container (used by both feed and preview dialog)
+function injectMarkdownExtras(container) {
+    if (!container) return;
+
+    // Add copy button to code blocks
+    container.querySelectorAll('pre').forEach(pre => {
+        if (pre.querySelector('.code-copy-btn')) return;
+        
+        const button = document.createElement('button');
+        button.className = 'code-copy-btn';
+        button.textContent = '复制';
+        button.addEventListener('click', (e) => {
+            e.stopPropagation();
+            let text = '';
+            const list = pre.querySelector('ol.linenums');
+            if (list) {
+            const lines = [];
+            list.querySelectorAll('li').forEach(li => {
+                lines.push(li.textContent.replace(/\n$/, '')); 
+            });
+            text = lines.join('\n');
+            } else {
+            const code = pre.querySelector('code');
+            text = code ? code.textContent : pre.textContent;
+            }
+            copyTextToClipboard(text); 
+        });
+        pre.appendChild(button);
+        pre.style.position = 'relative';
+    });
+
+    // Add save as image button to diagrams
+    container.querySelectorAll('.flowchart, .sequence-diagram').forEach(diag => {
+        if (diag.querySelector('.diag-save-btn')) return;
+        
+        diag.style.position = 'relative';
+        diag.style.cursor = 'default';
+
+        const button = document.createElement('button');
+        button.className = 'diag-save-btn';
+        button.textContent = '保存图片';
+        button.addEventListener('click', (e) => {
+            e.stopPropagation();
+            saveDiagramAsImage(diag);
+        });
+        diag.appendChild(button);
+    });
+}
+
 async function copyTextToClipboard(text) {
   if (!text) {
     showToast('没有可复制的内容', 'error');
@@ -1878,6 +1927,8 @@ function renderPreviewContent(message) {
         flowChart: true,
         sequenceDiagram: true,
       });
+      // Inject extras
+      injectMarkdownExtras(holder);
     } else {
       messagePreviewBody.classList.remove('is-markdown');
       const textBlock = document.createElement('div');
@@ -2418,52 +2469,9 @@ function renderMessages(messages, options = {}) {
             sequenceDiagram: true,
           });
 
-          // Add copy button to code blocks
+          // Inject extras (copy buttons, save image buttons)
           const container = document.getElementById(item.id);
-          if (container) {
-            container.querySelectorAll('pre').forEach(pre => {
-               if (pre.querySelector('.code-copy-btn')) return;
-               
-               const button = document.createElement('button');
-               button.className = 'code-copy-btn';
-               button.textContent = '复制';
-               button.addEventListener('click', (e) => {
-                 e.stopPropagation();
-                 let text = '';
-                 const list = pre.querySelector('ol.linenums');
-                 if (list) {
-                    const lines = [];
-                    list.querySelectorAll('li').forEach(li => {
-                        lines.push(li.textContent.replace(/\n$/, '')); 
-                    });
-                    text = lines.join('\n');
-                 } else {
-                    const code = pre.querySelector('code');
-                    text = code ? code.textContent : pre.textContent;
-                 }
-                 copyTextToClipboard(text); 
-               });
-               pre.appendChild(button);
-               pre.style.position = 'relative';
-            });
-
-            // Add save as image button to diagrams
-            container.querySelectorAll('.flowchart, .sequence-diagram').forEach(diag => {
-               if (diag.querySelector('.diag-save-btn')) return;
-               
-               diag.style.position = 'relative';
-               diag.style.cursor = 'default';
-
-               const button = document.createElement('button');
-               button.className = 'diag-save-btn';
-               button.textContent = '保存图片';
-               button.addEventListener('click', (e) => {
-                 e.stopPropagation();
-                 saveDiagramAsImage(diag);
-               });
-               diag.appendChild(button);
-            });
-          }
+          injectMarkdownExtras(container);
         } catch (e) {
           console.error("Failed to render markdown for", item.id, e);
           const el = document.getElementById(item.id);
