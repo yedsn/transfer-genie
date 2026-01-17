@@ -1257,6 +1257,68 @@ function showPasswordDialog(options = {}) {
   });
 }
 
+async function saveDiagramAsImage(container) {
+  const svg = container.querySelector('svg');
+  if (!svg) {
+    showToast('未找到图片内容', 'error');
+    return;
+  }
+
+  try {
+    const svgData = new XMLSerializer().serializeToString(svg);
+    const svgBlob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(svgBlob);
+    
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = reject;
+      img.src = url;
+    });
+
+    const canvas = document.createElement('canvas');
+    // Using getBoundingClientRect for actual rendered size
+    const rect = svg.getBoundingClientRect();
+    const padding = 20;
+    canvas.width = rect.width + padding * 2;
+    canvas.height = rect.height + padding * 2;
+    
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    ctx.drawImage(img, padding, padding, rect.width, rect.height);
+    
+    URL.revokeObjectURL(url);
+
+    const pngDataUrl = canvas.toDataURL('image/png');
+    const base64 = pngDataUrl.split(',')[1];
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+
+    if (!saveDialog) {
+      showToast('未检测到保存对话框插件', 'error');
+      return;
+    }
+
+    const path = await saveDialog({
+      defaultPath: 'diagram.png',
+      filters: [{ name: 'Images', extensions: ['png'] }]
+    });
+
+    if (path) {
+      await invoke('save_local_data', { path, data: Array.from(bytes) });
+      showToast('图片已保存', 'success');
+    }
+  } catch (e) {
+    console.error('Failed to save diagram', e);
+    showToast(`保存失败: ${e}`, 'error');
+  }
+}
+
 async function copyTextToClipboard(text) {
   if (!text) {
     showToast('没有可复制的内容', 'error');
@@ -2144,6 +2206,23 @@ function renderMessages(messages, options = {}) {
                });
                pre.appendChild(button);
                pre.style.position = 'relative';
+            });
+
+            // Add save as image button to diagrams
+            container.querySelectorAll('.flowchart, .sequence-diagram').forEach(diag => {
+               if (diag.querySelector('.diag-save-btn')) return;
+               
+               diag.style.position = 'relative';
+               diag.style.cursor = 'default';
+
+               const button = document.createElement('button');
+               button.className = 'diag-save-btn';
+               button.textContent = '保存图片';
+               button.addEventListener('click', (e) => {
+                 e.stopPropagation();
+                 saveDiagramAsImage(diag);
+               });
+               diag.appendChild(button);
             });
           }
         } catch (e) {

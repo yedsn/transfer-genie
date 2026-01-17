@@ -973,6 +973,22 @@ async fn open_download_dir(
 }
 
 #[tauri::command]
+async fn save_local_data(
+  path: String,
+  data: Vec<u8>,
+) -> Result<(), String> {
+  if path.trim().is_empty() {
+    return Err("路径为空".to_string());
+  }
+  let target = PathBuf::from(path);
+  if let Some(parent) = target.parent() {
+    fs::create_dir_all(parent).map_err(|err| format!("创建目录失败: {err}"))?;
+  }
+  fs::write(&target, data).map_err(|err| format!("保存文件失败: {err}"))?;
+  Ok(())
+}
+
+#[tauri::command]
 fn open_log_dir(app: AppHandle) -> Result<(), String> {
   let log_dir = app
     .path()
@@ -2871,34 +2887,34 @@ fn main() {
     )
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_opener::init())
-    .invoke_handler(tauri::generate_handler![
-      get_settings,
-      save_settings,
-      export_settings,
-      import_settings,
-      list_messages,
-      send_text,
-      send_file,
-      send_file_data,
-      download_message_file,
-      fetch_image_preview,
-      save_message_file_as,
-      open_message_file,
-      open_download_dir,
-      open_log_dir,
-      open_data_dir,
-      minimize_window,
-      delete_messages,
-      cleanup_messages,
-      manual_refresh,
-      get_sync_status,
-      test_webdav_speed,
-      backup_webdav,
-      restore_webdav,
-      mark_message,
-      unmark_message
-    ])
-    .build(tauri::generate_context!())
+          .invoke_handler(tauri::generate_handler![
+            get_settings,
+            save_settings,
+            export_settings,
+            import_settings,
+            list_messages,
+            send_text,
+            send_file,
+            send_file_data,
+            download_message_file,
+            save_message_file_as,
+            save_local_data,
+            open_message_file,
+            open_download_dir,
+            open_log_dir,
+            open_data_dir,
+            minimize_window,
+            fetch_image_preview,
+            delete_messages,
+            cleanup_messages,
+            manual_refresh,
+            get_sync_status,
+            mark_message,
+            unmark_message,
+            test_webdav_speed,
+            backup_webdav,
+            restore_webdav
+          ])    .build(tauri::generate_context!())
     .expect("error while building tauri application");
 
   app.run(|_app_handle, _event| {
