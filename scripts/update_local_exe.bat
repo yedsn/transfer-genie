@@ -153,10 +153,7 @@ set /p "OPEN_DIR=是否打开安装目录? (y/n，默认 n): "
 if /i "!OPEN_DIR!"=="y" (
     explorer "!INSTALL_DIR!"
 ) else (
-    echo.
     echo 完成。
 )
 
-echo.
-pause
 
