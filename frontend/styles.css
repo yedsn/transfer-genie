@@ -787,11 +787,31 @@ body {
   font-size: 14px;
   line-height: 1.5;
   color: var(--ink);
+  white-space: normal;
 }
 
 .message-card.is-self .message-body.markdown-body {
   background: #dff5d5 !important;
   border-color: #c8ebc0;
+}
+
+.message-body.markdown-body.editormd-html-preview {
+  background: #ffffff !important;
+  border: 1px solid var(--border);
+  white-space: normal;
+}
+
+.message-body .flowchart,
+.message-body .sequence-diagram {
+  display: block;
+  max-width: 100%;
+  overflow: auto;
+}
+
+.message-body .flowchart svg,
+.message-body .sequence-diagram svg {
+  max-width: 100%;
+  height: auto;
 }
 
 .message-card.is-marked .message-body.markdown-body {

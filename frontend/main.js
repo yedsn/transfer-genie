@@ -2016,7 +2016,7 @@ function renderMessages(messages, options = {}) {
     body.className = 'message-body';
     if (message.kind === 'text') {
       if (message.format === 'markdown') {
-        body.classList.add('markdown-body');
+        body.classList.add('markdown-body', 'editormd-html-preview', 'is-markdown');
         // Generate a safe unique ID
         const uniqueId = `md-msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
         body.id = uniqueId;
