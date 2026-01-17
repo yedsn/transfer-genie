@@ -1862,11 +1862,12 @@ function renderPreviewContent(message) {
   renderPreviewActions(message);
 
   if (message.kind === 'text') {
+    messagePreviewBody.classList.add('is-markdown');
     if (message.format === 'markdown' && window.editormd) {
       const holder = document.createElement('div');
       const uniqueId = `preview-md-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       holder.id = uniqueId;
-      holder.className = 'markdown-body';
+      holder.className = 'markdown-body editormd-html-preview';
       messagePreviewBody.appendChild(holder);
       editormd.markdownToHTML(uniqueId, {
         markdown: message.content || '',
@@ -1878,11 +1879,13 @@ function renderPreviewContent(message) {
         sequenceDiagram: true,
       });
     } else {
+      messagePreviewBody.classList.remove('is-markdown');
       const textBlock = document.createElement('div');
       textBlock.textContent = message.content || '';
       messagePreviewBody.appendChild(textBlock);
     }
   } else {
+    messagePreviewBody.classList.remove('is-markdown');
     const title = document.createElement('div');
     title.className = 'message-preview-file-title';
     title.textContent = message.original_name || message.filename || '文件';
@@ -1911,10 +1914,17 @@ function renderPreviewContent(message) {
 function openMessagePreview(message) {
   if (!messagePreview || !message) return;
   currentPreviewMessage = message;
-  renderPreviewContent(message);
   messagePreview.classList.add('is-active');
   messagePreview.setAttribute('aria-hidden', 'false');
   document.body.classList.add('preview-open');
+  renderPreviewContent(message);
+  if (message.kind === 'text' && message.format === 'markdown') {
+    setTimeout(() => {
+      if (currentPreviewMessage === message && messagePreview.classList.contains('is-active')) {
+        renderPreviewContent(message);
+      }
+    }, 0);
+  }
 }
 
 function shouldShowMenuAbove(item) {
