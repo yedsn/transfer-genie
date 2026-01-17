@@ -2018,6 +2018,10 @@ body.preview-open {
     cursor: pointer;
 }
 
+.message-body.is-image-message::before {
+    display: none !important;
+}
+
 .message-thumbnail {
     max-width: 200px;
     max-height: 200px;
