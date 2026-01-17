@@ -56,8 +56,17 @@
               回到底部
             </button>
             <section class="composer">
+              <label for="text-input" class="visually-hidden">发送文本</label>
+        <div class="composer-body">
+              <div class="composer-row">
+                <div id="editor-container" style="width: 100%; display: flex; flex-direction: column;">
+                  <textarea id="text-input" placeholder="输入消息..."></textarea>
+                  <div id="markdown-editor" style="display: none;"></div>
+                </div>
+              </div>
               <div class="composer-toolbar">
                 <div class="format-toggle">
+                  <div class="active-tab-indicator"></div>
                   <label class="radio-tab">
                     <input type="radio" name="message-format" value="text" checked />
                     <span>纯文本</span>
@@ -66,13 +75,6 @@
                     <input type="radio" name="message-format" value="markdown" />
                     <span>Markdown</span>
                   </label>
-                </div>
-              </div>
-              <label for="text-input" class="visually-hidden">发送文本</label>
-              <div class="composer-row">
-                <div id="editor-container" style="width: 100%; display: flex; flex-direction: column;">
-                  <textarea id="text-input" placeholder="输入消息..."></textarea>
-                  <div id="markdown-editor" style="display: none;"></div>
                 </div>
                 <div class="composer-actions">
                   <button id="send-file" class="icon-button" type="button">
@@ -85,6 +87,7 @@
                   </button>
                 </div>
               </div>
+            </div>
             </section>
           </section>
         </section>

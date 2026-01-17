@@ -160,13 +160,36 @@ function switchFormat(format) {
   }
 }
 
+function updateFormatToggleIndicator() {
+  const toggle = document.querySelector('.format-toggle');
+  if (!toggle) return;
+
+  const indicator = toggle.querySelector('.active-tab-indicator');
+  const activeRadio = toggle.querySelector('input[name="message-format"]:checked');
+  if (!indicator || !activeRadio) return;
+  
+  const activeLabel = activeRadio.closest('.radio-tab');
+  if (!activeLabel) return;
+
+  indicator.style.left = `${activeLabel.offsetLeft}px`;
+  indicator.style.width = `${activeLabel.offsetWidth}px`;
+}
+
 if (formatInputs) {
   formatInputs.forEach(input => {
     input.addEventListener('change', () => {
       if (input.checked) {
         switchFormat(input.value);
+        updateFormatToggleIndicator();
       }
     });
+  });
+
+  window.addEventListener('load', () => {
+    setTimeout(updateFormatToggleIndicator, 50);
+  });
+  window.addEventListener('resize', () => {
+    setTimeout(updateFormatToggleIndicator, 50);
   });
 }
 
