@@ -1993,3 +1993,61 @@ body.preview-open {
   background-color: #d32f2f;
   color: white;
 }
+
+.selected-file-item {
+    position: relative;
+    flex-direction: column;
+    height: 100px;
+    padding: 0;
+    justify-content: flex-end;
+    overflow: hidden;
+}
+
+.selected-file-preview {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    z-index: 1;
+}
+
+.selected-file-info {
+    position: relative;
+    z-index: 2;
+    background: rgba(0, 0, 0, 0.5);
+    color: white;
+    padding: 4px 6px;
+    width: 100%;
+    font-size: 11px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.selected-file-item .remove-file-btn {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    z-index: 3;
+    background: rgba(0,0,0,0.6);
+    color: white;
+    border: none;
+}
+
+.selected-file-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    background-color: var(--panel-soft);
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--border);
+}
+
+

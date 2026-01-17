@@ -3,6 +3,7 @@ const invoke = tauri.core?.invoke || tauri.invoke;
 const openDialog = tauri.dialog?.open;
 const saveDialog = tauri.dialog?.save;
 const listen = tauri.event?.listen;
+const convertFileSrc = tauri.path?.convertFileSrc;
 
 const messageList = document.getElementById('message-list');
 const syncStatus = document.getElementById('sync-status');
@@ -3200,6 +3201,12 @@ async function selectFiles() {
   }
 }
 
+function isImagePath(path) {
+    if (!path) return false;
+    const lower = path.toLowerCase();
+    return lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.gif') || lower.endsWith('.webp') || lower.endsWith('.bmp');
+}
+
 function renderSelectedFiles() {
   const container = document.getElementById('selected-files-container');
   if (!container) return;
@@ -3216,9 +3223,31 @@ function renderSelectedFiles() {
     const fileItem = document.createElement('div');
     fileItem.className = 'selected-file-item';
 
+    if (isImagePath(path)) {
+        const tauriConvert = window.__TAURI__?.tauri?.convertFileSrc || window.__TAURI__?.path?.convertFileSrc || window.__TAURI__?.core?.convertFileSrc;
+        if (tauriConvert) {
+            const img = document.createElement('img');
+            img.className = 'selected-file-preview';
+            img.src = tauriConvert(path);
+            fileItem.appendChild(img);
+        } else {
+            fileItem.style.backgroundColor = 'red'; // Visual debug hint
+        }
+    } else {
+        const fileIcon = document.createElement('div');
+        fileIcon.className = 'selected-file-icon';
+        const extension = path.split('.').pop() || '';
+        fileIcon.textContent = extension.toLowerCase();
+        fileItem.appendChild(fileIcon);
+    }
+
+    const fileInfo = document.createElement('div');
+    fileInfo.className = 'selected-file-info';
+    
     const fileName = document.createElement('span');
     fileName.className = 'selected-file-name';
     fileName.textContent = path.split(/[/\\]/).pop() || path;
+    fileInfo.appendChild(fileName);
     
     const removeBtn = document.createElement('button');
     removeBtn.className = 'remove-file-btn';
@@ -3229,7 +3258,7 @@ function renderSelectedFiles() {
       removeSelectedFile(index);
     });
 
-    fileItem.appendChild(fileName);
+    fileItem.appendChild(fileInfo);
     fileItem.appendChild(removeBtn);
     container.appendChild(fileItem);
   });
