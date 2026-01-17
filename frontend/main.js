@@ -96,8 +96,34 @@ function initMarkdownEditor() {
     toolbar: true,
     codeFold: true,
     searchReplace: true,
+    flowChart: true,
+    sequenceDiagram: true,
     toolbarIcons: function() {
-      return ["bold", "italic", "quote", "|", "h1", "h2", "h3", "|", "list-ul", "list-ol", "|", "link", "code", "code-block", "table", "datetime", "|", "watch", "preview", "clear", "help"];
+      return ["bold", "italic", "quote", "|", "h1", "h2", "h3", "|", "list-ul", "list-ol", "|", "link", "code", "code-block", "table", "datetime", "|", "flowchart", "sequence-diagram", "|", "watch", "preview", "clear", "help"];
+    },
+    toolbarIconsClass: {
+        flowchart: "fa-random", 
+        "sequence-diagram": "fa-exchange"
+    },
+    toolbarHandlers: {
+        flowchart: function(cm, icon, cursor, selection) {
+            cm.replaceSelection("```flow\nst=>start: Start\nop=>operation: Your Operation\ncond=>condition: Yes or No?\ne=>end: End\n\nst->op->cond\ncond(yes)->e\ncond(no)->op\n```");
+            if(selection === "") {
+                cm.setCursor(cursor.line, cursor.ch + 8);
+            }
+        },
+        "sequence-diagram": function(cm, icon, cursor, selection) {
+            cm.replaceSelection("```seq\nAlice->Bob: Hello Bob, how are you?\nNote right of Bob: Bob thinks\nBob-->Alice: I am good thanks!\n```");
+            if(selection === "") {
+                cm.setCursor(cursor.line, cursor.ch + 8);
+            }
+        }
+    },
+    lang: {
+        toolbar: {
+            flowchart: "���入流程图",
+            "sequence-diagram": "插入时序图"
+        }
     },
     onload: function() {
       const cm = this.cm;
@@ -107,10 +133,6 @@ function initMarkdownEditor() {
           if (isCtrlLike) {
             event.preventDefault();
             sendText();
-          }
-        } else if (event.key === 'Escape') {
-          if (!event.defaultPrevented) {
-            minimizeAppWindow();
           }
         }
       });
@@ -2091,8 +2113,8 @@ function renderMessages(messages, options = {}) {
             emoji: true,
             taskList: true,
             tex: false, 
-            flowChart: false, 
-            sequenceDiagram: false,
+            flowChart: true, 
+            sequenceDiagram: true,
           });
 
           // Add copy button to code blocks

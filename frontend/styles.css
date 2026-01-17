@@ -781,39 +781,102 @@ body {
 }
 
 .message-body.markdown-body {
-  padding: 10px 12px;
+  padding: 8px 12px;
   background: #ffffff;
   border: 1px solid var(--border);
-}
-
-/* Fix editormd preview styles inside message card */
-.message-body.markdown-body.editormd-html-preview {
-  padding: 10px 12px;
-  width: auto;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  font-size: 15px;
+  font-size: 14px;
+  line-height: 1.5;
   color: var(--ink);
-  line-height: 1.6;
 }
 
-.message-body.markdown-body p:last-child {
-  margin-bottom: 0;
+.message-card.is-self .message-body.markdown-body {
+  background: #dff5d5;
+  border-color: #c8ebc0;
+}
+
+/* Override editormd-html-preview defaults for chat bubbles */
+.markdown-body.editormd-html-preview {
+  padding: 8px 12px !important;
+  width: auto !important;
+  background: transparent !important;
+  border: none !important;
+  font-family: inherit !important;
+}
+
+.markdown-body.editormd-html-preview * {
+  font-family: inherit !important;
+}
+
+/* Extremely compact block elements */
+.markdown-body.editormd-html-preview p,
+.markdown-body.editormd-html-preview ul,
+.markdown-body.editormd-html-preview ol,
+.markdown-body.editormd-html-preview li,
+.markdown-body.editormd-html-preview blockquote,
+.markdown-body.editormd-html-preview h1,
+.markdown-body.editormd-html-preview h2,
+.markdown-body.editormd-html-preview h3,
+.markdown-body.editormd-html-preview h4,
+.markdown-body.editormd-html-preview pre {
+  margin: 0 !important;
+  margin-bottom: 2px !important; /* Minimal gap between blocks */
+  padding: 0 !important;
+}
+
+/* Ensure last child has no margin */
+.markdown-body.editormd-html-preview *:last-child {
+  margin-bottom: 0 !important;
+}
+
+/* Headings adjustment */
+.markdown-body.editormd-html-preview h1 { font-size: 1.25em !important; font-weight: 600 !important; margin-bottom: 4px !important; }
+.markdown-body.editormd-html-preview h2 { font-size: 1.15em !important; font-weight: 600 !important; margin-bottom: 4px !important; }
+.markdown-body.editormd-html-preview h3 { font-size: 1.05em !important; font-weight: 600 !important; margin-bottom: 4px !important; }
+
+/* List indentation */
+.markdown-body.editormd-html-preview ul,
+.markdown-body.editormd-html-preview ol {
+  padding-left: 1.5em !important;
+  margin-bottom: 4px !important;
+}
+
+.markdown-body.editormd-html-preview li {
+  list-style: inherit !important;
+  margin-bottom: 1px !important;
+}
+
+/* Code blocks in chat */
+.markdown-body.editormd-html-preview pre {
+  padding: 6px 8px !important;
+  background: rgba(0, 0, 0, 0.04) !important;
+  border-radius: 4px !important;
+  border: 1px solid rgba(0, 0, 0, 0.08) !important;
+  margin: 4px 0 !important;
+  font-family: Consolas, Monaco, monospace !important;
+}
+
+/* Blockquote in chat */
+.markdown-body.editormd-html-preview blockquote {
+  padding-left: 8px !important;
+  border-left: 3px solid #ddd !important;
+  color: #666 !important;
+  margin: 4px 0 !important;
 }
 
 .code-copy-btn {
   position: absolute;
-  top: 6px;
-  right: 6px;
-  padding: 4px 8px;
-  font-size: 12px;
-  background: rgba(255, 255, 255, 0.8);
-  border: 1px solid var(--border);
-  border-radius: 4px;
+  top: 4px;
+  right: 4px;
+  padding: 2px 6px;
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid #ddd;
+  border-radius: 3px;
   cursor: pointer;
-  color: var(--muted);
+  color: #666;
   opacity: 0;
-  transition: opacity 0.2s, background 0.2s;
+  transition: opacity 0.2s;
+  z-index: 10;
 }
 
 .message-body.markdown-body pre:hover .code-copy-btn {
