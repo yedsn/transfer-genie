@@ -50,6 +50,11 @@ const openLogDirButton = document.getElementById('open-log-dir');
 const openDataDirButton = document.getElementById('open-data-dir');
 const filterMarkedButton = document.getElementById('filter-marked');
 const markedFilterLabel = document.getElementById('marked-filter-label');
+const messagePreview = document.getElementById('message-preview');
+const messagePreviewBody = document.getElementById('message-preview-body');
+const messagePreviewMeta = document.getElementById('message-preview-meta');
+const messagePreviewClose = document.querySelector('.message-preview-close');
+const messagePreviewBackdrop = messagePreview ? messagePreview.querySelector('.message-preview-backdrop') : null;
 
 let refreshTimer = null;
 let didInitialSync = false;
@@ -64,6 +69,7 @@ const uploadSpeed = new Map();
 let selectionMode = false;
 let markedFilterActive = false;
 const selectedMessages = new Set();
+let currentPreviewMessage = null;
 
 // 发送状态常量
 const SEND_STATUS = {
@@ -122,7 +128,7 @@ function initMarkdownEditor() {
     },
     lang: {
         toolbar: {
-            flowchart: "���入流程图",
+            flowchart: "插入流程图",
             "sequence-diagram": "插入时序图"
         }
     },
@@ -1755,6 +1761,83 @@ function updateMarkedBadge(count) {
   filterMarkedButton.classList.toggle('has-marked', validCount > 0);
 }
 
+
+function closeMessagePreview() {
+  if (!messagePreview) return;
+  currentPreviewMessage = null;
+  if (messagePreviewBody) {
+    messagePreviewBody.innerHTML = '';
+  }
+  messagePreview.classList.remove('is-active');
+  messagePreview.setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('preview-open');
+}
+
+function renderPreviewContent(message) {
+  if (!messagePreviewBody || !messagePreviewMeta || !message) return;
+  messagePreviewBody.innerHTML = '';
+  messagePreviewBody.className = 'message-preview-body';
+
+  const senderLabel = message.sender || '未知发送者';
+  const timeLabel = formatTime(message.timestamp_ms) || '';
+  messagePreviewMeta.textContent = timeLabel ? `${senderLabel} • ${timeLabel}` : senderLabel;
+
+  if (message.kind === 'text') {
+    if (message.format === 'markdown' && window.editormd) {
+      const holder = document.createElement('div');
+      const uniqueId = `preview-md-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      holder.id = uniqueId;
+      holder.className = 'markdown-body';
+      messagePreviewBody.appendChild(holder);
+      editormd.markdownToHTML(uniqueId, {
+        markdown: message.content || '',
+        htmlDecode: 'style,script,iframe',
+        emoji: true,
+        taskList: true,
+        tex: false,
+        flowChart: true,
+        sequenceDiagram: true,
+      });
+    } else {
+      const textBlock = document.createElement('div');
+      textBlock.textContent = message.content || '';
+      messagePreviewBody.appendChild(textBlock);
+    }
+  } else {
+    const title = document.createElement('div');
+    title.className = 'message-preview-file-title';
+    title.textContent = message.original_name || message.filename || '文件';
+
+    const meta = document.createElement('div');
+    meta.className = 'message-preview-file-meta';
+    meta.textContent = `大小 ${formatBytes(message.size || 0)}`;
+
+    const actions = document.createElement('div');
+    actions.className = 'message-preview-actions';
+
+    const openBtn = document.createElement('button');
+    openBtn.type = 'button';
+    openBtn.className = 'button primary small';
+    openBtn.textContent = message.download_exists ? '打开文件' : '下载并打开';
+    openBtn.addEventListener('click', () => openMessageFile(message));
+
+    actions.appendChild(openBtn);
+
+    messagePreviewBody.appendChild(title);
+    messagePreviewBody.appendChild(meta);
+    messagePreviewBody.appendChild(actions);
+  }
+}
+
+function openMessagePreview(message) {
+  if (!messagePreview || !message) return;
+  currentPreviewMessage = message;
+  renderPreviewContent(message);
+  messagePreview.classList.add('is-active');
+  messagePreview.setAttribute('aria-hidden', 'false');
+  document.body.classList.add('preview-open');
+}
+
 function shouldShowMenuAbove(item) {
   if (!messageList || !item) return false;
   
@@ -1811,6 +1894,7 @@ function renderMessages(messages, options = {}) {
     const isFile = message.kind === 'file';
     const selfName = senderNameInput?.value.trim();
     const isSelf = message.sender === '我' || (selfName && message.sender === selfName);
+    let fileBodyClickTimer = null;
     item.classList.toggle('is-file', isFile);
     item.classList.toggle('is-text', !isFile);
     item.classList.toggle('is-self', isSelf);
@@ -1867,7 +1951,13 @@ function renderMessages(messages, options = {}) {
         if (event.target.closest('button, a, input, textarea, select, summary, details')) {
           return;
         }
-        openMessageFile(message);
+        if (fileBodyClickTimer) {
+          clearTimeout(fileBodyClickTimer);
+        }
+        fileBodyClickTimer = setTimeout(() => {
+          openMessageFile(message);
+          fileBodyClickTimer = null;
+        }, 180);
       });
     }
 
@@ -2105,7 +2195,31 @@ function renderMessages(messages, options = {}) {
     item.appendChild(body);
     item.appendChild(footer);
 
+    item.addEventListener('dblclick', (event) => {
+      if (selectionMode) {
+        return;
+      }
+      if (message.uploading) {
+        return;
+      }
+      if (
+        event.target.closest(
+          'button, a, input, textarea, select, summary, details, .action-menu, .message-actions',
+        )
+      ) {
+        return;
+      }
+      if (fileBodyClickTimer) {
+        clearTimeout(fileBodyClickTimer);
+        fileBodyClickTimer = null;
+      }
+      openMessagePreview(message);
+    });
+
     item.addEventListener('click', (event) => {
+      if (event.detail > 1) {
+        return;
+      }
       if (!selectionMode || !selectionCheckbox || selectionCheckbox.disabled) {
         return;
       }
@@ -3573,6 +3687,28 @@ function isDefaultPastedFileName(name) {
   const defaultNames = ['image.png', 'image.jpeg', 'image.jpg', 'image.gif', 'image.webp', 'image.bmp'];
   return !name || defaultNames.includes(name.toLowerCase());
 }
+
+if (messagePreviewClose) {
+  messagePreviewClose.addEventListener('click', closeMessagePreview);
+}
+
+if (messagePreviewBackdrop) {
+  messagePreviewBackdrop.addEventListener('click', closeMessagePreview);
+}
+
+if (messagePreview) {
+  messagePreview.addEventListener('click', (event) => {
+    if (event.target === messagePreview) {
+      closeMessagePreview();
+    }
+  });
+}
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && messagePreview?.classList.contains('is-active')) {
+    closeMessagePreview();
+  }
+});
 
 document.addEventListener('paste', async (event) => {
   // 如果在输入框中粘贴文本，不处理

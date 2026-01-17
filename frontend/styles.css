@@ -1696,6 +1696,120 @@ input {
   }
 }
 
+.message-preview {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 20px;
+  background: rgba(15, 15, 25, 0.55);
+  backdrop-filter: blur(6px);
+  z-index: 1200;
+}
+
+.message-preview.is-active {
+  display: flex;
+}
+
+.message-preview-backdrop {
+  position: absolute;
+  inset: 0;
+}
+
+.message-preview-dialog {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: #ffffff;
+  border-radius: 16px;
+  box-shadow: 0 14px 42px rgba(15, 15, 25, 0.18), 0 4px 18px rgba(15, 15, 25, 0.12);
+  border: 1px solid var(--border);
+  max-width: 960px;
+  width: min(960px, 96vw);
+  max-height: 90vh;
+  padding: 20px 24px 24px;
+  overflow: hidden;
+  color: var(--ink);
+}
+
+.message-preview-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 999px;
+  background: #ffffff;
+  cursor: pointer;
+  font-size: 28px;
+  line-height: 1;
+  color: var(--muted);
+  display: grid;
+  place-items: center;
+  transition: all 0.2s ease;
+}
+
+.message-preview-close:hover {
+  color: var(--ink);
+  border-color: var(--ink);
+}
+
+.message-preview-meta {
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 10px;
+  flex-shrink: 0;
+}
+
+.message-preview-body {
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+  flex: 1;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.message-preview-body .markdown-body {
+  padding: 0;
+  border: none;
+  background: transparent;
+  max-width: none;
+}
+
+.message-preview-body .markdown-body pre {
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: 10px;
+  padding: 14px;
+  border: none;
+}
+
+.message-preview-file-title {
+  font-weight: 700;
+  margin-bottom: 6px;
+  font-size: 16px;
+}
+
+.message-preview-file-meta {
+  color: var(--muted);
+  margin-bottom: 14px;
+}
+
+.message-preview-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+body.preview-open {
+  overflow: hidden;
+}
+
 @media (max-width: 960px) {
   body {
     overflow: hidden;
@@ -1736,4 +1850,11 @@ input {
     animation: none;
     transition: none;
   }
+}
+
+.message-preview-dialog .markdown-body {
+  padding: 0 !important;
+  border: none;
+  background: transparent;
+  max-width: none;
 }

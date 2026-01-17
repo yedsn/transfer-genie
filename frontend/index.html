@@ -223,6 +223,15 @@
         </section>
       </main>
 
+      <div id="message-preview" class="message-preview" aria-hidden="true">
+        <div class="message-preview-backdrop"></div>
+        <div class="message-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="message-preview-meta">
+          <button type="button" class="message-preview-close" aria-label="关闭预览">×</button>
+          <div id="message-preview-meta" class="message-preview-meta"></div>
+          <div id="message-preview-body" class="message-preview-body"></div>
+        </div>
+      </div>
+
       <nav class="tabbar" role="tablist" aria-label="主菜单">
         <button
           class="tab-button is-active"
