@@ -91,6 +91,7 @@ function initMarkdownEditor() {
     width: "100%",
     height: 200,
     path: "lib/editor.md/lib/",
+    pluginPath: "lib/editor.md/plugins/",
     placeholder: "使用 Markdown 输入消息...",
     watch: true,
     toolbar: true,
