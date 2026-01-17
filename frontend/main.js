@@ -53,6 +53,7 @@ const markedFilterLabel = document.getElementById('marked-filter-label');
 const messagePreview = document.getElementById('message-preview');
 const messagePreviewBody = document.getElementById('message-preview-body');
 const messagePreviewMeta = document.getElementById('message-preview-meta');
+const messagePreviewActions = document.getElementById('message-preview-actions');
 const messagePreviewClose = document.querySelector('.message-preview-close');
 const messagePreviewBackdrop = messagePreview ? messagePreview.querySelector('.message-preview-backdrop') : null;
 
@@ -1553,19 +1554,20 @@ async function saveMessageFileAs(message) {
 
 async function deleteSingleMessage(message) {
   if (!message || !message.filename) {
-    return;
+    return false;
   }
   if (!invoke) {
     await showInfoDialog({
       title: '删除失败',
-      message: '未检测到 Tauri API，请检查 app.withGlobalTauri 设置',
+      message: '未检测到 Tauri API，请检查app.withGlobalTauri 设置',
     });
-    return;
+    return false;
   }
   const choice = await showDeleteConfirmDialog(1);
   if (choice === 'cancel') {
-    return;
+    return false;
   }
+  let deleted = false;
   try {
     const result = await invoke('delete_messages', {
       filenames: [message.filename],
@@ -1581,7 +1583,7 @@ async function deleteSingleMessage(message) {
       if (choice === 'remote') {
         await showInfoDialog({
           title: '删除成功',
-          message: '已删除 1 条消息',
+          message: '已删除1 条消息',
         });
       } else {
         await showInfoDialog({
@@ -1589,16 +1591,18 @@ async function deleteSingleMessage(message) {
           message: '已删除本地文件',
         });
       }
+      deleted = true;
     }
     await loadMessages();
+    return deleted;
   } catch (error) {
     await showInfoDialog({
       title: '删除失败',
       message: String(error),
     });
+    return false;
   }
 }
-
 async function deleteSelectedMessages() {
   const filenames = Array.from(selectedMessages);
   if (!filenames.length) {
@@ -1768,9 +1772,83 @@ function closeMessagePreview() {
   if (messagePreviewBody) {
     messagePreviewBody.innerHTML = '';
   }
+  if (messagePreviewActions) {
+    messagePreviewActions.innerHTML = '';
+  }
   messagePreview.classList.remove('is-active');
   messagePreview.setAttribute('aria-hidden', 'true');
   document.body.classList.remove('preview-open');
+}
+
+function renderPreviewActions(message) {
+  if (!messagePreviewActions) return;
+  messagePreviewActions.className = 'message-preview-toolbar';
+  messagePreviewActions.innerHTML = '';
+  if (!message) return;
+
+  const buttons = [];
+
+  const markButton = document.createElement('button');
+  markButton.type = 'button';
+  markButton.className = 'button ghost small icon-only mark-action';
+  markButton.title = message.marked ? '取消标记' : '标记';
+  markButton.classList.toggle('is-marked', !!message.marked);
+  const markIcon = document.createElement('img');
+  markIcon.src = 'icons/mark.svg';
+  markIcon.alt = '标记';
+  markIcon.style.width = '16px';
+  markIcon.style.height = '16px';
+  markButton.appendChild(markIcon);
+  markButton.addEventListener('click', async () => {
+    await toggleMessageMarked(message);
+    currentPreviewMessage = message;
+    renderPreviewActions(message);
+  });
+  buttons.push(markButton);
+
+  if (message.kind === 'text') {
+    const copyButton = document.createElement('button');
+    copyButton.type = 'button';
+    copyButton.className = 'button ghost small';
+    copyButton.textContent = '复制内容';
+    copyButton.addEventListener('click', () => copyTextToClipboard(message.content || ''));
+    buttons.push(copyButton);
+  } else {
+    const openButton = document.createElement('button');
+    openButton.type = 'button';
+    openButton.className = 'button primary small';
+    openButton.textContent = message.download_exists ? '打开文件' : '下载并打开';
+    openButton.addEventListener('click', () => openMessageFile(message));
+    buttons.push(openButton);
+
+    const downloadButton = document.createElement('button');
+    downloadButton.type = 'button';
+    downloadButton.className = 'button ghost small';
+    downloadButton.textContent = '下载';
+    downloadButton.addEventListener('click', () => downloadMessageFile(message));
+    buttons.push(downloadButton);
+
+    const saveAsButton = document.createElement('button');
+    saveAsButton.type = 'button';
+    saveAsButton.className = 'button ghost small';
+    saveAsButton.textContent = '另存为';
+    saveAsButton.addEventListener('click', () => saveMessageFileAs(message));
+    buttons.push(saveAsButton);
+  }
+
+  const deleteButton = document.createElement('button');
+  deleteButton.type = 'button';
+  deleteButton.className = 'button ghost small delete-action';
+  deleteButton.textContent = '删除';
+  deleteButton.addEventListener('click', async () => {
+    const deleted = await deleteSingleMessage(message);
+    if (deleted) {
+      closeMessagePreview();
+    }
+  });
+  buttons.push(deleteButton);
+
+  buttons.forEach((button) => messagePreviewActions.appendChild(button));
 }
 
 function renderPreviewContent(message) {
@@ -1781,6 +1859,7 @@ function renderPreviewContent(message) {
   const senderLabel = message.sender || '未知发送者';
   const timeLabel = formatTime(message.timestamp_ms) || '';
   messagePreviewMeta.textContent = timeLabel ? `${senderLabel} • ${timeLabel}` : senderLabel;
+  renderPreviewActions(message);
 
   if (message.kind === 'text') {
     if (message.format === 'markdown' && window.editormd) {

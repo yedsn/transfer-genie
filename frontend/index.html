@@ -226,8 +226,13 @@
       <div id="message-preview" class="message-preview" aria-hidden="true">
         <div class="message-preview-backdrop"></div>
         <div class="message-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="message-preview-meta">
-          <button type="button" class="message-preview-close" aria-label="关闭预览">×</button>
-          <div id="message-preview-meta" class="message-preview-meta"></div>
+          <div class="message-preview-header">
+            <div id="message-preview-meta" class="message-preview-meta"></div>
+            <div class="message-preview-header-actions">
+              <div id="message-preview-actions" class="message-preview-toolbar"></div>
+              <button type="button" class="message-preview-close" aria-label="关闭预览">×</button>
+            </div>
+          </div>
           <div id="message-preview-body" class="message-preview-body"></div>
         </div>
       </div>
