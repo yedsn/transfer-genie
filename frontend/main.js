@@ -4057,7 +4057,15 @@ function updateAndRender(options = {}) {
   
   const messagesToRender = !query 
     ? lastMessages
-    : lastMessages.filter(m => m.kind === 'text' && (m.content || '').toLowerCase().includes(query));
+    : lastMessages.filter(message => {
+        if (message.kind === 'text') {
+            return (message.content || '').toLowerCase().includes(query);
+        }
+        if (message.kind === 'file') {
+            return (message.original_name || '').toLowerCase().includes(query);
+        }
+        return false;
+    });
   
   const renderOptions = {
     ...options,

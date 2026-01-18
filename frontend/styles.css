@@ -352,8 +352,8 @@ body {
 
 .scroll-to-bottom {
   position: absolute;
-  right: 40px;
-  bottom: calc(var(--composer-offset, 88px) + 30px);
+  right: 20px;
+  bottom: 10px;
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 6px 12px;
