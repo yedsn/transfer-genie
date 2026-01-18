@@ -140,6 +140,10 @@ function initMarkdownEditor() {
     onload: function() {
       const cm = this.cm;
       cm.on("keydown", (cm, event) => {
+        if (event.key === 'Escape') {
+          minimizeAppWindow();
+          return;
+        }
         if (event.key === 'Enter') {
           const isCtrlLike = event.ctrlKey || event.metaKey;
           if (isCtrlLike) {
@@ -184,7 +188,7 @@ if (formatInputs) {
     input.addEventListener('change', () => {
       if (input.checked) {
         switchFormat(input.value);
-        updateFormatToggleIndicator();
+        setTimeout(updateFormatToggleIndicator, 50);
       }
     });
   });
@@ -3846,6 +3850,7 @@ function handleWindowFocus() {
     textRadio.checked = true;
   }
   switchFormat('text');
+  requestAnimationFrame(updateFormatToggleIndicator);
   
   focusHomeComposer();
 }
