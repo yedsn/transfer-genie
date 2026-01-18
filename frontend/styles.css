@@ -288,7 +288,6 @@ body {
   align-items: center;
   gap: 12px;
   cursor: pointer;
-  white-space: nowrap;
 }
 
 .message-card.is-file .message-body::before {
@@ -2075,7 +2074,6 @@ body.preview-open {
 
 .message-body.is-image-message {
     padding: 4px;
-    line-height: 0;
     max-width: 208px;
     cursor: pointer;
 }
