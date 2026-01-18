@@ -288,6 +288,7 @@ body {
   align-items: center;
   gap: 12px;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .message-card.is-file .message-body::before {
@@ -301,6 +302,22 @@ body {
   color: var(--muted);
   border: 1px solid var(--border);
   background: #f7f1ea;
+}
+
+.message-thumbnail {
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 4px;
+  background-color: var(--panel-soft);
+  border: 1px solid var(--border);
+}
+
+.message-filename {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .message-card.is-self .message-body {

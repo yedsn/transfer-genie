@@ -2153,12 +2153,17 @@ function renderMessages(messages, options = {}) {
       const isImage = isImagePath(message.original_name || message.filename);
       if (isImage) {
         body.classList.add('is-image-message');
+        body.innerHTML = ''; // Clear existing content
+
         const thumbImg = document.createElement('img');
         thumbImg.className = 'message-thumbnail';
         thumbImg.alt = '缩略图';
-        // Add loading placeholder
-        body.innerHTML = '';
+
+        const fileNameSpan = document.createElement('span');
+        fileNameSpan.textContent = message.original_name || message.filename || '';
+
         body.appendChild(thumbImg);
+        body.appendChild(fileNameSpan);
         
         const tauriConvert = window.__TAURI__?.tauri?.convertFileSrc || window.__TAURI__?.path?.convertFileSrc || window.__TAURI__?.core?.convertFileSrc;
         
@@ -2170,7 +2175,7 @@ function renderMessages(messages, options = {}) {
           })
           .catch(err => {
             console.warn('Load thumbnail failed', err);
-            body.textContent = message.original_name || message.filename || '';
+            thumbImg.style.display = 'none';
           });
           
         body.addEventListener('dblclick', () => {
