@@ -51,10 +51,15 @@
                 <button id="toggle-selection" class="button ghost small" type="button">选择</button>
               </div>
             </div>
-            <ul id="message-list" class="message-list"></ul>
-            <button id="scroll-to-bottom" class="scroll-to-bottom" type="button" hidden>
-              回到底部
-            </button>
+            <div class="feed-content">
+              <div class="feed-search">
+                <input type="search" id="search-input" placeholder="搜索消息..." />
+              </div>
+              <ul id="message-list" class="message-list"></ul>
+              <button id="scroll-to-bottom" class="scroll-to-bottom" type="button" hidden>
+                回到底部
+              </button>
+            </div>
             <section class="composer">
               <label for="text-input" class="visually-hidden">发送文本</label>
         <div class="composer-body">

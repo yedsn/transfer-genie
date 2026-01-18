@@ -117,7 +117,6 @@ body {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  height: 100%;
   min-height: 0;
   flex: 1;
   width: 100%;
@@ -168,19 +167,65 @@ body {
   gap: 8px;
 }
 
+.feed-content {
+  position: relative;
+  background: var(--panel-soft);
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.feed-search {
+  padding: 10px;
+  position: absolute;
+  width: 100%;
+  z-index: 10;
+  background: linear-gradient(to bottom, rgba(255, 255, 255, 0.6), transparent);
+  backdrop-filter: blur(4px);
+  opacity: 0.8;
+  transition: all 0.2s ease-in-out;
+  padding-right: 24px;
+}
+
+.feed-search:hover,
+.feed-search:focus-within {
+  opacity: 1;
+}
+
+#search-input {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  padding: 10px 12px;
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--ink);
+  background: white;
+  height: 30px;
+  transition: all 0.2s ease-in-out;
+}
+
+#search-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: #fff;
+  box-shadow: 0 0 0 2px rgba(255, 122, 47, 0.15);
+}
+
 .message-list {
   list-style: none;
   margin: 0;
   padding: 12px;
+  padding-top: 66px; /* Add space for search bar */
   display: flex;
   flex-direction: column;
   gap: 14px;
   flex: 1;
   overflow-y: auto;
   padding-right: 8px;
-  background: var(--panel-soft);
   border-radius: 0;
-  border: 1px solid var(--border);
 }
 
 .load-more-hint {

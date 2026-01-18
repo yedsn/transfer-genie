@@ -57,6 +57,7 @@ const messagePreviewMeta = document.getElementById('message-preview-meta');
 const messagePreviewActions = document.getElementById('message-preview-actions');
 const messagePreviewClose = document.querySelector('.message-preview-close');
 const messagePreviewBackdrop = messagePreview ? messagePreview.querySelector('.message-preview-backdrop') : null;
+const searchInput = document.getElementById('search-input');
 
 let selectedFiles = [];
 
@@ -2054,9 +2055,10 @@ function shouldShowMenuAbove(item) {
 }
 
 function renderMessages(messages, options = {}) {
-  lastMessages = Array.isArray(messages) ? messages : [];
-  const merged = mergeMessages(lastMessages);
-  const { scrollToBottom = false, preserveScroll = false } = options;
+  const { scrollToBottom = false, preserveScroll = false, isSearchResult = false, query = '' } = options;
+  // The `messages` parameter is now the single source of truth for this render pass.
+  // We no longer modify the global `lastMessages` here.
+  const merged = mergeMessages(messages, options);
   const previousScrollTop = messageList ? messageList.scrollTop : 0;
   const previousScrollHeight = messageList ? messageList.scrollHeight : 0;
   const available = new Set(merged.map((message) => message.filename));
@@ -2071,7 +2073,7 @@ function renderMessages(messages, options = {}) {
   const markdownRenderQueue = [];
 
   // 添加"加载更多"提示
-  if (hasMoreMessages) {
+  if (hasMoreMessages && !isSearchResult) {
     const loadMoreItem = document.createElement('li');
     loadMoreItem.className = 'load-more-hint';
     loadMoreItem.id = 'load-more-hint';
@@ -2082,7 +2084,11 @@ function renderMessages(messages, options = {}) {
   if (!merged || merged.length === 0) {
     const empty = document.createElement('li');
     empty.className = 'message-card';
-    empty.textContent = '暂无消息';
+    if (isSearchResult) {
+      empty.textContent = `没有找到与 "${query}" 匹配的消息`;
+    } else {
+      empty.textContent = '暂无消息';
+    }
     messageList.appendChild(empty);
     updateScrollToBottomButton();
     return;
@@ -2586,43 +2592,46 @@ function renderMessages(messages, options = {}) {
     updateScrollToBottomButton();
   }
 }
-function mergeMessages(messages) {
+function mergeMessages(messages, options = {}) {
+  const { isSearchResult = false } = options;
   const merged = [...messages];
   
-  // 合并待发送的文本消息
-  pendingSends.forEach((send) => {
-    merged.push({
-      filename: send.filename || send.tempId,
-      sender: send.sender,
-      timestamp_ms: send.timestamp_ms,
-      size: send.size || (send.text ? send.text.length : 0),
-      kind: 'text',
-      original_name: send.format === 'markdown' ? 'message.md' : 'message.txt',
-      content: send.content || send.text,
-      local_path: null,
-      download_exists: false,
-      sending: true,
-      sendStatus: send.sendStatus || send.status,
-      sendError: send.sendError || send.error,
-      format: send.format || 'text',
+  if (!isSearchResult) {
+    // 合并待发送的文本消息
+    pendingSends.forEach((send) => {
+      merged.push({
+        filename: send.filename || send.tempId,
+        sender: send.sender,
+        timestamp_ms: send.timestamp_ms,
+        size: send.size || (send.text ? send.text.length : 0),
+        kind: 'text',
+        original_name: send.format === 'markdown' ? 'message.md' : 'message.txt',
+        content: send.content || send.text,
+        local_path: null,
+        download_exists: false,
+        sending: true,
+        sendStatus: send.sendStatus || send.status,
+        sendError: send.sendError || send.error,
+        format: send.format || 'text',
+      });
     });
-  });
-  
-  // 合并待上传的文件
-  pendingUploads.forEach((upload) => {
-    merged.push({
-      filename: upload.clientId,
-      sender: senderNameInput.value.trim() || '我',
-      timestamp_ms: upload.timestamp_ms,
-      size: upload.total || 0,
-      kind: 'file',
-      original_name: upload.originalName || '上传文件',
-      content: null,
-      local_path: upload.localPath || null,
-      download_exists: false,
-      uploading: true,
+    
+    // 合并待上传的文件
+    pendingUploads.forEach((upload) => {
+      merged.push({
+        filename: upload.clientId,
+        sender: senderNameInput.value.trim() || '我',
+        timestamp_ms: upload.timestamp_ms,
+        size: upload.total || 0,
+        kind: 'file',
+        original_name: upload.originalName || '上传文件',
+        content: null,
+        local_path: upload.localPath || null,
+        download_exists: false,
+        uploading: true,
+      });
     });
-  });
+  }
   
   merged.sort((a, b) => (a.timestamp_ms || 0) - (b.timestamp_ms || 0));
   return merged;
@@ -2793,6 +2802,10 @@ function startRefreshTimer(intervalSecs) {
   }
   const interval = Math.max(1, Number(intervalSecs) || 5);
   refreshTimer = setInterval(() => {
+    const hasSearchQuery = searchInput && searchInput.value.trim().length > 0;
+    if (hasSearchQuery) {
+      return; // Don't refresh if searching
+    }
     // 使用 checkNew 模式进行增量更新，不清空现有数据
     loadMessages({ checkNew: true });
     loadSyncStatus();
@@ -3549,6 +3562,9 @@ async function updateMessageDownloadStatus(filename) {
 }
 
 async function manualRefresh() {
+  if (searchInput) {
+    searchInput.value = '';
+  }
   try {
     if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
@@ -4035,3 +4051,25 @@ document.addEventListener('pointerdown', (event) => {
     openMenu.open = false;
   }
 });
+
+function updateAndRender(options = {}) {
+  const query = searchInput.value.trim().toLowerCase();
+  
+  const messagesToRender = !query 
+    ? lastMessages
+    : lastMessages.filter(m => m.kind === 'text' && (m.content || '').toLowerCase().includes(query));
+  
+  const renderOptions = {
+    ...options,
+    isSearchResult: !!query,
+    query
+  };
+
+  renderMessages(messagesToRender, renderOptions);
+}
+
+if (searchInput) {
+  searchInput.addEventListener('input', () => {
+    updateAndRender({ preserveScroll: true });
+  });
+}
