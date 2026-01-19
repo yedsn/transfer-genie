@@ -1368,6 +1368,41 @@ async function saveDiagramAsImage(container) {
 function injectMarkdownExtras(container) {
     if (!container) return;
 
+    // Handle links to open in system browser
+    container.querySelectorAll('a[href]').forEach(link => {
+        const href = link.getAttribute('href');
+        if (!href) return;
+        
+        // Skip if already handled
+        if (link.dataset.linkHandled === 'true') return;
+        link.dataset.linkHandled = 'true';
+        
+        // Only handle http/https links
+        if (!href.startsWith('http://') && !href.startsWith('https://')) {
+            return;
+        }
+        
+        link.addEventListener('click', async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            
+            try {
+                // Use backend command to open URL in system browser
+                const invoke = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
+                if (invoke) {
+                    await invoke('open_url', { url: href });
+                } else {
+                    // Fallback: use window.open as last resort
+                    window.open(href, '_blank');
+                }
+            } catch (error) {
+                console.error('Failed to open link:', error);
+                // Fallback to default behavior
+                window.open(href, '_blank');
+            }
+        });
+    });
+
     // Add copy button to code blocks
     container.querySelectorAll('pre').forEach(pre => {
         if (pre.querySelector('.code-copy-btn')) return;

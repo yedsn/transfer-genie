@@ -1059,6 +1059,24 @@ async fn open_download_dir(
 }
 
 #[tauri::command]
+async fn open_url(app: AppHandle, url: String) -> Result<(), String> {
+  if url.trim().is_empty() {
+    return Err("URL 为空".to_string());
+  }
+  // Validate URL format
+  if !url.starts_with("http://") && !url.starts_with("https://") {
+    return Err("URL 必须以 http:// 或 https:// 开头".to_string());
+  }
+  // Use opener plugin to open URL in system browser
+  // The opener plugin should handle URLs automatically
+  app
+    .opener()
+    .open_path(url, None::<&str>)
+    .map_err(|err| format!("打开链接失败: {err}"))?;
+  Ok(())
+}
+
+#[tauri::command]
 async fn save_local_data(
   path: String,
   data: Vec<u8>,
@@ -2990,6 +3008,7 @@ fn main() {
             open_download_dir,
             open_log_dir,
             open_data_dir,
+            open_url,
             minimize_window,
             fetch_image_preview,
             delete_messages,
