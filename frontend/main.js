@@ -20,6 +20,7 @@ const saveSettingsButton = document.getElementById('save-settings');
 const scrollToBottomButton = document.getElementById('scroll-to-bottom');
 const composer = document.querySelector('.composer');
 const composerFullscreenToggle = document.getElementById('composer-fullscreen-toggle');
+const composerFullscreenIcon = document.getElementById('composer-fullscreen-icon');
 const feed = document.querySelector('.feed');
 const tabButtons = Array.from(document.querySelectorAll('[data-tab-target]'));
 const tabPanels = Array.from(document.querySelectorAll('[data-tab-panel]'));
@@ -92,6 +93,10 @@ const SEND_HOTKEY = {
 };
 let sendHotkey = SEND_HOTKEY.ENTER;
 let isComposerFullscreen = false;
+const LABEL_EXPAND_COMPOSER = '\u653e\u5927\u8f93\u5165\u6846'; // 放大输入框
+const LABEL_EXIT_FULLSCREEN = '\u9000\u51fa\u5168\u5c4f'; // 退出全屏
+const ICON_EXPAND = 'icons/fullscreen.svg';
+const ICON_EXIT = 'icons/fullscreen-exit.svg';
 
 // Markdown Editor instance
 let mdEditor = null;
@@ -277,10 +282,12 @@ function setComposerFullscreen(enabled) {
   composer.classList.toggle('is-fullscreen', enabled);
   document.body.classList.toggle('composer-fullscreen-active', enabled);
   if (composerFullscreenToggle) {
-    const label = enabled ? '退出全屏' : '放大输入框';
+    const label = enabled ? LABEL_EXIT_FULLSCREEN : LABEL_EXPAND_COMPOSER;
     composerFullscreenToggle.title = label;
     composerFullscreenToggle.setAttribute('aria-label', label);
-    composerFullscreenToggle.innerHTML = enabled ? COMPOSER_ICON_COLLAPSE : COMPOSER_ICON_EXPAND;
+    if (composerFullscreenIcon) {
+      composerFullscreenIcon.src = enabled ? ICON_EXIT : ICON_EXPAND;
+    }
   }
   if (enabled) {
     setTimeout(() => {
@@ -3835,6 +3842,8 @@ if (composerFullscreenToggle) {
   composerFullscreenToggle.addEventListener('click', () => {
     setComposerFullscreen(!isComposerFullscreen);
   });
+  // Ensure icon and labels reflect initial state
+  setComposerFullscreen(false);
 }
 
 if (messageList) {

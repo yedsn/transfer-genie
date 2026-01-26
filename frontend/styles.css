@@ -865,12 +865,12 @@ body {
 
 .composer-expand-button {
   position: absolute;
-  right: 10px;
-  top: 10px;
-  width: 32px;
-  height: 32px;
+  right: 15px;
+  top: 15px;
+  width: 22px;
+  height: 22px;
   border-radius: 10px;
-  border: 1px solid var(--border);
+  border: none;
   background: #fff;
   display: inline-flex;
   align-items: center;
@@ -883,13 +883,11 @@ body {
   opacity: 0.6;
 }
 
-.composer-expand-button svg {
-  width: 18px;
-  height: 18px;
-  stroke: var(--ink);
-  fill: none;
-  stroke-width: 1.8;
-  opacity: 0.9;
+.composer-expand-button img {
+  width: 20px;
+  height: 20px;
+  opacity: 0.7;
+  filter: grayscale(10%) contrast(110%);
 }
 
 .composer-expand-button:hover {
