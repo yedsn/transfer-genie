@@ -19,6 +19,7 @@ const sendFileButton = document.getElementById('send-file');
 const saveSettingsButton = document.getElementById('save-settings');
 const scrollToBottomButton = document.getElementById('scroll-to-bottom');
 const composer = document.querySelector('.composer');
+const composerFullscreenToggle = document.getElementById('composer-fullscreen-toggle');
 const feed = document.querySelector('.feed');
 const tabButtons = Array.from(document.querySelectorAll('[data-tab-target]'));
 const tabPanels = Array.from(document.querySelectorAll('[data-tab-panel]'));
@@ -90,6 +91,7 @@ const SEND_HOTKEY = {
   CTRL_ENTER: 'ctrl_enter',
 };
 let sendHotkey = SEND_HOTKEY.ENTER;
+let isComposerFullscreen = false;
 
 // Markdown Editor instance
 let mdEditor = null;
@@ -268,6 +270,28 @@ function setSendHotkey(value) {
 }
 
 setSendHotkey(sendHotkey);
+
+function setComposerFullscreen(enabled) {
+  if (!composer) return;
+  isComposerFullscreen = enabled;
+  composer.classList.toggle('is-fullscreen', enabled);
+  document.body.classList.toggle('composer-fullscreen-active', enabled);
+  if (composerFullscreenToggle) {
+    const label = enabled ? '退出全屏' : '放大输入框';
+    composerFullscreenToggle.title = label;
+    composerFullscreenToggle.setAttribute('aria-label', label);
+    composerFullscreenToggle.innerHTML = enabled ? COMPOSER_ICON_COLLAPSE : COMPOSER_ICON_EXPAND;
+  }
+  if (enabled) {
+    setTimeout(() => {
+      if (currentFormat === 'markdown' && mdEditor) {
+        mdEditor.focus();
+      } else if (textInput) {
+        textInput.focus();
+      }
+    }, 0);
+  }
+}
 
 function normalizeGlobalHotkey(value) {
   if (!value) return '';
@@ -3807,6 +3831,12 @@ if (scrollToBottomButton) {
   scrollToBottomButton.addEventListener('click', scrollMessageListToBottom);
 }
 
+if (composerFullscreenToggle) {
+  composerFullscreenToggle.addEventListener('click', () => {
+    setComposerFullscreen(!isComposerFullscreen);
+  });
+}
+
 if (messageList) {
   messageList.addEventListener('scroll', updateScrollToBottomButton);
   
@@ -3868,6 +3898,10 @@ document.addEventListener('keydown', (event) => {
     return;
   }
   if (document.querySelector('.dialog-overlay')) {
+    return;
+  }
+  if (isComposerFullscreen) {
+    setComposerFullscreen(false);
     return;
   }
   minimizeAppWindow();
