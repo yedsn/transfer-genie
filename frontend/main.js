@@ -3927,6 +3927,7 @@ tabButtons.forEach((button) => {
 });
 
 function handleWindowFocus() {
+  setComposerFullscreen(false);
   // 切换到纯文本模式
   const textRadio = document.querySelector('input[name="message-format"][value="text"]');
   if (textRadio) {
