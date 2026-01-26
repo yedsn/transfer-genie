@@ -931,6 +931,20 @@ body {
 .composer.is-fullscreen #markdown-editor {
   flex: 1;
   height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.composer.is-fullscreen .editormd,
+.composer.is-fullscreen .editormd-container {
+  height: 100% !important;
+  display: flex;
+  flex-direction: column;
+}
+
+.composer.is-fullscreen .CodeMirror,
+.composer.is-fullscreen .CodeMirror-scroll {
+  height: 100% !important;
 }
 
 .composer.is-fullscreen .composer-toolbar {

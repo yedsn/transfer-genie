@@ -97,6 +97,7 @@ const LABEL_EXPAND_COMPOSER = '\u653e\u5927\u8f93\u5165\u6846'; // 放大输入�
 const LABEL_EXIT_FULLSCREEN = '\u9000\u51fa\u5168\u5c4f'; // 退出全屏
 const ICON_EXPAND = 'icons/fullscreen.svg';
 const ICON_EXIT = 'icons/fullscreen-exit.svg';
+const MARKDOWN_EDITOR_DEFAULT_HEIGHT = 200;
 
 // Markdown Editor instance
 let mdEditor = null;
@@ -107,7 +108,7 @@ function initMarkdownEditor() {
   
   mdEditor = editormd("markdown-editor", {
     width: "100%",
-    height: 200,
+    height: MARKDOWN_EDITOR_DEFAULT_HEIGHT,
     path: "lib/editor.md/lib/",
     pluginPath: "lib/editor.md/plugins/",
     placeholder: "使用 Markdown 输入消息...",
@@ -288,6 +289,9 @@ function setComposerFullscreen(enabled) {
     if (composerFullscreenIcon) {
       composerFullscreenIcon.src = enabled ? ICON_EXIT : ICON_EXPAND;
     }
+  }
+  if (mdEditor && typeof mdEditor.resize === 'function') {
+    mdEditor.resize('100%', enabled ? '100%' : MARKDOWN_EDITOR_DEFAULT_HEIGHT);
   }
   if (enabled) {
     setTimeout(() => {
