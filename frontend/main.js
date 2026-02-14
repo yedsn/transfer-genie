@@ -2926,6 +2926,7 @@ function applySettings(settings) {
   if (senderNameInput) {
     senderNameInput.value = settings.sender_name || '';
   }
+  setSenderNameDisplay(settings.sender_name || '');
   if (refreshIntervalInput) {
     refreshIntervalInput.value = settings.refresh_interval_secs || 5;
   }
@@ -3678,27 +3679,12 @@ function updateMessageDownloadStatus(filename) {
   }
 }
 
-function setDeviceName(name) {
+function setSenderNameDisplay(name) {
   if (!deviceNameLabel) return;
   const value = String(name || '').trim();
-  const text = value ? `TransferGenie（${value}）` : 'TransferGenie（未知设备）';
+  const text = value ? `TransferGenie（${value}）` : 'TransferGenie（未设置发送者）';
   deviceNameLabel.textContent = text;
   deviceNameLabel.title = text;
-}
-
-async function loadDeviceName() {
-  if (!deviceNameLabel) return;
-  if (!invoke) {
-    setDeviceName('');
-    return;
-  }
-  try {
-    const name = await invoke('get_device_name');
-    setDeviceName(name);
-  } catch (error) {
-    console.warn('读取设备名称失败：', error);
-    setDeviceName('');
-  }
 }
 
 async function manualRefresh() {
@@ -3863,6 +3849,11 @@ if (sendHotkeyInputs && sendHotkeyInputs.length > 0) {
     });
   });
 }
+if (senderNameInput) {
+  senderNameInput.addEventListener('input', () => {
+    setSenderNameDisplay(senderNameInput.value);
+  });
+}
 if (endpointSelect) {
   endpointSelect.addEventListener('change', switchActiveEndpoint);
 }
@@ -4006,7 +3997,6 @@ function handleWindowFocus() {
 }
 
 loadSettings();
-loadDeviceName();
 loadMessages({ scrollToBottom: true });
 loadSyncStatus();
 focusHomeComposer();
