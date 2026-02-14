@@ -88,6 +88,21 @@ body {
   margin-left: 10px;
 }
 
+.device-name {
+  display: inline-flex;
+  align-items: center;
+  max-width: min(100%, 520px);
+  min-height: 40px;
+  padding: 0 2px;
+  font-size: 26px;
+  font-weight: 800;
+  color: #000;
+  letter-spacing: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .content {
   display: flex;
   flex-direction: column;
@@ -131,6 +146,12 @@ body {
   justify-content: space-between;
   flex-wrap: wrap;
   row-gap: 8px;
+}
+
+.device-name-row {
+  flex: 1 1 100%;
+  display: flex;
+  align-items: center;
 }
 
 .feed-toolbar-left {
@@ -2076,6 +2097,11 @@ body.preview-open {
 
   .message-list {
     padding: 10px;
+  }
+
+  .device-name {
+    max-width: 100%;
+    width: 100%;
   }
 
   .tabbar {

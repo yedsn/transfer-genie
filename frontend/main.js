@@ -7,6 +7,7 @@ const convertFileSrc = tauri.path?.convertFileSrc;
 
 const messageList = document.getElementById('message-list');
 const syncStatus = document.getElementById('sync-status');
+const deviceNameLabel = document.getElementById('device-name');
 const refreshButton = document.getElementById('refresh-btn');
 const refreshLabel = refreshButton ? refreshButton.querySelector('.refresh-label') : null;
 const refreshLabelDefault = refreshLabel ? refreshLabel.textContent : '';
@@ -276,6 +277,15 @@ function setSendHotkey(value) {
 }
 
 setSendHotkey(sendHotkey);
+
+async function persistSendHotkeySetting() {
+  if (!invoke) return;
+  try {
+    await invoke('save_send_hotkey', { sendHotkey: sendHotkey });
+  } catch (error) {
+    console.warn('保存发送快捷键失败：', error);
+  }
+}
 
 function setComposerFullscreen(enabled) {
   if (!composer) return;
@@ -3610,33 +3620,84 @@ async function switchActiveEndpoint() {
   }
 }
 
-async function updateMessageDownloadStatus(filename) {
-  try {
-    if (!invoke || !getActiveEndpoint()) {
-      return;
+function updateMessageDownloadStatus(filename) {
+  if (!filename) return;
+
+  let changed = false;
+  lastMessages = lastMessages.map((msg) => {
+    if (msg.filename === filename) {
+      changed = true;
+      return { ...msg, download_exists: true };
     }
-    // 重新加载当前页的消息列表以获取最新的下载状态
-    const result = await invoke('list_messages', { limit: PAGE_SIZE, offset: currentOffset });
-    const updatedMessages = result.messages || [];
-    
-    // 创建消息映射以便快速查找
-    const messageMap = new Map(updatedMessages.map(msg => [msg.filename, msg]));
-    
-    // 如果目标消息在当前页返回的消息中，更新 lastMessages 数组中对应的消息
-    if (messageMap.has(filename)) {
-      const updatedMessage = messageMap.get(filename);
-      lastMessages = lastMessages.map(msg => {
-        if (msg.filename === filename) {
-          return updatedMessage;
+    return msg;
+  });
+
+  if (!changed) {
+    return;
+  }
+
+  const cardSelector = `.message-card[data-filename="${escapeSelector(filename)}"]`;
+  const card = document.querySelector(cardSelector);
+  if (card) {
+    card.classList.remove('is-downloading');
+
+    const actions = card.querySelector('.message-actions');
+    if (actions) {
+      const downloadButton = actions.querySelector('.download-action');
+      if (downloadButton) {
+        downloadButton.remove();
+      }
+      const downloadingTag = actions.querySelector('.downloading-tag.download-progress-tag');
+      if (downloadingTag) {
+        downloadingTag.remove();
+      }
+      if (!actions.querySelector('.downloaded-tag')) {
+        const downloadedTag = document.createElement('span');
+        downloadedTag.className = 'downloaded-tag';
+        downloadedTag.textContent = '已下载';
+        const menu = actions.querySelector('.action-menu');
+        if (menu) {
+          actions.insertBefore(downloadedTag, menu);
+        } else {
+          actions.appendChild(downloadedTag);
         }
-        return msg;
-      });
-      
-      // 重新渲染消息列表，保留滚动位置
-      renderMessages(lastMessages, { preserveScroll: true });
+      }
     }
+
+    const progressWrap = card.querySelector(
+      `.download-progress[data-filename="${escapeSelector(filename)}"]`,
+    );
+    if (progressWrap) {
+      progressWrap.classList.add('hidden');
+    }
+  }
+
+  if (currentPreviewMessage && currentPreviewMessage.filename === filename) {
+    currentPreviewMessage = { ...currentPreviewMessage, download_exists: true };
+    renderPreviewContent(currentPreviewMessage);
+  }
+}
+
+function setDeviceName(name) {
+  if (!deviceNameLabel) return;
+  const value = String(name || '').trim();
+  const text = value ? `TransferGenie（${value}）` : 'TransferGenie（未知设备）';
+  deviceNameLabel.textContent = text;
+  deviceNameLabel.title = text;
+}
+
+async function loadDeviceName() {
+  if (!deviceNameLabel) return;
+  if (!invoke) {
+    setDeviceName('');
+    return;
+  }
+  try {
+    const name = await invoke('get_device_name');
+    setDeviceName(name);
   } catch (error) {
-    console.error('更新下载状态失败：', error);
+    console.warn('读取设备名称失败：', error);
+    setDeviceName('');
   }
 }
 
@@ -3794,9 +3855,10 @@ if (globalHotkeyEnabledInput) {
 }
 if (sendHotkeyInputs && sendHotkeyInputs.length > 0) {
   sendHotkeyInputs.forEach((input) => {
-    input.addEventListener('change', () => {
+    input.addEventListener('change', async () => {
       if (input.checked) {
         setSendHotkey(input.value);
+        await persistSendHotkeySetting();
       }
     });
   });
@@ -3944,6 +4006,7 @@ function handleWindowFocus() {
 }
 
 loadSettings();
+loadDeviceName();
 loadMessages({ scrollToBottom: true });
 loadSyncStatus();
 focusHomeComposer();

@@ -251,6 +251,26 @@ fn save_settings(app: AppHandle, state: State<'_, AppState>, settings: Settings)
 }
 
 #[tauri::command]
+fn save_send_hotkey(state: State<'_, AppState>, send_hotkey: String) -> Result<String, String> {
+  let mut settings = current_settings(&state)?;
+  settings.send_hotkey = send_hotkey;
+  let normalized = normalize_settings(settings, &state.default_download_dir)?;
+  write_settings(&state.settings_path, &normalized)?;
+  let persisted = normalized.send_hotkey.clone();
+  let mut guard = state
+    .settings
+    .lock()
+    .map_err(|_| "写入设置失败".to_string())?;
+  *guard = normalized;
+  Ok(persisted)
+}
+
+#[tauri::command]
+fn get_device_name() -> String {
+  resolve_device_name()
+}
+
+#[tauri::command]
 fn export_settings(
   state: State<'_, AppState>,
   path: String,
@@ -1708,6 +1728,59 @@ fn random_sender_name() -> String {
   format!("Device-{value:06x}")
 }
 
+fn normalize_device_name(raw: &str) -> Option<String> {
+  let trimmed = raw.trim().trim_matches('\0').to_string();
+  if trimmed.is_empty() {
+    return None;
+  }
+  Some(trimmed)
+}
+
+fn resolve_device_name() -> String {
+  #[cfg(target_os = "windows")]
+  {
+    if let Ok(name) = env::var("COMPUTERNAME") {
+      if let Some(valid) = normalize_device_name(&name) {
+        return valid;
+      }
+    }
+  }
+
+  if let Ok(name) = env::var("HOSTNAME") {
+    if let Some(valid) = normalize_device_name(&name) {
+      return valid;
+    }
+  }
+
+  #[cfg(not(target_os = "windows"))]
+  {
+    if let Ok(name) = fs::read_to_string("/etc/hostname") {
+      if let Some(valid) = normalize_device_name(&name) {
+        return valid;
+      }
+    }
+  }
+
+  #[cfg(target_os = "macos")]
+  {
+    for key in ["ComputerName", "LocalHostName", "HostName"] {
+      if let Ok(output) = std::process::Command::new("scutil")
+        .args(["--get", key])
+        .output()
+      {
+        if output.status.success() {
+          let value = String::from_utf8_lossy(&output.stdout);
+          if let Some(valid) = normalize_device_name(&value) {
+            return valid;
+          }
+        }
+      }
+    }
+  }
+
+  "Unknown".to_string()
+}
+
 fn generate_endpoint_id() -> String {
   let mut rng = rand::thread_rng();
   let value: u64 = rng.gen();
@@ -2994,6 +3067,8 @@ fn main() {
           .invoke_handler(tauri::generate_handler![
             get_settings,
             save_settings,
+            save_send_hotkey,
+            get_device_name,
             export_settings,
             import_settings,
             list_messages,
