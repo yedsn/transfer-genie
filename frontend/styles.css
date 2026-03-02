@@ -303,6 +303,50 @@ body {
   max-width: 76%;
 }
 
+.message-body.is-collapsible {
+  position: relative;
+}
+
+.message-body.is-collapsible.is-collapsed {
+  max-height: 260px;
+  overflow: hidden;
+}
+
+.message-body.is-collapsible.is-collapsed::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 36px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.96) 100%);
+  pointer-events: none;
+}
+
+.message-card.is-self .message-body.is-collapsible.is-collapsed::after {
+  background: linear-gradient(180deg, rgba(223, 245, 213, 0) 0%, rgba(223, 245, 213, 0.96) 100%);
+}
+
+.message-expand-toggle {
+  margin-top: 6px;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: 12px;
+  line-height: 1.2;
+  cursor: pointer;
+  padding: 0 2px;
+  align-self: flex-start;
+}
+
+.message-card.is-self .message-expand-toggle {
+  align-self: flex-end;
+}
+
+.message-expand-toggle:hover {
+  color: var(--accent-strong);
+}
+
 .message-card.is-file .message-body {
   font-weight: 600;
   display: flex;

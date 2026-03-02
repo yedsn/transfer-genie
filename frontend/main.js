@@ -77,7 +77,9 @@ const uploadSpeed = new Map();
 let selectionMode = false;
 let markedFilterActive = false;
 const selectedMessages = new Set();
+const expandedTextMessages = new Set();
 let currentPreviewMessage = null;
+const MESSAGE_BODY_COLLAPSE_HEIGHT = 260;
 
 // 发送状态常量
 const SEND_STATUS = {
@@ -1518,6 +1520,103 @@ async function copyTextToClipboard(text) {
   }
 }
 
+function buildTextMessageFilename(message) {
+  const extension = message?.format === 'markdown' ? 'md' : 'txt';
+  const sender = String(message?.sender || 'message')
+    .trim()
+    .replace(/[\\/:*?"<>|]+/g, '_')
+    .replace(/\s+/g, '_');
+  const safeSender = sender || 'message';
+  const timestamp = message?.timestamp_ms
+    ? new Date(message.timestamp_ms).toISOString().replace(/[:.]/g, '-')
+    : Date.now();
+  return `${safeSender}-${timestamp}.${extension}`;
+}
+
+async function downloadTextMessageAsFile(message) {
+  try {
+    const content = message?.content || '';
+    if (!content) {
+      showToast('没有可下载的内容', 'error');
+      return;
+    }
+
+    const defaultPath = message?.original_name || buildTextMessageFilename(message);
+    if (saveDialog && invoke) {
+      const target = await saveDialog({ defaultPath });
+      if (!target) return;
+      const bytes = new TextEncoder().encode(content);
+      await invoke('save_local_data', { path: target, data: Array.from(bytes) });
+      setSuccessStatus(`文件已保存到 ${target}`.trim());
+      return;
+    }
+
+    const mime = message?.format === 'markdown' ? 'text/markdown;charset=utf-8' : 'text/plain;charset=utf-8';
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = defaultPath;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    showToast('文件已开始下载', 'success');
+  } catch (error) {
+    setErrorStatus(`下载失败：${error}`);
+  }
+}
+
+function applyMessageBodyCollapse(item, body, message) {
+  if (!item || !body || !message || message.kind !== 'text') {
+    return;
+  }
+
+  const oldToggle = item.querySelector('.message-expand-toggle');
+  if (oldToggle) {
+    oldToggle.remove();
+  }
+
+  body.classList.remove('is-collapsible', 'is-collapsed');
+  const exceedsLimit = body.scrollHeight > MESSAGE_BODY_COLLAPSE_HEIGHT + 4;
+  if (!exceedsLimit) {
+    expandedTextMessages.delete(message.filename);
+    return;
+  }
+
+  body.classList.add('is-collapsible');
+  const isExpanded = expandedTextMessages.has(message.filename);
+  if (!isExpanded) {
+    body.classList.add('is-collapsed');
+  }
+
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'message-expand-toggle';
+  toggle.textContent = isExpanded ? '收起' : '展开全文';
+  toggle.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const collapsed = body.classList.contains('is-collapsed');
+    if (collapsed) {
+      body.classList.remove('is-collapsed');
+      expandedTextMessages.add(message.filename);
+      toggle.textContent = '收起';
+      return;
+    }
+    body.classList.add('is-collapsed');
+    expandedTextMessages.delete(message.filename);
+    toggle.textContent = '展开全文';
+  });
+
+  const footer = item.querySelector('.message-footer');
+  if (footer) {
+    item.insertBefore(toggle, footer);
+  } else {
+    item.appendChild(toggle);
+  }
+}
+
 function showDownloadConflictDialog(filename) {
   return new Promise((resolve) => {
     const overlay = document.createElement('div');
@@ -1979,6 +2078,13 @@ function renderPreviewActions(message) {
     copyButton.textContent = '复制内容';
     copyButton.addEventListener('click', () => copyTextToClipboard(message.content || ''));
     buttons.push(copyButton);
+
+    const downloadButton = document.createElement('button');
+    downloadButton.type = 'button';
+    downloadButton.className = 'button ghost small';
+    downloadButton.textContent = '下载文件';
+    downloadButton.addEventListener('click', () => downloadTextMessageAsFile(message));
+    buttons.push(downloadButton);
   } else {
     const openButton = document.createElement('button');
     openButton.type = 'button';
@@ -2146,6 +2252,11 @@ function renderMessages(messages, options = {}) {
   const previousScrollTop = messageList ? messageList.scrollTop : 0;
   const previousScrollHeight = messageList ? messageList.scrollHeight : 0;
   const available = new Set(merged.map((message) => message.filename));
+  expandedTextMessages.forEach((filename) => {
+    if (!available.has(filename)) {
+      expandedTextMessages.delete(filename);
+    }
+  });
   selectedMessages.forEach((filename) => {
     if (!available.has(filename)) {
       selectedMessages.delete(filename);
@@ -2155,6 +2266,7 @@ function renderMessages(messages, options = {}) {
   messageList.innerHTML = '';
   
   const markdownRenderQueue = [];
+  const collapseQueue = [];
 
   // 添加"加载更多"提示
   if (hasMoreMessages && !isSearchResult) {
@@ -2229,6 +2341,7 @@ function renderMessages(messages, options = {}) {
       } else {
         body.textContent = message.content || '';
       }
+      collapseQueue.push({ item, body, message });
     } else {
       const isImage = isImagePath(message.original_name || message.filename);
       if (isImage) {
@@ -2370,6 +2483,17 @@ function renderMessages(messages, options = {}) {
         copyButton.addEventListener('click', () => copyTextToClipboard(message.content || ''));
         actions.appendChild(copyButton);
 
+        const downloadTextButton = document.createElement('button');
+        downloadTextButton.className = 'button primary small icon-only';
+        const downloadTextIcon = document.createElement('img');
+        downloadTextIcon.src = 'icons/download.svg';
+        downloadTextIcon.alt = '下载为文件';
+        downloadTextIcon.style.width = '16px';
+        downloadTextIcon.style.height = '16px';
+        downloadTextButton.appendChild(downloadTextIcon);
+        downloadTextButton.addEventListener('click', () => downloadTextMessageAsFile(message));
+        actions.appendChild(downloadTextButton);
+
         const menu = document.createElement('details');
         menu.className = 'action-menu';
 
@@ -2393,6 +2517,15 @@ function renderMessages(messages, options = {}) {
           deleteSingleMessage(message);
         });
 
+        const downloadAsFileButton = document.createElement('button');
+        downloadAsFileButton.className = 'button ghost small';
+        downloadAsFileButton.textContent = '下载为文件';
+        downloadAsFileButton.addEventListener('click', () => {
+          menu.open = false;
+          downloadTextMessageAsFile(message);
+        });
+
+        menuList.appendChild(downloadAsFileButton);
         menuList.appendChild(deleteButton);
         menu.appendChild(summary);
         menu.appendChild(menuList);
@@ -2638,6 +2771,11 @@ function renderMessages(messages, options = {}) {
   });
   
   // Render pending markdown messages
+  const runBodyCollapseCheck = () => {
+    collapseQueue.forEach(({ item, body, message }) => {
+      applyMessageBodyCollapse(item, body, message);
+    });
+  };
   if (markdownRenderQueue.length > 0 && window.editormd) {
     // execute after DOM update
     setTimeout(() => {
@@ -2662,7 +2800,10 @@ function renderMessages(messages, options = {}) {
           if (el) el.textContent = item.content;
         }
       });
+      runBodyCollapseCheck();
     }, 0);
+  } else {
+    setTimeout(runBodyCollapseCheck, 0);
   }
 
   if (scrollToBottom) {
