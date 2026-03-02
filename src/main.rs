@@ -28,7 +28,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{oneshot, Mutex as AsyncMutex};
 use tauri::Window;
 #[cfg(desktop)]
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
@@ -41,6 +41,7 @@ struct AppState {
   settings: Mutex<Settings>,
   sync_status: Mutex<SyncStatus>,
   sync_guard: AsyncMutex<()>,
+  sync_cancel: Mutex<Option<oneshot::Sender<()>>>,
   http: Client,
   registered_hotkey: Mutex<Option<Shortcut>>,
 }
@@ -51,6 +52,7 @@ const DEFAULT_GLOBAL_HOTKEY: &str = "alt+t";
 const HOTKEY_MENU_ID: &str = "toggle-hotkey";
 const DEFAULT_SEND_HOTKEY: &str = "enter";
 const SEND_HOTKEY_CTRL_ENTER: &str = "ctrl_enter";
+const SYNC_TIMEOUT_SECS: u64 = 45;
 
 fn default_export_global_hotkey_enabled() -> bool {
   true
@@ -1373,6 +1375,21 @@ async fn manual_refresh(state: State<'_, AppState>) -> Result<SyncStatus, String
 }
 
 #[tauri::command]
+fn cancel_manual_refresh(state: State<'_, AppState>) -> Result<(), String> {
+  let cancel_tx = {
+    let mut sync_cancel = state
+      .sync_cancel
+      .lock()
+      .map_err(|_| "取消刷新失败".to_string())?;
+    sync_cancel.take()
+  };
+  if let Some(tx) = cancel_tx {
+    let _ = tx.send(());
+  }
+  Ok(())
+}
+
+#[tauri::command]
 fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
   let status = state
     .sync_status
@@ -2377,7 +2394,31 @@ async fn run_sync(state: &AppState, source: &str) -> Result<SyncStatus, String> 
     status.last_result = Some(format!("同步中：{source}..."));
   }
 
-  let result = sync_once(state).await;
+  let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+  {
+    let mut sync_cancel = state
+      .sync_cancel
+      .lock()
+      .map_err(|_| "更新同步状态失败".to_string())?;
+    if let Some(previous) = sync_cancel.take() {
+      let _ = previous.send(());
+    }
+    *sync_cancel = Some(cancel_tx);
+  }
+
+  let result = tokio::select! {
+    _ = cancel_rx => Err("已取消刷新".to_string()),
+    timed = tokio::time::timeout(Duration::from_secs(SYNC_TIMEOUT_SECS), sync_once(state)) => {
+      match timed {
+        Ok(inner) => inner,
+        Err(_) => Err(format!("刷新超时（超过 {} 秒）", SYNC_TIMEOUT_SECS)),
+      }
+    }
+  };
+
+  if let Ok(mut sync_cancel) = state.sync_cancel.lock() {
+    sync_cancel.take();
+  }
 
   let mut status = state
     .sync_status
@@ -2908,7 +2949,13 @@ fn main() {
         settings: Mutex::new(settings),
         sync_status: Mutex::new(SyncStatus::idle()),
         sync_guard: AsyncMutex::new(()),
-        http: Client::new(),
+        sync_cancel: Mutex::new(None),
+        http: Client::builder()
+          .connect_timeout(Duration::from_secs(10))
+          .timeout(Duration::from_secs(SYNC_TIMEOUT_SECS))
+          .pool_idle_timeout(Duration::from_secs(30))
+          .build()
+          .map_err(|err| format!("创建 HTTP 客户端失败: {err}"))?,
         registered_hotkey: Mutex::new(None),
       });
 
@@ -3089,6 +3136,7 @@ fn main() {
             delete_messages,
             cleanup_messages,
             manual_refresh,
+            cancel_manual_refresh,
             get_sync_status,
             mark_message,
             unmark_message,

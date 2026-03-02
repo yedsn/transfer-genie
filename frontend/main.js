@@ -80,6 +80,10 @@ const selectedMessages = new Set();
 const expandedTextMessages = new Set();
 let currentPreviewMessage = null;
 const MESSAGE_BODY_COLLAPSE_HEIGHT = 260;
+let isManualRefreshRunning = false;
+let isLoadMessagesRunning = false;
+let isLoadSyncStatusRunning = false;
+const MANUAL_REFRESH_TIMEOUT_MS = 45_000;
 
 // 发送状态常量
 const SEND_STATUS = {
@@ -421,9 +425,9 @@ async function openMessageFile(message) {
 function setRefreshLoading(loading) {
   if (!refreshButton) return;
   refreshButton.classList.toggle('is-loading', loading);
-  refreshButton.disabled = loading;
+  refreshButton.disabled = false;
   if (refreshLabel) {
-    refreshLabel.textContent = loading ? '刷新中...' : refreshLabelDefault || '刷新';
+    refreshLabel.textContent = loading ? '取消刷新' : refreshLabelDefault || '刷新';
   }
 }
 
@@ -2868,6 +2872,10 @@ function mergeMessages(messages, options = {}) {
 }
 
 async function loadMessages(options = {}) {
+  if (isLoadMessagesRunning && options.checkNew) {
+    return;
+  }
+  isLoadMessagesRunning = true;
   const shouldScroll =
     typeof options.scrollToBottom === 'boolean'
       ? options.scrollToBottom
@@ -2998,10 +3006,16 @@ async function loadMessages(options = {}) {
   } catch (error) {
     isLoadingMore = false;
     setErrorStatus(`加载消息失败：${error}`);
+  } finally {
+    isLoadMessagesRunning = false;
   }
 }
 
 async function loadSyncStatus() {
+  if (isLoadSyncStatusRunning) {
+    return;
+  }
+  isLoadSyncStatusRunning = true;
   try {
     if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
@@ -3023,6 +3037,8 @@ async function loadSyncStatus() {
     }
   } catch (error) {
     setErrorStatus(`状态更新失败：${error}`);
+  } finally {
+    isLoadSyncStatusRunning = false;
   }
 }
 
@@ -3829,6 +3845,18 @@ function setSenderNameDisplay(name) {
 }
 
 async function manualRefresh() {
+  if (isManualRefreshRunning) {
+    try {
+      if (invoke) {
+        await invoke('cancel_manual_refresh');
+      }
+      setStatus('正在取消刷新...');
+    } catch (error) {
+      setErrorStatus(`取消刷新失败：${error}`);
+    }
+    return;
+  }
+
   if (searchInput) {
     searchInput.value = '';
   }
@@ -3841,13 +3869,44 @@ async function manualRefresh() {
       setErrorStatus('请先选择 WebDAV 端点');
       return;
     }
+    isManualRefreshRunning = true;
     setRefreshLoading(true);
-    await invoke('manual_refresh');
+    const refreshPromise = invoke('manual_refresh');
+    await new Promise((resolve, reject) => {
+      const timeoutHandle = setTimeout(() => {
+        reject(new Error('__manual_refresh_timeout__'));
+      }, MANUAL_REFRESH_TIMEOUT_MS);
+
+      refreshPromise
+        .then((value) => {
+          clearTimeout(timeoutHandle);
+          resolve(value);
+        })
+        .catch((err) => {
+          clearTimeout(timeoutHandle);
+          reject(err);
+        });
+    });
     await loadMessages();
     await loadSyncStatus();
   } catch (error) {
-    setErrorStatus(`手动刷新失败：${error}`);
+    const reason = String(error || '');
+    if (reason.includes('__manual_refresh_timeout__')) {
+      try {
+        if (invoke) {
+          await invoke('cancel_manual_refresh');
+        }
+      } catch (_) {
+        // ignore cancel error after timeout
+      }
+      setErrorStatus(`手动刷新超时（${Math.floor(MANUAL_REFRESH_TIMEOUT_MS / 1000)}秒），已自动取消`);
+    } else if (reason.includes('已取消')) {
+      setStatus('已取消刷新');
+    } else {
+      setErrorStatus(`手动刷新失败：${error}`);
+    }
   } finally {
+    isManualRefreshRunning = false;
     setRefreshLoading(false);
   }
 }

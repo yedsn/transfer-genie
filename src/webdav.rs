@@ -5,9 +5,11 @@ use log::info;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use reqwest::{Body, Client, Method, RequestBuilder};
+use std::time::Duration;
 use url::Url;
 
 fn apply_auth(request: RequestBuilder, endpoint: &WebDavEndpoint) -> RequestBuilder {
+  let request = request.timeout(Duration::from_secs(30));
   if endpoint.username.is_empty() && endpoint.password.is_empty() {
     request
   } else {
@@ -108,16 +110,11 @@ fn parse_propfind_response(xml_text: &str, endpoint: &WebDavEndpoint) -> Result<
     loop {
         match reader.read_event_into(&mut buffer) {
             Ok(event) => {
-                // Debug: Log every event to see what the parser is actually seeing
-                info!("XML Event: {:?}", event);
-                
                 if let Event::Start(ref e) = event {
                     let name = e.name();
                     // Check if the tag name ends with "response" (ignoring namespace prefix)
                     if name.as_ref().ends_with(b"response") {
-                        // info!("Found <response> tag, parsing entry...");
                         if let Some(entry) = parse_response_entry(&mut reader, endpoint)? {
-                            info!("Successfully parsed entry: {}", entry.filename);
                             entries.push(entry);
                         } 
                     }
