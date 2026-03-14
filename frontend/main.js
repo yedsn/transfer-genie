@@ -65,6 +65,7 @@ const searchInput = document.getElementById('search-input');
 let selectedFiles = [];
 
 let refreshTimer = null;
+let activeRefreshIntervalSecs = 5;
 let didInitialSync = false;
 let webdavEndpoints = [];
 let activeEndpointId = null;
@@ -2871,6 +2872,14 @@ function mergeMessages(messages, options = {}) {
   return merged;
 }
 
+function hasActiveContentTransfer() {
+  const hasSendingText = Array.from(pendingSends.values()).some((send) => {
+    const status = send?.sendStatus || send?.status;
+    return status === SEND_STATUS.SENDING;
+  });
+  return hasSendingText || pendingUploads.size > 0;
+}
+
 async function loadMessages(options = {}) {
   if (isLoadMessagesRunning && options.checkNew) {
     return;
@@ -3047,15 +3056,39 @@ function startRefreshTimer(intervalSecs) {
     clearInterval(refreshTimer);
   }
   const interval = Math.max(1, Number(intervalSecs) || 5);
+  activeRefreshIntervalSecs = interval;
   refreshTimer = setInterval(() => {
     const hasSearchQuery = searchInput && searchInput.value.trim().length > 0;
-    if (hasSearchQuery) {
+    if (hasSearchQuery || hasActiveContentTransfer()) {
       return; // Don't refresh if searching
     }
     // 使用 checkNew 模式进行增量更新，不清空现有数据
     loadMessages({ checkNew: true });
     loadSyncStatus();
   }, interval * 1000);
+}
+
+function restartRefreshTimer() {
+  startRefreshTimer(activeRefreshIntervalSecs);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForSyncToFinish(maxWaitMs = MANUAL_REFRESH_TIMEOUT_MS) {
+  if (!invoke) {
+    return null;
+  }
+  const deadline = Date.now() + Math.max(1000, maxWaitMs);
+  while (Date.now() < deadline) {
+    const status = await invoke('get_sync_status');
+    if (!status?.running) {
+      return status;
+    }
+    await delay(500);
+  }
+  return null;
 }
 
 function applySettings(settings) {
@@ -3115,9 +3148,20 @@ async function loadSettings() {
     }
     const settings = await invoke('get_settings');
     applySettings(settings);
+    if (getActiveEndpoint()) {
+      await loadMessages({ scrollToBottom: true });
+    }
     if (!didInitialSync && getActiveEndpoint()) {
       didInitialSync = true;
-      await manualRefresh();
+      const syncStatus = await invoke('get_sync_status');
+      if (syncStatus?.running) {
+        setStatus(syncStatus.last_result || '同步中...');
+        await waitForSyncToFinish();
+        await loadMessages({ checkNew: true, scrollToBottom: true });
+        await loadSyncStatus();
+      } else {
+        await manualRefresh();
+      }
     }
   } catch (error) {
     setErrorStatus(`读取设置失败：${error}`);
@@ -4020,7 +4064,14 @@ if (listen) {
   });
 }
 
-refreshButton.addEventListener('click', manualRefresh);
+refreshButton.addEventListener('click', async () => {
+  restartRefreshTimer();
+  if (hasActiveContentTransfer()) {
+    setStatus('发送进行中，暂不刷新');
+    return;
+  }
+  await manualRefresh();
+});
 if (openDownloadDirButton) {
   openDownloadDirButton.addEventListener('click', openDownloadDir);
 }
