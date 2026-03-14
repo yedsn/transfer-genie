@@ -1371,7 +1371,7 @@ async fn cleanup_messages(
 
 #[tauri::command]
 async fn manual_refresh(state: State<'_, AppState>) -> Result<SyncStatus, String> {
-  run_sync(&state, "手动刷新").await
+  run_sync(&state, "手动刷新", true).await
 }
 
 #[tauri::command]
@@ -2383,15 +2383,35 @@ fn emit_upload_progress(
   let _ = window.emit("upload-progress", payload);
 }
 
-async fn run_sync(state: &AppState, source: &str) -> Result<SyncStatus, String> {
-  {
-    let mut status = state
-      .sync_status
-      .lock()
-      .map_err(|_| "更新同步状态失败".to_string())?;
-    status.running = true;
-    status.last_error = None;
-    status.last_result = Some(format!("同步中：{source}..."));
+async fn run_sync(state: &AppState, source: &str, wait_for_turn: bool) -> Result<SyncStatus, String> {
+  const SYNC_CANCELLED_SENTINEL: &str = "__sync_cancelled__";
+  const SYNC_CANCELLED_MESSAGE: &str = "\u{5DF2}\u{53D6}\u{6D88}\u{5237}\u{65B0}";
+
+  loop {
+    let running_status = {
+      let mut status = state
+        .sync_status
+        .lock()
+        .map_err(|_| "\u{66F4}\u{65B0}\u{540C}\u{6B65}\u{72B6}\u{6001}\u{5931}\u{8D25}".to_string())?;
+      if status.running {
+        Some(status.clone())
+      } else {
+        status.running = true;
+        status.last_error = None;
+        status.last_result = Some(format!("\u{540C}\u{6B65}\u{4E2D}\u{FF1A}{source}..."));
+        None
+      }
+    };
+
+    if let Some(status) = running_status {
+      if !wait_for_turn {
+        return Ok(status);
+      }
+      tokio::time::sleep(Duration::from_millis(150)).await;
+      continue;
+    }
+
+    break;
   }
 
   let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
@@ -2399,19 +2419,16 @@ async fn run_sync(state: &AppState, source: &str) -> Result<SyncStatus, String> 
     let mut sync_cancel = state
       .sync_cancel
       .lock()
-      .map_err(|_| "更新同步状态失败".to_string())?;
-    if let Some(previous) = sync_cancel.take() {
-      let _ = previous.send(());
-    }
+      .map_err(|_| "\u{66F4}\u{65B0}\u{540C}\u{6B65}\u{72B6}\u{6001}\u{5931}\u{8D25}".to_string())?;
     *sync_cancel = Some(cancel_tx);
   }
 
   let result = tokio::select! {
-    _ = cancel_rx => Err("已取消刷新".to_string()),
+    _ = cancel_rx => Err(SYNC_CANCELLED_SENTINEL.to_string()),
     timed = tokio::time::timeout(Duration::from_secs(SYNC_TIMEOUT_SECS), sync_once(state)) => {
       match timed {
         Ok(inner) => inner,
-        Err(_) => Err(format!("刷新超时（超过 {} 秒）", SYNC_TIMEOUT_SECS)),
+        Err(_) => Err(format!("\u{5237}\u{65B0}\u{8D85}\u{65F6}\u{FF08}\u{8D85}\u{8FC7} {} \u{79D2}\u{FF09}", SYNC_TIMEOUT_SECS)),
       }
     }
   };
@@ -2423,19 +2440,25 @@ async fn run_sync(state: &AppState, source: &str) -> Result<SyncStatus, String> 
   let mut status = state
     .sync_status
     .lock()
-    .map_err(|_| "更新同步状态失败".to_string())?;
+    .map_err(|_| "\u{66F4}\u{65B0}\u{540C}\u{6B65}\u{72B6}\u{6001}\u{5931}\u{8D25}".to_string())?;
   status.running = false;
   status.last_run_ms = Some(now_ms());
   match result {
     Ok(count) => {
       status.last_error = None;
-      status.last_result = Some(format!("同步完成，新增 {count} 条"));
+      status.last_result = Some(format!("\u{540C}\u{6B65}\u{5B8C}\u{6210}\u{FF0C}\u{65B0}\u{589E} {count} \u{6761}"));
       Ok(status.clone())
     }
     Err(err) => {
-      status.last_error = Some(err.clone());
-      status.last_result = Some("同步失败".to_string());
-      Err(err)
+      if err == SYNC_CANCELLED_SENTINEL {
+        status.last_error = None;
+        status.last_result = Some(SYNC_CANCELLED_MESSAGE.to_string());
+        Err(SYNC_CANCELLED_MESSAGE.to_string())
+      } else {
+        status.last_error = Some(err.clone());
+        status.last_result = Some("\u{540C}\u{6B65}\u{5931}\u{8D25}".to_string());
+        Err(err)
+      }
     }
   }
 }
@@ -2909,7 +2932,7 @@ fn start_sync_loop(app_handle: AppHandle) {
         Err(_) => 5,
       };
 
-      let _ = run_sync(&state, "定时同步").await;
+      let _ = run_sync(&state, "定时同步", false).await;
       tokio::time::sleep(Duration::from_secs(interval)).await;
     }
   });

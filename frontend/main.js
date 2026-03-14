@@ -426,9 +426,9 @@ async function openMessageFile(message) {
 function setRefreshLoading(loading) {
   if (!refreshButton) return;
   refreshButton.classList.toggle('is-loading', loading);
-  refreshButton.disabled = false;
+  refreshButton.disabled = loading;
   if (refreshLabel) {
-    refreshLabel.textContent = loading ? '取消刷新' : refreshLabelDefault || '刷新';
+    refreshLabel.textContent = loading ? '刷新中...' : refreshLabelDefault || '刷新';
   }
 }
 
@@ -3890,14 +3890,7 @@ function setSenderNameDisplay(name) {
 
 async function manualRefresh() {
   if (isManualRefreshRunning) {
-    try {
-      if (invoke) {
-        await invoke('cancel_manual_refresh');
-      }
-      setStatus('正在取消刷新...');
-    } catch (error) {
-      setErrorStatus(`取消刷新失败：${error}`);
-    }
+    setStatus('手动刷新进行中...');
     return;
   }
 
@@ -3915,36 +3908,12 @@ async function manualRefresh() {
     }
     isManualRefreshRunning = true;
     setRefreshLoading(true);
-    const refreshPromise = invoke('manual_refresh');
-    await new Promise((resolve, reject) => {
-      const timeoutHandle = setTimeout(() => {
-        reject(new Error('__manual_refresh_timeout__'));
-      }, MANUAL_REFRESH_TIMEOUT_MS);
-
-      refreshPromise
-        .then((value) => {
-          clearTimeout(timeoutHandle);
-          resolve(value);
-        })
-        .catch((err) => {
-          clearTimeout(timeoutHandle);
-          reject(err);
-        });
-    });
+    await invoke('manual_refresh');
     await loadMessages();
     await loadSyncStatus();
   } catch (error) {
     const reason = String(error || '');
-    if (reason.includes('__manual_refresh_timeout__')) {
-      try {
-        if (invoke) {
-          await invoke('cancel_manual_refresh');
-        }
-      } catch (_) {
-        // ignore cancel error after timeout
-      }
-      setErrorStatus(`手动刷新超时（${Math.floor(MANUAL_REFRESH_TIMEOUT_MS / 1000)}秒），已自动取消`);
-    } else if (reason.includes('已取消')) {
+    if (reason.includes('已取消')) {
       setStatus('已取消刷新');
     } else {
       setErrorStatus(`手动刷新失败：${error}`);
@@ -4065,7 +4034,6 @@ if (listen) {
 }
 
 refreshButton.addEventListener('click', async () => {
-  restartRefreshTimer();
   if (hasActiveContentTransfer()) {
     setStatus('发送进行中，暂不刷新');
     return;
