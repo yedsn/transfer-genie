@@ -2036,6 +2036,31 @@ function updateMarkedBadge(count) {
 }
 
 
+function setMarkedFilterActive(active) {
+  markedFilterActive = !!active;
+  if (filterMarkedButton) {
+    filterMarkedButton.classList.toggle('is-active', markedFilterActive);
+  }
+}
+
+function resetMarkedFilter(options = {}) {
+  const shouldReload = options.reload !== false;
+  if (!markedFilterActive) {
+    return false;
+  }
+
+  setMarkedFilterActive(false);
+  currentOffset = 0;
+  lastMessages = [];
+  hasMoreMessages = false;
+
+  if (shouldReload) {
+    loadMessages(options.loadOptions || {});
+  }
+
+  return true;
+}
+
 function closeMessagePreview() {
   if (!messagePreview) return;
   currentPreviewMessage = null;
@@ -4211,6 +4236,7 @@ function handleWindowFocus() {
   }
   switchFormat('text');
   requestAnimationFrame(updateFormatToggleIndicator);
+  resetMarkedFilter({ loadOptions: { scrollToBottom: true } });
   
   focusHomeComposer();
 }
@@ -4401,8 +4427,12 @@ document.addEventListener('paste', async (event) => {
 
 if (filterMarkedButton) {
   filterMarkedButton.addEventListener('click', () => {
-    markedFilterActive = !markedFilterActive;
-    filterMarkedButton.classList.toggle('is-active', markedFilterActive);
+    if (markedFilterActive) {
+      resetMarkedFilter();
+      return;
+    }
+
+    setMarkedFilterActive(true);
     currentOffset = 0;
     lastMessages = [];
     hasMoreMessages = false;
