@@ -1142,6 +1142,7 @@ fn open_data_dir(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn minimize_window(app: AppHandle, window: Window) -> Result<(), String> {
+  let _ = window.emit("trigger-hide", ());
   window
     .hide()
     .map_err(|err| format!("隐藏窗口失败: {err}"))?;
@@ -2733,6 +2734,7 @@ fn toggle_main_window(app: &AppHandle) {
   if let Some(window) = app.get_webview_window("main") {
     let is_visible = window.is_visible().unwrap_or(true);
     if is_visible {
+      let _ = window.emit("trigger-hide", ());
       let _ = window.hide();
       #[cfg(target_os = "macos")]
       sync_dock_visibility_webview(app, &window);
@@ -3110,6 +3112,7 @@ fn main() {
           let event_window = window.clone();
           window.on_window_event(move |event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+              let _ = event_window.emit("trigger-hide", ());
               let _ = event_window.hide();
               api.prevent_close();
             }

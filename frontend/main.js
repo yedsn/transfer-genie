@@ -432,6 +432,18 @@ function setRefreshLoading(loading) {
   }
 }
 
+function prepareWindowForHide() {
+  setComposerFullscreen(false);
+  const textRadio = document.querySelector('input[name="message-format"][value="text"]');
+  if (textRadio) {
+    textRadio.checked = true;
+  }
+  switchFormat('text');
+  requestAnimationFrame(updateFormatToggleIndicator);
+  setActiveTab('home', { scrollToBottom: false, focusInput: false });
+  resetMarkedFilter();
+}
+
 function generateEndpointId() {
   return `endpoint-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
@@ -4228,16 +4240,6 @@ tabButtons.forEach((button) => {
 });
 
 function handleWindowFocus() {
-  setComposerFullscreen(false);
-  // 切换到纯文本模式
-  const textRadio = document.querySelector('input[name="message-format"][value="text"]');
-  if (textRadio) {
-    textRadio.checked = true;
-  }
-  switchFormat('text');
-  requestAnimationFrame(updateFormatToggleIndicator);
-  resetMarkedFilter({ loadOptions: { scrollToBottom: true } });
-  
   focusHomeComposer();
 }
 
@@ -4295,6 +4297,8 @@ function setDragOverState(active) {
 }
 
 if (listen) {
+  listen('trigger-hide', prepareWindowForHide);
+
   // 全局快捷键的特定监听器
   listen('trigger-show', handleWindowFocus);
 
