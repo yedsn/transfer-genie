@@ -92,3 +92,9 @@ transfer-genie/
 ├── tauri.conf.json      # Tauri 配置
 └── build.rs             # 构建脚本
 ```
+
+
+
+## 常见代码位置
+### 关闭窗口重置
+- frontend\main.js - prepareWindowForHide
