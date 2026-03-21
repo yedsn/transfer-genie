@@ -35,6 +35,20 @@ pub struct DbDownloadHistory {
     pub updated_at_ms: i64,
 }
 
+#[derive(Clone)]
+pub struct DbPartialDownload {
+    pub endpoint_id: String,
+    pub filename: String,
+    pub original_name: String,
+    pub final_path: String,
+    pub temp_path: String,
+    pub downloaded_bytes: i64,
+    pub total_bytes: i64,
+    pub etag: Option<String>,
+    pub mtime: Option<String>,
+    pub updated_at_ms: i64,
+}
+
 pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| format!("幹秀方象垂朕村払移: {err}"))?;
@@ -78,6 +92,19 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
         created_at_ms INTEGER NOT NULL,\
         updated_at_ms INTEGER NOT NULL,\
         UNIQUE(endpoint_id, filename)\
+      );\
+      CREATE TABLE IF NOT EXISTS partial_downloads (\
+        endpoint_id TEXT NOT NULL,\
+        filename TEXT NOT NULL,\
+        original_name TEXT NOT NULL,\
+        final_path TEXT NOT NULL,\
+        temp_path TEXT NOT NULL,\
+        downloaded_bytes INTEGER NOT NULL DEFAULT 0,\
+        total_bytes INTEGER NOT NULL DEFAULT 0,\
+        etag TEXT,\
+        mtime TEXT,\
+        updated_at_ms INTEGER NOT NULL,\
+        PRIMARY KEY(endpoint_id, filename)\
       );",
         )
         .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
@@ -226,6 +253,19 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
         created_at_ms INTEGER NOT NULL,\
         updated_at_ms INTEGER NOT NULL,\
         UNIQUE(endpoint_id, filename)\
+      );\
+      CREATE TABLE IF NOT EXISTS partial_downloads (\
+        endpoint_id TEXT NOT NULL,\
+        filename TEXT NOT NULL,\
+        original_name TEXT NOT NULL,\
+        final_path TEXT NOT NULL,\
+        temp_path TEXT NOT NULL,\
+        downloaded_bytes INTEGER NOT NULL DEFAULT 0,\
+        total_bytes INTEGER NOT NULL DEFAULT 0,\
+        etag TEXT,\
+        mtime TEXT,\
+        updated_at_ms INTEGER NOT NULL,\
+        PRIMARY KEY(endpoint_id, filename)\
       );",
     )
     .map_err(|err| format!("鍏滃叺鏅掓柟璞″瀭鎵曠Щ: {err}"))?;
@@ -561,4 +601,75 @@ pub fn list_download_history(path: &Path) -> rusqlite::Result<Vec<DownloadHistor
 pub fn delete_download_history(path: &Path, id: i64) -> rusqlite::Result<usize> {
     let conn = Connection::open(path)?;
     conn.execute("DELETE FROM download_history WHERE id = ?1", params![id])
+}
+
+pub fn get_partial_download(
+    path: &Path,
+    endpoint_id: &str,
+    filename: &str,
+) -> rusqlite::Result<Option<DbPartialDownload>> {
+    let conn = Connection::open(path)?;
+    conn.query_row(
+        "SELECT endpoint_id, filename, original_name, final_path, temp_path, downloaded_bytes, total_bytes, etag, mtime, updated_at_ms \
+         FROM partial_downloads WHERE endpoint_id = ?1 AND filename = ?2",
+        params![endpoint_id, filename],
+        |row| {
+            Ok(DbPartialDownload {
+                endpoint_id: row.get(0)?,
+                filename: row.get(1)?,
+                original_name: row.get(2)?,
+                final_path: row.get(3)?,
+                temp_path: row.get(4)?,
+                downloaded_bytes: row.get(5)?,
+                total_bytes: row.get(6)?,
+                etag: row.get(7)?,
+                mtime: row.get(8)?,
+                updated_at_ms: row.get(9)?,
+            })
+        },
+    )
+    .optional()
+}
+
+pub fn upsert_partial_download(path: &Path, entry: &DbPartialDownload) -> rusqlite::Result<()> {
+    let conn = Connection::open(path)?;
+    conn.execute(
+        "INSERT INTO partial_downloads \
+         (endpoint_id, filename, original_name, final_path, temp_path, downloaded_bytes, total_bytes, etag, mtime, updated_at_ms) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+         ON CONFLICT(endpoint_id, filename) DO UPDATE SET \
+           original_name=excluded.original_name, \
+           final_path=excluded.final_path, \
+           temp_path=excluded.temp_path, \
+           downloaded_bytes=excluded.downloaded_bytes, \
+           total_bytes=excluded.total_bytes, \
+           etag=excluded.etag, \
+           mtime=excluded.mtime, \
+           updated_at_ms=excluded.updated_at_ms",
+        params![
+            entry.endpoint_id,
+            entry.filename,
+            entry.original_name,
+            entry.final_path,
+            entry.temp_path,
+            entry.downloaded_bytes,
+            entry.total_bytes,
+            entry.etag,
+            entry.mtime,
+            entry.updated_at_ms,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn delete_partial_download(
+    path: &Path,
+    endpoint_id: &str,
+    filename: &str,
+) -> rusqlite::Result<usize> {
+    let conn = Connection::open(path)?;
+    conn.execute(
+        "DELETE FROM partial_downloads WHERE endpoint_id = ?1 AND filename = ?2",
+        params![endpoint_id, filename],
+    )
 }

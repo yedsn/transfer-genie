@@ -420,7 +420,7 @@ async function openMessageFile(message) {
   if (!message.filename) {
     return;
   }
-  if (message.download_exists || (message.local_path && message.local_path.trim())) {
+  if (hasLocalMessageFile(message)) {
     const opened = await tryOpenMessageFile(message);
     if (opened.ok) {
       return;
@@ -479,6 +479,10 @@ function setRefreshLoading(loading) {
     refreshLabel.textContent = loading ? '刷新中...' : refreshLabelDefault || '刷新';
   }
   updateRefreshCountdown();
+}
+
+function hasLocalMessageFile(message) {
+  return !!(message && message.local_path && String(message.local_path).trim());
 }
 
 function prepareWindowForHide() {
@@ -789,6 +793,71 @@ function formatProgress(received, total, label = '已下载', speed = 0) {
     .join(' · ');
 }
 
+function normalizeByteOffset(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function getDownloadTransferModeLabel(task) {
+  switch (task?.transferMode) {
+    case 'resumed':
+      return '\u7ee7\u7eed\u4e0b\u8f7d';
+    case 'restarted':
+      return '\u91cd\u65b0\u4e0b\u8f7d';
+    case 'fresh':
+      return '\u65b0\u4e0b\u8f7d';
+    default:
+      return '';
+  }
+}
+
+function formatDownloadActiveRange(task) {
+  const start = normalizeByteOffset(task?.rangeStart);
+  const end = normalizeByteOffset(task?.rangeEnd);
+  if (start === null && end === null) {
+    return '';
+  }
+  if (start !== null && end !== null && end >= start) {
+    return `\u5f53\u524d\u533a\u6bb5 ${formatBytes(start)} - ${formatBytes(end + 1)}`;
+  }
+  if (start !== null) {
+    return `\u5f53\u524d\u4ece ${formatBytes(start)} \u5f00\u59cb`;
+  }
+  return '';
+}
+
+function formatDownloadProgressText(task, speed = 0, includeConnectionLabel = false) {
+  const parts = [];
+  if (includeConnectionLabel) {
+    parts.push('\u5355\u8fde\u63a5');
+  }
+  const mode = getDownloadTransferModeLabel(task);
+  if (mode) {
+    parts.push(mode);
+  }
+  const range = formatDownloadActiveRange(task);
+  if (range) {
+    parts.push(range);
+  }
+  parts.push(formatProgress(task?.received || 0, task?.total, '\u5df2\u4e0b\u8f7d', speed));
+  return parts.filter(Boolean).join(' | ');
+}
+
+function getDownloadTaskDisplayStateLabel(task) {
+  if (!task) {
+    return '';
+  }
+  if (task.status === 'progress') {
+    if (task.transferMode === 'resumed') {
+      return '\u7ee7\u7eed\u4e0b\u8f7d\u4e2d';
+    }
+    if (task.transferMode === 'restarted') {
+      return '\u91cd\u65b0\u4e0b\u8f7d\u4e2d';
+    }
+  }
+  return getDownloadTaskStateLabel(task);
+}
+
 function escapeSelector(value) {
   if (window.CSS && typeof window.CSS.escape === 'function') {
     return window.CSS.escape(value);
@@ -941,6 +1010,9 @@ function createDownloadTask(message, mode = 'download') {
     updatedAt: now,
     path: '',
     error: '',
+    transferMode: null,
+    rangeStart: null,
+    rangeEnd: null,
   });
 }
 
@@ -965,6 +1037,9 @@ function createPersistedDownloadTask(record) {
     path: record?.saved_path || '',
     error: record?.error || '',
     localExists: record?.local_exists !== false,
+    transferMode: null,
+    rangeStart: null,
+    rangeEnd: null,
   };
 }
 
@@ -1072,6 +1147,13 @@ function syncDownloadTaskProgress(payload) {
     status: payload.status || current.status,
     received: payload.received || 0,
     total: payload.total || current.total || 0,
+    transferMode: payload.transfer_mode || payload.transferMode || current.transferMode || null,
+    rangeStart:
+      normalizeByteOffset(payload.range_start ?? payload.rangeStart) ??
+      normalizeByteOffset(current.rangeStart),
+    rangeEnd:
+      normalizeByteOffset(payload.range_end ?? payload.rangeEnd) ??
+      normalizeByteOffset(current.rangeEnd),
     error: payload.error || '',
   });
 }
@@ -1182,7 +1264,7 @@ function renderDownloadTasks() {
 
     const state = document.createElement('span');
     state.className = 'download-task-state';
-    state.textContent = getDownloadTaskStateLabel(task);
+    state.textContent = getDownloadTaskDisplayStateLabel(task);
 
     titleRow.appendChild(title);
     titleRow.appendChild(state);
@@ -1212,6 +1294,11 @@ function renderDownloadTasks() {
 
       const detail = document.createElement('div');
       detail.className = 'download-task-detail';
+      const progressText = formatDownloadProgressText(
+        task,
+        getSpeed(downloadSpeed, task.key),
+        true,
+      );
       detail.textContent = formatProgress(
         task.received || 0,
         task.total,
@@ -1219,6 +1306,7 @@ function renderDownloadTasks() {
         getSpeed(downloadSpeed, task.key),
       );
 
+      detail.textContent = progressText;
       progressBar.appendChild(progressFill);
       progressWrap.appendChild(progressBar);
       progressWrap.appendChild(detail);
@@ -1302,6 +1390,29 @@ function updateProgressUI(filename, endpointId = activeEndpointId) {
   if (card) {
     card.classList.toggle('is-downloading', isDownloadTaskActive(task));
   }
+  const selector = `.download-progress[data-filename="${escapeSelector(filename)}"]`;
+  const wrap = document.querySelector(selector);
+  if (!wrap) {
+    return;
+  }
+  if (!task || task.status !== 'progress') {
+    wrap.classList.add('hidden');
+    return;
+  }
+  const fill = wrap.querySelector('.download-progress-fill');
+  const text = wrap.querySelector('.download-progress-text');
+  if (task.total) {
+    const percent = Math.min(100, Math.round(((task.received || 0) / task.total) * 100));
+    if (fill) {
+      fill.style.width = `${percent}%`;
+    }
+  } else if (fill) {
+    fill.style.width = '30%';
+  }
+  if (text) {
+    text.textContent = formatDownloadProgressText(task, getSpeed(downloadSpeed, task.key));
+  }
+  wrap.classList.remove('hidden');
 }
 
 function legacyUpdateProgressUI(filename) {
@@ -2411,6 +2522,17 @@ function showConfirmationDialog(options = {}) {
   });
 }
 
+function formatDownloadSuccessMessage(result, fallbackPath, defaultPrefix = '\u6587\u4ef6\u5df2\u4fdd\u5b58\u5230') {
+  const path = (result?.path || fallbackPath || '').trim();
+  if (result?.transfer_mode === 'resumed') {
+    return `\u5df2\u7ee7\u7eed\u4e0b\u8f7d\u5e76\u4fdd\u5b58\u5230 ${path}`.trim();
+  }
+  if (result?.transfer_mode === 'restarted') {
+    return `\u5df2\u91cd\u65b0\u4e0b\u8f7d\u5e76\u4fdd\u5b58\u5230 ${path}`.trim();
+  }
+  return `${defaultPrefix} ${path}`.trim();
+}
+
 async function downloadMessageFile(message) {
   let task = null;
   try {
@@ -2452,7 +2574,7 @@ async function downloadMessageFile(message) {
           error: '',
         });
         updateMessageDownloadStatus(message.filename, retryTask.endpointId);
-        setSuccessStatus(`文件已保存到 ${retry.path || ''}`.trim());
+        setSuccessStatus(formatDownloadSuccessMessage(retry, retry.path || ''));
         await loadPersistedDownloadHistory({ silent: true });
       } else {
         setDownloadTaskResult(retryTask.key, {
@@ -2471,7 +2593,7 @@ async function downloadMessageFile(message) {
         error: '',
       });
       updateMessageDownloadStatus(message.filename, task.endpointId);
-      setSuccessStatus(`文件已保存到 ${result.path || ''}`.trim());
+      setSuccessStatus(formatDownloadSuccessMessage(result, result.path || ''));
       await loadPersistedDownloadHistory({ silent: true });
     } else {
       setDownloadTaskResult(task.key, {
@@ -2526,7 +2648,7 @@ async function saveMessageFileAs(message) {
       error: '',
     });
     updateMessageDownloadStatus(message.filename, task.endpointId);
-    setSuccessStatus(`文件已保存到 ${result.path || target}`.trim());
+    setSuccessStatus(formatDownloadSuccessMessage(result, result.path || target));
   } catch (error) {
     const key = task?.key || getDownloadTaskKey(message.filename, activeEndpointId || '');
     setDownloadTaskResult(key, {
@@ -2571,7 +2693,7 @@ async function saveDownloadHistoryAs(task) {
       error: '',
       localExists: true,
     });
-    setSuccessStatus(`文件已保存到 ${result.path || target}`.trim());
+    setSuccessStatus(formatDownloadSuccessMessage(result, result.path || target));
     await loadPersistedDownloadHistory({ silent: true });
     await loadPersistedDownloadHistory({ silent: true });
   } catch (error) {
@@ -2609,7 +2731,7 @@ async function redownloadDownloadHistory(task) {
       error: '',
       localExists: true,
     });
-    setSuccessStatus(`文件已重新下载到 ${result.path || task.path || ''}`.trim());
+    setSuccessStatus(formatDownloadSuccessMessage(result, result.path || task.path || ''));
     await loadPersistedDownloadHistory({ silent: true });
   } catch (error) {
     console.error('[download] history redownload error', error);
@@ -3050,7 +3172,7 @@ function renderPreviewActions(message) {
     const openButton = document.createElement('button');
     openButton.type = 'button';
     openButton.className = 'button primary small';
-    openButton.textContent = message.download_exists ? '打开文件' : '下载并打开';
+    openButton.textContent = hasLocalMessageFile(message) ? '打开文件' : '下载并打开';
     openButton.addEventListener('click', () => openMessageFile(message));
     buttons.push(openButton);
 
@@ -3163,7 +3285,7 @@ function renderPreviewContent(message) {
     const openBtn = document.createElement('button');
     openBtn.type = 'button';
     openBtn.className = 'button primary small';
-    openBtn.textContent = message.download_exists ? '打开文件' : '下载并打开';
+    openBtn.textContent = hasLocalMessageFile(message) ? '打开文件' : '下载并打开';
     openBtn.addEventListener('click', () => openMessageFile(message));
 
     actions.appendChild(openBtn);
@@ -3530,28 +3652,21 @@ function renderMessages(messages, options = {}) {
         markButton.addEventListener('click', () => toggleMessageMarked(message));
         actions.appendChild(markButton);
 
-        if (!message.download_exists) {
-          const downloadButton = document.createElement('button');
-          downloadButton.className = 'button primary small icon-only download-action';
-          const downloadIcon = document.createElement('img');
-          downloadIcon.src = 'icons/download.svg';
-          downloadIcon.alt = '下载';
-          downloadIcon.style.width = '16px';
-          downloadIcon.style.height = '16px';
-          downloadButton.appendChild(downloadIcon);
-          downloadButton.addEventListener('click', () => downloadMessageFile(message));
-          actions.appendChild(downloadButton);
+        const downloadButton = document.createElement('button');
+        downloadButton.className = 'button primary small icon-only download-action';
+        const downloadIcon = document.createElement('img');
+        downloadIcon.src = 'icons/download.svg';
+        downloadIcon.alt = '下载';
+        downloadIcon.style.width = '16px';
+        downloadIcon.style.height = '16px';
+        downloadButton.appendChild(downloadIcon);
+        downloadButton.addEventListener('click', () => downloadMessageFile(message));
+        actions.appendChild(downloadButton);
 
-          const downloadingTag = document.createElement('span');
-          downloadingTag.className = 'downloading-tag download-progress-tag';
-          downloadingTag.textContent = '下载中';
-          actions.appendChild(downloadingTag);
-        } else {
-          const downloadedTag = document.createElement('span');
-          downloadedTag.className = 'downloaded-tag';
-          downloadedTag.textContent = '已下载';
-          actions.appendChild(downloadedTag);
-        }
+        const downloadingTag = document.createElement('span');
+        downloadingTag.className = 'downloading-tag download-progress-tag';
+        downloadingTag.textContent = '下载中';
+        actions.appendChild(downloadingTag);
 
         const menu = document.createElement('details');
         menu.className = 'action-menu';
@@ -3654,7 +3769,7 @@ function renderMessages(messages, options = {}) {
     });
 
     if (message.kind === 'file') {
-      const progress = null;
+      const progress = getDownloadTask(message.filename, activeEndpointId);
       const progressWrap = document.createElement('div');
       progressWrap.className = 'download-progress';
       progressWrap.dataset.filename = message.filename;
@@ -3678,12 +3793,17 @@ function renderMessages(messages, options = {}) {
           const percent = Math.min(100, Math.round((progress.received / total) * 100));
           progressFill.style.width = `${percent}%`;
         }
+        const progressTextValue = formatDownloadProgressText(
+          progress,
+          getSpeed(downloadSpeed, progress.key || message.filename),
+        );
         progressText.textContent = formatProgress(
           progress.received || 0,
           progress.total,
           '已下载',
           getSpeed(downloadSpeed, message.filename),
         );
+        progressText.textContent = progressTextValue;
       } else {
         progressWrap.classList.add('hidden');
       }
@@ -3924,7 +4044,7 @@ async function loadMessages(options = {}) {
         if (newMessagesMap.has(oldMsg.filename)) {
           const newMsg = newMessagesMap.get(oldMsg.filename);
           // 检查是否有属性变更
-          if (oldMsg.marked !== newMsg.marked || oldMsg.download_exists !== newMsg.download_exists) {
+          if (oldMsg.marked !== newMsg.marked || oldMsg.local_path !== newMsg.local_path) {
             stateChanged = true;
             return { ...oldMsg, ...newMsg };
           }
@@ -5228,7 +5348,7 @@ function updateMessageDownloadStatus(filename, endpointId = activeEndpointId) {
   lastMessages = lastMessages.map((msg) => {
     if (msg.filename === filename) {
       changed = true;
-      return { ...msg, download_exists: true };
+      return { ...msg };
     }
     return msg;
   });
@@ -5252,22 +5372,11 @@ function updateMessageDownloadStatus(filename, endpointId = activeEndpointId) {
       if (downloadingTag) {
         downloadingTag.remove();
       }
-      if (!actions.querySelector('.downloaded-tag')) {
-        const downloadedTag = document.createElement('span');
-        downloadedTag.className = 'downloaded-tag';
-        downloadedTag.textContent = '已下载';
-        const menu = actions.querySelector('.action-menu');
-        if (menu) {
-          actions.insertBefore(downloadedTag, menu);
-        } else {
-          actions.appendChild(downloadedTag);
-        }
-      }
     }
   }
 
   if (currentPreviewMessage && currentPreviewMessage.filename === filename) {
-    currentPreviewMessage = { ...currentPreviewMessage, download_exists: true };
+    currentPreviewMessage = { ...currentPreviewMessage };
     renderPreviewContent(currentPreviewMessage);
   }
 }
@@ -5283,7 +5392,7 @@ function setSenderNameDisplay(name) {
 async function manualRefresh() {
   let didStartManualRefresh = false;
   if (isManualRefreshRunning) {
-    setStatus('手动刷新进行中...');
+    setStatus('正在刷新...');
     return;
   }
 
@@ -5303,8 +5412,7 @@ async function manualRefresh() {
     isManualRefreshRunning = true;
     setRefreshLoading(true);
     await invoke('manual_refresh');
-    await loadMessages();
-    await loadSyncStatus();
+    await Promise.all([loadMessages(), loadSyncStatus()]);
   } catch (error) {
     const reason = String(error || '');
     if (reason.includes('已取消')) {

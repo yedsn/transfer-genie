@@ -4,9 +4,20 @@ use futures_util::StreamExt;
 use log::info;
 use quick_xml::events::Event;
 use quick_xml::Reader;
+use reqwest::header::{CONTENT_RANGE, ETAG, LAST_MODIFIED, RANGE};
 use reqwest::{Body, Client, Method, RequestBuilder};
+use std::pin::Pin;
 use std::time::Duration;
 use url::Url;
+
+pub struct DownloadStreamResponse {
+    pub stream: Pin<Box<dyn futures_util::Stream<Item = reqwest::Result<Bytes>> + Send>>,
+    pub content_length: Option<u64>,
+    pub total_size: Option<u64>,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    pub status_code: u16,
+}
 
 fn apply_auth(request: RequestBuilder, endpoint: &WebDavEndpoint) -> RequestBuilder {
     apply_auth_with_timeout(request, endpoint, Some(Duration::from_secs(30)))
@@ -41,6 +52,15 @@ fn base_url(endpoint: &WebDavEndpoint) -> Result<Url, String> {
         raw.push('/');
     }
     Url::parse(&raw).map_err(|err| format!("WebDAV 地址无效: {err}"))
+}
+
+fn parse_content_range_total(value: Option<&str>) -> Option<u64> {
+    let value = value?;
+    let total = value.split('/').nth(1)?.trim();
+    if total == "*" {
+        return None;
+    }
+    total.parse::<u64>().ok()
 }
 
 pub async fn list_entries(
@@ -95,7 +115,7 @@ pub async fn list_entries(
 
     // info!("Received response body:\n---\n{}\n---", &text);
 
-    if !status.is_success() {
+    if !(status.is_success() || status.as_u16() == 206) {
         if allow_missing && status.as_u16() == 404 {
             return Ok(Vec::new());
         }
@@ -280,7 +300,7 @@ pub async fn download_file(
         .map_err(|err| format!("下载失败: {err}"))?;
 
     let status = response.status();
-    if !status.is_success() {
+    if !(status.is_success() || status.as_u16() == 206) {
         info!("Failed to download '{}'. HTTP Status: {}", url, status);
         return Err(format!("下载失败: HTTP {}", status));
     }
@@ -292,62 +312,33 @@ pub async fn download_file(
         .map_err(|err| format!("读取下载内容失败: {err}"))
 }
 
-pub async fn download_file_with_progress<F>(
-    client: &Client,
-    endpoint: &WebDavEndpoint,
-    remote_path: &str,
-    mut on_progress: F,
-) -> Result<Vec<u8>, String>
-where
-    F: FnMut(u64, Option<u64>),
-{
-    let mut url = base_url(endpoint)?;
-    url = url
-        .join(remote_path)
-        .map_err(|err| format!("文件地址无效: {err}"))?;
-
-    let request = client.get(url);
-    let response = apply_auth_without_timeout(request, endpoint)
-        .send()
-        .await
-        .map_err(|err| format!("下载失败: {err}"))?;
-
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!("下载失败: HTTP {}", status));
-    }
-
-    let total = response.content_length();
-    let mut stream = response.bytes_stream();
-    let mut bytes = Vec::new();
-    let mut received = 0u64;
-    on_progress(received, total);
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|err| format!("读取下载内容失败: {err}"))?;
-        received += chunk.len() as u64;
-        bytes.extend_from_slice(&chunk);
-        on_progress(received, total);
-    }
-    Ok(bytes)
-}
 
 pub async fn download_file_stream(
     client: &Client,
     endpoint: &WebDavEndpoint,
     remote_path: &str,
-) -> Result<
-    (
-        impl futures_util::Stream<Item = reqwest::Result<Bytes>>,
-        Option<u64>,
-    ),
-    String,
-> {
+) -> Result<DownloadStreamResponse, String> {
+    download_file_stream_with_range(client, endpoint, remote_path, None).await
+}
+
+pub async fn download_file_stream_with_range(
+    client: &Client,
+    endpoint: &WebDavEndpoint,
+    remote_path: &str,
+    range_start: Option<u64>,
+) -> Result<DownloadStreamResponse, String> {
     let mut url = base_url(endpoint)?;
     url = url
         .join(remote_path)
         .map_err(|err| format!("文件地址无效: {err}"))?;
 
-    let request = client.get(url);
+    let request = if let Some(range_start) = range_start {
+        client
+            .get(url)
+            .header(RANGE, format!("bytes={range_start}-"))
+    } else {
+        client.get(url)
+    };
     let response = apply_auth_without_timeout(request, endpoint)
         .send()
         .await
@@ -357,8 +348,33 @@ pub async fn download_file_stream(
     if !status.is_success() {
         return Err(format!("下载失败: HTTP {}", status));
     }
-    let len = response.content_length();
-    Ok((response.bytes_stream(), len))
+    let content_length = response.content_length();
+    let headers = response.headers();
+    let total_size = if status.as_u16() == 206 {
+        parse_content_range_total(
+            headers
+                .get(CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok()),
+        )
+    } else {
+        content_length
+    };
+    let etag = headers
+        .get(ETAG)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim_matches('"').to_string());
+    let last_modified = headers
+        .get(LAST_MODIFIED)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string());
+    Ok(DownloadStreamResponse {
+        stream: Box::pin(response.bytes_stream()),
+        content_length,
+        total_size,
+        etag,
+        last_modified,
+        status_code: status.as_u16(),
+    })
 }
 
 pub async fn upload_file_stream<S, E>(

@@ -6,7 +6,7 @@ mod telegram_bridge;
 mod types;
 mod webdav;
 
-use crate::db::{DbDownloadHistory, DbMessage};
+use crate::db::{DbDownloadHistory, DbMessage, DbPartialDownload};
 use crate::filenames::{build_message_filename, parse_message_filename, MessageKind};
 use crate::history::HistoryEntry;
 use crate::types::{
@@ -212,6 +212,7 @@ struct DownloadResult {
     status: String,
     path: Option<String>,
     suggested_path: Option<String>,
+    transfer_mode: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -242,8 +243,34 @@ struct DownloadProgress {
     filename: String,
     received: u64,
     total: Option<u64>,
+    transfer_mode: Option<String>,
+    range_start: Option<u64>,
+    range_end: Option<u64>,
     status: String,
     error: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DownloadTransferMode {
+    Fresh,
+    Resumed,
+    Restarted,
+}
+
+impl DownloadTransferMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Resumed => "resumed",
+            Self::Restarted => "restarted",
+        }
+    }
+}
+
+struct DownloadExecutionResult {
+    final_path: PathBuf,
+    file_size: i64,
+    transfer_mode: DownloadTransferMode,
 }
 
 #[derive(Clone, Serialize)]
@@ -319,7 +346,6 @@ fn emit_backup_restore_progress(
         total,
         state: state.to_string(),
     };
-
     if let Err(e) = window.emit(event_name, payload) {
         log::warn!("Failed to emit {}: {}", event_name, e);
     }
@@ -616,35 +642,8 @@ fn list_messages(
         db::count_messages(&state.db_path, &endpoint.id, true).map_err(|err| err.to_string())?
     };
 
-    let mut messages =
-        db::list_messages_paged(&state.db_path, &endpoint.id, limit, offset, marked_filter)
-            .map_err(|err| err.to_string())?;
-
-    let base_dir = resolve_download_dir(&state, &settings);
-    for message in messages.iter_mut() {
-        if message.kind == MessageKind::File.as_str() {
-            let file_name = sanitize_filename(&message.original_name);
-            let target_path = base_dir.join(file_name);
-            // 优先使用哈希值判断文件是否已下载
-            if let Some(ref expected_hash) = message.file_hash {
-                if target_path.is_file() {
-                    // 文件存在，检查哈希值是否匹配
-                    if let Some(actual_hash) = compute_file_hash_from_path(&target_path) {
-                        message.download_exists = &actual_hash == expected_hash;
-                    } else {
-                        message.download_exists = false;
-                    }
-                } else {
-                    message.download_exists = false;
-                }
-            } else {
-                // 没有哈希值（旧数据），回退到检查文件是否存在
-                message.download_exists = target_path.exists();
-            }
-        } else {
-            message.download_exists = false;
-        }
-    }
+    let messages = db::list_messages_paged(&state.db_path, &endpoint.id, limit, offset, marked_filter)
+        .map_err(|err| err.to_string())?;
 
     let current_offset = offset.unwrap_or(0);
     let current_limit = limit.unwrap_or(total);
@@ -1051,7 +1050,7 @@ async fn download_message_file(
     let endpoint = resolve_active_endpoint(&settings)?;
 
     let base_dir = resolve_download_dir(&state, &settings);
-    fs::create_dir_all(&base_dir).map_err(|err| format!("创建下载目录失败: {err}"))?;
+    fs::create_dir_all(&base_dir).map_err(|err| format!("Failed to create download directory: {err}"))?;
 
     let file_name = sanitize_filename(&original_name);
     let target_path = base_dir.join(file_name);
@@ -1062,14 +1061,23 @@ async fn download_message_file(
                 status: "conflict".to_string(),
                 path: None,
                 suggested_path: Some(suggested.to_string_lossy().to_string()),
+                transfer_mode: None,
             });
         }
         DownloadDecision::Ready(path) => path,
     };
 
-    let bytes = match download_file_bytes_with_progress(&window, &state, &endpoint, &filename).await
+    let download = match execute_streamed_download(
+        &window,
+        &state,
+        &endpoint,
+        &filename,
+        &original_name,
+        &final_path,
+    )
+    .await
     {
-        Ok(bytes) => bytes,
+        Ok(result) => result,
         Err(err) => {
             let _ = persist_download_history(
                 &state,
@@ -1084,32 +1092,23 @@ async fn download_message_file(
             return Err(err);
         }
     };
-    ensure_parent_dir(&final_path)?;
-    fs::write(&final_path, &bytes).map_err(|err| format!("保存文件失败: {err}"))?;
-    let file_hash = compute_file_hash(&bytes);
-    update_message_local_path(
-        &state.db_path,
-        &endpoint.id,
-        &filename,
-        &final_path,
-        bytes.len() as i64,
-        Some(file_hash),
-    )?;
+
     persist_download_history(
         &state,
         &endpoint.id,
         &filename,
         &original_name,
-        Some(&final_path),
+        Some(&download.final_path),
         "complete",
         None,
-        bytes.len() as i64,
+        download.file_size,
     )?;
 
     Ok(DownloadResult {
         status: "saved".to_string(),
-        path: Some(final_path.to_string_lossy().to_string()),
+        path: Some(download.final_path.to_string_lossy().to_string()),
         suggested_path: None,
+        transfer_mode: Some(download.transfer_mode.as_str().to_string()),
     })
 }
 
@@ -1123,18 +1122,27 @@ async fn save_message_file_as(
     let settings = current_settings(&state)?;
     let endpoint = resolve_active_endpoint(&settings)?;
     let original_name = db::get_message(&state.db_path, &endpoint.id, &filename)
-        .map_err(|err| format!("读取消息失败: {err}"))?
+        .map_err(|err| format!("Failed to read message: {err}"))?
         .map(|message| message.original_name)
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| filename.clone());
 
     if target_path.trim().is_empty() {
-        return Err("未选择保存路径".to_string());
+        return Err("No save path selected".to_string());
     }
+
     let final_path = PathBuf::from(target_path);
-    let bytes = match download_file_bytes_with_progress(&window, &state, &endpoint, &filename).await
+    let download = match execute_streamed_download(
+        &window,
+        &state,
+        &endpoint,
+        &filename,
+        &original_name,
+        &final_path,
+    )
+    .await
     {
-        Ok(bytes) => bytes,
+        Ok(result) => result,
         Err(err) => {
             let _ = persist_download_history(
                 &state,
@@ -1149,32 +1157,23 @@ async fn save_message_file_as(
             return Err(err);
         }
     };
-    ensure_parent_dir(&final_path)?;
-    fs::write(&final_path, &bytes).map_err(|err| format!("保存文件失败: {err}"))?;
-    let file_hash = compute_file_hash(&bytes);
-    update_message_local_path(
-        &state.db_path,
-        &endpoint.id,
-        &filename,
-        &final_path,
-        bytes.len() as i64,
-        Some(file_hash),
-    )?;
+
     persist_download_history(
         &state,
         &endpoint.id,
         &filename,
         &original_name,
-        Some(&final_path),
+        Some(&download.final_path),
         "complete",
         None,
-        bytes.len() as i64,
+        download.file_size,
     )?;
 
     Ok(DownloadResult {
         status: "saved".to_string(),
-        path: Some(final_path.to_string_lossy().to_string()),
+        path: Some(download.final_path.to_string_lossy().to_string()),
         suggested_path: None,
+        transfer_mode: Some(download.transfer_mode.as_str().to_string()),
     })
 }
 
@@ -1212,55 +1211,362 @@ fn require_download_history(state: &AppState, record_id: i64) -> Result<DbDownlo
         .ok_or_else(|| "下载记录不存在".to_string())
 }
 
-async fn download_file_bytes_with_progress(
+fn build_partial_download_path(final_path: &Path) -> PathBuf {
+    let file_name = final_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("download.bin");
+    final_path.with_file_name(format!("{file_name}.part"))
+}
+
+fn load_message_remote_metadata(
+    db_path: &Path,
+    endpoint_id: &str,
+    filename: &str,
+) -> Result<(Option<String>, Option<String>, i64), String> {
+    let message = db::get_message(db_path, endpoint_id, filename).map_err(|err| err.to_string())?;
+    Ok(message
+        .map(|message| (message.etag, message.mtime, message.size.max(0)))
+        .unwrap_or((None, None, 0)))
+}
+
+fn persist_partial_download(state: &AppState, entry: &DbPartialDownload) -> Result<(), String> {
+    db::upsert_partial_download(&state.db_path, entry)
+        .map_err(|err| format!("淇濆瓨涓嬭浇杩涘害澶辫触: {err}"))
+}
+
+fn clear_partial_download(state: &AppState, endpoint_id: &str, filename: &str) -> Result<(), String> {
+    db::delete_partial_download(&state.db_path, endpoint_id, filename)
+        .map(|_| ())
+        .map_err(|err| format!("娓呯悊涓嬭浇杩涘害澶辫触: {err}"))
+}
+
+fn discard_partial_download(state: &AppState, partial: &DbPartialDownload) -> Result<(), String> {
+    if !partial.temp_path.trim().is_empty() {
+        let _ = fs::remove_file(&partial.temp_path);
+    }
+    clear_partial_download(state, &partial.endpoint_id, &partial.filename)
+}
+
+fn should_restart_after_range_error(error: &str) -> bool {
+    ["HTTP 400", "HTTP 405", "HTTP 416", "HTTP 501"]
+        .iter()
+        .any(|status| error.contains(status))
+}
+
+fn resume_identity_matches(
+    partial: &DbPartialDownload,
+    response: &webdav::DownloadStreamResponse,
+) -> bool {
+    if let Some(expected_etag) = partial.etag.as_deref().filter(|value| !value.trim().is_empty()) {
+        return response.etag.as_deref() == Some(expected_etag);
+    }
+    if let Some(expected_mtime) = partial.mtime.as_deref().filter(|value| !value.trim().is_empty())
+    {
+        return response.last_modified.as_deref() == Some(expected_mtime);
+    }
+    if partial.total_bytes > 0 {
+        return response.total_size == Some(partial.total_bytes as u64);
+    }
+    false
+}
+
+async fn write_download_stream_to_partial(
+    window: &Window,
+    state: &AppState,
+    endpoint_id: &str,
+    filename: &str,
+    mut partial: DbPartialDownload,
+    response: webdav::DownloadStreamResponse,
+    resume_from: u64,
+    transfer_mode: DownloadTransferMode,
+) -> Result<i64, String> {
+    use futures_util::StreamExt;
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    let mut stream = response.stream;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(resume_from == 0)
+        .append(resume_from > 0)
+        .open(&partial.temp_path)
+        .map_err(|err| format!("鍒涘缓涓嬭浇涓存椂鏂囦欢澶辫触: {err}"))?;
+    let mut received = resume_from;
+    let total = response
+        .total_size
+        .or_else(|| response.content_length.map(|length| length + resume_from));
+    let range_start = Some(resume_from);
+    let range_end = total.and_then(|size| size.checked_sub(1));
+    partial.downloaded_bytes = received as i64;
+    partial.total_bytes = total.unwrap_or_default() as i64;
+    partial.etag = response.etag.or(partial.etag);
+    partial.mtime = response.last_modified.or(partial.mtime);
+    partial.updated_at_ms = now_ms();
+    persist_partial_download(state, &partial)?;
+    emit_download_progress(
+        window,
+        endpoint_id,
+        filename,
+        received,
+        total,
+        Some(transfer_mode),
+        range_start,
+        range_end,
+        "progress",
+        None,
+    );
+
+    let mut last_persisted = received;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|err| format!("璇诲彇涓嬭浇鍐呭澶辫触: {err}"))?;
+        file.write_all(&chunk)
+            .map_err(|err| format!("鍐欏叆涓嬭浇涓存椂鏂囦欢澶辫触: {err}"))?;
+        received += chunk.len() as u64;
+        emit_download_progress(
+            window,
+            endpoint_id,
+            filename,
+            received,
+            total,
+            Some(transfer_mode),
+            range_start,
+            range_end,
+            "progress",
+            None,
+        );
+        if received.saturating_sub(last_persisted) >= 1024 * 1024 {
+            partial.downloaded_bytes = received as i64;
+            partial.updated_at_ms = now_ms();
+            persist_partial_download(state, &partial)?;
+            last_persisted = received;
+        }
+    }
+    file.flush()
+        .map_err(|err| format!("鍒锋柊涓嬭浇涓存椂鏂囦欢澶辫触: {err}"))?;
+    partial.downloaded_bytes = received as i64;
+    partial.total_bytes = total.unwrap_or(received) as i64;
+    partial.updated_at_ms = now_ms();
+    persist_partial_download(state, &partial)?;
+    Ok(received as i64)
+}
+
+async fn execute_streamed_download(
     window: &Window,
     state: &AppState,
     endpoint: &WebDavEndpoint,
     filename: &str,
-) -> Result<Vec<u8>, String> {
-    let remote_path = format!("files/{filename}");
-    let window = window.clone();
-    match webdav::download_file_with_progress(&state.http, endpoint, &remote_path, |received, total| {
-        emit_download_progress(
-            &window,
-            &endpoint.id,
-            filename,
-            received,
-            total,
-            "progress",
-            None,
-        );
-    })
-    .await
-    {
-        Ok(bytes) => {
-            emit_download_progress(
-                &window,
-                &endpoint.id,
-                filename,
-                bytes.len() as u64,
-                Some(bytes.len() as u64),
-                "complete",
-                None,
-            );
-            Ok(bytes)
-        }
-        Err(err) => {
-            emit_download_progress(
-                &window,
-                &endpoint.id,
-                filename,
-                0,
-                None,
-                "error",
-                Some(err.clone()),
-            );
-            Err(err)
+    original_name: &str,
+    final_path: &Path,
+) -> Result<DownloadExecutionResult, String> {
+    ensure_parent_dir(final_path)?;
+    let temp_path = build_partial_download_path(final_path);
+    let final_path_string = final_path.to_string_lossy().to_string();
+    let temp_path_string = temp_path.to_string_lossy().to_string();
+    let (expected_etag, expected_mtime, expected_size) =
+        load_message_remote_metadata(&state.db_path, &endpoint.id, filename)?;
+
+    let existing_partial =
+        db::get_partial_download(&state.db_path, &endpoint.id, filename).map_err(|err| err.to_string())?;
+    let transfer_mode = if existing_partial.is_some() {
+        DownloadTransferMode::Restarted
+    } else {
+        DownloadTransferMode::Fresh
+    };
+
+    if let Some(partial) = existing_partial {
+        let temp_file_size = fs::metadata(&partial.temp_path)
+            .ok()
+            .filter(|meta| meta.is_file())
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        let partial_matches_target = partial.final_path == final_path_string
+            && partial.temp_path == temp_path_string
+            && partial.downloaded_bytes > 0
+            && temp_file_size == partial.downloaded_bytes as u64;
+        if partial_matches_target {
+            match webdav::download_file_stream_with_range(
+                &state.http,
+                endpoint,
+                &format!("files/{filename}"),
+                Some(partial.downloaded_bytes as u64),
+            )
+            .await
+            {
+                Ok(response)
+                    if response.status_code == 206
+                        && resume_identity_matches(&partial, &response) =>
+                {
+                    let resumed_size = write_download_stream_to_partial(
+                        window,
+                        state,
+                        &endpoint.id,
+                        filename,
+                        DbPartialDownload {
+                            endpoint_id: endpoint.id.clone(),
+                            filename: filename.to_string(),
+                            original_name: original_name.to_string(),
+                            final_path: final_path_string.clone(),
+                            temp_path: temp_path_string.clone(),
+                            downloaded_bytes: partial.downloaded_bytes,
+                            total_bytes: response
+                                .total_size
+                                .or_else(|| {
+                                    if partial.total_bytes > 0 {
+                                        Some(partial.total_bytes as u64)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap_or_default() as i64,
+                            etag: response.etag.clone().or(partial.etag.clone()),
+                            mtime: response.last_modified.clone().or(partial.mtime.clone()),
+                            updated_at_ms: now_ms(),
+                        },
+                        response,
+                        partial.downloaded_bytes as u64,
+                        DownloadTransferMode::Resumed,
+                    )
+                    .await?;
+                    if final_path.exists() {
+                        fs::remove_file(final_path)
+                            .map_err(|err| format!("鏇挎崲宸叉湁涓嬭浇鏂囦欢澶辫触: {err}"))?;
+                    }
+                    fs::rename(&temp_path, final_path)
+                        .map_err(|err| format!("瀹屾垚涓嬭浇鏂囦欢澶辫触: {err}"))?;
+                    clear_partial_download(state, &endpoint.id, filename)?;
+                    let file_hash = compute_file_hash_from_path(final_path)?;
+                    let _ = update_message_local_path(
+                        &state.db_path,
+                        &endpoint.id,
+                        filename,
+                        final_path,
+                        resumed_size,
+                        Some(file_hash),
+                    );
+                    emit_download_progress(
+                        window,
+                        &endpoint.id,
+                        filename,
+                        resumed_size as u64,
+                        Some(resumed_size as u64),
+                        Some(DownloadTransferMode::Resumed),
+                        Some(partial.downloaded_bytes as u64),
+                        resumed_size.checked_sub(1).map(|value| value as u64),
+                        "complete",
+                        None,
+                    );
+                    return Ok(DownloadExecutionResult {
+                        final_path: final_path.to_path_buf(),
+                        file_size: resumed_size,
+                        transfer_mode: DownloadTransferMode::Resumed,
+                    });
+                }
+                Ok(_) => {
+                    discard_partial_download(state, &partial)?;
+                }
+                Err(err) if should_restart_after_range_error(&err) => {
+                    discard_partial_download(state, &partial)?;
+                }
+                Err(err) => {
+                    emit_download_progress(
+                        window,
+                        &endpoint.id,
+                        filename,
+                        partial.downloaded_bytes as u64,
+                        if partial.total_bytes > 0 {
+                            Some(partial.total_bytes as u64)
+                        } else {
+                            None
+                        },
+                        Some(DownloadTransferMode::Resumed),
+                        Some(partial.downloaded_bytes as u64),
+                        if partial.total_bytes > 0 {
+                            Some(partial.total_bytes as u64 - 1)
+                        } else {
+                            None
+                        },
+                        "error",
+                        Some(err.clone()),
+                    );
+                    return Err(err);
+                }
+            }
+        } else {
+            discard_partial_download(state, &partial)?;
         }
     }
+
+    let response =
+        webdav::download_file_stream(&state.http, endpoint, &format!("files/{filename}")).await?;
+    let downloaded_size = write_download_stream_to_partial(
+        window,
+        state,
+        &endpoint.id,
+        filename,
+        DbPartialDownload {
+            endpoint_id: endpoint.id.clone(),
+            filename: filename.to_string(),
+            original_name: original_name.to_string(),
+            final_path: final_path_string,
+            temp_path: temp_path_string,
+            downloaded_bytes: 0,
+            total_bytes: response
+                .total_size
+                .or_else(|| {
+                    if expected_size > 0 {
+                        Some(expected_size as u64)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default() as i64,
+            etag: response.etag.clone().or(expected_etag),
+            mtime: response.last_modified.clone().or(expected_mtime),
+            updated_at_ms: now_ms(),
+        },
+        response,
+        0,
+        transfer_mode,
+    )
+    .await?;
+    if final_path.exists() {
+        fs::remove_file(final_path).map_err(|err| format!("Failed to replace existing downloaded file: {err}"))?;
+    }
+    fs::rename(&temp_path, final_path).map_err(|err| format!("Failed to finalize downloaded file: {err}"))?;
+    clear_partial_download(state, &endpoint.id, filename)?;
+    let file_hash = compute_file_hash_from_path(final_path)?;
+    let _ = update_message_local_path(
+        &state.db_path,
+        &endpoint.id,
+        filename,
+        final_path,
+        downloaded_size,
+        Some(file_hash),
+    );
+    emit_download_progress(
+        window,
+        &endpoint.id,
+        filename,
+        downloaded_size as u64,
+        Some(downloaded_size as u64),
+        Some(transfer_mode),
+        Some(0),
+        downloaded_size.checked_sub(1).map(|value| value as u64),
+        "complete",
+        None,
+    );
+    Ok(DownloadExecutionResult {
+        final_path: final_path.to_path_buf(),
+        file_size: downloaded_size,
+        transfer_mode,
+    })
 }
 
 #[tauri::command]
+
 fn list_download_history(state: State<'_, AppState>) -> Result<Vec<DownloadHistoryRecord>, String> {
     db::list_download_history(&state.db_path)
         .map_err(|err| format!("读取下载历史失败: {err}"))
@@ -1274,7 +1580,7 @@ async fn save_download_history_as(
     target_path: String,
 ) -> Result<DownloadResult, String> {
     if target_path.trim().is_empty() {
-        return Err("未选择保存路径".to_string());
+        return Err("No save path selected".to_string());
     }
 
     let record = require_download_history(&state, record_id)?;
@@ -1290,25 +1596,33 @@ async fn save_download_history_as(
     {
         if saved_path != final_path {
             fs::copy(&saved_path, &final_path)
-                .map_err(|err| format!("另存为失败: {err}"))?;
+                .map_err(|err| format!("Save-as failed: {err}"))?;
         }
         return Ok(DownloadResult {
             status: "saved".to_string(),
             path: Some(final_path.to_string_lossy().to_string()),
             suggested_path: None,
+            transfer_mode: None,
         });
     }
 
     let settings = current_settings(&state)?;
     let endpoint = resolve_endpoint_by_id(&settings, &record.endpoint_id)?;
-    let bytes = download_file_bytes_with_progress(&window, &state, &endpoint, &record.filename).await?;
-    ensure_parent_dir(&final_path)?;
-    fs::write(&final_path, &bytes).map_err(|err| format!("保存文件失败: {err}"))?;
+    let download = execute_streamed_download(
+        &window,
+        &state,
+        &endpoint,
+        &record.filename,
+        &record.original_name,
+        &final_path,
+    )
+    .await?;
 
     Ok(DownloadResult {
         status: "saved".to_string(),
-        path: Some(final_path.to_string_lossy().to_string()),
+        path: Some(download.final_path.to_string_lossy().to_string()),
         suggested_path: None,
+        transfer_mode: Some(download.transfer_mode.as_str().to_string()),
     })
 }
 
@@ -1329,17 +1643,25 @@ async fn redownload_download_history(
         PathBuf::from(saved_path)
     } else {
         let base_dir = resolve_download_dir(&state, &settings);
-        fs::create_dir_all(&base_dir).map_err(|err| format!("创建下载目录失败: {err}"))?;
+        fs::create_dir_all(&base_dir).map_err(|err| format!("Failed to create download directory: {err}"))?;
         base_dir.join(sanitize_filename(&record.original_name))
     };
 
     if final_path.is_dir() {
-        return Err("目标路径是目录，无法重新下载".to_string());
+        return Err("Target path is a directory and cannot be redownloaded".to_string());
     }
 
-    let bytes = match download_file_bytes_with_progress(&window, &state, &endpoint, &record.filename).await
+    let download = match execute_streamed_download(
+        &window,
+        &state,
+        &endpoint,
+        &record.filename,
+        &record.original_name,
+        &final_path,
+    )
+    .await
     {
-        Ok(bytes) => bytes,
+        Ok(result) => result,
         Err(err) => {
             let _ = persist_download_history(
                 &state,
@@ -1354,33 +1676,23 @@ async fn redownload_download_history(
             return Err(err);
         }
     };
-    ensure_parent_dir(&final_path)?;
-    fs::write(&final_path, &bytes).map_err(|err| format!("保存文件失败: {err}"))?;
 
-    let file_hash = compute_file_hash(&bytes);
-    let _ = update_message_local_path(
-        &state.db_path,
-        &record.endpoint_id,
-        &record.filename,
-        &final_path,
-        bytes.len() as i64,
-        Some(file_hash),
-    );
     persist_download_history(
         &state,
         &record.endpoint_id,
         &record.filename,
         &record.original_name,
-        Some(&final_path),
+        Some(&download.final_path),
         "complete",
         None,
-        bytes.len() as i64,
+        download.file_size,
     )?;
 
     Ok(DownloadResult {
         status: "saved".to_string(),
-        path: Some(final_path.to_string_lossy().to_string()),
+        path: Some(download.final_path.to_string_lossy().to_string()),
         suggested_path: None,
+        transfer_mode: Some(download.transfer_mode.as_str().to_string()),
     })
 }
 
@@ -2000,7 +2312,8 @@ async fn backup_webdav(
         let download_result =
             webdav::download_file_stream(&state.http, &endpoint, remote_path).await;
         match download_result {
-            Ok((mut stream, _)) => {
+            Ok(response) => {
+                let mut stream = response.stream;
                 // Use std::fs::File (Blocking write) as tokio::fs is not enabled
                 let mut temp_file = std::fs::File::create(&temp_file_path)
                     .map_err(|e| format!("创���临时文件失败: {}", e))?;
@@ -3184,8 +3497,22 @@ fn compute_file_hash(data: &[u8]) -> String {
     format!("{:x}", result)
 }
 
-fn compute_file_hash_from_path(path: &Path) -> Option<String> {
-    fs::read(path).ok().map(|data| compute_file_hash(&data))
+fn compute_file_hash_from_path(path: &Path) -> Result<String, String> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path).map_err(|err| format!("读取已下载文件失败: {err}"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|err| format!("读取已下载文件失败: {err}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -3350,6 +3677,9 @@ fn emit_download_progress(
     filename: &str,
     received: u64,
     total: Option<u64>,
+    transfer_mode: Option<DownloadTransferMode>,
+    range_start: Option<u64>,
+    range_end: Option<u64>,
     status: &str,
     error: Option<String>,
 ) {
@@ -3358,6 +3688,9 @@ fn emit_download_progress(
         filename: filename.to_string(),
         received,
         total,
+        transfer_mode: transfer_mode.map(|value| value.as_str().to_string()),
+        range_start,
+        range_end,
         status: status.to_string(),
         error,
     };
