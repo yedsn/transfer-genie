@@ -195,6 +195,57 @@
                 </div>
               </div>
 
+              <div class="settings-group">
+                <h3 class="settings-group-title">Telegram Bridge</h3>
+                <div class="settings-group-content">
+                  <label>
+                    Telegram Bot Token
+                    <input id="telegram-bot-token" type="password" placeholder="123456:ABC..." />
+                  </label>
+                  <label class="toggle-left">
+                    <span class="toggle-label">启用 Telegram 代理</span>
+                    <input id="telegram-proxy-enabled" type="checkbox" />
+                  </label>
+                  <label>
+                    Telegram 代理
+                    <input id="telegram-proxy-url" type="text" placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:1080" />
+                    <span class="field-hint">默认 `http://127.0.0.1:7890`；仅在启用代理后用于 Telegram 请求。</span>
+                  </label>
+                  <label>
+                    Telegram Chat ID
+                    <div class="field-row">
+                      <input id="telegram-chat-id" type="text" placeholder="-1001234567890" />
+                      <button id="telegram-discover-chat-id" class="button ghost small" type="button">自动获取</button>
+                    </div>
+                    <span class="field-hint">先给 bot 或目标群发一条消息，再点自动获取。</span>
+                  </label>
+                  <div id="telegram-chat-candidates" class="telegram-chat-candidates" hidden></div>
+                  <label>
+                    轮询间隔（秒）
+                    <input id="telegram-poll-interval" type="number" min="1" step="1" />
+                  </label>
+                  <span class="field-hint">Telegram bridge 始终跟随当前活动的 WebDAV 端点，切换端点时运行中的服务会自动重启。</span>
+                  <div class="telegram-bridge-actions">
+                    <label class="toggle-left telegram-inline-toggle">
+                      <span class="toggle-label">自启动服务</span>
+                      <input id="telegram-auto-start" type="checkbox" />
+                    </label>
+                    <button id="telegram-start-service" class="button ghost" type="button">启动服务</button>
+                    <button id="telegram-stop-service" class="button ghost" type="button">停止服务</button>
+                  </div>
+                  <div class="telegram-bridge-status-card">
+                    <div class="telegram-bridge-status-row">
+                      <span class="telegram-bridge-status-label">运行状态</span>
+                      <span id="telegram-bridge-status" class="telegram-bridge-status-value">未获取</span>
+                    </div>
+                    <div class="telegram-bridge-status-row">
+                      <span class="telegram-bridge-status-label">最近错误</span>
+                      <span id="telegram-bridge-last-error" class="telegram-bridge-error">无</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <button id="save-settings" class="button primary">保存设置</button>
 
               <div class="settings-group">

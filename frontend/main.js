@@ -36,6 +36,18 @@ const downloadDirInput = document.getElementById('download-dir');
 const chooseDownloadDirButton = document.getElementById('choose-download-dir');
 const downloadDirHint = document.getElementById('download-dir-hint');
 const autoStartInput = document.getElementById('auto-start');
+const telegramAutoStartInput = document.getElementById('telegram-auto-start');
+const telegramBotTokenInput = document.getElementById('telegram-bot-token');
+const telegramProxyEnabledInput = document.getElementById('telegram-proxy-enabled');
+const telegramProxyUrlInput = document.getElementById('telegram-proxy-url');
+const telegramChatIdInput = document.getElementById('telegram-chat-id');
+const telegramDiscoverChatIdButton = document.getElementById('telegram-discover-chat-id');
+const telegramChatCandidates = document.getElementById('telegram-chat-candidates');
+const telegramPollIntervalInput = document.getElementById('telegram-poll-interval');
+const telegramStartServiceButton = document.getElementById('telegram-start-service');
+const telegramStopServiceButton = document.getElementById('telegram-stop-service');
+const telegramBridgeStatusLabel = document.getElementById('telegram-bridge-status');
+const telegramBridgeLastErrorLabel = document.getElementById('telegram-bridge-last-error');
 const globalHotkeyInput = document.getElementById('global-hotkey');
 const globalHotkeyEnabledInput = document.getElementById('global-hotkey-enabled');
 const sendHotkeyInputs = document.querySelectorAll('input[name="send-hotkey"]');
@@ -84,7 +96,10 @@ const MESSAGE_BODY_COLLAPSE_HEIGHT = 260;
 let isManualRefreshRunning = false;
 let isLoadMessagesRunning = false;
 let isLoadSyncStatusRunning = false;
+let telegramBridgeStatusPollTimer = null;
 const MANUAL_REFRESH_TIMEOUT_MS = 45_000;
+const DEFAULT_TELEGRAM_POLL_INTERVAL_SECS = 5;
+const TELEGRAM_BRIDGE_STATUS_POLL_MS = 5000;
 
 // 发送状态常量
 const SEND_STATUS = {
@@ -507,6 +522,7 @@ function renderEndpointSelect() {
   });
 }
 
+
 function renderWebdavEndpoints() {
   if (!webdavList) return;
   webdavList.innerHTML = '';
@@ -515,6 +531,7 @@ function renderWebdavEndpoints() {
     empty.className = 'endpoint-empty';
     empty.textContent = '暂无 WebDAV 端点';
     webdavList.appendChild(empty);
+    syncTelegramControlsState();
     return;
   }
   webdavEndpoints.forEach((endpoint) => {
@@ -709,6 +726,7 @@ function renderWebdavEndpoints() {
     card.appendChild(speedTestResult);
     webdavList.appendChild(card);
   });
+  syncTelegramControlsState();
 }
 
 function collectEndpointPayload() {
@@ -3128,6 +3146,301 @@ async function waitForSyncToFinish(maxWaitMs = MANUAL_REFRESH_TIMEOUT_MS) {
   return null;
 }
 
+function normalizeTelegramPollInterval(value) {
+  return Math.max(DEFAULT_TELEGRAM_POLL_INTERVAL_SECS, Number(value) || DEFAULT_TELEGRAM_POLL_INTERVAL_SECS);
+}
+
+function getTelegramBridgeFormState() {
+  const botToken = telegramBotTokenInput ? telegramBotTokenInput.value.trim() : '';
+  const chatId = telegramChatIdInput ? telegramChatIdInput.value.trim() : '';
+  const hasActiveEndpoint = !!getActiveEndpoint();
+  return {
+    botToken,
+    chatId,
+    isConfigured: !!botToken && /^-?\d+$/.test(chatId) && hasActiveEndpoint,
+  };
+}
+
+function hasUsableActiveEndpoint() {
+  return !!getActiveEndpoint();
+}
+
+
+function syncTelegramProxyControlsState() {
+  const proxyEnabled = telegramProxyEnabledInput ? telegramProxyEnabledInput.checked : false;
+  if (telegramProxyUrlInput) {
+    telegramProxyUrlInput.disabled = !proxyEnabled;
+  }
+}
+
+function syncTelegramControlsState() {
+  const { isConfigured } = getTelegramBridgeFormState();
+  const running = telegramBridgeStatusLabel?.dataset.running === 'true';
+  if (telegramStartServiceButton) {
+    telegramStartServiceButton.disabled = running || !isConfigured;
+    telegramStartServiceButton.hidden = running;
+  }
+  if (telegramStopServiceButton) {
+    telegramStopServiceButton.disabled = !running;
+    telegramStopServiceButton.hidden = !running;
+  }
+}
+
+function setTelegramBridgeStatus(status) {
+  if (!telegramBridgeStatusLabel || !telegramBridgeLastErrorLabel) return;
+  const running = !!status?.running;
+  telegramBridgeStatusLabel.dataset.running = running ? 'true' : 'false';
+  telegramBridgeStatusLabel.classList.toggle('is-running', running);
+  telegramBridgeStatusLabel.classList.toggle('is-stopped', !running);
+  if (running) {
+    const startedAt = status?.last_started_ms ? formatTime(status.last_started_ms) : '';
+    telegramBridgeStatusLabel.textContent = startedAt
+      ? `运行中 · ${startedAt}`
+      : '运行中';
+  } else if (status?.last_stopped_ms) {
+    telegramBridgeStatusLabel.textContent = `已停止 · ${formatTime(status.last_stopped_ms)}`;
+  } else {
+    telegramBridgeStatusLabel.textContent = '未运行';
+  }
+  telegramBridgeLastErrorLabel.textContent = status?.last_error || '无';
+  syncTelegramControlsState();
+}
+
+async function loadTelegramBridgeStatus(options = {}) {
+  try {
+    if (!invoke) return;
+    const status = await invoke('get_telegram_bridge_status');
+    setTelegramBridgeStatus(status);
+  } catch (error) {
+    await showInfoDialog({
+      title: '获取 Chat ID 失败',
+      message: `获取 Chat ID 失败：${error}`,
+    });
+    if (!options.silent) {
+      setErrorStatus(`读取 Telegram bridge 状态失败：${error}`);
+    }
+  }
+}
+
+async function loadTelegramBridgeStatus(options = {}) {
+  try {
+    if (!invoke) return;
+    const status = await invoke('get_telegram_bridge_status');
+    setTelegramBridgeStatus(status);
+  } catch (error) {
+    if (!options.silent) {
+      setErrorStatus(`读取 Telegram bridge 状态失败：${error}`);
+    }
+  }
+}
+
+function clearTelegramChatCandidates() {
+  if (!telegramChatCandidates) return;
+  telegramChatCandidates.innerHTML = '';
+  telegramChatCandidates.hidden = true;
+}
+
+function renderTelegramChatCandidates(candidates) {
+  if (!telegramChatCandidates) return;
+  telegramChatCandidates.innerHTML = '';
+  const list = Array.isArray(candidates) ? candidates : [];
+  if (list.length === 0) {
+    telegramChatCandidates.hidden = true;
+    return;
+  }
+
+  list.forEach((candidate) => {
+    const row = document.createElement('div');
+    row.className = 'telegram-chat-candidate';
+
+    const meta = document.createElement('div');
+    meta.className = 'telegram-chat-candidate-meta';
+
+    const title = document.createElement('div');
+    title.className = 'telegram-chat-candidate-title';
+    title.textContent = candidate.title || '未命名聊天';
+
+    const subtitle = document.createElement('div');
+    subtitle.className = 'telegram-chat-candidate-subtitle';
+    subtitle.textContent = `${candidate.chat_type || 'chat'} · ${candidate.id || ''}`;
+
+    const applyButton = document.createElement('button');
+    applyButton.type = 'button';
+    applyButton.className = 'button ghost small';
+    applyButton.textContent = '使用';
+    applyButton.addEventListener('click', () => {
+      if (telegramChatIdInput) {
+        telegramChatIdInput.value = candidate.id || '';
+      }
+      setSuccessStatus(`已填入 Chat ID：${candidate.id}`);
+    });
+
+    meta.appendChild(title);
+    meta.appendChild(subtitle);
+    row.appendChild(meta);
+    row.appendChild(applyButton);
+    telegramChatCandidates.appendChild(row);
+  });
+
+  telegramChatCandidates.hidden = false;
+}
+
+async function discoverTelegramChats() {
+  try {
+    if (!invoke) {
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
+      return;
+    }
+    const botToken = telegramBotTokenInput ? telegramBotTokenInput.value.trim() : '';
+    const proxyEnabled = telegramProxyEnabledInput ? telegramProxyEnabledInput.checked : false;
+    const proxyUrl = proxyEnabled && telegramProxyUrlInput ? telegramProxyUrlInput.value.trim() : '';
+    if (!botToken) {
+      setErrorStatus('请先填写 Telegram Bot Token');
+      return;
+    }
+    if (telegramDiscoverChatIdButton) {
+      telegramDiscoverChatIdButton.disabled = true;
+      telegramDiscoverChatIdButton.textContent = '获取中...';
+    }
+    const candidates = await invoke('discover_telegram_chats', { botToken, proxyUrl });
+    if (candidates.length === 1) {
+      if (telegramChatIdInput) {
+        telegramChatIdInput.value = candidates[0].id || '';
+      }
+      clearTelegramChatCandidates();
+      syncTelegramControlsState();
+      await showInfoDialog({
+        title: '获取 Chat ID 成功',
+        message: `已自动填入 Chat ID：${candidates[0].id}`,
+      });
+      setSuccessStatus(`已自动填入 Chat ID：${candidates[0].id}`);
+      return;
+    }
+    renderTelegramChatCandidates(candidates);
+    await showInfoDialog({
+      title: '获取 Chat ID 成功',
+      message: `已发现 ${candidates.length} 个聊天候选，请在列表中点击“使用”应用到 Chat ID。`,
+    });
+    setSuccessStatus(`已发现 ${candidates.length} 个聊天候选`);
+  } catch (error) {
+    clearTelegramChatCandidates();
+    setErrorStatus(`获取 Chat ID 失败：${error}`);
+  } finally {
+    if (telegramDiscoverChatIdButton) {
+      telegramDiscoverChatIdButton.disabled = false;
+      telegramDiscoverChatIdButton.textContent = '自动获取';
+    }
+  }
+}
+
+async function discoverTelegramChatsWithFeedback() {
+  try {
+    if (!invoke) {
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
+      await showInfoDialog({
+        title: '获取 Chat ID 失败',
+        message: '未检测到 Tauri API，请检查 app.withGlobalTauri 设置',
+      });
+      return;
+    }
+    const botToken = telegramBotTokenInput ? telegramBotTokenInput.value.trim() : '';
+    const proxyEnabled = telegramProxyEnabledInput ? telegramProxyEnabledInput.checked : false;
+    const proxyUrl = proxyEnabled && telegramProxyUrlInput ? telegramProxyUrlInput.value.trim() : '';
+    if (!botToken) {
+      setErrorStatus('请先填写 Telegram Bot Token');
+      await showInfoDialog({
+        title: '获取 Chat ID 失败',
+        message: '请先填写 Telegram Bot Token',
+      });
+      return;
+    }
+    if (telegramDiscoverChatIdButton) {
+      telegramDiscoverChatIdButton.disabled = true;
+      telegramDiscoverChatIdButton.textContent = '获取中...';
+    }
+
+    const candidates = await invoke('discover_telegram_chats', { botToken, proxyUrl });
+    if (candidates.length === 1) {
+      if (telegramChatIdInput) {
+        telegramChatIdInput.value = candidates[0].id || '';
+      }
+      clearTelegramChatCandidates();
+      syncTelegramControlsState();
+      setSuccessStatus(`已自动填入 Chat ID：${candidates[0].id}`);
+      await showInfoDialog({
+        title: '获取 Chat ID 成功',
+        message: `已自动填入 Chat ID：${candidates[0].id}`,
+      });
+      return;
+    }
+
+    renderTelegramChatCandidates(candidates);
+    setSuccessStatus(`已发现 ${candidates.length} 个聊天候选`);
+    await showInfoDialog({
+      title: '获取 Chat ID 成功',
+      message: `已发现 ${candidates.length} 个聊天候选，请在列表中点击“使用”应用到 Chat ID。`,
+    });
+  } catch (error) {
+    clearTelegramChatCandidates();
+    setErrorStatus(`获取 Chat ID 失败：${error}`);
+    await showInfoDialog({
+      title: '获取 Chat ID 失败',
+      message: `获取 Chat ID 失败：${error}`,
+    });
+  } finally {
+    if (telegramDiscoverChatIdButton) {
+      telegramDiscoverChatIdButton.disabled = false;
+      telegramDiscoverChatIdButton.textContent = '自动获取';
+    }
+  }
+}
+
+async function startTelegramBridge() {
+  try {
+    if (!invoke) {
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
+      return;
+    }
+    const saved = await saveSettings({
+      requireTelegramBridgeConfig: true,
+      silent: true,
+    });
+    if (!saved) {
+      return;
+    }
+    const status = await invoke('start_telegram_bridge');
+    setTelegramBridgeStatus(status);
+    setSuccessStatus('Telegram bridge 已启动');
+  } catch (error) {
+    await loadTelegramBridgeStatus({ silent: true });
+    setErrorStatus(`启动 Telegram bridge 失败：${error}`);
+  }
+}
+
+async function stopTelegramBridge() {
+  try {
+    if (!invoke) {
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
+      return;
+    }
+    const status = await invoke('stop_telegram_bridge');
+    setTelegramBridgeStatus(status);
+    setSuccessStatus('Telegram bridge 已停止');
+  } catch (error) {
+    await loadTelegramBridgeStatus({ silent: true });
+    setErrorStatus(`停止 Telegram bridge 失败：${error}`);
+  }
+}
+
+function startTelegramBridgeStatusPolling() {
+  if (telegramBridgeStatusPollTimer) {
+    clearInterval(telegramBridgeStatusPollTimer);
+  }
+  telegramBridgeStatusPollTimer = setInterval(() => {
+    loadTelegramBridgeStatus({ silent: true });
+  }, TELEGRAM_BRIDGE_STATUS_POLL_MS);
+}
+
 function applySettings(settings) {
   const endpoints = Array.isArray(settings.webdav_endpoints)
     ? settings.webdav_endpoints
@@ -3170,10 +3483,32 @@ function applySettings(settings) {
   if (globalHotkeyEnabledInput) {
     globalHotkeyEnabledInput.checked = settings.global_hotkey_enabled !== false;
   }
+  const telegram = settings.telegram || {};
+  if (telegramAutoStartInput) {
+    telegramAutoStartInput.checked = telegram.auto_start || false;
+  }
+  if (telegramProxyEnabledInput) {
+    telegramProxyEnabledInput.checked = telegram.proxy_enabled || false;
+  }
+  if (telegramBotTokenInput) {
+    telegramBotTokenInput.value = telegram.bot_token || '';
+  }
+  if (telegramProxyUrlInput) {
+    telegramProxyUrlInput.value = telegram.proxy_url || 'http://127.0.0.1:7890';
+  }
+  if (telegramChatIdInput) {
+    telegramChatIdInput.value = telegram.chat_id || '';
+  }
+  if (telegramPollIntervalInput) {
+    telegramPollIntervalInput.value = normalizeTelegramPollInterval(telegram.poll_interval_secs);
+  }
   syncGlobalHotkeyInputState();
   setSendHotkey(settings.send_hotkey || SEND_HOTKEY.ENTER);
   renderWebdavEndpoints();
   renderEndpointSelect();
+  clearTelegramChatCandidates();
+  syncTelegramProxyControlsState();
+  syncTelegramControlsState();
   startRefreshTimer(settings.refresh_interval_secs || 5);
 }
 
@@ -3185,6 +3520,7 @@ async function loadSettings() {
     }
     const settings = await invoke('get_settings');
     applySettings(settings);
+    await loadTelegramBridgeStatus({ silent: true });
     if (getActiveEndpoint()) {
       await loadMessages({ scrollToBottom: true });
     }
@@ -3205,7 +3541,9 @@ async function loadSettings() {
   }
 }
 
-async function saveSettings() {
+async function saveSettings(options = {}) {
+  const requireTelegramBridgeConfig = !!options.requireTelegramBridgeConfig;
+  const silent = !!options.silent;
   const endpoints = collectEndpointPayload();
   for (const endpoint of endpoints) {
     if (endpoint.enabled && !endpoint.url) {
@@ -3221,6 +3559,34 @@ async function saveSettings() {
     setErrorStatus('全局快捷键需包含修饰键，例如 Ctrl+Alt+T');
     return;
   }
+  const telegramFormState = getTelegramBridgeFormState();
+  const telegramBotToken = telegramBotTokenInput ? telegramBotTokenInput.value.trim() : '';
+  const telegramProxyEnabled = telegramProxyEnabledInput ? telegramProxyEnabledInput.checked : false;
+  const telegramProxyUrl = telegramProxyUrlInput ? telegramProxyUrlInput.value.trim() : '';
+  const telegramChatId = telegramChatIdInput ? telegramChatIdInput.value.trim() : '';
+  const telegramPollInterval = normalizeTelegramPollInterval(
+    telegramPollIntervalInput ? telegramPollIntervalInput.value : DEFAULT_TELEGRAM_POLL_INTERVAL_SECS,
+  );
+  const telegramEnabled =
+    requireTelegramBridgeConfig || (telegramAutoStartInput ? telegramAutoStartInput.checked : false);
+  if (telegramEnabled) {
+    if (!telegramBotToken) {
+      setErrorStatus('启用 Telegram bridge 前请先填写 Bot Token');
+      return;
+    }
+    if (!telegramChatId) {
+      setErrorStatus('启用 Telegram bridge 前请先填写 Chat ID');
+      return;
+    }
+    if (!/^-?\d+$/.test(telegramChatId)) {
+      setErrorStatus('Telegram Chat ID 格式无效');
+      return;
+    }
+    if (!hasUsableActiveEndpoint()) {
+      setErrorStatus('启用 Telegram bridge 前请先选择当前可用的 WebDAV 端点');
+      return;
+    }
+  }
   const activeCandidate = endpoints.find(
     (endpoint) => endpoint.id === activeEndpointId && endpoint.enabled && endpoint.url,
   );
@@ -3234,6 +3600,15 @@ async function saveSettings() {
     global_hotkey: normalizedGlobalHotkey || DEFAULT_GLOBAL_HOTKEY,
     send_hotkey: sendHotkey,
     auto_start: autoStartInput ? autoStartInput.checked : false,
+    telegram: {
+      enabled: telegramFormState.isConfigured,
+      auto_start: telegramAutoStartInput ? telegramAutoStartInput.checked : false,
+      bot_token: telegramBotToken,
+      proxy_enabled: telegramProxyEnabled,
+      proxy_url: telegramProxyUrl,
+      chat_id: telegramChatId,
+      poll_interval_secs: telegramPollInterval,
+    },
   };
 
   try {
@@ -3245,6 +3620,7 @@ async function saveSettings() {
     const updated = await invoke('save_settings', { settings: payload });
     setSuccessStatus('设置已保存');
     applySettings(updated);
+    await loadTelegramBridgeStatus({ silent: true });
     setHint(downloadDirHint, '下载目录已保存');
     if (previousActive !== activeEndpointId && getActiveEndpoint()) {
       setSelectionMode(false);
@@ -3255,9 +3631,27 @@ async function saveSettings() {
       await manualRefresh();
       didInitialSync = true;
     }
+    return updated;
   } catch (error) {
     setErrorStatus(`保存设置失败：${error}`);
   }
+}
+
+async function saveSettingsWithFeedback() {
+  const updated = await saveSettings();
+  if (updated) {
+    await showInfoDialog({
+      title: '保存设置成功',
+      message: '设置已保存并生效。',
+    });
+    return updated;
+  }
+
+  await showInfoDialog({
+    title: '保存设置失败',
+    message: syncStatus?.textContent || '保存设置失败，请检查输入后重试。',
+  });
+  return null;
 }
 
 async function exportSettings() {
@@ -3325,6 +3719,7 @@ async function importSettings() {
     const previousActive = activeEndpointId;
     const updated = await invoke('import_settings', { path, password });
     applySettings(updated);
+    await loadTelegramBridgeStatus({ silent: true });
     setSuccessStatus('配置已导入并生效');
     if (previousActive !== activeEndpointId && getActiveEndpoint()) {
       setSelectionMode(false);
@@ -4082,7 +4477,7 @@ if (openDownloadDirButton) {
 }
 sendTextButton.addEventListener('click', sendText);
 sendFileButton.addEventListener('click', selectFiles);
-saveSettingsButton.addEventListener('click', saveSettings);
+saveSettingsButton.addEventListener('click', saveSettingsWithFeedback);
 if (chooseDownloadDirButton) {
   chooseDownloadDirButton.addEventListener('click', chooseDownloadDir);
 }
@@ -4094,6 +4489,28 @@ if (batchSpeedTestButton) {
 }
 if (globalHotkeyEnabledInput) {
   globalHotkeyEnabledInput.addEventListener('change', syncGlobalHotkeyInputState);
+}
+if (telegramProxyEnabledInput) {
+  telegramProxyEnabledInput.addEventListener('change', () => {
+    syncTelegramProxyControlsState();
+    clearTelegramChatCandidates();
+    syncTelegramControlsState();
+  });
+}
+if (telegramBotTokenInput) {
+  telegramBotTokenInput.addEventListener('input', () => {
+    clearTelegramChatCandidates();
+    syncTelegramControlsState();
+  });
+}
+if (telegramProxyUrlInput) {
+  telegramProxyUrlInput.addEventListener('input', clearTelegramChatCandidates);
+}
+if (telegramChatIdInput) {
+  telegramChatIdInput.addEventListener('input', syncTelegramControlsState);
+}
+if (telegramDiscoverChatIdButton) {
+  telegramDiscoverChatIdButton.addEventListener('click', discoverTelegramChatsWithFeedback);
 }
 if (sendHotkeyInputs && sendHotkeyInputs.length > 0) {
   sendHotkeyInputs.forEach((input) => {
@@ -4145,6 +4562,12 @@ if (openLogDirButton) {
 }
 if (openDataDirButton) {
   openDataDirButton.addEventListener('click', openDataDir);
+}
+if (telegramStartServiceButton) {
+  telegramStartServiceButton.addEventListener('click', startTelegramBridge);
+}
+if (telegramStopServiceButton) {
+  telegramStopServiceButton.addEventListener('click', stopTelegramBridge);
 }
 
 if (scrollToBottomButton) {
@@ -4243,6 +4666,9 @@ function handleWindowFocus() {
   focusHomeComposer();
 }
 
+syncTelegramProxyControlsState();
+syncTelegramControlsState();
+startTelegramBridgeStatusPolling();
 loadSettings();
 loadMessages({ scrollToBottom: true });
 loadSyncStatus();
@@ -4305,6 +4731,7 @@ if (listen) {
   // 用于非侵入性操作的通用焦点监听器
   listen('tauri://focus', () => {
     loadSyncStatus();
+    loadTelegramBridgeStatus({ silent: true });
   });
 
   // 拖放事件监听器

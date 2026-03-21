@@ -9,41 +9,41 @@ use std::time::Duration;
 use url::Url;
 
 fn apply_auth(request: RequestBuilder, endpoint: &WebDavEndpoint) -> RequestBuilder {
-  let request = request.timeout(Duration::from_secs(30));
-  if endpoint.username.is_empty() && endpoint.password.is_empty() {
-    request
-  } else {
-    request.basic_auth(endpoint.username.clone(), Some(endpoint.password.clone()))
-  }
+    let request = request.timeout(Duration::from_secs(30));
+    if endpoint.username.is_empty() && endpoint.password.is_empty() {
+        request
+    } else {
+        request.basic_auth(endpoint.username.clone(), Some(endpoint.password.clone()))
+    }
 }
 
 fn base_url(endpoint: &WebDavEndpoint) -> Result<Url, String> {
-  let mut raw = endpoint.url.trim().to_string();
-  if raw.is_empty() {
-    return Err("WebDAV 地址为空".to_string());
-  }
-  if !raw.ends_with('/') {
-    raw.push('/');
-  }
-  Url::parse(&raw).map_err(|err| format!("WebDAV 地址无效: {err}"))
+    let mut raw = endpoint.url.trim().to_string();
+    if raw.is_empty() {
+        return Err("WebDAV 地址为空".to_string());
+    }
+    if !raw.ends_with('/') {
+        raw.push('/');
+    }
+    Url::parse(&raw).map_err(|err| format!("WebDAV 地址无效: {err}"))
 }
 
 pub async fn list_entries(
-  client: &Client,
-  endpoint: &WebDavEndpoint,
-  prefix: Option<&str>,
-  allow_missing: bool,
+    client: &Client,
+    endpoint: &WebDavEndpoint,
+    prefix: Option<&str>,
+    allow_missing: bool,
 ) -> Result<Vec<DavEntry>, String> {
-  let mut url = base_url(endpoint)?;
-  let prefix_trim = prefix.unwrap_or("").trim_matches('/');
-  if !prefix_trim.is_empty() {
-    let target = format!("{}/", prefix_trim);
-    url = url
-      .join(&target)
-      .map_err(|err| format!("WebDAV 路径无效: {err}"))?;
-  }
+    let mut url = base_url(endpoint)?;
+    let prefix_trim = prefix.unwrap_or("").trim_matches('/');
+    if !prefix_trim.is_empty() {
+        let target = format!("{}/", prefix_trim);
+        url = url
+            .join(&target)
+            .map_err(|err| format!("WebDAV 路径无效: {err}"))?;
+    }
 
-  let body = r###"<?xml version="1.0" encoding="utf-8"?>
+    let body = r###"<?xml version="1.0" encoding="utf-8"?>
 <d:propfind xmlns:d="DAV:">
   <d:prop>
     <d:displayname/>
@@ -54,54 +54,59 @@ pub async fn list_entries(
   </d:prop>
 </d:propfind>"###;
 
-  let request = client
-    .request(Method::from_bytes(b"PROPFIND").map_err(|e| e.to_string())?, url.clone())
-    .header("Depth", "1")
-    .header("Content-Type", "application/xml")
-    .body(body.to_string());
+    let request = client
+        .request(
+            Method::from_bytes(b"PROPFIND").map_err(|e| e.to_string())?,
+            url.clone(),
+        )
+        .header("Depth", "1")
+        .header("Content-Type", "application/xml")
+        .body(body.to_string());
 
-  info!("Sending PROPFIND request to: {}", url);
+    info!("Sending PROPFIND request to: {}", url);
 
-  let response = apply_auth(request, endpoint)
-    .send()
-    .await
-    .map_err(|err| format!("WebDAV 请求失败: {err}"))?;
+    let response = apply_auth(request, endpoint)
+        .send()
+        .await
+        .map_err(|err| format!("WebDAV 请求失败: {err}"))?;
 
-  let status = response.status();
-  info!("Received response with status: {}", status);
+    let status = response.status();
+    info!("Received response with status: {}", status);
 
-  let text = response
-    .text()
-    .await
-    .map_err(|err| format!("读取 WebDAV 响应失败: {err}"))?;
+    let text = response
+        .text()
+        .await
+        .map_err(|err| format!("读取 WebDAV 响应失败: {err}"))?;
 
-  // info!("Received response body:\n---\n{}\n---", &text);
+    // info!("Received response body:\n---\n{}\n---", &text);
 
-  if !status.is_success() {
-    if allow_missing && status.as_u16() == 404 {
-      return Ok(Vec::new());
+    if !status.is_success() {
+        if allow_missing && status.as_u16() == 404 {
+            return Ok(Vec::new());
+        }
+        return Err(format!("WebDAV 列表失败: HTTP {}", status));
     }
-    return Err(format!("WebDAV 列表失败: HTTP {}", status));
-  }
 
-  let entries = parse_propfind_response(&text, endpoint)?;
+    let entries = parse_propfind_response(&text, endpoint)?;
 
-  // info!("Entries: {:#?}", entries);
+    // info!("Entries: {:#?}", entries);
 
-  let request_path = prefix.unwrap_or("").trim_matches('/');
-  Ok(entries
-    .into_iter()
-    .filter(|entry| {
-      let is_self = entry.remote_path.trim_matches('/') == request_path;
-      // The python script also checks for empty name from href.
-      let is_empty = entry.filename.is_empty();
-      !is_self && !is_empty
-    })
-    .collect())
+    let request_path = prefix.unwrap_or("").trim_matches('/');
+    Ok(entries
+        .into_iter()
+        .filter(|entry| {
+            let is_self = entry.remote_path.trim_matches('/') == request_path;
+            // The python script also checks for empty name from href.
+            let is_empty = entry.filename.is_empty();
+            !is_self && !is_empty
+        })
+        .collect())
 }
 
-
-fn parse_propfind_response(xml_text: &str, endpoint: &WebDavEndpoint) -> Result<Vec<DavEntry>, String> {
+fn parse_propfind_response(
+    xml_text: &str,
+    endpoint: &WebDavEndpoint,
+) -> Result<Vec<DavEntry>, String> {
     let mut reader = Reader::from_str(xml_text);
     reader.trim_text(true);
     let mut entries = Vec::new();
@@ -116,7 +121,7 @@ fn parse_propfind_response(xml_text: &str, endpoint: &WebDavEndpoint) -> Result<
                     if name.as_ref().ends_with(b"response") {
                         if let Some(entry) = parse_response_entry(&mut reader, endpoint)? {
                             entries.push(entry);
-                        } 
+                        }
                     }
                 } else if let Event::Eof = event {
                     break;
@@ -130,7 +135,10 @@ fn parse_propfind_response(xml_text: &str, endpoint: &WebDavEndpoint) -> Result<
     Ok(entries)
 }
 
-fn parse_response_entry(reader: &mut Reader<&[u8]>, endpoint: &WebDavEndpoint) -> Result<Option<DavEntry>, String> {
+fn parse_response_entry(
+    reader: &mut Reader<&[u8]>,
+    endpoint: &WebDavEndpoint,
+) -> Result<Option<DavEntry>, String> {
     let mut entry = DavEntry::default();
     let mut buffer = Vec::new();
     let mut prop_name = String::new();
@@ -143,7 +151,7 @@ fn parse_response_entry(reader: &mut Reader<&[u8]>, endpoint: &WebDavEndpoint) -
                 level += 1;
                 // Convert tag name to string for easier suffix checking
                 let tag_name = String::from_utf8_lossy(e.name().as_ref()).to_lowercase();
-                
+
                 // Store the tag name to process text content later
                 // We use a simplified name (suffix) for matching properties
                 if tag_name.ends_with("propstat") {
@@ -191,7 +199,7 @@ fn parse_response_entry(reader: &mut Reader<&[u8]>, endpoint: &WebDavEndpoint) -
         }
         buffer.clear();
     }
-    
+
     finalize_entry(&mut entry, endpoint)?;
     if entry.filename.is_empty() {
         return Ok(None);
@@ -208,7 +216,7 @@ fn finalize_entry(entry: &mut DavEntry, endpoint: &WebDavEndpoint) -> Result<(),
     // Keep base path and href encoded for consistent filename handling
     let base_path_encoded = base.path().to_string();
     let href_encoded = entry.href.clone();
-    
+
     // Extract the path part if href is a full URL, otherwise use it as is (absolute path)
     let href_path = if let Ok(href_url) = Url::parse(&entry.href) {
         href_url.path().to_string()
@@ -218,294 +226,313 @@ fn finalize_entry(entry: &mut DavEntry, endpoint: &WebDavEndpoint) -> Result<(),
 
     // Calculate the relative path by removing the base path prefix
     if href_path.starts_with(&base_path_encoded) {
-        entry.remote_path = href_path[base_path_encoded.len()..].trim_matches('/').to_string();
+        entry.remote_path = href_path[base_path_encoded.len()..]
+            .trim_matches('/')
+            .to_string();
     } else {
         // Fallback: if it's not under base_path, just use the trimmed absolute path
         entry.remote_path = href_path.trim_matches('/').to_string();
     }
 
     // Extract filename from the path (it will remain encoded)
-    entry.filename = href_path.trim_end_matches('/').split('/').last().unwrap_or("").to_string();
-    
+    entry.filename = href_path
+        .trim_end_matches('/')
+        .split('/')
+        .last()
+        .unwrap_or("")
+        .to_string();
+
     Ok(())
 }
 
 pub async fn download_file(
-  client: &Client,
-  endpoint: &WebDavEndpoint,
-  remote_path: &str,
+    client: &Client,
+    endpoint: &WebDavEndpoint,
+    remote_path: &str,
 ) -> Result<Vec<u8>, String> {
-  let mut url = base_url(endpoint)?;
-  url = url
-    .join(remote_path)
-    .map_err(|err| format!("文件地址无效: {err}"))?;
+    let mut url = base_url(endpoint)?;
+    url = url
+        .join(remote_path)
+        .map_err(|err| format!("文件地址无效: {err}"))?;
 
-  log::info!("Downloading file from: {}", url);
+    log::info!("Downloading file from: {}", url);
 
-  let request = client.get(url.clone());
-  // log::info!("Request: {:?}", request);
-  let response = apply_auth(request, endpoint)
-    .send()
-    .await
-    .map_err(|err| format!("下载失败: {err}"))?;
+    let request = client.get(url.clone());
+    // log::info!("Request: {:?}", request);
+    let response = apply_auth(request, endpoint)
+        .send()
+        .await
+        .map_err(|err| format!("下载失败: {err}"))?;
 
-  let status = response.status();
-  if !status.is_success() {
-    info!("Failed to download '{}'. HTTP Status: {}", url, status);
-    return Err(format!("下载失败: HTTP {}", status));
-  }
+    let status = response.status();
+    if !status.is_success() {
+        info!("Failed to download '{}'. HTTP Status: {}", url, status);
+        return Err(format!("下载失败: HTTP {}", status));
+    }
 
-  response
-    .bytes()
-    .await
-    .map(|bytes| bytes.to_vec())
-    .map_err(|err| format!("读取下载内容失败: {err}"))
+    response
+        .bytes()
+        .await
+        .map(|bytes| bytes.to_vec())
+        .map_err(|err| format!("读取下载内容失败: {err}"))
 }
 
 pub async fn download_file_with_progress<F>(
-  client: &Client,
-  endpoint: &WebDavEndpoint,
-  remote_path: &str,
-  mut on_progress: F,
+    client: &Client,
+    endpoint: &WebDavEndpoint,
+    remote_path: &str,
+    mut on_progress: F,
 ) -> Result<Vec<u8>, String>
 where
-  F: FnMut(u64, Option<u64>),
+    F: FnMut(u64, Option<u64>),
 {
-  let mut url = base_url(endpoint)?;
-  url = url
-    .join(remote_path)
-    .map_err(|err| format!("文件地址无效: {err}"))?;
+    let mut url = base_url(endpoint)?;
+    url = url
+        .join(remote_path)
+        .map_err(|err| format!("文件地址无效: {err}"))?;
 
-  let request = client.get(url);
-  let response = apply_auth(request, endpoint)
-    .send()
-    .await
-    .map_err(|err| format!("下载失败: {err}"))?;
+    let request = client.get(url);
+    let response = apply_auth(request, endpoint)
+        .send()
+        .await
+        .map_err(|err| format!("下载失败: {err}"))?;
 
-  let status = response.status();
-  if !status.is_success() {
-    return Err(format!("下载失败: HTTP {}", status));
-  }
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("下载失败: HTTP {}", status));
+    }
 
-  let total = response.content_length();
-  let mut stream = response.bytes_stream();
-  let mut bytes = Vec::new();
-  let mut received = 0u64;
-  on_progress(received, total);
-  while let Some(chunk) = stream.next().await {
-    let chunk = chunk.map_err(|err| format!("读取下载内容失败: {err}"))?;
-    received += chunk.len() as u64;
-    bytes.extend_from_slice(&chunk);
+    let total = response.content_length();
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    let mut received = 0u64;
     on_progress(received, total);
-  }
-  Ok(bytes)
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|err| format!("读取下载内容失败: {err}"))?;
+        received += chunk.len() as u64;
+        bytes.extend_from_slice(&chunk);
+        on_progress(received, total);
+    }
+    Ok(bytes)
 }
 
 pub async fn download_file_stream(
-  client: &Client,
-  endpoint: &WebDavEndpoint,
-  remote_path: &str,
-) -> Result<(impl futures_util::Stream<Item = reqwest::Result<Bytes>>, Option<u64>), String> {
-  let mut url = base_url(endpoint)?;
-  url = url
-    .join(remote_path)
-    .map_err(|err| format!("文件地址无效: {err}"))?;
+    client: &Client,
+    endpoint: &WebDavEndpoint,
+    remote_path: &str,
+) -> Result<
+    (
+        impl futures_util::Stream<Item = reqwest::Result<Bytes>>,
+        Option<u64>,
+    ),
+    String,
+> {
+    let mut url = base_url(endpoint)?;
+    url = url
+        .join(remote_path)
+        .map_err(|err| format!("文件地址无效: {err}"))?;
 
-  let request = client.get(url);
-  let response = apply_auth(request, endpoint)
-    .send()
-    .await
-    .map_err(|err| format!("下载失败: {err}"))?;
+    let request = client.get(url);
+    let response = apply_auth(request, endpoint)
+        .send()
+        .await
+        .map_err(|err| format!("下载失败: {err}"))?;
 
-  let status = response.status();
-  if !status.is_success() {
-    return Err(format!("下载失败: HTTP {}", status));
-  }
-  let len = response.content_length();
-  Ok((response.bytes_stream(), len))
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("下载失败: HTTP {}", status));
+    }
+    let len = response.content_length();
+    Ok((response.bytes_stream(), len))
 }
 
 pub async fn upload_file_stream<S, E>(
-  client: &Client,
-  endpoint: &WebDavEndpoint,
-  remote_path: &str,
-  stream: S,
-  content_length: u64,
+    client: &Client,
+    endpoint: &WebDavEndpoint,
+    remote_path: &str,
+    stream: S,
+    content_length: u64,
 ) -> Result<(), String>
 where
-  S: futures_util::Stream<Item = Result<Bytes, E>> + Send + Sync + 'static,
-  E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    S: futures_util::Stream<Item = Result<Bytes, E>> + Send + Sync + 'static,
+    E: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
-  let mut url = base_url(endpoint)?;
-  url = url
-    .join(remote_path)
-    .map_err(|err| format!("上传地址无效: {err}"))?;
+    let mut url = base_url(endpoint)?;
+    url = url
+        .join(remote_path)
+        .map_err(|err| format!("上传地址无效: {err}"))?;
 
-  // Explicitly set Content-Length to avoid "411 Length Required"
-  let body = Body::wrap_stream(stream);
-  let request = client
-    .put(url)
-    .header("Content-Length", content_length.to_string())
-    .body(body);
-    
-  let response = apply_auth(request, endpoint)
-    .send()
-    .await
-    .map_err(|err| format!("上传失败: {err}"))?;
+    // Explicitly set Content-Length to avoid "411 Length Required"
+    let body = Body::wrap_stream(stream);
+    let request = client
+        .put(url)
+        .header("Content-Length", content_length.to_string())
+        .body(body);
 
-  let status = response.status();
-  if !status.is_success() {
-    return Err(format!("上传失败: HTTP {}", status));
-  }
-  Ok(())
+    let response = apply_auth(request, endpoint)
+        .send()
+        .await
+        .map_err(|err| format!("上传失败: {err}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("上传失败: HTTP {}", status));
+    }
+    Ok(())
 }
 
 pub async fn download_optional_file(
-  client: &Client,
-  endpoint: &WebDavEndpoint,
-  remote_path: &str,
+    client: &Client,
+    endpoint: &WebDavEndpoint,
+    remote_path: &str,
 ) -> Result<Option<Vec<u8>>, String> {
-  let mut url = base_url(endpoint)?;
-  url = url
-    .join(remote_path)
-    .map_err(|err| format!("文件地址无效: {err}"))?;
+    let mut url = base_url(endpoint)?;
+    url = url
+        .join(remote_path)
+        .map_err(|err| format!("文件地址无效: {err}"))?;
 
-  let request = client.get(url);
-  let response = apply_auth(request, endpoint)
-    .send()
-    .await
-    .map_err(|err| format!("下载失败: {err}"))?;
+    let request = client.get(url);
+    let response = apply_auth(request, endpoint)
+        .send()
+        .await
+        .map_err(|err| format!("下载失败: {err}"))?;
 
-  let status = response.status();
-  if status.as_u16() == 404 {
-    return Ok(None);
-  }
-  if !status.is_success() {
-    return Err(format!("下载失败: HTTP {}", status));
-  }
+    let status = response.status();
+    if status.as_u16() == 404 {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        return Err(format!("下载失败: HTTP {}", status));
+    }
 
-  response
-    .bytes()
-    .await
-    .map(|bytes| Some(bytes.to_vec()))
-    .map_err(|err| format!("读取下载内容失败: {err}"))
+    response
+        .bytes()
+        .await
+        .map(|bytes| Some(bytes.to_vec()))
+        .map_err(|err| format!("读取下载内容失败: {err}"))
 }
 
 pub async fn upload_file(
-  client: &Client,
-  endpoint: &WebDavEndpoint,
-  remote_path: &str,
-  data: Vec<u8>,
+    client: &Client,
+    endpoint: &WebDavEndpoint,
+    remote_path: &str,
+    data: Vec<u8>,
 ) -> Result<(), String> {
-  let mut url = base_url(endpoint)?;
-  url = url
-    .join(remote_path)
-    .map_err(|err| format!("上传地址无效: {err}"))?;
+    let mut url = base_url(endpoint)?;
+    url = url
+        .join(remote_path)
+        .map_err(|err| format!("上传地址无效: {err}"))?;
 
-  let request = client.put(url).body(data);
-  let response = apply_auth(request, endpoint)
-    .send()
-    .await
-    .map_err(|err| format!("上传失败: {err}"))?;
+    let request = client.put(url).body(data);
+    let response = apply_auth(request, endpoint)
+        .send()
+        .await
+        .map_err(|err| format!("上传失败: {err}"))?;
 
-  let status = response.status();
-  if !status.is_success() {
-    return Err(format!("上传失败: HTTP {}", status));
-  }
-  Ok(())
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("上传失败: HTTP {}", status));
+    }
+    Ok(())
 }
 
 pub async fn upload_file_with_progress<F>(
-  client: &Client,
-  endpoint: &WebDavEndpoint,
-  remote_path: &str,
-  data: Vec<u8>,
-  mut on_progress: F,
+    client: &Client,
+    endpoint: &WebDavEndpoint,
+    remote_path: &str,
+    data: Vec<u8>,
+    mut on_progress: F,
 ) -> Result<(), String>
 where
-  F: FnMut(u64, u64) + Send + 'static,
+    F: FnMut(u64, u64) + Send + 'static,
 {
-  let mut url = base_url(endpoint)?;
-  url = url
-    .join(remote_path)
-    .map_err(|err| format!("上传地址无效: {err}"))?;
+    let mut url = base_url(endpoint)?;
+    url = url
+        .join(remote_path)
+        .map_err(|err| format!("上传地址无效: {err}"))?;
 
-  let total = data.len() as u64;
-  let chunk_size = 64 * 1024;
-  on_progress(0, total);
+    let total = data.len() as u64;
+    let chunk_size = 64 * 1024;
+    on_progress(0, total);
 
-  let mut sent = 0u64;
-  let mut on_progress = on_progress;
-  let chunks: Vec<Bytes> = data
-    .chunks(chunk_size)
-    .map(Bytes::copy_from_slice)
-    .collect();
-  let stream = futures_util::stream::iter(chunks.into_iter()).map(move |chunk| {
-    sent += chunk.len() as u64;
-    on_progress(sent, total);
-    Ok::<Bytes, std::io::Error>(chunk)
-  });
+    let mut sent = 0u64;
+    let mut on_progress = on_progress;
+    let chunks: Vec<Bytes> = data
+        .chunks(chunk_size)
+        .map(Bytes::copy_from_slice)
+        .collect();
+    let stream = futures_util::stream::iter(chunks.into_iter()).map(move |chunk| {
+        sent += chunk.len() as u64;
+        on_progress(sent, total);
+        Ok::<Bytes, std::io::Error>(chunk)
+    });
 
-  let body = Body::wrap_stream(stream);
-  let request = client.put(url).body(body);
-  let response = apply_auth(request, endpoint)
-    .send()
-    .await
-    .map_err(|err| format!("上传失败: {err}"))?;
+    let body = Body::wrap_stream(stream);
+    let request = client.put(url).body(body);
+    let response = apply_auth(request, endpoint)
+        .send()
+        .await
+        .map_err(|err| format!("上传失败: {err}"))?;
 
-  let status = response.status();
-  if !status.is_success() {
-    return Err(format!("上传失败: HTTP {}", status));
-  }
-  Ok(())
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("上传失败: HTTP {}", status));
+    }
+    Ok(())
 }
 
 pub async fn delete_file(
-  client: &Client,
-  endpoint: &WebDavEndpoint,
-  remote_path: &str,
-  allow_missing: bool,
+    client: &Client,
+    endpoint: &WebDavEndpoint,
+    remote_path: &str,
+    allow_missing: bool,
 ) -> Result<(), String> {
-  let mut url = base_url(endpoint)?;
-  url = url
-    .join(remote_path)
-    .map_err(|err| format!("删除地址无效: {err}"))?;
+    let mut url = base_url(endpoint)?;
+    url = url
+        .join(remote_path)
+        .map_err(|err| format!("删除地址无效: {err}"))?;
 
-  let request = client.request(Method::from_bytes(b"DELETE").map_err(|e| e.to_string())?, url);
-  let response = apply_auth(request, endpoint)
-    .send()
-    .await
-    .map_err(|err| format!("删除失败: {err}"))?;
+    let request = client.request(
+        Method::from_bytes(b"DELETE").map_err(|e| e.to_string())?,
+        url,
+    );
+    let response = apply_auth(request, endpoint)
+        .send()
+        .await
+        .map_err(|err| format!("删除失败: {err}"))?;
 
-  let status = response.status();
-  if status.is_success() || (allow_missing && status.as_u16() == 404) {
-    return Ok(());
-  }
-  Err(format!("删除失败: HTTP {}", status))
+    let status = response.status();
+    if status.is_success() || (allow_missing && status.as_u16() == 404) {
+        return Ok(());
+    }
+    Err(format!("删除失败: HTTP {}", status))
 }
 
 pub async fn ensure_directory(
-  client: &Client,
-  endpoint: &WebDavEndpoint,
-  remote_path: &str,
+    client: &Client,
+    endpoint: &WebDavEndpoint,
+    remote_path: &str,
 ) -> Result<(), String> {
-  let mut url = base_url(endpoint)?;
-  let target = format!("{}/", remote_path.trim_matches('/'));
-  url = url
-    .join(&target)
-    .map_err(|err| format!("目录地址无效: {err}"))?;
+    let mut url = base_url(endpoint)?;
+    let target = format!("{}/", remote_path.trim_matches('/'));
+    url = url
+        .join(&target)
+        .map_err(|err| format!("目录地址无效: {err}"))?;
 
-  let request = client.request(Method::from_bytes(b"MKCOL").map_err(|e| e.to_string())?, url);
-  let response = apply_auth(request, endpoint)
-    .send()
-    .await
-    .map_err(|err| format!("创建目录失败: {err}"))?;
+    let request = client.request(
+        Method::from_bytes(b"MKCOL").map_err(|e| e.to_string())?,
+        url,
+    );
+    let response = apply_auth(request, endpoint)
+        .send()
+        .await
+        .map_err(|err| format!("创建目录失败: {err}"))?;
 
-  let status = response.status();
-  if status.is_success() || status.as_u16() == 405 {
-    return Ok(());
-  }
-  Err(format!("创建目录失败: HTTP {}", status))
+    let status = response.status();
+    if status.is_success() || status.as_u16() == 405 {
+        return Ok(());
+    }
+    Err(format!("创建目录失败: HTTP {}", status))
 }
 
 #[cfg(test)]

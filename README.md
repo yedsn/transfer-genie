@@ -10,6 +10,7 @@
 - 本地 SQLite 索引
 - 多 WebDAV 端点管理
 - 配置导入/导出
+- 可选的 Telegram 双向桥接服务
 
 ## 开发环境
 请参考：`docs/setup.md`
@@ -31,6 +32,22 @@ cargo tauri dev
 如果出现 `no such command: tauri`：
 - 确认已安装 Tauri CLI：`cargo --list | rg tauri`
 - 重开终端后再运行命令
+
+## Telegram Bridge
+
+Telegram bridge 现在可以直接由主程序托管：
+
+- 在“设置 -> Telegram Bridge”中填写 `Bot Token`、`Chat ID` 和轮询间隔
+- 如 Telegram 访问需要代理，可勾选“启用 Telegram 代理”，默认地址预填 `http://127.0.0.1:7890`，也支持改成 `socks5://127.0.0.1:1080`
+- 可在“启动服务”旁勾选“自启动服务”
+- bridge 会始终跟随当前活动的 WebDAV 端点；切换活动端点时，运行中的 bridge 会自动重启
+- 可在设置页直接自动获取 `Chat ID`、启动/停止 bridge，并查看 bridge 运行状态和最近错误
+
+仍然保留独立运行方式，便于单独调试：
+
+- 启动：`cargo run --bin telegram_bridge -- .\telegram-bridge.json`
+- 配置示例：`examples/telegram-bridge.json`
+- 详细说明：`docs/telegram-bridge.md`
 
 ## 打包发布
 

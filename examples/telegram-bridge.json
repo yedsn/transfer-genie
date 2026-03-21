@@ -1,0 +1,16 @@
+{
+  "telegram_bot_token": "123456:replace-me",
+  "allowed_chat_id": 123456789,
+  "proxy_url": "",
+  "poll_interval_secs": 5,
+  "state_path": "./data/telegram-bridge-state.json",
+  "temp_dir": "./data/telegram-bridge-tmp",
+  "webdav": {
+    "id": "main",
+    "name": "Main WebDAV",
+    "url": "https://example.com/dav/TransferGenie/",
+    "username": "user",
+    "password": "pass",
+    "enabled": true
+  }
+}

@@ -2,6 +2,7 @@
 name = "transfer-genie"
 version = "0.1.0"
 edition = "2021"
+default-run = "transfer-genie"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -13,7 +14,7 @@ aes-gcm = "0.10"
 base64 = "0.21"
 pbkdf2 = "0.12"
 sha2 = "0.10"
-reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls", "stream", "blocking"] }
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls", "stream", "blocking", "multipart"] }
 quick-xml = "0.31"
 url = "2.5"
 percent-encoding = "2.3"
