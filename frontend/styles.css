@@ -188,6 +188,273 @@ body {
   gap: 8px;
 }
 
+.download-task-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid rgba(255, 122, 47, 0.18);
+  border-radius: 16px;
+  background:
+    linear-gradient(135deg, rgba(255, 122, 47, 0.08), rgba(255, 255, 255, 0.92)),
+    var(--panel);
+  box-shadow: 0 10px 28px rgba(15, 15, 25, 0.06);
+}
+
+.downloads-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+  flex: 1;
+  padding: 20px;
+  background: #fff;
+}
+
+.downloads-page-header h2 {
+  margin: 0;
+  font-size: 24px;
+}
+
+.downloads-page-header p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.downloads-page-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 6px 12px;
+}
+
+.downloads-page-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  justify-self: end;
+}
+
+.downloads-page-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.downloads-page-header h2 {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.downloads-page-header p {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.download-task-panel[hidden] {
+  display: none !important;
+}
+
+.download-task-panel-header h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.download-task-summary {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.download-task-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: min(100%, 520px);
+  overflow-y: auto;
+}
+
+.download-task-empty {
+  padding: 24px 16px;
+  border: 1px dashed rgba(225, 215, 206, 0.95);
+  border-radius: 12px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.download-task-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(225, 215, 206, 0.9);
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.download-task-item.with-selection {
+  position: relative;
+  padding-left: 38px;
+}
+
+.download-task-item.is-selected {
+  border-color: #ffc39f;
+  background: rgba(255, 247, 241, 0.98);
+}
+
+.download-task-item.is-active {
+  border-color: rgba(255, 122, 47, 0.3);
+  background: rgba(255, 247, 241, 0.94);
+}
+
+.download-task-item.is-complete {
+  border-color: rgba(77, 162, 101, 0.2);
+}
+
+.download-task-item.is-error {
+  border-color: rgba(211, 47, 47, 0.22);
+  background: rgba(255, 245, 245, 0.92);
+}
+
+.download-task-badge {
+  width: 10px;
+  height: 10px;
+  margin-top: 5px;
+  border-radius: 999px;
+  background: var(--muted);
+  box-shadow: 0 0 0 5px rgba(107, 107, 115, 0.1);
+}
+
+.download-task-item.is-active .download-task-badge {
+  background: var(--accent);
+  box-shadow: 0 0 0 5px rgba(255, 122, 47, 0.14);
+}
+
+.download-task-item.is-complete .download-task-badge {
+  background: #4da265;
+  box-shadow: 0 0 0 5px rgba(77, 162, 101, 0.14);
+}
+
+.download-task-item.is-error .download-task-badge {
+  background: #d32f2f;
+  box-shadow: 0 0 0 5px rgba(211, 47, 47, 0.12);
+}
+
+.download-task-select {
+  position: absolute;
+  left: 12px;
+  top: 14px;
+}
+
+.download-task-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.download-task-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.download-task-title {
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  word-break: break-word;
+}
+
+.download-task-state {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.download-task-item.is-active .download-task-state {
+  color: var(--accent-strong);
+}
+
+.download-task-item.is-complete .download-task-state {
+  color: #2d8a4e;
+}
+
+.download-task-item.is-error .download-task-state {
+  color: #c62828;
+}
+
+.download-task-meta,
+.download-task-detail {
+  font-size: 12px;
+  color: var(--muted);
+  word-break: break-word;
+}
+
+.download-task-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.download-task-progress-bar {
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: #efe4d9;
+  overflow: hidden;
+}
+
+.download-task-progress-fill {
+  width: 0%;
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), #ff9c64);
+  transition: width 0.2s ease;
+}
+
+.download-task-updated {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.download-task-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.download-task-actions .button {
+  min-width: 0;
+}
+
+.download-task-delete {
+  border-color: rgba(211, 47, 47, 0.22);
+  color: #c62828;
+}
+
+.download-task-delete:hover {
+  background: rgba(211, 47, 47, 0.08);
+  border-color: rgba(211, 47, 47, 0.34);
+  color: #b71c1c;
+}
+
 .feed-content {
   position: relative;
   background: var(--panel-soft);
@@ -1800,7 +2067,7 @@ input {
   border-radius: 0;
   padding: 8px 16px 10px;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px;
   box-shadow: none;
   backdrop-filter: none;
@@ -1823,6 +2090,30 @@ input {
   color: var(--muted);
   transition: all 0.25s ease;
   position: relative;
+}
+
+.tab-badge {
+  position: absolute;
+  top: 6px;
+  left: calc(50% + 8px);
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #e5484d;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  border: 2px solid #fff;
+  box-shadow: 0 6px 16px rgba(229, 72, 77, 0.25);
+}
+
+.tab-badge[hidden] {
+  display: none !important;
 }
 
 .tab-button:hover {
@@ -2246,6 +2537,34 @@ body.preview-open {
 
   .feed {
     padding: 16px;
+  }
+
+  .downloads-page {
+    padding: 16px;
+  }
+
+  .downloads-page-header {
+    grid-template-columns: 1fr;
+  }
+
+  .downloads-page-toolbar {
+    grid-column: 1;
+    grid-row: auto;
+    justify-self: stretch;
+    justify-content: space-between;
+  }
+
+  .downloads-page-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .download-task-item {
+    grid-template-columns: auto 1fr;
+  }
+
+  .download-task-updated {
+    grid-column: 2;
   }
 
   .message-list {

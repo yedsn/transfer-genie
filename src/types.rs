@@ -118,6 +118,21 @@ pub struct SyncStatus {
     pub last_result: Option<String>,
 }
 
+#[derive(Clone, Serialize)]
+pub struct DownloadHistoryRecord {
+    pub id: i64,
+    pub endpoint_id: String,
+    pub filename: String,
+    pub original_name: String,
+    pub saved_path: Option<String>,
+    pub status: String,
+    pub error: Option<String>,
+    pub file_size: i64,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub local_exists: bool,
+}
+
 impl SyncStatus {
     pub fn idle() -> Self {
         Self {

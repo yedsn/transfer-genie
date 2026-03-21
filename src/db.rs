@@ -1,7 +1,7 @@
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, ToSql};
 use std::path::Path;
 
-use crate::types::Message;
+use crate::types::{DownloadHistoryRecord, Message};
 
 #[derive(Clone)]
 pub struct DbMessage {
@@ -19,6 +19,20 @@ pub struct DbMessage {
     pub file_hash: Option<String>,
     pub marked: bool,
     pub format: String,
+}
+
+#[derive(Clone)]
+pub struct DbDownloadHistory {
+    pub id: i64,
+    pub endpoint_id: String,
+    pub filename: String,
+    pub original_name: String,
+    pub saved_path: Option<String>,
+    pub status: String,
+    pub error: Option<String>,
+    pub file_size: i64,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
 }
 
 pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), String> {
@@ -51,6 +65,19 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
         local_path TEXT,\
         file_hash TEXT,\
         PRIMARY KEY(endpoint_id, filename)\
+      );\
+      CREATE TABLE IF NOT EXISTS download_history (\
+        id INTEGER PRIMARY KEY AUTOINCREMENT,\
+        endpoint_id TEXT NOT NULL,\
+        filename TEXT NOT NULL,\
+        original_name TEXT NOT NULL,\
+        saved_path TEXT,\
+        status TEXT NOT NULL,\
+        error TEXT,\
+        file_size INTEGER NOT NULL DEFAULT 0,\
+        created_at_ms INTEGER NOT NULL,\
+        updated_at_ms INTEGER NOT NULL,\
+        UNIQUE(endpoint_id, filename)\
       );",
         )
         .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
@@ -185,6 +212,23 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
         )
         .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
     }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS download_history (\
+        id INTEGER PRIMARY KEY AUTOINCREMENT,\
+        endpoint_id TEXT NOT NULL,\
+        filename TEXT NOT NULL,\
+        original_name TEXT NOT NULL,\
+        saved_path TEXT,\
+        status TEXT NOT NULL,\
+        error TEXT,\
+        file_size INTEGER NOT NULL DEFAULT 0,\
+        created_at_ms INTEGER NOT NULL,\
+        updated_at_ms INTEGER NOT NULL,\
+        UNIQUE(endpoint_id, filename)\
+      );",
+    )
+    .map_err(|err| format!("鍏滃叺鏅掓柟璞″瀭鎵曠Щ: {err}"))?;
 
     Ok(())
 }
@@ -396,4 +440,125 @@ pub fn delete_messages_before(
         "DELETE FROM messages WHERE endpoint_id = ?1 AND timestamp_ms < ?2",
         params![endpoint_id, cutoff_ms],
     )
+}
+
+pub fn get_download_history(path: &Path, id: i64) -> rusqlite::Result<Option<DbDownloadHistory>> {
+    let conn = Connection::open(path)?;
+    conn.query_row(
+        "SELECT id, endpoint_id, filename, original_name, saved_path, status, error, file_size, created_at_ms, updated_at_ms \
+         FROM download_history WHERE id = ?1",
+        params![id],
+        |row| {
+            Ok(DbDownloadHistory {
+                id: row.get(0)?,
+                endpoint_id: row.get(1)?,
+                filename: row.get(2)?,
+                original_name: row.get(3)?,
+                saved_path: row.get(4)?,
+                status: row.get(5)?,
+                error: row.get(6)?,
+                file_size: row.get(7)?,
+                created_at_ms: row.get(8)?,
+                updated_at_ms: row.get(9)?,
+            })
+        },
+    )
+    .optional()
+}
+
+fn get_download_history_by_key(
+    conn: &Connection,
+    endpoint_id: &str,
+    filename: &str,
+) -> rusqlite::Result<Option<DbDownloadHistory>> {
+    conn.query_row(
+        "SELECT id, endpoint_id, filename, original_name, saved_path, status, error, file_size, created_at_ms, updated_at_ms \
+         FROM download_history WHERE endpoint_id = ?1 AND filename = ?2",
+        params![endpoint_id, filename],
+        |row| {
+            Ok(DbDownloadHistory {
+                id: row.get(0)?,
+                endpoint_id: row.get(1)?,
+                filename: row.get(2)?,
+                original_name: row.get(3)?,
+                saved_path: row.get(4)?,
+                status: row.get(5)?,
+                error: row.get(6)?,
+                file_size: row.get(7)?,
+                created_at_ms: row.get(8)?,
+                updated_at_ms: row.get(9)?,
+            })
+        },
+    )
+    .optional()
+}
+
+pub fn upsert_download_history(
+    path: &Path,
+    entry: &DbDownloadHistory,
+) -> rusqlite::Result<DbDownloadHistory> {
+    let conn = Connection::open(path)?;
+    conn.execute(
+        "INSERT INTO download_history \
+         (endpoint_id, filename, original_name, saved_path, status, error, file_size, created_at_ms, updated_at_ms) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+         ON CONFLICT(endpoint_id, filename) DO UPDATE SET \
+           original_name=excluded.original_name, \
+           saved_path=COALESCE(excluded.saved_path, download_history.saved_path), \
+           status=excluded.status, \
+           error=excluded.error, \
+           file_size=excluded.file_size, \
+           updated_at_ms=excluded.updated_at_ms",
+        params![
+            entry.endpoint_id,
+            entry.filename,
+            entry.original_name,
+            entry.saved_path,
+            entry.status,
+            entry.error,
+            entry.file_size,
+            entry.created_at_ms,
+            entry.updated_at_ms,
+        ],
+    )?;
+    get_download_history_by_key(&conn, &entry.endpoint_id, &entry.filename)?
+        .ok_or(rusqlite::Error::QueryReturnedNoRows)
+}
+
+pub fn list_download_history(path: &Path) -> rusqlite::Result<Vec<DownloadHistoryRecord>> {
+    let conn = Connection::open(path)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, endpoint_id, filename, original_name, saved_path, status, error, file_size, created_at_ms, updated_at_ms \
+         FROM download_history ORDER BY updated_at_ms DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let saved_path: Option<String> = row.get(4)?;
+        let local_exists = saved_path
+            .as_ref()
+            .map(|path| Path::new(path).is_file())
+            .unwrap_or(false);
+        Ok(DownloadHistoryRecord {
+            id: row.get(0)?,
+            endpoint_id: row.get(1)?,
+            filename: row.get(2)?,
+            original_name: row.get(3)?,
+            saved_path,
+            status: row.get(5)?,
+            error: row.get(6)?,
+            file_size: row.get(7)?,
+            created_at_ms: row.get(8)?,
+            updated_at_ms: row.get(9)?,
+            local_exists,
+        })
+    })?;
+    let mut records = Vec::new();
+    for row in rows {
+        records.push(row?);
+    }
+    Ok(records)
+}
+
+pub fn delete_download_history(path: &Path, id: i64) -> rusqlite::Result<usize> {
+    let conn = Connection::open(path)?;
+    conn.execute("DELETE FROM download_history WHERE id = ?1", params![id])
 }

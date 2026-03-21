@@ -9,7 +9,22 @@ use std::time::Duration;
 use url::Url;
 
 fn apply_auth(request: RequestBuilder, endpoint: &WebDavEndpoint) -> RequestBuilder {
-    let request = request.timeout(Duration::from_secs(30));
+    apply_auth_with_timeout(request, endpoint, Some(Duration::from_secs(30)))
+}
+
+fn apply_auth_without_timeout(request: RequestBuilder, endpoint: &WebDavEndpoint) -> RequestBuilder {
+    apply_auth_with_timeout(request, endpoint, None)
+}
+
+fn apply_auth_with_timeout(
+    request: RequestBuilder,
+    endpoint: &WebDavEndpoint,
+    timeout: Option<Duration>,
+) -> RequestBuilder {
+    let request = match timeout {
+        Some(timeout) => request.timeout(timeout),
+        None => request,
+    };
     if endpoint.username.is_empty() && endpoint.password.is_empty() {
         request
     } else {
@@ -259,7 +274,7 @@ pub async fn download_file(
 
     let request = client.get(url.clone());
     // log::info!("Request: {:?}", request);
-    let response = apply_auth(request, endpoint)
+    let response = apply_auth_without_timeout(request, endpoint)
         .send()
         .await
         .map_err(|err| format!("下载失败: {err}"))?;
@@ -292,7 +307,7 @@ where
         .map_err(|err| format!("文件地址无效: {err}"))?;
 
     let request = client.get(url);
-    let response = apply_auth(request, endpoint)
+    let response = apply_auth_without_timeout(request, endpoint)
         .send()
         .await
         .map_err(|err| format!("下载失败: {err}"))?;
@@ -333,7 +348,7 @@ pub async fn download_file_stream(
         .map_err(|err| format!("文件地址无效: {err}"))?;
 
     let request = client.get(url);
-    let response = apply_auth(request, endpoint)
+    let response = apply_auth_without_timeout(request, endpoint)
         .send()
         .await
         .map_err(|err| format!("下载失败: {err}"))?;

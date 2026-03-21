@@ -12,6 +12,17 @@ const refreshButton = document.getElementById('refresh-btn');
 const refreshLabel = refreshButton ? refreshButton.querySelector('.refresh-label') : null;
 const refreshLabelDefault = refreshLabel ? refreshLabel.textContent : '';
 const openDownloadDirButton = document.getElementById('open-download-dir');
+const downloadsOpenDownloadDirButton = document.getElementById('downloads-open-download-dir');
+const downloadTaskPanel = document.getElementById('download-task-panel');
+const downloadTaskList = document.getElementById('download-task-list');
+const downloadTaskSummary = document.getElementById('download-task-summary');
+const downloadTaskTabBadge = document.getElementById('download-task-tab-badge');
+const downloadToggleSelectionButton = document.getElementById('download-toggle-selection');
+const downloadSelectionBar = document.getElementById('download-selection-bar');
+const downloadSelectionCount = document.getElementById('download-selection-count');
+const downloadSelectAllButton = document.getElementById('download-select-all');
+const downloadDeleteSelectedButton = document.getElementById('download-delete-selected');
+const downloadCancelSelectionButton = document.getElementById('download-cancel-selection');
 const textInput = document.getElementById('text-input');
 const markdownEditorContainer = document.getElementById('markdown-editor');
 const formatInputs = document.querySelectorAll('input[name="message-format"]');
@@ -82,6 +93,7 @@ let didInitialSync = false;
 let webdavEndpoints = [];
 let activeEndpointId = null;
 const downloadProgress = new Map();
+const downloadTasks = new Map();
 const pendingUploads = new Map();
 const pendingSends = new Map(); // 待发送消息的状态管理
 let lastMessages = [];
@@ -90,6 +102,8 @@ const uploadSpeed = new Map();
 let selectionMode = false;
 let markedFilterActive = false;
 const selectedMessages = new Set();
+let downloadSelectionMode = false;
+const selectedDownloadTasks = new Set();
 const expandedTextMessages = new Set();
 let currentPreviewMessage = null;
 const MESSAGE_BODY_COLLAPSE_HEIGHT = 260;
@@ -100,6 +114,7 @@ let telegramBridgeStatusPollTimer = null;
 const MANUAL_REFRESH_TIMEOUT_MS = 45_000;
 const DEFAULT_TELEGRAM_POLL_INTERVAL_SECS = 5;
 const TELEGRAM_BRIDGE_STATUS_POLL_MS = 5000;
+const MAX_RECENT_DOWNLOAD_TASKS = 8;
 
 // 发送状态常量
 const SEND_STATUS = {
@@ -418,17 +433,34 @@ async function openMessageFile(message) {
     setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
     return;
   }
+  let task = null;
   try {
+    task = createDownloadTask(message, 'open');
     const result = await invoke('download_message_file', {
       filename: message.filename,
       originalName: message.original_name,
       conflictAction: 'overwrite',
     });
     if (result.status && result.status !== 'saved') {
+      setDownloadTaskResult(task.key, {
+        status: 'error',
+        error: '下载失败',
+      });
       setErrorStatus('下载失败');
       return;
     }
+    setDownloadTaskResult(task.key, {
+      status: 'complete',
+      path: result.path || '',
+      error: '',
+    });
+    updateMessageDownloadStatus(message.filename, task.endpointId);
   } catch (error) {
+    const key = task?.key || getDownloadTaskKey(message.filename, activeEndpointId || '');
+    setDownloadTaskResult(key, {
+      status: 'error',
+      error: String(error),
+    });
     setErrorStatus(`下载失败：${error}`);
     return;
   }
@@ -797,16 +829,480 @@ function uploadStatusLabel(upload) {
   return '已上传';
 }
 
-function setProgressFor(filename, payload) {
-  if (!filename) return;
-  if (!payload || payload.status !== 'progress') {
-    downloadProgress.delete(filename);
-    return;
-  }
-  downloadProgress.set(filename, payload);
+function getDownloadTaskKey(filename, endpointId = activeEndpointId) {
+  return `${endpointId || 'default'}::${filename || ''}`;
 }
 
-function updateProgressUI(filename) {
+function isDownloadTaskActive(task) {
+  return !!task && (task.status === 'queued' || task.status === 'progress');
+}
+
+function getDownloadTask(filename, endpointId = activeEndpointId) {
+  if (!filename) {
+    return null;
+  }
+  if (endpointId) {
+    const direct = downloadTasks.get(getDownloadTaskKey(filename, endpointId));
+    if (direct) {
+      return direct;
+    }
+  }
+  for (const task of downloadTasks.values()) {
+    if (task.filename === filename && isDownloadTaskActive(task)) {
+      return task;
+    }
+  }
+  return null;
+}
+
+function getDownloadTaskStateLabel(task) {
+  if (!task) {
+    return '';
+  }
+  if (task.status === 'complete') {
+    return '已完成';
+  }
+  if (task.status === 'error') {
+    return '失败';
+  }
+  if (task.status === 'progress') {
+    return '下载中';
+  }
+  return '准备中';
+}
+
+function trimDownloadTasks() {
+  const activeTasks = [];
+  const inactiveTasks = [];
+  downloadTasks.forEach((task) => {
+    if (isDownloadTaskActive(task)) {
+      activeTasks.push(task);
+    } else {
+      inactiveTasks.push(task);
+    }
+  });
+  inactiveTasks.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  const persistedKeys = inactiveTasks
+    .filter((task) => task.persisted || task.historyId)
+    .map((task) => task.key);
+  const keepKeys = new Set([
+    ...activeTasks.map((task) => task.key),
+    ...persistedKeys,
+    ...inactiveTasks
+      .filter((task) => !(task.persisted || task.historyId))
+      .slice(0, MAX_RECENT_DOWNLOAD_TASKS)
+      .map((task) => task.key),
+  ]);
+  Array.from(downloadTasks.keys()).forEach((key) => {
+    if (!keepKeys.has(key)) {
+      downloadTasks.delete(key);
+      downloadSpeed.delete(key);
+    }
+  });
+}
+
+function updateDownloadTaskEntry(task) {
+  if (!task || !task.key) {
+    return null;
+  }
+  const current = downloadTasks.get(task.key) || {};
+  const next = {
+    ...current,
+    ...task,
+    updatedAt: task.updatedAt || Date.now(),
+  };
+  downloadTasks.set(task.key, next);
+  trimDownloadTasks();
+  renderDownloadTasks();
+  updateProgressUI(next.filename, next.endpointId);
+  return next;
+}
+
+function createDownloadTask(message, mode = 'download') {
+  const endpointId = activeEndpointId || '';
+  const endpoint = endpointId
+    ? webdavEndpoints.find((item) => item.id === endpointId)
+    : null;
+  const key = getDownloadTaskKey(message.filename, endpointId);
+  const now = Date.now();
+  return updateDownloadTaskEntry({
+    key,
+    filename: message.filename,
+    originalName: message.original_name || message.filename || 'download.bin',
+    endpointId,
+    endpointLabel: endpoint ? getEndpointLabel(endpoint) : '未选择端点',
+    mode,
+    status: 'queued',
+    received: 0,
+    total: Number(message.size) || 0,
+    createdAt: downloadTasks.get(key)?.createdAt || now,
+    updatedAt: now,
+    path: '',
+    error: '',
+  });
+}
+
+function createPersistedDownloadTask(record) {
+  const endpoint = record?.endpoint_id
+    ? webdavEndpoints.find((item) => item.id === record.endpoint_id)
+    : null;
+  return {
+    key: getDownloadTaskKey(record?.filename, record?.endpoint_id || ''),
+    historyId: record?.id || null,
+    persisted: true,
+    filename: record?.filename || '',
+    originalName: record?.original_name || record?.filename || 'download.bin',
+    endpointId: record?.endpoint_id || '',
+    endpointLabel: endpoint ? getEndpointLabel(endpoint) : '链€夋嫨绔偣',
+    mode: 'history',
+    status: record?.status || 'complete',
+    received: 0,
+    total: Number(record?.file_size) || 0,
+    createdAt: record?.created_at_ms || Date.now(),
+    updatedAt: record?.updated_at_ms || Date.now(),
+    path: record?.saved_path || '',
+    error: record?.error || '',
+    localExists: record?.local_exists !== false,
+  };
+}
+
+function mergePersistedDownloadHistory(records) {
+  const persistedKeys = new Set();
+  (Array.isArray(records) ? records : []).forEach((record) => {
+    const next = createPersistedDownloadTask(record);
+    persistedKeys.add(next.key);
+    const current = downloadTasks.get(next.key);
+    if (current && isDownloadTaskActive(current)) {
+      downloadTasks.set(next.key, {
+        ...current,
+        historyId: next.historyId,
+        persisted: true,
+        localExists: next.localExists,
+        path: next.path || current.path || '',
+        total: next.total || current.total || 0,
+        error: current.error || next.error || '',
+        endpointLabel: next.endpointLabel,
+      });
+      return;
+    }
+    downloadTasks.set(next.key, {
+      ...(current || {}),
+      ...next,
+    });
+  });
+
+  Array.from(downloadTasks.entries()).forEach(([key, task]) => {
+    if ((task.persisted || task.historyId) && !persistedKeys.has(key) && !isDownloadTaskActive(task)) {
+      downloadTasks.delete(key);
+      downloadSpeed.delete(key);
+    }
+  });
+
+  trimDownloadTasks();
+  renderDownloadTasks();
+}
+
+async function loadPersistedDownloadHistory(options = {}) {
+  const silent = options.silent !== false;
+  if (!invoke) {
+    return;
+  }
+  try {
+    const records = await invoke('list_download_history');
+    mergePersistedDownloadHistory(records);
+  } catch (error) {
+    if (!silent) {
+      setErrorStatus(`加载下载历史失败：${error}`);
+    }
+    console.error('[download] load history error', error);
+  }
+}
+
+function removeDownloadTask(key) {
+  if (!key) {
+    return;
+  }
+  downloadTasks.delete(key);
+  downloadSpeed.delete(key);
+  renderDownloadTasks();
+}
+
+function setDownloadTaskResult(key, patch = {}) {
+  const task = downloadTasks.get(key);
+  if (!task) {
+    return null;
+  }
+  return updateDownloadTaskEntry({
+    ...task,
+    ...patch,
+    key,
+  });
+}
+
+function syncDownloadTaskProgress(payload) {
+  const filename = payload?.filename;
+  if (!filename) {
+    return null;
+  }
+  const endpointId = payload.endpoint_id || payload.endpointId || activeEndpointId || '';
+  const key = getDownloadTaskKey(filename, endpointId);
+  const current =
+    downloadTasks.get(key) ||
+    updateDownloadTaskEntry({
+      key,
+      filename,
+      originalName: filename,
+      endpointId,
+      endpointLabel: endpointId
+        ? getEndpointLabel(webdavEndpoints.find((item) => item.id === endpointId))
+        : '未选择端点',
+      status: 'queued',
+      received: 0,
+      total: payload.total || 0,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      path: '',
+      error: '',
+    });
+  return updateDownloadTaskEntry({
+    ...current,
+    endpointId,
+    status: payload.status || current.status,
+    received: payload.received || 0,
+    total: payload.total || current.total || 0,
+    error: payload.error || '',
+  });
+}
+
+function hasActiveDownloadTasks() {
+  return Array.from(downloadTasks.values()).some((task) => isDownloadTaskActive(task));
+}
+
+function refreshDownloadTaskEndpointLabels() {
+  let changed = false;
+  downloadTasks.forEach((task, key) => {
+    const endpoint = task.endpointId
+      ? webdavEndpoints.find((item) => item.id === task.endpointId)
+      : null;
+    const nextLabel = endpoint ? getEndpointLabel(endpoint) : task.endpointLabel || '未选择端点';
+    if (task.endpointLabel !== nextLabel) {
+      downloadTasks.set(key, {
+        ...task,
+        endpointLabel: nextLabel,
+      });
+      changed = true;
+    }
+  });
+  if (changed) {
+    renderDownloadTasks();
+  }
+}
+
+function updateDownloadTaskBadge(activeCount) {
+  if (!downloadTaskTabBadge) {
+    return;
+  }
+  const count = Math.max(0, Number(activeCount) || 0);
+  downloadTaskTabBadge.hidden = count <= 0;
+  downloadTaskTabBadge.textContent = count > 99 ? '99+' : String(count);
+}
+
+function renderDownloadTasks() {
+  if (!downloadTaskPanel || !downloadTaskList) {
+    return;
+  }
+  const tasks = Array.from(downloadTasks.values()).sort((a, b) => {
+    const activityDelta = Number(isDownloadTaskActive(b)) - Number(isDownloadTaskActive(a));
+    if (activityDelta !== 0) {
+      return activityDelta;
+    }
+    return (b.updatedAt || 0) - (a.updatedAt || 0);
+  });
+  pruneSelectedDownloadTasks();
+  downloadTaskList.innerHTML = '';
+  const activeCount = tasks.filter((task) => isDownloadTaskActive(task)).length;
+  updateDownloadTaskBadge(activeCount);
+  updateDownloadSelectionBar();
+  updateDownloadSelectionToggleLabel();
+  if (downloadTaskSummary) {
+    downloadTaskSummary.textContent =
+      activeCount > 0
+        ? `${activeCount} 个任务进行中，消息列表刷新不会中断下载。`
+        : tasks.length > 0
+          ? '显示最近的下载结果，新的下载会在这里持续更新。'
+          : '暂无进行中的下载任务。';
+  }
+
+  if (tasks.length === 0) {
+    const empty = document.createElement('li');
+    empty.className = 'download-task-empty';
+    empty.textContent = '暂无下载任务，开始下载文件后会显示在这里。';
+    downloadTaskList.appendChild(empty);
+    return;
+  }
+
+  tasks.forEach((task) => {
+    const item = document.createElement('li');
+    item.className = 'download-task-item';
+    item.classList.toggle('is-active', isDownloadTaskActive(task));
+    item.classList.toggle('is-complete', task.status === 'complete');
+    item.classList.toggle('is-error', task.status === 'error');
+    item.classList.toggle('with-selection', downloadSelectionMode);
+    item.classList.toggle('is-selected', selectedDownloadTasks.has(task.key));
+
+    const badge = document.createElement('span');
+    badge.className = 'download-task-badge';
+
+    let selectionCheckbox = null;
+    if (downloadSelectionMode) {
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.className = 'message-select download-task-select';
+      checkbox.checked = selectedDownloadTasks.has(task.key);
+      checkbox.disabled = !task.historyId || isDownloadTaskActive(task);
+      checkbox.addEventListener('change', () => {
+        toggleSelectedDownloadTask(task.key, checkbox.checked);
+        item.classList.toggle('is-selected', checkbox.checked);
+      });
+      selectionCheckbox = checkbox;
+      item.appendChild(checkbox);
+    }
+
+    const main = document.createElement('div');
+    main.className = 'download-task-main';
+
+    const titleRow = document.createElement('div');
+    titleRow.className = 'download-task-title-row';
+
+    const title = document.createElement('div');
+    title.className = 'download-task-title';
+    title.textContent = task.originalName || task.filename;
+
+    const state = document.createElement('span');
+    state.className = 'download-task-state';
+    state.textContent = getDownloadTaskStateLabel(task);
+
+    titleRow.appendChild(title);
+    titleRow.appendChild(state);
+
+    const meta = document.createElement('div');
+    meta.className = 'download-task-meta';
+    meta.textContent = `${task.endpointLabel || '未选择端点'} · ${formatBytes(task.total || 0)}`;
+
+    main.appendChild(titleRow);
+    main.appendChild(meta);
+
+    if (isDownloadTaskActive(task)) {
+      const progressWrap = document.createElement('div');
+      progressWrap.className = 'download-task-progress';
+
+      const progressBar = document.createElement('div');
+      progressBar.className = 'download-task-progress-bar';
+
+      const progressFill = document.createElement('div');
+      progressFill.className = 'download-task-progress-fill';
+      if (task.total) {
+        const percent = Math.min(100, Math.round(((task.received || 0) / task.total) * 100));
+        progressFill.style.width = `${percent}%`;
+      } else {
+        progressFill.style.width = '30%';
+      }
+
+      const detail = document.createElement('div');
+      detail.className = 'download-task-detail';
+      detail.textContent = formatProgress(
+        task.received || 0,
+        task.total,
+        '已下载',
+        getSpeed(downloadSpeed, task.key),
+      );
+
+      progressBar.appendChild(progressFill);
+      progressWrap.appendChild(progressBar);
+      progressWrap.appendChild(detail);
+      main.appendChild(progressWrap);
+    } else {
+      const detail = document.createElement('div');
+      detail.className = 'download-task-detail';
+      if (task.status === 'error') {
+        detail.textContent = task.error || '下载失败';
+      } else if (task.path) {
+        detail.textContent = task.localExists === false ? `${task.path}（文件不存在）` : task.path;
+      } else {
+        detail.textContent = task.status === 'complete' ? '文件已保存' : '等待下载';
+      }
+      main.appendChild(detail);
+
+      if (task.historyId) {
+        const actions = document.createElement('div');
+        actions.className = 'download-task-actions';
+
+        const saveAsButton = document.createElement('button');
+        saveAsButton.className = 'button ghost small';
+        saveAsButton.type = 'button';
+        saveAsButton.textContent = '另存为';
+        saveAsButton.addEventListener('click', () => saveDownloadHistoryAs(task));
+
+        const redownloadButton = document.createElement('button');
+        redownloadButton.className = 'button ghost small';
+        redownloadButton.type = 'button';
+        redownloadButton.textContent = '重新下载';
+        redownloadButton.addEventListener('click', () => redownloadDownloadHistory(task));
+
+        const openDirButton = document.createElement('button');
+        openDirButton.className = 'button ghost small';
+        openDirButton.type = 'button';
+        openDirButton.textContent = '打开目录';
+        openDirButton.disabled = task.localExists === false;
+        openDirButton.addEventListener('click', () => openDownloadHistoryDir(task));
+
+        const deleteButton = document.createElement('button');
+        deleteButton.className = 'button ghost small download-task-delete';
+        deleteButton.type = 'button';
+        deleteButton.textContent = '删除';
+        deleteButton.addEventListener('click', () => deleteDownloadHistoryRecord(task));
+
+        actions.appendChild(saveAsButton);
+        actions.appendChild(redownloadButton);
+        actions.appendChild(openDirButton);
+        actions.appendChild(deleteButton);
+        main.appendChild(actions);
+      }
+    }
+
+    const updated = document.createElement('div');
+    updated.className = 'download-task-updated';
+    updated.textContent = formatTime(task.updatedAt || task.createdAt || Date.now());
+
+    item.appendChild(badge);
+    item.appendChild(main);
+    item.appendChild(updated);
+    downloadTaskList.appendChild(item);
+
+    item.addEventListener('click', (event) => {
+      if (!downloadSelectionMode || !selectionCheckbox || selectionCheckbox.disabled) {
+        return;
+      }
+      if (event.target.closest('button, a, input, textarea, select, summary, details')) {
+        return;
+      }
+      selectionCheckbox.checked = !selectionCheckbox.checked;
+      toggleSelectedDownloadTask(task.key, selectionCheckbox.checked);
+      item.classList.toggle('is-selected', selectionCheckbox.checked);
+    });
+  });
+}
+
+function updateProgressUI(filename, endpointId = activeEndpointId) {
+  const task = getDownloadTask(filename, endpointId);
+  const cardSelector = `.message-card[data-filename="${escapeSelector(filename)}"]`;
+  const card = document.querySelector(cardSelector);
+  if (card) {
+    card.classList.toggle('is-downloading', isDownloadTaskActive(task));
+  }
+}
+
+function legacyUpdateProgressUI(filename) {
   const progress = downloadProgress.get(filename);
   const cardSelector = `.message-card[data-filename="${escapeSelector(filename)}"]`;
   const card = document.querySelector(cardSelector);
@@ -939,6 +1435,74 @@ function selectAllMessages() {
   renderMessages(lastMessages);
 }
 
+function getSelectableDownloadTasks() {
+  return Array.from(downloadTasks.values()).filter(
+    (task) => task.historyId && !isDownloadTaskActive(task),
+  );
+}
+
+function updateDownloadSelectionBar() {
+  if (!downloadSelectionBar || !downloadSelectionCount || !downloadDeleteSelectedButton) return;
+  const count = selectedDownloadTasks.size;
+  const selectableCount = downloadSelectionMode ? getSelectableDownloadTasks().length : 0;
+  downloadSelectionBar.hidden = !downloadSelectionMode;
+  downloadSelectionBar.style.display = downloadSelectionMode ? 'flex' : 'none';
+  downloadSelectionCount.hidden = !downloadSelectionMode;
+  downloadSelectionCount.textContent = `已选中 ${count} 项`;
+  downloadDeleteSelectedButton.disabled = count === 0;
+  if (downloadSelectAllButton) {
+    downloadSelectAllButton.disabled = selectableCount === 0;
+  }
+}
+
+function updateDownloadSelectionToggleLabel() {
+  if (!downloadToggleSelectionButton) return;
+  downloadToggleSelectionButton.textContent = downloadSelectionMode ? '完成' : '选择';
+}
+
+function setDownloadSelectionMode(enabled) {
+  downloadSelectionMode = enabled;
+  if (!downloadSelectionMode) {
+    selectedDownloadTasks.clear();
+  }
+  updateDownloadSelectionToggleLabel();
+  updateDownloadSelectionBar();
+  renderDownloadTasks();
+}
+
+function toggleDownloadSelectionMode() {
+  setDownloadSelectionMode(!downloadSelectionMode);
+}
+
+function toggleSelectedDownloadTask(key, checked) {
+  if (!key) return;
+  if (checked) {
+    selectedDownloadTasks.add(key);
+  } else {
+    selectedDownloadTasks.delete(key);
+  }
+  updateDownloadSelectionBar();
+}
+
+function selectAllDownloadTasks() {
+  if (!downloadSelectionMode) {
+    setDownloadSelectionMode(true);
+  }
+  selectedDownloadTasks.clear();
+  getSelectableDownloadTasks().forEach((task) => selectedDownloadTasks.add(task.key));
+  updateDownloadSelectionBar();
+  renderDownloadTasks();
+}
+
+function pruneSelectedDownloadTasks() {
+  Array.from(selectedDownloadTasks).forEach((key) => {
+    const task = downloadTasks.get(key);
+    if (!task || !task.historyId || isDownloadTaskActive(task)) {
+      selectedDownloadTasks.delete(key);
+    }
+  });
+}
+
 function isMessageListAtBottom() {
   if (!messageList) return true;
   const threshold = 16;
@@ -1064,6 +1628,73 @@ function showDeleteConfirmDialog(count) {
 
     actions.appendChild(localButton);
     actions.appendChild(remoteButton);
+    actions.appendChild(cancelButton);
+    dialog.appendChild(title);
+    dialog.appendChild(message);
+    dialog.appendChild(actions);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    document.addEventListener('keydown', onKeyDown);
+  });
+}
+
+function showDownloadHistoryDeleteConfirmDialog(count) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+
+    const dialog = document.createElement('div');
+    dialog.className = 'dialog';
+
+    const title = document.createElement('h3');
+    title.className = 'dialog-title';
+    title.textContent = '确认删除';
+
+    const message = document.createElement('p');
+    message.className = 'dialog-text';
+    message.textContent =
+      count > 1
+        ? `将处理 ${count} 条下载记录。仅删除记录会保留本地文件，删除记录和本地文件会同时移除记录与本地文件。`
+        : '选择删除范围：仅删除记录会保留本地文件，删除记录和本地文件会同时移除记录与本地文件。';
+
+    const actions = document.createElement('div');
+    actions.className = 'dialog-actions';
+
+    const recordButton = document.createElement('button');
+    recordButton.className = 'button small';
+    recordButton.textContent = '仅删除记录';
+
+    const localFileButton = document.createElement('button');
+    localFileButton.className = 'button primary small';
+    localFileButton.textContent = '删除记录和本地文件';
+
+    const cancelButton = document.createElement('button');
+    cancelButton.className = 'button ghost small';
+    cancelButton.textContent = '取消';
+
+    const cleanup = (choice) => {
+      document.removeEventListener('keydown', onKeyDown);
+      overlay.remove();
+      resolve(choice);
+    };
+
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        cleanup('cancel');
+      }
+    };
+
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) {
+        cleanup('cancel');
+      }
+    });
+    recordButton.addEventListener('click', () => cleanup('record'));
+    localFileButton.addEventListener('click', () => cleanup('local'));
+    cancelButton.addEventListener('click', () => cleanup('cancel'));
+
+    actions.appendChild(recordButton);
+    actions.appendChild(localFileButton);
     actions.appendChild(cancelButton);
     dialog.appendChild(title);
     dialog.appendChild(message);
@@ -1779,6 +2410,7 @@ function showConfirmationDialog(options = {}) {
 }
 
 async function downloadMessageFile(message) {
+  let task = null;
   try {
     console.info('[download] click', {
       filename: message.filename,
@@ -1788,6 +2420,7 @@ async function downloadMessageFile(message) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
+    task = createDownloadTask(message, 'download');
     const result = await invoke('download_message_file', {
       filename: message.filename,
       originalName: message.original_name,
@@ -1796,12 +2429,14 @@ async function downloadMessageFile(message) {
     console.info('[download] result', result);
 
     if (result.status === 'conflict') {
+      removeDownloadTask(task.key);
       const choice = await showDownloadConflictDialog(message.original_name);
       console.info('[download] conflict choice', choice);
       if (choice === 'cancel') {
         setStatus('已取消下载');
         return;
       }
+      const retryTask = createDownloadTask(message, 'download');
       const retry = await invoke('download_message_file', {
         filename: message.filename,
         originalName: message.original_name,
@@ -1809,21 +2444,54 @@ async function downloadMessageFile(message) {
       });
       console.info('[download] retry result', retry);
       if (retry.status === 'saved') {
+        setDownloadTaskResult(retryTask.key, {
+          status: 'complete',
+          path: retry.path || '',
+          error: '',
+        });
+        updateMessageDownloadStatus(message.filename, retryTask.endpointId);
         setSuccessStatus(`文件已保存到 ${retry.path || ''}`.trim());
+        await loadPersistedDownloadHistory({ silent: true });
+      } else {
+        setDownloadTaskResult(retryTask.key, {
+          status: 'error',
+          error: '下载失败',
+        });
+        await loadPersistedDownloadHistory({ silent: true });
       }
       return;
     }
 
     if (result.status === 'saved') {
+      setDownloadTaskResult(task.key, {
+        status: 'complete',
+        path: result.path || '',
+        error: '',
+      });
+      updateMessageDownloadStatus(message.filename, task.endpointId);
       setSuccessStatus(`文件已保存到 ${result.path || ''}`.trim());
+      await loadPersistedDownloadHistory({ silent: true });
+    } else {
+      setDownloadTaskResult(task.key, {
+        status: 'error',
+        error: '下载失败',
+      });
+      await loadPersistedDownloadHistory({ silent: true });
     }
   } catch (error) {
+    const key = task?.key || getDownloadTaskKey(message.filename, activeEndpointId || '');
+    setDownloadTaskResult(key, {
+      status: 'error',
+      error: String(error),
+    });
     console.error('[download] error', error);
     setErrorStatus(`下载失败：${error}`);
+    await loadPersistedDownloadHistory({ silent: true });
   }
 }
 
 async function saveMessageFileAs(message) {
+  let task = null;
   try {
     console.info('[download] save as click', {
       filename: message.filename,
@@ -1844,15 +2512,242 @@ async function saveMessageFileAs(message) {
       return;
     }
     console.info('[download] save as target', target);
+    task = createDownloadTask(message, 'save_as');
     const result = await invoke('save_message_file_as', {
       filename: message.filename,
       targetPath: target,
     });
     console.info('[download] save as result', result);
+    setDownloadTaskResult(task.key, {
+      status: 'complete',
+      path: result.path || target,
+      error: '',
+    });
+    updateMessageDownloadStatus(message.filename, task.endpointId);
     setSuccessStatus(`文件已保存到 ${result.path || target}`.trim());
   } catch (error) {
+    const key = task?.key || getDownloadTaskKey(message.filename, activeEndpointId || '');
+    setDownloadTaskResult(key, {
+      status: 'error',
+      error: String(error),
+    });
     console.error('[download] save as error', error);
     setErrorStatus(`另存为失败：${error}`);
+  }
+}
+
+async function saveDownloadHistoryAs(task) {
+  try {
+    if (!invoke) {
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
+      return;
+    }
+    if (!saveDialog) {
+      setErrorStatus('未检测到保存对话框插件，请确认已启用 dialog 插件');
+      return;
+    }
+    const target = await saveDialog({
+      defaultPath: task.originalName || task.filename || 'download.bin',
+    });
+    if (!target) {
+      return;
+    }
+    updateDownloadTaskEntry({
+      ...task,
+      status: 'queued',
+      received: 0,
+      error: '',
+      updatedAt: Date.now(),
+    });
+    const result = await invoke('save_download_history_as', {
+      recordId: task.historyId,
+      targetPath: target,
+    });
+    setDownloadTaskResult(task.key, {
+      status: 'complete',
+      path: result.path || target,
+      error: '',
+      localExists: true,
+    });
+    setSuccessStatus(`文件已保存到 ${result.path || target}`.trim());
+    await loadPersistedDownloadHistory({ silent: true });
+    await loadPersistedDownloadHistory({ silent: true });
+  } catch (error) {
+    console.error('[download] history save as error', error);
+    setErrorStatus(`另存为失败：${error}`);
+    await loadPersistedDownloadHistory({ silent: true });
+    await showInfoDialog({
+      title: '另存为失败',
+      message: String(error),
+    });
+    await loadPersistedDownloadHistory({ silent: true });
+  }
+}
+
+async function redownloadDownloadHistory(task) {
+  try {
+    if (!invoke) {
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
+      return;
+    }
+    updateDownloadTaskEntry({
+      ...task,
+      mode: 'download',
+      status: 'queued',
+      received: 0,
+      error: '',
+      updatedAt: Date.now(),
+    });
+    const result = await invoke('redownload_download_history', {
+      recordId: task.historyId,
+    });
+    setDownloadTaskResult(task.key, {
+      status: 'complete',
+      path: result.path || task.path || '',
+      error: '',
+      localExists: true,
+    });
+    setSuccessStatus(`文件已重新下载到 ${result.path || task.path || ''}`.trim());
+    await loadPersistedDownloadHistory({ silent: true });
+  } catch (error) {
+    console.error('[download] history redownload error', error);
+    setErrorStatus(`重新下载失败：${error}`);
+    await showInfoDialog({
+      title: '重新下载失败',
+      message: String(error),
+    });
+    await loadPersistedDownloadHistory({ silent: true });
+  }
+}
+
+async function deleteDownloadHistoryRecord(task) {
+  if (!task?.historyId) {
+    return;
+  }
+  const choice = await showDownloadHistoryDeleteConfirmDialog(1);
+  if (choice === 'cancel') {
+    return;
+  }
+  const deleteLocalFile = choice === 'local';
+  try {
+    if (!invoke) {
+      await showInfoDialog({
+        title: '删除失败',
+        message: '未检测到 Tauri API，请检查 app.withGlobalTauri 设置',
+      });
+      return;
+    }
+    await invoke('delete_download_history', {
+      recordId: task.historyId,
+      deleteLocalFile,
+    });
+    const successMessage = deleteLocalFile ? '已删除下载记录和本地文件' : '已删除下载记录';
+    setSuccessStatus(successMessage);
+    await showInfoDialog({
+      title: '删除成功',
+      message: successMessage,
+    });
+    await loadPersistedDownloadHistory({ silent: true });
+    if (deleteLocalFile) {
+      await loadMessages();
+    }
+  } catch (error) {
+    console.error('[download] history delete error', error);
+    setErrorStatus(`删除下载记录失败：${error}`);
+    await showInfoDialog({
+      title: '删除下载记录失败',
+      message: String(error),
+    });
+  }
+}
+
+async function deleteSelectedDownloadTasks() {
+  const selected = Array.from(selectedDownloadTasks)
+    .map((key) => downloadTasks.get(key))
+    .filter((task) => task?.historyId && !isDownloadTaskActive(task));
+  if (!selected.length) {
+    await showInfoDialog({
+      title: '删除失败',
+      message: '请先选择要删除的下载记录',
+    });
+    return;
+  }
+  const choice = await showDownloadHistoryDeleteConfirmDialog(selected.length);
+  if (choice === 'cancel') {
+    return;
+  }
+  const deleteLocalFile = choice === 'local';
+  try {
+    if (!invoke) {
+      await showInfoDialog({
+        title: '删除失败',
+        message: '未检测到 Tauri API，请检查 app.withGlobalTauri 设置',
+      });
+      return;
+    }
+    const results = await Promise.allSettled(
+      selected.map((task) =>
+        invoke('delete_download_history', {
+          recordId: task.historyId,
+          deleteLocalFile,
+        }),
+      ),
+    );
+    const failed = results.filter((result) => result.status === 'rejected');
+    const deletedCount = results.length - failed.length;
+    setDownloadSelectionMode(false);
+    await loadPersistedDownloadHistory({ silent: true });
+    if (deleteLocalFile) {
+      await loadMessages();
+    }
+    if (failed.length > 0) {
+      const title = deletedCount > 0 ? '删除完成' : '删除失败';
+      const message =
+        deletedCount > 0
+          ? `已删除 ${deletedCount} 条下载记录${deleteLocalFile ? '和本地文件' : ''}，${failed.length} 条处理失败。`
+          : String(failed[0].reason || '删除下载记录失败');
+      if (deletedCount > 0) {
+        setSuccessStatus(`已删除 ${deletedCount} 条下载记录${deleteLocalFile ? '和本地文件' : ''}`);
+      }
+      setErrorStatus(message);
+      await showInfoDialog({ title, message });
+      return;
+    }
+    const successMessage = `已删除 ${deletedCount} 条下载记录${deleteLocalFile ? '和本地文件' : ''}`;
+    setSuccessStatus(successMessage);
+    await showInfoDialog({
+      title: '删除成功',
+      message: successMessage,
+    });
+  } catch (error) {
+    console.error('[download] delete selected history error', error);
+    setErrorStatus(`删除下载记录失败：${error}`);
+    await showInfoDialog({
+      title: '删除下载记录失败',
+      message: String(error),
+    });
+  }
+}
+
+async function openDownloadHistoryDir(task) {
+  if (!task?.historyId) {
+    return;
+  }
+  try {
+    if (!invoke) {
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
+      return;
+    }
+    await invoke('open_download_history_dir', {
+      recordId: task.historyId,
+    });
+  } catch (error) {
+    console.error('[download] open history dir error', error);
+    setErrorStatus(`打开目录失败：${error}`);
+    await showInfoDialog({
+      title: '打开目录失败',
+      message: String(error),
+    });
   }
 }
 
@@ -2615,8 +3510,8 @@ function renderMessages(messages, options = {}) {
         uploadingTag.textContent = '上传中';
         actions.appendChild(uploadingTag);
       } else {
-        const progress = downloadProgress.get(message.filename);
-        const isDownloading = progress && progress.status === 'progress';
+        const downloadTask = getDownloadTask(message.filename, activeEndpointId);
+        const isDownloading = isDownloadTaskActive(downloadTask);
         if (isDownloading) {
           item.classList.add('is-downloading');
         }
@@ -2757,7 +3652,7 @@ function renderMessages(messages, options = {}) {
     });
 
     if (message.kind === 'file') {
-      const progress = downloadProgress.get(message.filename);
+      const progress = null;
       const progressWrap = document.createElement('div');
       progressWrap.className = 'download-progress';
       progressWrap.dataset.filename = message.filename;
@@ -3520,6 +4415,8 @@ function applySettings(settings) {
   setSendHotkey(settings.send_hotkey || SEND_HOTKEY.ENTER);
   renderWebdavEndpoints();
   renderEndpointSelect();
+  refreshDownloadTaskEndpointLabels();
+  renderDownloadTasks();
   clearTelegramChatCandidates();
   syncTelegramProxyControlsState();
   syncTelegramControlsState();
@@ -3534,6 +4431,7 @@ async function loadSettings() {
     }
     const settings = await invoke('get_settings');
     applySettings(settings);
+    await loadPersistedDownloadHistory({ silent: true });
     await loadTelegramBridgeStatus({ silent: true });
     if (getActiveEndpoint()) {
       await loadMessages({ scrollToBottom: true });
@@ -3638,8 +4536,6 @@ async function saveSettings(options = {}) {
     setHint(downloadDirHint, '下载目录已保存');
     if (previousActive !== activeEndpointId && getActiveEndpoint()) {
       setSelectionMode(false);
-      downloadProgress.clear();
-      downloadSpeed.clear();
       pendingUploads.clear();
       uploadSpeed.clear();
       await manualRefresh();
@@ -3743,8 +4639,6 @@ async function importSettings() {
     setSuccessStatus('配置已导入并生效');
     if (previousActive !== activeEndpointId && getActiveEndpoint()) {
       setSelectionMode(false);
-      downloadProgress.clear();
-      downloadSpeed.clear();
       pendingUploads.clear();
       uploadSpeed.clear();
       await manualRefresh();
@@ -4273,8 +5167,6 @@ async function switchActiveEndpoint() {
     const updated = await invoke('save_settings', { settings });
     applySettings(updated);
     setSelectionMode(false);
-    downloadProgress.clear();
-    downloadSpeed.clear();
     pendingUploads.clear();
     uploadSpeed.clear();
     await manualRefresh();
@@ -4285,8 +5177,8 @@ async function switchActiveEndpoint() {
   }
 }
 
-function updateMessageDownloadStatus(filename) {
-  if (!filename) return;
+function updateMessageDownloadStatus(filename, endpointId = activeEndpointId) {
+  if (!filename || (endpointId && activeEndpointId && endpointId !== activeEndpointId)) return;
 
   let changed = false;
   lastMessages = lastMessages.map((msg) => {
@@ -4327,13 +5219,6 @@ function updateMessageDownloadStatus(filename) {
           actions.appendChild(downloadedTag);
         }
       }
-    }
-
-    const progressWrap = card.querySelector(
-      `.download-progress[data-filename="${escapeSelector(filename)}"]`,
-    );
-    if (progressWrap) {
-      progressWrap.classList.add('hidden');
     }
   }
 
@@ -4395,23 +5280,27 @@ if (listen) {
       return;
     }
     if (payload.status === 'progress') {
-      setProgressFor(filename, payload);
-      updateSpeedTracker(downloadSpeed, filename, payload.received || 0);
-      updateProgressUI(filename);
+      const task = syncDownloadTaskProgress(payload);
+      if (task) {
+        updateSpeedTracker(downloadSpeed, task.key, payload.received || 0);
+        updateProgressUI(filename, task.endpointId);
+      }
       return;
     }
     if (payload.status === 'complete') {
-      downloadProgress.delete(filename);
-      downloadSpeed.delete(filename);
-      updateProgressUI(filename);
+      const task = syncDownloadTaskProgress(payload);
+      if (task) {
+        downloadSpeed.delete(task.key);
+        updateMessageDownloadStatus(filename, task.endpointId);
       // 下载完成后重新获取消息以更新下载状态
-      updateMessageDownloadStatus(filename);
+      }
       return;
     }
     if (payload.status === 'error') {
-      downloadProgress.delete(filename);
-      downloadSpeed.delete(filename);
-      updateProgressUI(filename);
+      const task = syncDownloadTaskProgress(payload);
+      if (task) {
+        downloadSpeed.delete(task.key);
+      }
       if (payload.error) {
         setErrorStatus(`下载失败：${payload.error}`);
       }
@@ -4506,6 +5395,9 @@ refreshButton.addEventListener('click', async () => {
 if (openDownloadDirButton) {
   openDownloadDirButton.addEventListener('click', openDownloadDir);
 }
+if (downloadsOpenDownloadDirButton) {
+  downloadsOpenDownloadDirButton.addEventListener('click', openDownloadDir);
+}
 sendTextButton.addEventListener('click', sendText);
 sendFileButton.addEventListener('click', selectFiles);
 saveSettingsButton.addEventListener('click', saveSettingsWithFeedback);
@@ -4572,6 +5464,18 @@ if (deleteSelectedButton) {
 }
 if (cancelSelectionButton) {
   cancelSelectionButton.addEventListener('click', () => setSelectionMode(false));
+}
+if (downloadToggleSelectionButton) {
+  downloadToggleSelectionButton.addEventListener('click', toggleDownloadSelectionMode);
+}
+if (downloadSelectAllButton) {
+  downloadSelectAllButton.addEventListener('click', selectAllDownloadTasks);
+}
+if (downloadDeleteSelectedButton) {
+  downloadDeleteSelectedButton.addEventListener('click', deleteSelectedDownloadTasks);
+}
+if (downloadCancelSelectionButton) {
+  downloadCancelSelectionButton.addEventListener('click', () => setDownloadSelectionMode(false));
 }
 if (cleanupMessagesButton) {
   cleanupMessagesButton.addEventListener('click', cleanupMessages);

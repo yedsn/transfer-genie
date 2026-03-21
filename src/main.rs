@@ -6,10 +6,12 @@ mod telegram_bridge;
 mod types;
 mod webdav;
 
-use crate::db::DbMessage;
+use crate::db::{DbDownloadHistory, DbMessage};
 use crate::filenames::{build_message_filename, parse_message_filename, MessageKind};
 use crate::history::HistoryEntry;
-use crate::types::{Message, Settings, SyncStatus, TelegramBridgeSettings, WebDavEndpoint};
+use crate::types::{
+    DownloadHistoryRecord, Message, Settings, SyncStatus, TelegramBridgeSettings, WebDavEndpoint,
+};
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -233,6 +235,7 @@ enum CleanupScope {
 
 #[derive(Clone, Serialize)]
 struct DownloadProgress {
+    endpoint_id: String,
     filename: String,
     received: u64,
     total: Option<u64>,
@@ -1058,31 +1061,20 @@ async fn download_message_file(
         DownloadDecision::Ready(path) => path,
     };
 
-    let remote_path = format!("files/{}", filename);
-    let window = window.clone();
-    let bytes = match webdav::download_file_with_progress(
-        &state.http,
-        &endpoint,
-        &remote_path,
-        |received, total| {
-            emit_download_progress(&window, &filename, received, total, "progress", None);
-        },
-    )
-    .await
+    let bytes = match download_file_bytes_with_progress(&window, &state, &endpoint, &filename).await
     {
-        Ok(bytes) => {
-            emit_download_progress(
-                &window,
-                &filename,
-                bytes.len() as u64,
-                Some(bytes.len() as u64),
-                "complete",
-                None,
-            );
-            bytes
-        }
+        Ok(bytes) => bytes,
         Err(err) => {
-            emit_download_progress(&window, &filename, 0, None, "error", Some(err.clone()));
+            let _ = persist_download_history(
+                &state,
+                &endpoint.id,
+                &filename,
+                &original_name,
+                None,
+                "error",
+                Some(err.clone()),
+                0,
+            );
             return Err(err);
         }
     };
@@ -1096,6 +1088,16 @@ async fn download_message_file(
         &final_path,
         bytes.len() as i64,
         Some(file_hash),
+    )?;
+    persist_download_history(
+        &state,
+        &endpoint.id,
+        &filename,
+        &original_name,
+        Some(&final_path),
+        "complete",
+        None,
+        bytes.len() as i64,
     )?;
 
     Ok(DownloadResult {
@@ -1114,36 +1116,30 @@ async fn save_message_file_as(
 ) -> Result<DownloadResult, String> {
     let settings = current_settings(&state)?;
     let endpoint = resolve_active_endpoint(&settings)?;
+    let original_name = db::get_message(&state.db_path, &endpoint.id, &filename)
+        .map_err(|err| format!("读取消息失败: {err}"))?
+        .map(|message| message.original_name)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| filename.clone());
 
     if target_path.trim().is_empty() {
         return Err("未选择保存路径".to_string());
     }
     let final_path = PathBuf::from(target_path);
-    let remote_path = format!("files/{}", filename);
-    let window = window.clone();
-    let bytes = match webdav::download_file_with_progress(
-        &state.http,
-        &endpoint,
-        &remote_path,
-        |received, total| {
-            emit_download_progress(&window, &filename, received, total, "progress", None);
-        },
-    )
-    .await
+    let bytes = match download_file_bytes_with_progress(&window, &state, &endpoint, &filename).await
     {
-        Ok(bytes) => {
-            emit_download_progress(
-                &window,
-                &filename,
-                bytes.len() as u64,
-                Some(bytes.len() as u64),
-                "complete",
-                None,
-            );
-            bytes
-        }
+        Ok(bytes) => bytes,
         Err(err) => {
-            emit_download_progress(&window, &filename, 0, None, "error", Some(err.clone()));
+            let _ = persist_download_history(
+                &state,
+                &endpoint.id,
+                &filename,
+                &original_name,
+                None,
+                "error",
+                Some(err.clone()),
+                0,
+            );
             return Err(err);
         }
     };
@@ -1158,12 +1154,269 @@ async fn save_message_file_as(
         bytes.len() as i64,
         Some(file_hash),
     )?;
+    persist_download_history(
+        &state,
+        &endpoint.id,
+        &filename,
+        &original_name,
+        Some(&final_path),
+        "complete",
+        None,
+        bytes.len() as i64,
+    )?;
 
     Ok(DownloadResult {
         status: "saved".to_string(),
         path: Some(final_path.to_string_lossy().to_string()),
         suggested_path: None,
     })
+}
+
+fn persist_download_history(
+    state: &AppState,
+    endpoint_id: &str,
+    filename: &str,
+    original_name: &str,
+    saved_path: Option<&Path>,
+    status: &str,
+    error: Option<String>,
+    file_size: i64,
+) -> Result<(), String> {
+    let timestamp = now_ms();
+    let entry = DbDownloadHistory {
+        id: 0,
+        endpoint_id: endpoint_id.to_string(),
+        filename: filename.to_string(),
+        original_name: original_name.to_string(),
+        saved_path: saved_path.map(|path| path.to_string_lossy().to_string()),
+        status: status.to_string(),
+        error,
+        file_size,
+        created_at_ms: timestamp,
+        updated_at_ms: timestamp,
+    };
+    db::upsert_download_history(&state.db_path, &entry)
+        .map(|_| ())
+        .map_err(|err| format!("写入下载历史失败: {err}"))
+}
+
+fn require_download_history(state: &AppState, record_id: i64) -> Result<DbDownloadHistory, String> {
+    db::get_download_history(&state.db_path, record_id)
+        .map_err(|err| format!("读取下载记录失败: {err}"))?
+        .ok_or_else(|| "下载记录不存在".to_string())
+}
+
+async fn download_file_bytes_with_progress(
+    window: &Window,
+    state: &AppState,
+    endpoint: &WebDavEndpoint,
+    filename: &str,
+) -> Result<Vec<u8>, String> {
+    let remote_path = format!("files/{filename}");
+    let window = window.clone();
+    match webdav::download_file_with_progress(&state.http, endpoint, &remote_path, |received, total| {
+        emit_download_progress(
+            &window,
+            &endpoint.id,
+            filename,
+            received,
+            total,
+            "progress",
+            None,
+        );
+    })
+    .await
+    {
+        Ok(bytes) => {
+            emit_download_progress(
+                &window,
+                &endpoint.id,
+                filename,
+                bytes.len() as u64,
+                Some(bytes.len() as u64),
+                "complete",
+                None,
+            );
+            Ok(bytes)
+        }
+        Err(err) => {
+            emit_download_progress(
+                &window,
+                &endpoint.id,
+                filename,
+                0,
+                None,
+                "error",
+                Some(err.clone()),
+            );
+            Err(err)
+        }
+    }
+}
+
+#[tauri::command]
+fn list_download_history(state: State<'_, AppState>) -> Result<Vec<DownloadHistoryRecord>, String> {
+    db::list_download_history(&state.db_path)
+        .map_err(|err| format!("读取下载历史失败: {err}"))
+}
+
+#[tauri::command]
+async fn save_download_history_as(
+    window: Window,
+    state: State<'_, AppState>,
+    record_id: i64,
+    target_path: String,
+) -> Result<DownloadResult, String> {
+    if target_path.trim().is_empty() {
+        return Err("未选择保存路径".to_string());
+    }
+
+    let record = require_download_history(&state, record_id)?;
+    let final_path = PathBuf::from(target_path);
+    ensure_parent_dir(&final_path)?;
+
+    if let Some(saved_path) = record
+        .saved_path
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+    {
+        if saved_path != final_path {
+            fs::copy(&saved_path, &final_path)
+                .map_err(|err| format!("另存为失败: {err}"))?;
+        }
+        return Ok(DownloadResult {
+            status: "saved".to_string(),
+            path: Some(final_path.to_string_lossy().to_string()),
+            suggested_path: None,
+        });
+    }
+
+    let settings = current_settings(&state)?;
+    let endpoint = resolve_endpoint_by_id(&settings, &record.endpoint_id)?;
+    let bytes = download_file_bytes_with_progress(&window, &state, &endpoint, &record.filename).await?;
+    ensure_parent_dir(&final_path)?;
+    fs::write(&final_path, &bytes).map_err(|err| format!("保存文件失败: {err}"))?;
+
+    Ok(DownloadResult {
+        status: "saved".to_string(),
+        path: Some(final_path.to_string_lossy().to_string()),
+        suggested_path: None,
+    })
+}
+
+#[tauri::command]
+async fn redownload_download_history(
+    window: Window,
+    state: State<'_, AppState>,
+    record_id: i64,
+) -> Result<DownloadResult, String> {
+    let record = require_download_history(&state, record_id)?;
+    let settings = current_settings(&state)?;
+    let endpoint = resolve_endpoint_by_id(&settings, &record.endpoint_id)?;
+    let final_path = if let Some(saved_path) = record
+        .saved_path
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        PathBuf::from(saved_path)
+    } else {
+        let base_dir = resolve_download_dir(&state, &settings);
+        fs::create_dir_all(&base_dir).map_err(|err| format!("创建下载目录失败: {err}"))?;
+        base_dir.join(sanitize_filename(&record.original_name))
+    };
+
+    if final_path.is_dir() {
+        return Err("目标路径是目录，无法重新下载".to_string());
+    }
+
+    let bytes = match download_file_bytes_with_progress(&window, &state, &endpoint, &record.filename).await
+    {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            let _ = persist_download_history(
+                &state,
+                &record.endpoint_id,
+                &record.filename,
+                &record.original_name,
+                None,
+                "error",
+                Some(err.clone()),
+                0,
+            );
+            return Err(err);
+        }
+    };
+    ensure_parent_dir(&final_path)?;
+    fs::write(&final_path, &bytes).map_err(|err| format!("保存文件失败: {err}"))?;
+
+    let file_hash = compute_file_hash(&bytes);
+    let _ = update_message_local_path(
+        &state.db_path,
+        &record.endpoint_id,
+        &record.filename,
+        &final_path,
+        bytes.len() as i64,
+        Some(file_hash),
+    );
+    persist_download_history(
+        &state,
+        &record.endpoint_id,
+        &record.filename,
+        &record.original_name,
+        Some(&final_path),
+        "complete",
+        None,
+        bytes.len() as i64,
+    )?;
+
+    Ok(DownloadResult {
+        status: "saved".to_string(),
+        path: Some(final_path.to_string_lossy().to_string()),
+        suggested_path: None,
+    })
+}
+
+#[tauri::command]
+fn delete_download_history(
+    state: State<'_, AppState>,
+    record_id: i64,
+    delete_local_file: bool,
+) -> Result<(), String> {
+    let record = require_download_history(&state, record_id)?;
+    if delete_local_file {
+        delete_recorded_download_file(record.saved_path.as_deref())?;
+        clear_message_local_path(&state.db_path, &record.endpoint_id, &record.filename)?;
+    }
+    db::delete_download_history(&state.db_path, record_id)
+        .map_err(|err| format!("删除下载记录失败: {err}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn open_download_history_dir(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    record_id: i64,
+) -> Result<(), String> {
+    let record = require_download_history(&state, record_id)?;
+    let saved_path = record
+        .saved_path
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "下载记录没有本地文件路径".to_string())?;
+    let file_path = PathBuf::from(saved_path);
+    if !file_path.is_file() {
+        return Err("本地文件不存在".to_string());
+    }
+    let dir = file_path
+        .parent()
+        .ok_or_else(|| "无法解析下载目录".to_string())?;
+    app.opener()
+        .open_path(dir.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|err| format!("打开下载目录失败: {err}"))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -2298,6 +2551,25 @@ fn resolve_active_endpoint(settings: &Settings) -> Result<WebDavEndpoint, String
     Ok(endpoint.clone())
 }
 
+fn resolve_endpoint_by_id(settings: &Settings, endpoint_id: &str) -> Result<WebDavEndpoint, String> {
+    let trimmed = endpoint_id.trim();
+    if trimmed.is_empty() {
+        return Err("下载记录缺少 WebDAV 端点".to_string());
+    }
+    let endpoint = settings
+        .webdav_endpoints
+        .iter()
+        .find(|item| item.id == trimmed)
+        .ok_or_else(|| format!("下载记录关联的 WebDAV 端点不存在: {trimmed}"))?;
+    if !endpoint.enabled {
+        return Err(format!("下载记录关联的 WebDAV 端点已禁用: {trimmed}"));
+    }
+    if endpoint.url.trim().is_empty() {
+        return Err(format!("下载记录关联的 WebDAV 地址为空: {trimmed}"));
+    }
+    Ok(endpoint.clone())
+}
+
 fn settings_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
     let base = app_handle
         .path()
@@ -3019,15 +3291,33 @@ fn clear_message_local_path(
 ) -> Result<(), String> {
     let existing =
         db::get_message(db_path, endpoint_id, filename).map_err(|err| err.to_string())?;
-    let mut message = existing.ok_or_else(|| "未找到消息记录".to_string())?;
+    let Some(mut message) = existing else {
+        return Ok(());
+    };
     message.local_path = None;
     message.file_hash = None;
     db::upsert_message(db_path, &message).map_err(|err| err.to_string())?;
     Ok(())
 }
 
+fn delete_recorded_download_file(saved_path: Option<&str>) -> Result<(), String> {
+    let Some(saved_path) = saved_path.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    let file_path = PathBuf::from(saved_path);
+    if !file_path.exists() {
+        return Ok(());
+    }
+    if !file_path.is_file() {
+        return Err("下载记录的本地路径不是文件".to_string());
+    }
+    fs::remove_file(&file_path).map_err(|err| format!("删除本地文件失败: {err}"))?;
+    Ok(())
+}
+
 fn emit_download_progress(
     window: &Window,
+    endpoint_id: &str,
     filename: &str,
     received: u64,
     total: Option<u64>,
@@ -3035,6 +3325,7 @@ fn emit_download_progress(
     error: Option<String>,
 ) {
     let payload = DownloadProgress {
+        endpoint_id: endpoint_id.to_string(),
         filename: filename.to_string(),
         received,
         total,
@@ -3683,7 +3974,6 @@ fn main() {
                 sync_cancel: Mutex::new(None),
                 http: Client::builder()
                     .connect_timeout(Duration::from_secs(10))
-                    .timeout(Duration::from_secs(SYNC_TIMEOUT_SECS))
                     .pool_idle_timeout(Duration::from_secs(30))
                     .build()
                     .map_err(|err| format!("创建 HTTP 客户端失败: {err}"))?,
@@ -3890,6 +4180,11 @@ fn main() {
             get_thumbnail,
             download_message_file,
             save_message_file_as,
+            list_download_history,
+            save_download_history_as,
+            redownload_download_history,
+            delete_download_history,
+            open_download_history_dir,
             save_local_data,
             open_message_file,
             open_download_dir,

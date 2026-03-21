@@ -54,6 +54,17 @@
                 <button id="toggle-selection" class="button ghost small" type="button">选择</button>
               </div>
             </div>
+            <section id="download-task-panel-legacy" class="download-task-panel" hidden>
+              <div class="download-task-panel-header">
+                <div>
+                  <h3>下载任务</h3>
+                  <p id="download-task-summary-legacy" class="download-task-summary">
+                    下载任务会独立显示，列表刷新不会打断进行中的下载。
+                  </p>
+                </div>
+              </div>
+              <ul id="download-task-list-legacy" class="download-task-list"></ul>
+            </section>
             <div class="feed-content">
               <div class="feed-search">
                 <input type="search" id="search-input" placeholder="搜索消息..." />
@@ -100,6 +111,38 @@
                 </div>
               </div>
             </div>
+            </section>
+          </section>
+        </section>
+
+        <section class="tab-panel" data-tab-panel="downloads" id="tab-downloads" role="tabpanel">
+          <section class="downloads-page">
+            <div class="downloads-page-header">
+              <div class="downloads-page-toolbar">
+                <div id="download-selection-bar" class="selection-bar" hidden>
+                  <button id="download-select-all" class="button ghost small" type="button">全选</button>
+                  <button id="download-delete-selected" class="button small" type="button">删除</button>
+                  <button id="download-cancel-selection" class="button ghost small" type="button">取消</button>
+                </div>
+                <div class="downloads-page-actions">
+                  <span id="download-selection-count" class="selection-count" hidden>已选中 0 项</span>
+                  <button id="downloads-open-download-dir" class="button ghost small" type="button">打开下载目录</button>
+                  <button id="download-toggle-selection" class="button ghost small" type="button">选择</button>
+                </div>
+              </div>
+              <h2>下载任务</h2>
+              <p>下载进度独立展示，消息刷新和切换列表不会打断正在进行的下载。</p>
+            </div>
+            <section id="download-task-panel" class="download-task-panel">
+              <div class="download-task-panel-header">
+                <div>
+                  <h3>任务列表</h3>
+                  <p id="download-task-summary" class="download-task-summary">
+                    暂无进行中的下载任务。
+                  </p>
+                </div>
+              </div>
+              <ul id="download-task-list" class="download-task-list"></ul>
             </section>
           </section>
         </section>
@@ -315,6 +358,19 @@
           <img src="icons/home.svg" alt="首页" class="tab-icon" />
           <span class="tab-label">首页</span>
           <span class="tab-caption">聊天</span>
+        </button>
+        <button
+          class="tab-button"
+          type="button"
+          data-tab-target="downloads"
+          role="tab"
+          aria-selected="false"
+          aria-controls="tab-downloads"
+        >
+          <img src="icons/download.svg" alt="下载" class="tab-icon" />
+          <span id="download-task-tab-badge" class="tab-badge" hidden>0</span>
+          <span class="tab-label">下载</span>
+          <span class="tab-caption">任务</span>
         </button>
         <button
           class="tab-button"
