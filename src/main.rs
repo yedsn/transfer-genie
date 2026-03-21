@@ -37,7 +37,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 use tauri_plugin_log::{Target, TargetKind};
 use tauri_plugin_opener::OpenerExt;
-use tokio::sync::{oneshot, Mutex as AsyncMutex};
+use tokio::sync::{oneshot, watch, Mutex as AsyncMutex};
 
 struct AppState {
     settings_path: PathBuf,
@@ -48,6 +48,7 @@ struct AppState {
     sync_status: Mutex<SyncStatus>,
     sync_guard: AsyncMutex<()>,
     sync_cancel: Mutex<Option<oneshot::Sender<()>>>,
+    sync_loop_signal: watch::Sender<u64>,
     http: Client,
     registered_hotkey: Mutex<Option<Shortcut>>,
     telegram_bridge: Mutex<TelegramBridgeManager>,
@@ -60,6 +61,8 @@ const HOTKEY_MENU_ID: &str = "toggle-hotkey";
 const DEFAULT_SEND_HOTKEY: &str = "enter";
 const SEND_HOTKEY_CTRL_ENTER: &str = "ctrl_enter";
 const SYNC_TIMEOUT_SECS: u64 = 45;
+const MANUAL_SYNC_SOURCE: &str = "手动刷新";
+const AUTO_SYNC_SOURCE: &str = "定时同步";
 const TELEGRAM_BRIDGE_ARG: &str = "--telegram-bridge";
 const DEFAULT_TELEGRAM_POLL_INTERVAL_SECS: u64 = 5;
 
@@ -389,6 +392,8 @@ async fn save_settings(
         restart_telegram_bridge_for_active_endpoint_change(&state).await;
     }
 
+    signal_sync_loop_reset(&state);
+
     Ok(normalized)
 }
 
@@ -519,6 +524,7 @@ fn import_settings(
         .lock()
         .map_err(|_| "写入设置失败".to_string())?;
     *guard = normalized.clone();
+    signal_sync_loop_reset(&state);
     Ok(normalized)
 }
 
@@ -1779,22 +1785,18 @@ async fn cleanup_messages(
 
 #[tauri::command]
 async fn manual_refresh(state: State<'_, AppState>) -> Result<SyncStatus, String> {
-    run_sync(&state, "手动刷新", true).await
+    if is_sync_running_from(&state, AUTO_SYNC_SOURCE)? {
+        cancel_active_sync(&state)?;
+    }
+
+    let result = run_sync(&state, MANUAL_SYNC_SOURCE, true).await;
+    signal_sync_loop_reset(&state);
+    result
 }
 
 #[tauri::command]
 fn cancel_manual_refresh(state: State<'_, AppState>) -> Result<(), String> {
-    let cancel_tx = {
-        let mut sync_cancel = state
-            .sync_cancel
-            .lock()
-            .map_err(|_| "取消刷新失败".to_string())?;
-        sync_cancel.take()
-    };
-    if let Some(tx) = cancel_tx {
-        let _ = tx.send(());
-    }
-    Ok(())
+    cancel_active_sync(&state)
 }
 
 #[tauri::command]
@@ -2200,6 +2202,33 @@ fn current_settings(state: &AppState) -> Result<Settings, String> {
         .lock()
         .map_err(|_| "读取设置失败".to_string())?;
     Ok(settings.clone())
+}
+
+fn signal_sync_loop_reset(state: &AppState) {
+    let next = (*state.sync_loop_signal.borrow()).wrapping_add(1);
+    let _ = state.sync_loop_signal.send(next);
+}
+
+fn cancel_active_sync(state: &AppState) -> Result<(), String> {
+    let cancel_tx = {
+        let mut sync_cancel = state
+            .sync_cancel
+            .lock()
+            .map_err(|_| "取消刷新失败".to_string())?;
+        sync_cancel.take()
+    };
+    if let Some(tx) = cancel_tx {
+        let _ = tx.send(());
+    }
+    Ok(())
+}
+
+fn is_sync_running_from(state: &AppState, source: &str) -> Result<bool, String> {
+    let status = state
+        .sync_status
+        .lock()
+        .map_err(|_| "读取同步状态失败".to_string())?;
+    Ok(status.running && status.current_source.as_deref() == Some(source))
 }
 
 fn now_ms() -> i64 {
@@ -3376,6 +3405,7 @@ async fn run_sync(
                 status.running = true;
                 status.last_error = None;
                 status.last_result = Some(format!("\u{540C}\u{6B65}\u{4E2D}\u{FF1A}{source}..."));
+                status.current_source = Some(source.to_string());
                 None
             }
         };
@@ -3418,6 +3448,7 @@ async fn run_sync(
     })?;
     status.running = false;
     status.last_run_ms = Some(now_ms());
+    status.current_source = None;
     match result {
         Ok(count) => {
             status.last_error = None;
@@ -3890,25 +3921,7 @@ fn sync_dock_visibility_window(app: &AppHandle, window: &Window) {
     let _ = app.set_dock_visibility(visible && !minimized);
 }
 
-fn start_sync_loop(app_handle: AppHandle) {
-    tauri::async_runtime::spawn(async move {
-        loop {
-            let state = app_handle.state::<AppState>();
-            let interval = match state.settings.lock() {
-                Ok(settings) => {
-                    if settings.refresh_interval_secs == 0 {
-                        5
-                    } else {
-                        settings.refresh_interval_secs
-                    }
-                }
-                Err(_) => 5,
-            };
-
-            let _ = run_sync(&state, "定时同步", false).await;
-            tokio::time::sleep(Duration::from_secs(interval)).await;
-        }
-    });
+fn start_sync_loop(_app_handle: AppHandle) {
 }
 
 fn is_telegram_bridge_mode() -> bool {
@@ -3963,6 +3976,8 @@ fn main() {
             fs::create_dir_all(&files_base_dir)
                 .map_err(|err| format!("创建文件目录失败: {err}"))?;
 
+            let (sync_loop_signal, _) = watch::channel(0_u64);
+
             app.manage(AppState {
                 settings_path,
                 db_path,
@@ -3972,6 +3987,7 @@ fn main() {
                 sync_status: Mutex::new(SyncStatus::idle()),
                 sync_guard: AsyncMutex::new(()),
                 sync_cancel: Mutex::new(None),
+                sync_loop_signal,
                 http: Client::builder()
                     .connect_timeout(Duration::from_secs(10))
                     .pool_idle_timeout(Duration::from_secs(30))

@@ -116,6 +116,7 @@ pub struct SyncStatus {
     pub last_run_ms: Option<i64>,
     pub last_error: Option<String>,
     pub last_result: Option<String>,
+    pub current_source: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -140,6 +141,7 @@ impl SyncStatus {
             last_run_ms: None,
             last_error: None,
             last_result: Some("尚未同步".to_string()),
+            current_source: None,
         }
     }
 }

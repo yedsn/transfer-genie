@@ -89,6 +89,7 @@ let selectedFiles = [];
 
 let refreshTimer = null;
 let activeRefreshIntervalSecs = 5;
+let refreshCountdownSecs = 5;
 let didInitialSync = false;
 let webdavEndpoints = [];
 let activeEndpointId = null;
@@ -477,6 +478,7 @@ function setRefreshLoading(loading) {
   if (refreshLabel) {
     refreshLabel.textContent = loading ? '刷新中...' : refreshLabelDefault || '刷新';
   }
+  updateRefreshCountdown();
 }
 
 function prepareWindowForHide() {
@@ -3989,6 +3991,9 @@ async function loadSyncStatus() {
       return;
     }
     const status = await invoke('get_sync_status');
+    if (!isManualRefreshRunning) {
+      setRefreshLoading(!!status.running);
+    }
     if (status.last_error) {
       setErrorStatus(`同步错误：${status.last_error}`);
       return;
@@ -4011,19 +4016,58 @@ function startRefreshTimer(intervalSecs) {
   }
   const interval = Math.max(1, Number(intervalSecs) || 5);
   activeRefreshIntervalSecs = interval;
-  refreshTimer = setInterval(() => {
+  refreshCountdownSecs = interval;
+  updateRefreshCountdown();
+  refreshTimer = setInterval(async () => {
+    if (isManualRefreshRunning) {
+      updateRefreshCountdown();
+      return;
+    }
+
+    if (!getActiveEndpoint()) {
+      refreshCountdownSecs = interval;
+      updateRefreshCountdown();
+      return;
+    }
+
     const hasSearchQuery = searchInput && searchInput.value.trim().length > 0;
     if (hasSearchQuery || hasActiveContentTransfer()) {
-      return; // Don't refresh if searching
+      updateRefreshCountdown();
+      return;
     }
-    // 使用 checkNew 模式进行增量更新，不清空现有数据
-    loadMessages({ checkNew: true });
-    loadSyncStatus();
-  }, interval * 1000);
+
+    refreshCountdownSecs = Math.max(0, refreshCountdownSecs - 1);
+    updateRefreshCountdown();
+
+    if (refreshCountdownSecs > 0) {
+      return;
+    }
+
+    await manualRefresh();
+  }, 1000);
 }
 
 function restartRefreshTimer() {
   startRefreshTimer(activeRefreshIntervalSecs);
+}
+
+function updateRefreshCountdown() {
+  if (!refreshLabel || !refreshButton) {
+    return;
+  }
+
+  if (!getActiveEndpoint()) {
+    refreshLabel.textContent = refreshLabelDefault || '刷新';
+    return;
+  }
+
+  if (isManualRefreshRunning) {
+    refreshLabel.textContent = '刷新中...';
+    return;
+  }
+
+  const remaining = Math.max(1, Math.ceil(Number(refreshCountdownSecs) || activeRefreshIntervalSecs || 1));
+  refreshLabel.textContent = `${refreshLabelDefault || '刷新'} (${remaining}s)`;
 }
 
 function delay(ms) {
@@ -5237,6 +5281,7 @@ function setSenderNameDisplay(name) {
 }
 
 async function manualRefresh() {
+  let didStartManualRefresh = false;
   if (isManualRefreshRunning) {
     setStatus('手动刷新进行中...');
     return;
@@ -5254,6 +5299,7 @@ async function manualRefresh() {
       setErrorStatus('请先选择 WebDAV 端点');
       return;
     }
+    didStartManualRefresh = true;
     isManualRefreshRunning = true;
     setRefreshLoading(true);
     await invoke('manual_refresh');
@@ -5269,6 +5315,9 @@ async function manualRefresh() {
   } finally {
     isManualRefreshRunning = false;
     setRefreshLoading(false);
+    if (didStartManualRefresh) {
+      restartRefreshTimer();
+    }
   }
 }
 
