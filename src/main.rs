@@ -61,7 +61,7 @@ const HOTKEY_MENU_ID: &str = "toggle-hotkey";
 const DEFAULT_SEND_HOTKEY: &str = "enter";
 const SEND_HOTKEY_CTRL_ENTER: &str = "ctrl_enter";
 const SYNC_TIMEOUT_SECS: u64 = 45;
-const MANUAL_SYNC_SOURCE: &str = "手动刷新";
+const REFRESH_SYNC_SOURCE: &str = "正在刷新";
 const AUTO_SYNC_SOURCE: &str = "定时同步";
 const TELEGRAM_BRIDGE_ARG: &str = "--telegram-bridge";
 const DEFAULT_TELEGRAM_POLL_INTERVAL_SECS: u64 = 5;
@@ -2096,18 +2096,18 @@ async fn cleanup_messages(
 }
 
 #[tauri::command]
-async fn manual_refresh(state: State<'_, AppState>) -> Result<SyncStatus, String> {
+async fn refresh(state: State<'_, AppState>) -> Result<SyncStatus, String> {
     if is_sync_running_from(&state, AUTO_SYNC_SOURCE)? {
         cancel_active_sync(&state)?;
     }
 
-    let result = run_sync(&state, MANUAL_SYNC_SOURCE, true).await;
+    let result = run_sync(&state, REFRESH_SYNC_SOURCE, true).await;
     signal_sync_loop_reset(&state);
     result
 }
 
 #[tauri::command]
-fn cancel_manual_refresh(state: State<'_, AppState>) -> Result<(), String> {
+fn cancel_refresh(state: State<'_, AppState>) -> Result<(), String> {
     cancel_active_sync(&state)
 }
 
@@ -4544,8 +4544,8 @@ fn main() {
             fetch_image_preview,
             delete_messages,
             cleanup_messages,
-            manual_refresh,
-            cancel_manual_refresh,
+            refresh,
+            cancel_refresh,
             get_sync_status,
             start_telegram_bridge,
             stop_telegram_bridge,

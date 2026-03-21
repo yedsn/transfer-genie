@@ -108,7 +108,7 @@ const selectedDownloadTasks = new Set();
 const expandedTextMessages = new Set();
 let currentPreviewMessage = null;
 const MESSAGE_BODY_COLLAPSE_HEIGHT = 260;
-let isManualRefreshRunning = false;
+let isRefreshRunning = false;
 let isLoadMessagesRunning = false;
 let isLoadSyncStatusRunning = false;
 let telegramBridgeStatusPollTimer = null;
@@ -4075,7 +4075,7 @@ async function loadMessages(options = {}) {
         }
       }
     } else {
-      // 初始加载或手动刷新：加载最新的消息
+      // 初始加载或刷新：加载最新的消息
       currentOffset = 0;
       const result = await invoke('list_messages', { limit: PAGE_SIZE, offset: 0, onlyMarked: markedFilterActive });
       
@@ -4111,7 +4111,7 @@ async function loadSyncStatus() {
       return;
     }
     const status = await invoke('get_sync_status');
-    if (!isManualRefreshRunning) {
+    if (!isRefreshRunning) {
       setRefreshLoading(!!status.running);
     }
     if (status.last_error) {
@@ -4139,7 +4139,7 @@ function startRefreshTimer(intervalSecs) {
   refreshCountdownSecs = interval;
   updateRefreshCountdown();
   refreshTimer = setInterval(async () => {
-    if (isManualRefreshRunning) {
+    if (isRefreshRunning) {
       updateRefreshCountdown();
       return;
     }
@@ -4163,7 +4163,7 @@ function startRefreshTimer(intervalSecs) {
       return;
     }
 
-    await manualRefresh();
+    await refreshMessages();
   }, 1000);
 }
 
@@ -4181,7 +4181,7 @@ function updateRefreshCountdown() {
     return;
   }
 
-  if (isManualRefreshRunning) {
+  if (isRefreshRunning) {
     refreshLabel.textContent = '刷新中...';
     return;
   }
@@ -4609,7 +4609,7 @@ async function loadSettings() {
         await loadMessages({ checkNew: true, scrollToBottom: true });
         await loadSyncStatus();
       } else {
-        await manualRefresh();
+        await refreshMessages();
       }
     }
   } catch (error) {
@@ -4702,7 +4702,7 @@ async function saveSettings(options = {}) {
       setSelectionMode(false);
       pendingUploads.clear();
       uploadSpeed.clear();
-      await manualRefresh();
+      await refreshMessages();
       didInitialSync = true;
     }
     return updated;
@@ -4805,7 +4805,7 @@ async function importSettings() {
       setSelectionMode(false);
       pendingUploads.clear();
       uploadSpeed.clear();
-      await manualRefresh();
+      await refreshMessages();
       didInitialSync = true;
     }
     await showSettingsResultDialog('导入配置成功', '配置已导入并生效。');
@@ -4928,7 +4928,7 @@ async function restoreWebdav() {
       title: '恢复成功',
       message: 'WebDAV 数据已成功恢复',
     });
-    await manualRefresh();
+    await refreshMessages();
   } catch (error) {
     setErrorStatus(`恢复失败：${error}`);
     showToast(`恢复失败：${error}`, 'error');
@@ -5333,7 +5333,7 @@ async function switchActiveEndpoint() {
     setSelectionMode(false);
     pendingUploads.clear();
     uploadSpeed.clear();
-    await manualRefresh();
+    await refreshMessages();
     didInitialSync = true;
   } catch (error) {
     setErrorStatus(`切换端点失败：${error}`);
@@ -5389,9 +5389,9 @@ function setSenderNameDisplay(name) {
   deviceNameLabel.title = text;
 }
 
-async function manualRefresh() {
+async function refreshMessages() {
   let didStartManualRefresh = false;
-  if (isManualRefreshRunning) {
+  if (isRefreshRunning) {
     setStatus('正在刷新...');
     return;
   }
@@ -5409,19 +5409,19 @@ async function manualRefresh() {
       return;
     }
     didStartManualRefresh = true;
-    isManualRefreshRunning = true;
+    isRefreshRunning = true;
     setRefreshLoading(true);
-    await invoke('manual_refresh');
+    await invoke('refresh');
     await Promise.all([loadMessages(), loadSyncStatus()]);
   } catch (error) {
     const reason = String(error || '');
     if (reason.includes('已取消')) {
       setStatus('已取消刷新');
     } else {
-      setErrorStatus(`手动刷新失败：${error}`);
+      setErrorStatus(`刷新失败：${error}`);
     }
   } finally {
-    isManualRefreshRunning = false;
+    isRefreshRunning = false;
     setRefreshLoading(false);
     if (didStartManualRefresh) {
       restartRefreshTimer();
@@ -5547,7 +5547,7 @@ refreshButton.addEventListener('click', async () => {
     setStatus('发送进行中，暂不刷新');
     return;
   }
-  await manualRefresh();
+  await refreshMessages();
 });
 if (openDownloadDirButton) {
   openDownloadDirButton.addEventListener('click', openDownloadDir);
