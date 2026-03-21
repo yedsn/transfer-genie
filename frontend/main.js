@@ -1300,6 +1300,10 @@ function showInfoDialog(options = {}) {
   });
 }
 
+async function showSettingsResultDialog(title, message) {
+  await showInfoDialog({ title, message });
+}
+
 function showPasswordDialog(options = {}) {
   const titleText = options.title || '请输入密码';
   const messageText = options.message || '此操作需要密码。';
@@ -3398,6 +3402,7 @@ async function discoverTelegramChatsWithFeedback() {
 async function startTelegramBridge() {
   try {
     if (!invoke) {
+      await showSettingsResultDialog('启动 Telegram Bridge 失败', '未检测到 Tauri API，请检查应用环境。');
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
@@ -3406,13 +3411,19 @@ async function startTelegramBridge() {
       silent: true,
     });
     if (!saved) {
+      await showSettingsResultDialog(
+        '启动 Telegram Bridge 失败',
+        syncStatus?.textContent || '启动前配置校验失败，请检查 Telegram Bridge 设置。',
+      );
       return;
     }
     const status = await invoke('start_telegram_bridge');
     setTelegramBridgeStatus(status);
+    await showSettingsResultDialog('启动 Telegram Bridge 成功', 'Telegram bridge 已启动。');
     setSuccessStatus('Telegram bridge 已启动');
   } catch (error) {
     await loadTelegramBridgeStatus({ silent: true });
+    await showSettingsResultDialog('启动 Telegram Bridge 失败', String(error));
     setErrorStatus(`启动 Telegram bridge 失败：${error}`);
   }
 }
@@ -3420,14 +3431,17 @@ async function startTelegramBridge() {
 async function stopTelegramBridge() {
   try {
     if (!invoke) {
+      await showSettingsResultDialog('停止 Telegram Bridge 失败', '未检测到 Tauri API，请检查应用环境。');
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
     const status = await invoke('stop_telegram_bridge');
     setTelegramBridgeStatus(status);
+    await showSettingsResultDialog('停止 Telegram Bridge 成功', 'Telegram bridge 已停止。');
     setSuccessStatus('Telegram bridge 已停止');
   } catch (error) {
     await loadTelegramBridgeStatus({ silent: true });
+    await showSettingsResultDialog('停止 Telegram Bridge 失败', String(error));
     setErrorStatus(`停止 Telegram bridge 失败：${error}`);
   }
 }
@@ -3657,10 +3671,12 @@ async function saveSettingsWithFeedback() {
 async function exportSettings() {
   try {
     if (!invoke) {
+      await showSettingsResultDialog('导出配置失败', '未检测到 Tauri API，请检查应用环境。');
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
     if (!saveDialog) {
+      await showSettingsResultDialog('导出配置失败', '未检测到保存对话框插件，请检查应用配置。');
       setErrorStatus('未检测到保存对话框插件，请确认已启用 dialog 插件');
       return;
     }
@@ -3680,8 +3696,10 @@ async function exportSettings() {
       return;
     }
     await invoke('export_settings', { path: target, password });
+    await showSettingsResultDialog('导出配置成功', `配置已导出到：\n${target}`);
     setSuccessStatus(`配置已导出到 ${target}`.trim());
   } catch (error) {
+    await showSettingsResultDialog('导出配置失败', String(error));
     setErrorStatus(`导出配置失败：${error}`);
   }
 }
@@ -3689,10 +3707,12 @@ async function exportSettings() {
 async function importSettings() {
   try {
     if (!invoke) {
+      await showSettingsResultDialog('导入配置失败', '未检测到 Tauri API，请检查应用环境。');
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
     if (!openDialog) {
+      await showSettingsResultDialog('导入配置失败', '未检测到文件对话框插件，请检查应用配置。');
       setErrorStatus('未检测到对话框插件，请确认已启用 dialog 插件');
       return;
     }
@@ -3730,7 +3750,9 @@ async function importSettings() {
       await manualRefresh();
       didInitialSync = true;
     }
+    await showSettingsResultDialog('导入配置成功', '配置已导入并生效。');
   } catch (error) {
+    await showSettingsResultDialog('导入配置失败', String(error));
     setErrorStatus(`导入配置失败：${error}`);
   }
 }
@@ -3739,14 +3761,17 @@ async function backupWebdav() {
   const originalText = backupWebdavButton ? backupWebdavButton.textContent : '备份';
   try {
     if (!invoke) {
+      await showSettingsResultDialog('备份 WebDAV 失败', '未检测到 Tauri API，请检查应用环境。');
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
     if (!getActiveEndpoint()) {
+      await showSettingsResultDialog('备份 WebDAV 失败', '请先选择 WebDAV 端点。');
       setErrorStatus('请先选择 WebDAV 端点');
       return;
     }
     if (!saveDialog) {
+      await showSettingsResultDialog('备份 WebDAV 失败', '未检测到保存对话框插件，请检查应用配置。');
       setErrorStatus('未检测到保存对话框插件，请确认已启用 dialog 插件');
       return;
     }
@@ -3796,14 +3821,17 @@ async function restoreWebdav() {
   const originalText = restoreWebdavButton ? restoreWebdavButton.textContent : '恢复';
   try {
     if (!invoke) {
-      setErrorStatus('未���测到 Tauri API，请检查 app.withGlobalTauri 设置');
+      await showSettingsResultDialog('恢复 WebDAV 失败', '未检测到 Tauri API，请检查应用环境。');
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
     if (!getActiveEndpoint()) {
+      await showSettingsResultDialog('恢复 WebDAV 失败', '请先选择 WebDAV 端点。');
       setErrorStatus('请先选择 WebDAV 端点');
       return;
     }
     if (!openDialog) {
+      await showSettingsResultDialog('恢复 WebDAV 失败', '未检测到文件对话框插件，请检查应用配置。');
       setErrorStatus('未检测到对话框插件，请确认已启用 dialog 插件');
       return;
     }
@@ -4157,6 +4185,7 @@ async function batchSpeedTest() {
 
   if (validEndpoints.length === 0) {
     setErrorStatus('没有可测试的端点（请至少填写一个端点的 URL）');
+    await showSettingsResultDialog('批量测速失败', '没有可测速的端点，请至少填写一个端点的 URL。');
     return;
   }
 
@@ -4219,8 +4248,10 @@ async function batchSpeedTest() {
   try {
     await Promise.all(testPromises);
     setSuccessStatus(`批量测速完成（${validEndpoints.length} 个端点）`);
+    await showSettingsResultDialog('批量测速成功', `已完成 ${validEndpoints.length} 个端点的测速。`);
   } catch (error) {
     setErrorStatus(`批量测速失败：${error}`);
+    await showSettingsResultDialog('批量测速失败', String(error));
   } finally {
     batchSpeedTestButton.disabled = false;
     batchSpeedTestButton.textContent = '批量测速';

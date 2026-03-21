@@ -1654,6 +1654,16 @@ input {
   color: var(--muted);
 }
 
+.button.danger {
+  background: #d6452d;
+  color: #fff;
+  border: 2px solid white;
+}
+
+.button.danger:hover {
+  background: #b93520;
+}
+
 .button:hover {
   transform: translateY(-1px);
   transition: transform 0.2s ease;
