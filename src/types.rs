@@ -24,7 +24,7 @@ fn default_telegram_proxy_url() -> String {
     "http://127.0.0.1:7890".to_string()
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WebDavEndpoint {
     pub id: String,
     #[serde(default)]
@@ -36,7 +36,7 @@ pub struct WebDavEndpoint {
     pub enabled: bool,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TelegramBridgeSettings {
     #[serde(default)]
     pub enabled: bool,

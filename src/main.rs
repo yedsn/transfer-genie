@@ -432,8 +432,8 @@ async fn save_settings(
         *guard = normalized.clone();
     }
 
-    if previous.active_webdav_id != normalized.active_webdav_id {
-        restart_telegram_bridge_for_active_endpoint_change(&state).await;
+    if should_restart_telegram_bridge(&previous, &normalized) {
+        restart_telegram_bridge_after_settings_change(&state, "settings update").await;
     }
 
     signal_sync_loop_reset(&state);
@@ -3385,7 +3385,27 @@ fn record_telegram_bridge_restart_failure(state: &AppState, err: String) {
     }
 }
 
-async fn restart_telegram_bridge_for_active_endpoint_change(state: &AppState) {
+fn active_endpoint_for_settings(settings: &Settings) -> Option<&WebDavEndpoint> {
+    let active_id = settings.active_webdav_id.as_deref()?;
+    settings
+        .webdav_endpoints
+        .iter()
+        .find(|endpoint| endpoint.id == active_id)
+}
+
+fn should_restart_telegram_bridge(previous: &Settings, normalized: &Settings) -> bool {
+    previous.sender_name != normalized.sender_name
+        || previous.active_webdav_id != normalized.active_webdav_id
+        || active_endpoint_for_settings(previous) != active_endpoint_for_settings(normalized)
+        || previous.telegram.sender_name != normalized.telegram.sender_name
+        || previous.telegram.bot_token != normalized.telegram.bot_token
+        || previous.telegram.chat_id != normalized.telegram.chat_id
+        || previous.telegram.proxy_enabled != normalized.telegram.proxy_enabled
+        || previous.telegram.proxy_url != normalized.telegram.proxy_url
+        || previous.telegram.poll_interval_secs != normalized.telegram.poll_interval_secs
+}
+
+async fn restart_telegram_bridge_after_settings_change(state: &AppState, reason: &str) {
     let Ok(running) = is_telegram_bridge_running(state) else {
         return;
     };
@@ -3396,7 +3416,7 @@ async fn restart_telegram_bridge_for_active_endpoint_change(state: &AppState) {
     let _ = stop_telegram_bridge_impl(state);
     if let Err(err) = start_telegram_bridge_impl(state).await {
         record_telegram_bridge_restart_failure(state, err.clone());
-        eprintln!("Telegram bridge restart after active endpoint switch failed: {err}");
+        eprintln!("Telegram bridge restart after {reason} failed: {err}");
     }
 }
 
@@ -4990,6 +5010,24 @@ mod tests {
         settings.active_webdav_id = None;
 
         assert!(!should_auto_start_telegram_bridge(&settings));
+    }
+
+    #[test]
+    fn should_restart_telegram_bridge_when_runtime_telegram_settings_change() {
+        let previous = test_settings();
+        let mut normalized = test_settings();
+        normalized.telegram.sender_name = "tg-alias".to_string();
+
+        assert!(should_restart_telegram_bridge(&previous, &normalized));
+    }
+
+    #[test]
+    fn should_not_restart_telegram_bridge_for_auto_start_only_change() {
+        let previous = test_settings();
+        let mut normalized = test_settings();
+        normalized.telegram.auto_start = true;
+
+        assert!(!should_restart_telegram_bridge(&previous, &normalized));
     }
 
     #[test]
