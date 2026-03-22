@@ -1,5 +1,9 @@
-use crate::filenames::{build_message_filename, message_remote_path, parse_message_filename, MessageKind};
-use crate::history::{append_history, load_history_with_layout, save_history, HistoryEntry, HistoryLayout};
+use crate::filenames::{
+    build_message_filename, message_remote_path, parse_message_filename, MessageKind,
+};
+use crate::history::{
+    append_history, load_history_with_layout, save_history, HistoryEntry, HistoryLayout,
+};
 use crate::types::WebDavEndpoint;
 use crate::webdav;
 use log::{error, info, warn};
@@ -19,6 +23,10 @@ const TELEGRAM_SEND_FILE_LIMIT_BYTES: i64 = 50 * 1024 * 1024;
 
 #[derive(Clone, Deserialize)]
 pub struct TelegramBridgeConfig {
+    #[serde(default)]
+    pub device_sender_name: String,
+    #[serde(default)]
+    pub telegram_sender_name: String,
     pub telegram_bot_token: String,
     pub allowed_chat_id: i64,
     #[serde(default)]
@@ -54,6 +62,8 @@ impl TelegramBridgeConfig {
             config.webdav.name = "Telegram Bridge".to_string();
         }
         config.proxy_url = config.proxy_url.trim().to_string();
+        config.device_sender_name = config.device_sender_name.trim().to_string();
+        config.telegram_sender_name = config.telegram_sender_name.trim().to_string();
         config.webdav.enabled = true;
         config.poll_interval_secs = config.poll_interval_secs.max(1);
         let base = path.parent().unwrap_or_else(|| Path::new("."));
@@ -450,14 +460,9 @@ async fn import_into_webdav(
             webdav::ensure_parent_directories(webdav_client, &config.webdav, &remote_path)
                 .await
                 .map_err(|err| BridgeError::transient("webdav_io", err))?;
-            webdav::upload_file(
-                webdav_client,
-                &config.webdav,
-                &remote_path,
-                bytes.clone(),
-            )
-            .await
-            .map_err(|err| BridgeError::transient("webdav_io", err))?;
+            webdav::upload_file(webdav_client, &config.webdav, &remote_path, bytes.clone())
+                .await
+                .map_err(|err| BridgeError::transient("webdav_io", err))?;
             append_history(
                 webdav_client,
                 &config.webdav,
@@ -698,6 +703,7 @@ async fn send_history_entry(
     config: &TelegramBridgeConfig,
     entry: &HistoryEntry,
 ) -> Result<i64, BridgeError> {
+    let outbound_sender = resolve_outbound_sender_name(config, &entry.sender);
     let remote_path = entry
         .remote_path
         .clone()
@@ -705,13 +711,13 @@ async fn send_history_entry(
     match entry.kind.as_str() {
         "text" => {
             let bytes = webdav::download_file(webdav_client, &config.webdav, &remote_path)
-            .await
-            .map_err(|err| BridgeError::transient("webdav_io", err))?;
+                .await
+                .map_err(|err| BridgeError::transient("webdav_io", err))?;
             let text = String::from_utf8_lossy(&bytes).to_string();
             send_message(
                 telegram_client,
                 config,
-                &format!("{}:\n{}", entry.sender, text),
+                &format!("{outbound_sender}:\n{text}"),
             )
             .await
         }
@@ -723,8 +729,8 @@ async fn send_history_entry(
                 ));
             }
             let bytes = webdav::download_file(webdav_client, &config.webdav, &remote_path)
-            .await
-            .map_err(|err| BridgeError::transient("webdav_io", err))?;
+                .await
+                .map_err(|err| BridgeError::transient("webdav_io", err))?;
             let temp_path = temp_file_path(
                 &config.temp_dir(),
                 &format!(
@@ -744,7 +750,7 @@ async fn send_history_entry(
                 config,
                 &entry.original_name,
                 send_bytes,
-                &format!("From {}", entry.sender),
+                &format!("From {outbound_sender}"),
             )
             .await
         }
@@ -753,6 +759,16 @@ async fn send_history_entry(
             format!("不支持的消息类型: {other}"),
         )),
     }
+}
+
+fn resolve_outbound_sender_name(config: &TelegramBridgeConfig, sender: &str) -> String {
+    if !config.telegram_sender_name.is_empty()
+        && !config.device_sender_name.is_empty()
+        && sender == config.device_sender_name
+    {
+        return config.telegram_sender_name.clone();
+    }
+    sender.to_string()
 }
 
 fn extract_inbound_payload(message: &TelegramMessage) -> Option<InboundPayload> {
@@ -1146,5 +1162,33 @@ mod tests {
             username: None,
         };
         assert_eq!(resolve_sender(Some(&user)), "telegram-user-7");
+    }
+
+    #[test]
+    fn resolve_outbound_sender_name_uses_telegram_override_for_local_sender() {
+        let config = TelegramBridgeConfig {
+            device_sender_name: "Device-A".to_string(),
+            telegram_sender_name: "TG-A".to_string(),
+            telegram_bot_token: "123:test".to_string(),
+            allowed_chat_id: 1,
+            proxy_url: String::new(),
+            webdav: WebDavEndpoint {
+                id: "endpoint".to_string(),
+                name: "Endpoint".to_string(),
+                url: "https://example.com".to_string(),
+                username: "user".to_string(),
+                password: "pass".to_string(),
+                enabled: true,
+            },
+            poll_interval_secs: 5,
+            state_path: String::new(),
+            temp_dir: String::new(),
+        };
+
+        assert_eq!(resolve_outbound_sender_name(&config, "Device-A"), "TG-A");
+        assert_eq!(
+            resolve_outbound_sender_name(&config, "Other-Device"),
+            "Other-Device"
+        );
     }
 }

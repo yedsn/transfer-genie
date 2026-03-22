@@ -1,4 +1,4 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+﻿#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod db;
 mod filenames;
 mod history;
@@ -132,6 +132,8 @@ struct ExportTelegramSettings {
     #[serde(default)]
     auto_start: bool,
     #[serde(default)]
+    sender_name: String,
+    #[serde(default)]
     proxy_enabled: bool,
     #[serde(default = "default_telegram_proxy_url")]
     proxy_url: String,
@@ -183,10 +185,13 @@ struct TelegramChatCandidate {
     id: String,
     title: String,
     chat_type: String,
+    sender_name: String,
 }
 
 #[derive(Serialize)]
 struct TelegramBridgeRuntimeConfig {
+    device_sender_name: String,
+    telegram_sender_name: String,
     telegram_bot_token: String,
     allowed_chat_id: i64,
     proxy_url: String,
@@ -318,6 +323,8 @@ struct TelegramDiscoveryUpdate {
 #[derive(Deserialize)]
 struct TelegramDiscoveryMessage {
     chat: TelegramDiscoveryChat,
+    #[serde(default)]
+    from: Option<TelegramDiscoveryUser>,
 }
 
 #[derive(Deserialize)]
@@ -333,6 +340,14 @@ struct TelegramDiscoveryChat {
     first_name: Option<String>,
     #[serde(default)]
     last_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TelegramDiscoveryUser {
+    #[allow(dead_code)]
+    id: i64,
+    #[serde(default)]
+    username: Option<String>,
 }
 
 fn emit_backup_restore_progress(
@@ -469,6 +484,7 @@ fn export_settings(
         telegram: ExportTelegramSettings {
             enabled: settings.telegram.enabled,
             auto_start: settings.telegram.auto_start,
+            sender_name: settings.telegram.sender_name.clone(),
             proxy_enabled: settings.telegram.proxy_enabled,
             proxy_url: settings.telegram.proxy_url.clone(),
             poll_interval_secs: settings.telegram.poll_interval_secs,
@@ -534,6 +550,7 @@ fn import_settings(
         telegram: TelegramBridgeSettings {
             enabled: bundle.settings.telegram.enabled,
             auto_start: bundle.settings.telegram.auto_start,
+            sender_name: bundle.settings.telegram.sender_name,
             bot_token: existing.telegram.bot_token,
             chat_id: existing.telegram.chat_id,
             proxy_enabled: bundle.settings.telegram.proxy_enabled,
@@ -645,8 +662,9 @@ fn list_messages(
         db::count_messages(&state.db_path, &endpoint.id, true).map_err(|err| err.to_string())?
     };
 
-    let messages = db::list_messages_paged(&state.db_path, &endpoint.id, limit, offset, marked_filter)
-        .map_err(|err| err.to_string())?;
+    let messages =
+        db::list_messages_paged(&state.db_path, &endpoint.id, limit, offset, marked_filter)
+            .map_err(|err| err.to_string())?;
 
     let current_offset = offset.unwrap_or(0);
     let current_limit = limit.unwrap_or(total);
@@ -841,12 +859,10 @@ async fn send_file(
     // Generate and upload thumbnail if it's an image
     if is_image_file(&original_name) {
         if let Ok(thumb_data) = generate_thumbnail(&data) {
-            let thumb_remote_path = resolved_thumbnail_remote_path(
-                Some(&remote_path),
-                &filename,
-                Some(timestamp_ms),
-            );
-            let _ = webdav::ensure_parent_directories(&state.http, &endpoint, &thumb_remote_path).await;
+            let thumb_remote_path =
+                resolved_thumbnail_remote_path(Some(&remote_path), &filename, Some(timestamp_ms));
+            let _ =
+                webdav::ensure_parent_directories(&state.http, &endpoint, &thumb_remote_path).await;
             let _ = webdav::upload_file(
                 &state.http,
                 &endpoint,
@@ -981,12 +997,10 @@ async fn send_file_data(
     // Generate and upload thumbnail if it's an image
     if is_image_file(&original_name) {
         if let Ok(thumb_data) = generate_thumbnail(&data) {
-            let thumb_remote_path = resolved_thumbnail_remote_path(
-                Some(&remote_path),
-                &filename,
-                Some(timestamp_ms),
-            );
-            let _ = webdav::ensure_parent_directories(&state.http, &endpoint, &thumb_remote_path).await;
+            let thumb_remote_path =
+                resolved_thumbnail_remote_path(Some(&remote_path), &filename, Some(timestamp_ms));
+            let _ =
+                webdav::ensure_parent_directories(&state.http, &endpoint, &thumb_remote_path).await;
             let _ = webdav::upload_file(
                 &state.http,
                 &endpoint,
@@ -1042,7 +1056,9 @@ async fn get_thumbnail(state: State<'_, AppState>, filename: String) -> Result<S
     let message = db::get_message(&state.db_path, &endpoint.id, &filename)
         .map_err(|err| format!("璇诲彇娑堟伅澶辫触: {err}"))?;
     let thumb_remote_path = resolved_thumbnail_remote_path(
-        message.as_ref().and_then(|item| item.remote_path.as_deref()),
+        message
+            .as_ref()
+            .and_then(|item| item.remote_path.as_deref()),
         &filename,
         message.as_ref().map(|item| item.timestamp_ms),
     );
@@ -1070,7 +1086,8 @@ async fn download_message_file(
     let endpoint = resolve_active_endpoint(&settings)?;
 
     let base_dir = resolve_download_dir(&state, &settings);
-    fs::create_dir_all(&base_dir).map_err(|err| format!("Failed to create download directory: {err}"))?;
+    fs::create_dir_all(&base_dir)
+        .map_err(|err| format!("Failed to create download directory: {err}"))?;
 
     let file_name = sanitize_filename(&original_name);
     let target_path = base_dir.join(file_name);
@@ -1090,7 +1107,9 @@ async fn download_message_file(
     let message = db::get_message(&state.db_path, &endpoint.id, &filename)
         .map_err(|err| format!("Failed to read message: {err}"))?;
     let remote_path = resolved_remote_path(
-        message.as_ref().and_then(|item| item.remote_path.as_deref()),
+        message
+            .as_ref()
+            .and_then(|item| item.remote_path.as_deref()),
         &filename,
         message.as_ref().map(|item| item.timestamp_ms),
     );
@@ -1164,7 +1183,9 @@ async fn save_message_file_as(
     let message = db::get_message(&state.db_path, &endpoint.id, &filename)
         .map_err(|err| format!("Failed to read message: {err}"))?;
     let remote_path = resolved_remote_path(
-        message.as_ref().and_then(|item| item.remote_path.as_deref()),
+        message
+            .as_ref()
+            .and_then(|item| item.remote_path.as_deref()),
         &filename,
         message.as_ref().map(|item| item.timestamp_ms),
     );
@@ -1273,7 +1294,11 @@ fn persist_partial_download(state: &AppState, entry: &DbPartialDownload) -> Resu
         .map_err(|err| format!("淇濆瓨涓嬭浇杩涘害澶辫触: {err}"))
 }
 
-fn clear_partial_download(state: &AppState, endpoint_id: &str, filename: &str) -> Result<(), String> {
+fn clear_partial_download(
+    state: &AppState,
+    endpoint_id: &str,
+    filename: &str,
+) -> Result<(), String> {
     db::delete_partial_download(&state.db_path, endpoint_id, filename)
         .map(|_| ())
         .map_err(|err| format!("娓呯悊涓嬭浇杩涘害澶辫触: {err}"))
@@ -1296,10 +1321,17 @@ fn resume_identity_matches(
     partial: &DbPartialDownload,
     response: &webdav::DownloadStreamResponse,
 ) -> bool {
-    if let Some(expected_etag) = partial.etag.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(expected_etag) = partial
+        .etag
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         return response.etag.as_deref() == Some(expected_etag);
     }
-    if let Some(expected_mtime) = partial.mtime.as_deref().filter(|value| !value.trim().is_empty())
+    if let Some(expected_mtime) = partial
+        .mtime
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
     {
         return response.last_modified.as_deref() == Some(expected_mtime);
     }
@@ -1406,8 +1438,8 @@ async fn execute_streamed_download(
     let (expected_etag, expected_mtime, expected_size) =
         load_message_remote_metadata(&state.db_path, &endpoint.id, filename)?;
 
-    let existing_partial =
-        db::get_partial_download(&state.db_path, &endpoint.id, filename).map_err(|err| err.to_string())?;
+    let existing_partial = db::get_partial_download(&state.db_path, &endpoint.id, filename)
+        .map_err(|err| err.to_string())?;
     let transfer_mode = if existing_partial.is_some() {
         DownloadTransferMode::Restarted
     } else {
@@ -1458,7 +1490,8 @@ async fn execute_streamed_download(
                                         None
                                     }
                                 })
-                                .unwrap_or_default() as i64,
+                                .unwrap_or_default()
+                                as i64,
                             etag: response.etag.clone().or(partial.etag.clone()),
                             mtime: response.last_modified.clone().or(partial.mtime.clone()),
                             updated_at_ms: now_ms(),
@@ -1570,9 +1603,11 @@ async fn execute_streamed_download(
     )
     .await?;
     if final_path.exists() {
-        fs::remove_file(final_path).map_err(|err| format!("Failed to replace existing downloaded file: {err}"))?;
+        fs::remove_file(final_path)
+            .map_err(|err| format!("Failed to replace existing downloaded file: {err}"))?;
     }
-    fs::rename(&temp_path, final_path).map_err(|err| format!("Failed to finalize downloaded file: {err}"))?;
+    fs::rename(&temp_path, final_path)
+        .map_err(|err| format!("Failed to finalize downloaded file: {err}"))?;
     clear_partial_download(state, &endpoint.id, filename)?;
     let file_hash = compute_file_hash_from_path(final_path)?;
     let _ = update_message_local_path(
@@ -1605,8 +1640,7 @@ async fn execute_streamed_download(
 #[tauri::command]
 
 fn list_download_history(state: State<'_, AppState>) -> Result<Vec<DownloadHistoryRecord>, String> {
-    db::list_download_history(&state.db_path)
-        .map_err(|err| format!("读取下载历史失败: {err}"))
+    db::list_download_history(&state.db_path).map_err(|err| format!("读取下载历史失败: {err}"))
 }
 
 #[tauri::command]
@@ -1632,8 +1666,7 @@ async fn save_download_history_as(
         .filter(|path| path.is_file())
     {
         if saved_path != final_path {
-            fs::copy(&saved_path, &final_path)
-                .map_err(|err| format!("Save-as failed: {err}"))?;
+            fs::copy(&saved_path, &final_path).map_err(|err| format!("Save-as failed: {err}"))?;
         }
         return Ok(DownloadResult {
             status: "saved".to_string(),
@@ -1648,7 +1681,9 @@ async fn save_download_history_as(
     let message = db::get_message(&state.db_path, &endpoint.id, &record.filename)
         .map_err(|err| format!("Failed to read message: {err}"))?;
     let remote_path = resolved_remote_path(
-        message.as_ref().and_then(|item| item.remote_path.as_deref()),
+        message
+            .as_ref()
+            .and_then(|item| item.remote_path.as_deref()),
         &record.filename,
         message.as_ref().map(|item| item.timestamp_ms),
     );
@@ -1688,7 +1723,8 @@ async fn redownload_download_history(
         PathBuf::from(saved_path)
     } else {
         let base_dir = resolve_download_dir(&state, &settings);
-        fs::create_dir_all(&base_dir).map_err(|err| format!("Failed to create download directory: {err}"))?;
+        fs::create_dir_all(&base_dir)
+            .map_err(|err| format!("Failed to create download directory: {err}"))?;
         base_dir.join(sanitize_filename(&record.original_name))
     };
 
@@ -1699,7 +1735,9 @@ async fn redownload_download_history(
     let message = db::get_message(&state.db_path, &record.endpoint_id, &record.filename)
         .map_err(|err| format!("Failed to read message: {err}"))?;
     let remote_path = resolved_remote_path(
-        message.as_ref().and_then(|item| item.remote_path.as_deref()),
+        message
+            .as_ref()
+            .and_then(|item| item.remote_path.as_deref()),
         &record.filename,
         message.as_ref().map(|item| item.timestamp_ms),
     );
@@ -1951,7 +1989,9 @@ async fn fetch_image_preview(
     let message = db::get_message(&state.db_path, &endpoint.id, &filename)
         .map_err(|err| format!("璇诲彇娑堟伅澶辫触: {err}"))?;
     let remote_path = resolved_remote_path(
-        message.as_ref().and_then(|item| item.remote_path.as_deref()),
+        message
+            .as_ref()
+            .and_then(|item| item.remote_path.as_deref()),
         &filename,
         message.as_ref().map(|item| item.timestamp_ms),
     );
@@ -1998,7 +2038,9 @@ async fn delete_messages(
             let message = db::get_message(&state.db_path, &endpoint.id, filename)
                 .map_err(|err| err.to_string())?;
             let remote_path = resolved_remote_path(
-                message.as_ref().and_then(|item| item.remote_path.as_deref()),
+                message
+                    .as_ref()
+                    .and_then(|item| item.remote_path.as_deref()),
                 filename,
                 message.as_ref().map(|item| item.timestamp_ms),
             );
@@ -2457,7 +2499,8 @@ async fn restore_webdav(
         }
         let _ = webdav::delete_file(&state.http, &endpoint, &remote_path, true).await;
     }
-    let existing_history = webdav::list_entries(&state.http, &endpoint, Some("history"), true).await?;
+    let existing_history =
+        webdav::list_entries(&state.http, &endpoint, Some("history"), true).await?;
     for entry in existing_history {
         let remote_path = entry.remote_path;
         if remote_path == "history" || remote_path == "history/" {
@@ -2804,6 +2847,7 @@ fn normalize_settings(
 
     settings.telegram.bot_token = settings.telegram.bot_token.trim().to_string();
     settings.telegram.chat_id = settings.telegram.chat_id.trim().to_string();
+    settings.telegram.sender_name = settings.telegram.sender_name.trim().to_string();
     settings.telegram.proxy_url = if settings.telegram.proxy_enabled {
         normalize_telegram_proxy_url(&settings.telegram.proxy_url)?
     } else {
@@ -2970,7 +3014,10 @@ fn resolve_active_endpoint(settings: &Settings) -> Result<WebDavEndpoint, String
     Ok(endpoint.clone())
 }
 
-fn resolve_endpoint_by_id(settings: &Settings, endpoint_id: &str) -> Result<WebDavEndpoint, String> {
+fn resolve_endpoint_by_id(
+    settings: &Settings,
+    endpoint_id: &str,
+) -> Result<WebDavEndpoint, String> {
     let trimmed = endpoint_id.trim();
     if trimmed.is_empty() {
         return Err("下载记录缺少 WebDAV 端点".to_string());
@@ -3165,7 +3212,11 @@ fn build_telegram_http_client(proxy_url: &str, timeout: Duration) -> Result<Clie
         .map_err(|err| format!("创建 Telegram HTTP 客户端失败: {err}"))
 }
 
-fn telegram_chat_candidate_from_chat(chat: TelegramDiscoveryChat) -> TelegramChatCandidate {
+fn telegram_chat_candidate_from_message(
+    message: TelegramDiscoveryMessage,
+) -> TelegramChatCandidate {
+    let TelegramDiscoveryMessage { chat, from } = message;
+    let sender_name = telegram_candidate_sender_name(&chat, from.as_ref());
     let title = if let Some(title) = chat.title.as_deref() {
         let title = title.trim().to_string();
         if !title.is_empty() {
@@ -3180,7 +3231,31 @@ fn telegram_chat_candidate_from_chat(chat: TelegramDiscoveryChat) -> TelegramCha
         id: chat.id.to_string(),
         title,
         chat_type: chat.chat_type,
+        sender_name,
     }
+}
+
+fn telegram_candidate_sender_name(
+    chat: &TelegramDiscoveryChat,
+    from: Option<&TelegramDiscoveryUser>,
+) -> String {
+    if let Some(from) = from {
+        if let Some(username) = from.username.as_deref() {
+            let username = username.trim();
+            if !username.is_empty() {
+                return username.to_string();
+            }
+        }
+    }
+
+    if let Some(username) = chat.username.as_deref() {
+        let username = username.trim();
+        if !username.is_empty() {
+            return username.to_string();
+        }
+    }
+
+    String::new()
 }
 
 fn format_telegram_chat_fallback_title(chat: &TelegramDiscoveryChat) -> String {
@@ -3233,10 +3308,9 @@ fn collect_telegram_chat_candidates(
         let Some(message) = message else {
             continue;
         };
-        let chat = message.chat;
-        let chat_id = chat.id.to_string();
+        let chat_id = message.chat.id.to_string();
         if seen.insert(chat_id) {
-            ordered.push(telegram_chat_candidate_from_chat(chat));
+            ordered.push(telegram_chat_candidate_from_message(message));
         }
     }
 
@@ -3470,6 +3544,8 @@ async fn prepare_telegram_bridge_launch(
     let state_path = bridge_dir.join("state.json");
     let temp_dir = bridge_dir.join("tmp");
     let runtime_config = TelegramBridgeRuntimeConfig {
+        device_sender_name: settings.sender_name.clone(),
+        telegram_sender_name: telegram.sender_name,
         telegram_bot_token: telegram.bot_token,
         allowed_chat_id: chat_id,
         proxy_url: if telegram.proxy_enabled {
@@ -3976,37 +4052,45 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
         let history_entry = history_map.get(&filename);
 
         let parsed = parse_message_filename(&filename);
-        let (sender, timestamp_ms, kind, original_name, size_hint, remote_path_hint, marked, format) =
-            if let Some(history) = history_entry {
-                (
-                    history.sender.clone(),
-                    history.timestamp_ms,
-                    history.kind.clone(),
-                    history.original_name.clone(),
-                    history.size,
-                    history.remote_path.clone(),
-                    history.marked,
-                    history.format.clone(),
-                )
-            } else if let Some(parsed) = parsed.as_ref() {
-                let format = if parsed.original_name.to_lowercase().ends_with(".md") {
-                    "markdown".to_string()
-                } else {
-                    "text".to_string()
-                };
-                (
-                    parsed.sender.clone(),
-                    parsed.timestamp_ms,
-                    parsed.kind.as_str().to_string(),
-                    parsed.original_name.clone(),
-                    file_entry.and_then(|entry| entry.size).unwrap_or(0) as i64,
-                    None,
-                    false,
-                    format,
-                )
+        let (
+            sender,
+            timestamp_ms,
+            kind,
+            original_name,
+            size_hint,
+            remote_path_hint,
+            marked,
+            format,
+        ) = if let Some(history) = history_entry {
+            (
+                history.sender.clone(),
+                history.timestamp_ms,
+                history.kind.clone(),
+                history.original_name.clone(),
+                history.size,
+                history.remote_path.clone(),
+                history.marked,
+                history.format.clone(),
+            )
+        } else if let Some(parsed) = parsed.as_ref() {
+            let format = if parsed.original_name.to_lowercase().ends_with(".md") {
+                "markdown".to_string()
             } else {
-                continue;
+                "text".to_string()
             };
+            (
+                parsed.sender.clone(),
+                parsed.timestamp_ms,
+                parsed.kind.as_str().to_string(),
+                parsed.original_name.clone(),
+                file_entry.and_then(|entry| entry.size).unwrap_or(0) as i64,
+                None,
+                false,
+                format,
+            )
+        } else {
+            continue;
+        };
 
         let existing = db::get_message(&state.db_path, &endpoint_id, &filename)
             .map_err(|err| err.to_string())?;
@@ -4403,8 +4487,7 @@ fn sync_dock_visibility_window(app: &AppHandle, window: &Window) {
     let _ = app.set_dock_visibility(visible && !minimized);
 }
 
-fn start_sync_loop(_app_handle: AppHandle) {
-}
+fn start_sync_loop(_app_handle: AppHandle) {}
 
 fn is_telegram_bridge_mode() -> bool {
     env::args_os()
@@ -4971,6 +5054,10 @@ mod tests {
                         first_name: Some("Alice".to_string()),
                         last_name: None,
                     },
+                    from: Some(TelegramDiscoveryUser {
+                        id: 10,
+                        username: Some("alice_sender".to_string()),
+                    }),
                 }),
                 edited_message: None,
                 channel_post: None,
@@ -4987,6 +5074,7 @@ mod tests {
                         first_name: None,
                         last_name: None,
                     },
+                    from: None,
                 }),
                 edited_message: None,
                 channel_post: None,
@@ -5003,6 +5091,10 @@ mod tests {
                         first_name: Some("Alice".to_string()),
                         last_name: None,
                     },
+                    from: Some(TelegramDiscoveryUser {
+                        id: 10,
+                        username: Some("alice_sender".to_string()),
+                    }),
                 }),
                 edited_message: None,
                 channel_post: None,
@@ -5015,8 +5107,10 @@ mod tests {
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].id, "1");
         assert_eq!(candidates[0].title, "@alice");
+        assert_eq!(candidates[0].sender_name, "alice_sender");
         assert_eq!(candidates[1].id, "-100123");
         assert_eq!(candidates[1].title, "Team Chat");
+        assert_eq!(candidates[1].sender_name, "");
     }
 
     #[tokio::test]

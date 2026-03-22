@@ -42,6 +42,7 @@ const webdavList = document.getElementById('webdav-list');
 const addWebdavButton = document.getElementById('add-webdav');
 const batchSpeedTestButton = document.getElementById('batch-speed-test');
 const senderNameInput = document.getElementById('sender-name');
+const telegramSenderNameInput = document.getElementById('telegram-sender-name');
 const refreshIntervalInput = document.getElementById('refresh-interval');
 const downloadDirInput = document.getElementById('download-dir');
 const chooseDownloadDirButton = document.getElementById('choose-download-dir');
@@ -4303,6 +4304,14 @@ function clearTelegramChatCandidates() {
   telegramChatCandidates.hidden = true;
 }
 
+function maybeApplyTelegramSenderName(candidate) {
+  if (!telegramSenderNameInput || telegramSenderNameInput.value.trim()) return false;
+  const nextSenderName = candidate?.sender_name ? String(candidate.sender_name).trim() : '';
+  if (!nextSenderName) return false;
+  telegramSenderNameInput.value = nextSenderName;
+  return true;
+}
+
 function renderTelegramChatCandidates(candidates) {
   if (!telegramChatCandidates) return;
   telegramChatCandidates.innerHTML = '';
@@ -4335,6 +4344,8 @@ function renderTelegramChatCandidates(candidates) {
       if (telegramChatIdInput) {
         telegramChatIdInput.value = candidate.id || '';
       }
+      maybeApplyTelegramSenderName(candidate);
+      syncTelegramControlsState();
       setSuccessStatus(`已填入 Chat ID：${candidate.id}`);
     });
 
@@ -4370,6 +4381,7 @@ async function discoverTelegramChats() {
       if (telegramChatIdInput) {
         telegramChatIdInput.value = candidates[0].id || '';
       }
+      maybeApplyTelegramSenderName(candidates[0]);
       clearTelegramChatCandidates();
       syncTelegramControlsState();
       await showInfoDialog({
@@ -4427,6 +4439,7 @@ async function discoverTelegramChatsWithFeedback() {
       if (telegramChatIdInput) {
         telegramChatIdInput.value = candidates[0].id || '';
       }
+      maybeApplyTelegramSenderName(candidates[0]);
       clearTelegramChatCandidates();
       syncTelegramControlsState();
       setSuccessStatus(`已自动填入 Chat ID：${candidates[0].id}`);
@@ -4566,6 +4579,9 @@ function applySettings(settings) {
   if (telegramBotTokenInput) {
     telegramBotTokenInput.value = telegram.bot_token || '';
   }
+  if (telegramSenderNameInput) {
+    telegramSenderNameInput.value = telegram.sender_name || '';
+  }
   if (telegramProxyUrlInput) {
     telegramProxyUrlInput.value = telegram.proxy_url || 'http://127.0.0.1:7890';
   }
@@ -4679,6 +4695,7 @@ async function saveSettings(options = {}) {
     telegram: {
       enabled: telegramFormState.isConfigured,
       auto_start: telegramAutoStartInput ? telegramAutoStartInput.checked : false,
+      sender_name: telegramSenderNameInput ? telegramSenderNameInput.value.trim() : '',
       bot_token: telegramBotToken,
       proxy_enabled: telegramProxyEnabled,
       proxy_url: telegramProxyUrl,

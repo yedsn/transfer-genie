@@ -109,10 +109,17 @@ pub async fn load_history_for_sync(
     fs::create_dir_all(cache_dir).map_err(|err| format!("鍒涘缓鍘嗗彶缂撳瓨鐩綍澶辫触: {err}"))?;
     let mut metadata = read_cache_metadata(cache_dir)?;
 
-    let Some(index_path) =
-        refresh_cached_file(client, endpoint, cache_dir, &mut metadata, HISTORY_INDEX_PATH).await?
+    let Some(index_path) = refresh_cached_file(
+        client,
+        endpoint,
+        cache_dir,
+        &mut metadata,
+        HISTORY_INDEX_PATH,
+    )
+    .await?
     else {
-        let entries = load_legacy_history_cached(client, endpoint, cache_dir, &mut metadata).await?;
+        let entries =
+            load_legacy_history_cached(client, endpoint, cache_dir, &mut metadata).await?;
         write_cache_metadata(cache_dir, &metadata)?;
         let layout = if entries.is_empty() {
             HistoryLayout::Empty
@@ -122,17 +129,19 @@ pub async fn load_history_for_sync(
         return Ok(LoadedHistory { entries, layout });
     };
 
-    let index_bytes = fs::read(&index_path).map_err(|err| format!("璇诲彇鍘嗗彶绱㈠紩缂撳瓨澶辫触: {err}"))?;
-    let index =
-        serde_json::from_slice::<HistoryIndex>(&index_bytes).map_err(|err| format!("瑙ｆ瀽鍘嗗彶绱㈠紩澶辫触: {err}"))?;
+    let index_bytes =
+        fs::read(&index_path).map_err(|err| format!("璇诲彇鍘嗗彶绱㈠紩缂撳瓨澶辫触: {err}"))?;
+    let index = serde_json::from_slice::<HistoryIndex>(&index_bytes)
+        .map_err(|err| format!("瑙ｆ瀽鍘嗗彶绱㈠紩澶辫触: {err}"))?;
 
     let mut entries = Vec::new();
     for shard in &index.shards {
-        let shard_path = refresh_cached_file(client, endpoint, cache_dir, &mut metadata, &shard.path)
-            .await?
-            .ok_or_else(|| format!("鍘嗗彶鍒嗙墖涓嶅瓨鍦? {}", shard.path))?;
-        let shard_bytes =
-            fs::read(&shard_path).map_err(|err| format!("璇诲彇鍘嗗彶鍒嗙墖缂撳瓨澶辫触: {err}"))?;
+        let shard_path =
+            refresh_cached_file(client, endpoint, cache_dir, &mut metadata, &shard.path)
+                .await?
+                .ok_or_else(|| format!("鍘嗗彶鍒嗙墖涓嶅瓨鍦? {}", shard.path))?;
+        let shard_bytes = fs::read(&shard_path)
+            .map_err(|err| format!("璇诲彇鍘嗗彶鍒嗙墖缂撳瓨澶辫触: {err}"))?;
         entries.extend(parse_manifest_shard(&shard_bytes)?);
     }
 
@@ -219,11 +228,13 @@ async fn load_manifest_remote(
     client: &Client,
     endpoint: &WebDavEndpoint,
 ) -> Result<Option<Vec<HistoryEntry>>, String> {
-    let Some(index_bytes) = webdav::download_optional_file(client, endpoint, HISTORY_INDEX_PATH).await? else {
+    let Some(index_bytes) =
+        webdav::download_optional_file(client, endpoint, HISTORY_INDEX_PATH).await?
+    else {
         return Ok(None);
     };
-    let index =
-        serde_json::from_slice::<HistoryIndex>(&index_bytes).map_err(|err| format!("瑙ｆ瀽鍘嗗彶绱㈠紩澶辫触: {err}"))?;
+    let index = serde_json::from_slice::<HistoryIndex>(&index_bytes)
+        .map_err(|err| format!("瑙ｆ瀽鍘嗗彶绱㈠紩澶辫触: {err}"))?;
 
     let mut entries = Vec::new();
     for shard in index.shards {
@@ -262,8 +273,8 @@ async fn load_legacy_history_cached(
 }
 
 fn parse_legacy_history(data: &[u8]) -> Result<Vec<HistoryEntry>, String> {
-    let entries =
-        serde_json::from_slice::<Vec<HistoryEntry>>(data).map_err(|err| format!("瑙ｆ瀽鍘嗗彶璁板綍澶辫触: {err}"))?;
+    let entries = serde_json::from_slice::<Vec<HistoryEntry>>(data)
+        .map_err(|err| format!("瑙ｆ瀽鍘嗗彶璁板綍澶辫触: {err}"))?;
     Ok(dedupe_and_sort(
         entries
             .into_iter()
@@ -273,8 +284,8 @@ fn parse_legacy_history(data: &[u8]) -> Result<Vec<HistoryEntry>, String> {
 }
 
 fn parse_manifest_shard(data: &[u8]) -> Result<Vec<HistoryEntry>, String> {
-    let shard =
-        serde_json::from_slice::<HistoryShard>(data).map_err(|err| format!("瑙ｆ瀽鍘嗗彶鍒嗙墖澶辫触: {err}"))?;
+    let shard = serde_json::from_slice::<HistoryShard>(data)
+        .map_err(|err| format!("瑙ｆ瀽鍘嗗彶鍒嗙墖澶辫触: {err}"))?;
     Ok(shard
         .entries
         .into_iter()
@@ -377,7 +388,9 @@ async fn refresh_cached_file(
                 metadata.files.insert(
                     remote_path.to_string(),
                     CachedRemoteFile {
-                        etag: response.etag.or_else(|| prior.and_then(|item| item.etag.clone())),
+                        etag: response
+                            .etag
+                            .or_else(|| prior.and_then(|item| item.etag.clone())),
                         last_modified: response
                             .last_modified
                             .or_else(|| prior.and_then(|item| item.last_modified.clone())),
@@ -390,9 +403,8 @@ async fn refresh_cached_file(
             match bytes {
                 Some(data) => {
                     if let Some(parent) = cached_path.parent() {
-                        fs::create_dir_all(parent).map_err(|err| {
-                            format!("鍒涘缓鍘嗗彶缂撳瓨鏂囦欢澶辫触: {err}")
-                        })?;
+                        fs::create_dir_all(parent)
+                            .map_err(|err| format!("鍒涘缓鍘嗗彶缂撳瓨鏂囦欢澶辫触: {err}"))?;
                     }
                     fs::write(&cached_path, data)
                         .map_err(|err| format!("鍐欏叆鍘嗗彶缂撳瓨澶辫触: {err}"))?;
@@ -425,7 +437,9 @@ mod tests {
             size: 128,
             kind: "text".to_string(),
             original_name: "message.txt".to_string(),
-            remote_path: Some("files/2023/11/1700000000000__Alice__12345678__message.txt".to_string()),
+            remote_path: Some(
+                "files/2023/11/1700000000000__Alice__12345678__message.txt".to_string(),
+            ),
             marked: false,
             format: "text".to_string(),
         }];

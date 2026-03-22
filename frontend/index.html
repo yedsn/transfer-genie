@@ -262,6 +262,17 @@
                     </div>
                     <span class="field-hint">先给 bot 或目标群发一条消息，再点自动获取。</span>
                   </label>
+                  <label>
+                    Telegram 发送者名称
+                    <input
+                      id="telegram-sender-name"
+                      type="text"
+                      placeholder="留空时自动使用 Telegram 用户名"
+                    />
+                    <span class="field-hint">
+                      仅用于发送到 Telegram 时显示的名称；如果为空，点击“自动获取”Chat ID 时会自动填入 Telegram 用户名。
+                    </span>
+                  </label>
                   <div id="telegram-chat-candidates" class="telegram-chat-candidates" hidden></div>
                   <label>
                     轮询间隔（秒）

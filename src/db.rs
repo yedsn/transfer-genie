@@ -216,7 +216,6 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
     Ok(())
 }
 
-
 pub fn get_message(
     path: &Path,
     endpoint_id: &str,
@@ -359,7 +358,6 @@ pub fn list_messages_paged(
     }
     Ok(messages)
 }
-
 
 pub fn count_messages(path: &Path, endpoint_id: &str, only_marked: bool) -> rusqlite::Result<i64> {
     let conn = Connection::open(path)?;

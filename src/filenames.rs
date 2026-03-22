@@ -76,13 +76,23 @@ pub fn parse_message_filename(filename: &str) -> Option<ParsedFilename> {
 }
 
 pub fn timestamp_bucket_key(timestamp_ms: i64) -> Option<String> {
-    let datetime = OffsetDateTime::from_unix_timestamp_nanos((timestamp_ms as i128) * 1_000_000).ok()?;
-    Some(format!("{:04}-{:02}", datetime.year(), u8::from(datetime.month())))
+    let datetime =
+        OffsetDateTime::from_unix_timestamp_nanos((timestamp_ms as i128) * 1_000_000).ok()?;
+    Some(format!(
+        "{:04}-{:02}",
+        datetime.year(),
+        u8::from(datetime.month())
+    ))
 }
 
 pub fn timestamp_bucket_path(timestamp_ms: i64) -> Option<String> {
-    let datetime = OffsetDateTime::from_unix_timestamp_nanos((timestamp_ms as i128) * 1_000_000).ok()?;
-    Some(format!("{:04}/{:02}", datetime.year(), u8::from(datetime.month())))
+    let datetime =
+        OffsetDateTime::from_unix_timestamp_nanos((timestamp_ms as i128) * 1_000_000).ok()?;
+    Some(format!(
+        "{:04}/{:02}",
+        datetime.year(),
+        u8::from(datetime.month())
+    ))
 }
 
 pub fn message_remote_path(filename: &str, timestamp_ms: i64) -> String {
@@ -138,8 +148,14 @@ mod tests {
     #[test]
     fn timestamp_bucket_helpers_use_month_shards() {
         let timestamp_ms = 1_704_067_200_000i64; // 2024-01-15T00:00:00Z
-        assert_eq!(timestamp_bucket_key(timestamp_ms).as_deref(), Some("2024-01"));
-        assert_eq!(timestamp_bucket_path(timestamp_ms).as_deref(), Some("2024/01"));
+        assert_eq!(
+            timestamp_bucket_key(timestamp_ms).as_deref(),
+            Some("2024-01")
+        );
+        assert_eq!(
+            timestamp_bucket_path(timestamp_ms).as_deref(),
+            Some("2024/01")
+        );
         assert_eq!(
             message_remote_path("message.txt", timestamp_ms),
             "files/2024/01/message.txt"

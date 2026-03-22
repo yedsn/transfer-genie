@@ -43,6 +43,8 @@ pub struct TelegramBridgeSettings {
     #[serde(default)]
     pub auto_start: bool,
     #[serde(default)]
+    pub sender_name: String,
+    #[serde(default)]
     pub bot_token: String,
     #[serde(default)]
     pub chat_id: String,
@@ -59,6 +61,7 @@ impl Default for TelegramBridgeSettings {
         Self {
             enabled: false,
             auto_start: false,
+            sender_name: String::new(),
             bot_token: String::new(),
             chat_id: String::new(),
             proxy_enabled: false,

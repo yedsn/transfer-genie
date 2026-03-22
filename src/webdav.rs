@@ -37,7 +37,10 @@ fn apply_auth(request: RequestBuilder, endpoint: &WebDavEndpoint) -> RequestBuil
     apply_auth_with_timeout(request, endpoint, Some(Duration::from_secs(30)))
 }
 
-fn apply_auth_without_timeout(request: RequestBuilder, endpoint: &WebDavEndpoint) -> RequestBuilder {
+fn apply_auth_without_timeout(
+    request: RequestBuilder,
+    endpoint: &WebDavEndpoint,
+) -> RequestBuilder {
     apply_auth_with_timeout(request, endpoint, None)
 }
 
@@ -325,7 +328,6 @@ pub async fn download_file(
         .map(|bytes| bytes.to_vec())
         .map_err(|err| format!("读取下载内容失败: {err}"))
 }
-
 
 pub async fn download_file_stream(
     client: &Client,
