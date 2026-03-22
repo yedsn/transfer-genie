@@ -1,5 +1,5 @@
-use crate::filenames::{build_message_filename, parse_message_filename, MessageKind};
-use crate::history::{append_history, load_history, save_history, HistoryEntry};
+use crate::filenames::{build_message_filename, message_remote_path, parse_message_filename, MessageKind};
+use crate::history::{append_history, load_history_with_layout, save_history, HistoryEntry, HistoryLayout};
 use crate::types::WebDavEndpoint;
 use crate::webdav;
 use log::{error, info, warn};
@@ -442,18 +442,18 @@ async fn import_into_webdav(
     sender: &str,
     timestamp_ms: i64,
 ) -> Result<String, BridgeError> {
-    webdav::ensure_directory(webdav_client, &config.webdav, "files")
-        .await
-        .map_err(|err| BridgeError::transient("webdav_io", err))?;
-
     match payload {
         InboundPayload::Text(text) => {
             let filename = build_message_filename(sender, "message.txt", timestamp_ms);
+            let remote_path = message_remote_path(&filename, timestamp_ms);
             let bytes = text.clone().into_bytes();
+            webdav::ensure_parent_directories(webdav_client, &config.webdav, &remote_path)
+                .await
+                .map_err(|err| BridgeError::transient("webdav_io", err))?;
             webdav::upload_file(
                 webdav_client,
                 &config.webdav,
-                &format!("files/{filename}"),
+                &remote_path,
                 bytes.clone(),
             )
             .await
@@ -468,6 +468,7 @@ async fn import_into_webdav(
                     size: bytes.len() as i64,
                     kind: MessageKind::Text.as_str().to_string(),
                     original_name: "message.txt".to_string(),
+                    remote_path: Some(remote_path),
                     marked: false,
                     format: "text".to_string(),
                 },
@@ -510,10 +511,14 @@ async fn import_into_webdav(
             let _ = fs::remove_file(&temp_path);
 
             let filename = build_message_filename(sender, original_name, timestamp_ms);
+            let remote_path = message_remote_path(&filename, timestamp_ms);
+            webdav::ensure_parent_directories(webdav_client, &config.webdav, &remote_path)
+                .await
+                .map_err(|err| BridgeError::transient("webdav_io", err))?;
             webdav::upload_file(
                 webdav_client,
                 &config.webdav,
-                &format!("files/{filename}"),
+                &remote_path,
                 upload_bytes.clone(),
             )
             .await
@@ -528,6 +533,7 @@ async fn import_into_webdav(
                     size: upload_bytes.len() as i64,
                     kind: MessageKind::File.as_str().to_string(),
                     original_name: original_name.clone(),
+                    remote_path: Some(remote_path),
                     marked: false,
                     format: "text".to_string(),
                 },
@@ -604,47 +610,55 @@ async fn collect_remote_messages(
     client: &Client,
     config: &TelegramBridgeConfig,
 ) -> Result<Vec<HistoryEntry>, BridgeError> {
-    let history = load_history(client, &config.webdav)
+    let loaded = load_history_with_layout(client, &config.webdav)
         .await
         .map_err(|err| BridgeError::transient("webdav_history", err))?;
-    let mut map: HashMap<String, HistoryEntry> = history
+    let mut map: HashMap<String, HistoryEntry> = loaded
+        .entries
         .into_iter()
         .map(|entry| (entry.filename.clone(), entry))
         .collect();
-    let entries = webdav::list_entries(client, &config.webdav, Some("files"), true)
-        .await
-        .map_err(|err| BridgeError::transient("webdav_io", err))?;
     let mut derived = false;
 
-    for entry in entries {
-        if entry.is_collection {
-            continue;
-        }
-        if let Some(existing) = map.get_mut(&entry.filename) {
-            if existing.size <= 0 {
-                existing.size = entry.size.unwrap_or(0) as i64;
+    if loaded.layout != HistoryLayout::Manifest {
+        let entries = webdav::list_entries(client, &config.webdav, Some("files"), true)
+            .await
+            .map_err(|err| BridgeError::transient("webdav_io", err))?;
+
+        for entry in entries {
+            if entry.is_collection {
+                continue;
             }
-            continue;
-        }
-        if let Some(parsed) = parse_message_filename(&entry.filename) {
-            map.insert(
-                entry.filename.clone(),
-                HistoryEntry {
-                    filename: entry.filename.clone(),
-                    sender: parsed.sender,
-                    timestamp_ms: parsed.timestamp_ms,
-                    size: entry.size.unwrap_or(0) as i64,
-                    kind: parsed.kind.as_str().to_string(),
-                    original_name: parsed.original_name.clone(),
-                    marked: false,
-                    format: if parsed.original_name.to_lowercase().ends_with(".md") {
-                        "markdown".to_string()
-                    } else {
-                        "text".to_string()
+            if let Some(existing) = map.get_mut(&entry.filename) {
+                if existing.size <= 0 {
+                    existing.size = entry.size.unwrap_or(0) as i64;
+                }
+                if existing.remote_path.is_none() {
+                    existing.remote_path = Some(entry.remote_path.clone());
+                }
+                continue;
+            }
+            if let Some(parsed) = parse_message_filename(&entry.filename) {
+                map.insert(
+                    entry.filename.clone(),
+                    HistoryEntry {
+                        filename: entry.filename.clone(),
+                        sender: parsed.sender,
+                        timestamp_ms: parsed.timestamp_ms,
+                        size: entry.size.unwrap_or(0) as i64,
+                        kind: parsed.kind.as_str().to_string(),
+                        original_name: parsed.original_name.clone(),
+                        remote_path: Some(entry.remote_path.clone()),
+                        marked: false,
+                        format: if parsed.original_name.to_lowercase().ends_with(".md") {
+                            "markdown".to_string()
+                        } else {
+                            "text".to_string()
+                        },
                     },
-                },
-            );
-            derived = true;
+                );
+                derived = true;
+            }
         }
     }
 
@@ -684,13 +698,13 @@ async fn send_history_entry(
     config: &TelegramBridgeConfig,
     entry: &HistoryEntry,
 ) -> Result<i64, BridgeError> {
+    let remote_path = entry
+        .remote_path
+        .clone()
+        .unwrap_or_else(|| message_remote_path(&entry.filename, entry.timestamp_ms));
     match entry.kind.as_str() {
         "text" => {
-            let bytes = webdav::download_file(
-                webdav_client,
-                &config.webdav,
-                &format!("files/{}", entry.filename),
-            )
+            let bytes = webdav::download_file(webdav_client, &config.webdav, &remote_path)
             .await
             .map_err(|err| BridgeError::transient("webdav_io", err))?;
             let text = String::from_utf8_lossy(&bytes).to_string();
@@ -708,11 +722,7 @@ async fn send_history_entry(
                     format!("WebDAV 文件过大: {}", entry.size),
                 ));
             }
-            let bytes = webdav::download_file(
-                webdav_client,
-                &config.webdav,
-                &format!("files/{}", entry.filename),
-            )
+            let bytes = webdav::download_file(webdav_client, &config.webdav, &remote_path)
             .await
             .map_err(|err| BridgeError::transient("webdav_io", err))?;
             let temp_path = temp_file_path(
@@ -1079,6 +1089,7 @@ mod tests {
             size: 1,
             kind: "text".to_string(),
             original_name: "message.txt".to_string(),
+            remote_path: Some("files/a".to_string()),
             marked: false,
             format: "text".to_string(),
         };

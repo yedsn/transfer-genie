@@ -1,5 +1,6 @@
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use rand::Rng;
+use time::OffsetDateTime;
 
 const SAFE_FILENAME: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
@@ -74,6 +75,30 @@ pub fn parse_message_filename(filename: &str) -> Option<ParsedFilename> {
     })
 }
 
+pub fn timestamp_bucket_key(timestamp_ms: i64) -> Option<String> {
+    let datetime = OffsetDateTime::from_unix_timestamp_nanos((timestamp_ms as i128) * 1_000_000).ok()?;
+    Some(format!("{:04}-{:02}", datetime.year(), u8::from(datetime.month())))
+}
+
+pub fn timestamp_bucket_path(timestamp_ms: i64) -> Option<String> {
+    let datetime = OffsetDateTime::from_unix_timestamp_nanos((timestamp_ms as i128) * 1_000_000).ok()?;
+    Some(format!("{:04}/{:02}", datetime.year(), u8::from(datetime.month())))
+}
+
+pub fn message_remote_path(filename: &str, timestamp_ms: i64) -> String {
+    match timestamp_bucket_path(timestamp_ms) {
+        Some(bucket) => format!("files/{bucket}/{filename}"),
+        None => format!("files/{filename}"),
+    }
+}
+
+pub fn thumbnail_remote_path(filename: &str, timestamp_ms: i64) -> String {
+    match timestamp_bucket_path(timestamp_ms) {
+        Some(bucket) => format!("files/.thumbs/{bucket}/{filename}"),
+        None => format!("files/.thumbs/{filename}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,5 +133,20 @@ mod tests {
     #[test]
     fn parse_invalid_filename() {
         assert!(parse_message_filename("not-a-message").is_none());
+    }
+
+    #[test]
+    fn timestamp_bucket_helpers_use_month_shards() {
+        let timestamp_ms = 1_704_067_200_000i64; // 2024-01-15T00:00:00Z
+        assert_eq!(timestamp_bucket_key(timestamp_ms).as_deref(), Some("2024-01"));
+        assert_eq!(timestamp_bucket_path(timestamp_ms).as_deref(), Some("2024/01"));
+        assert_eq!(
+            message_remote_path("message.txt", timestamp_ms),
+            "files/2024/01/message.txt"
+        );
+        assert_eq!(
+            thumbnail_remote_path("image.jpg", timestamp_ms),
+            "files/.thumbs/2024/01/image.jpg"
+        );
     }
 }

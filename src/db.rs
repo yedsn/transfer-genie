@@ -16,6 +16,7 @@ pub struct DbMessage {
     pub mtime: Option<String>,
     pub content: Option<String>,
     pub local_path: Option<String>,
+    pub remote_path: Option<String>,
     pub file_hash: Option<String>,
     pub marked: bool,
     pub format: String,
@@ -23,6 +24,7 @@ pub struct DbMessage {
 
 #[derive(Clone)]
 pub struct DbDownloadHistory {
+    #[allow(dead_code)]
     pub id: i64,
     pub endpoint_id: String,
     pub filename: String,
@@ -51,9 +53,10 @@ pub struct DbPartialDownload {
 
 pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| format!("幹秀方象垂朕村払移: {err}"))?;
+        std::fs::create_dir_all(parent).map_err(|err| format!("创建数据库目录失败: {err}"))?;
     }
-    let mut conn = Connection::open(path).map_err(|err| format!("嬉蝕方象垂払移: {err}"))?;
+
+    let mut conn = Connection::open(path).map_err(|err| format!("打开数据库失败: {err}"))?;
     let table_exists: Option<i64> = conn
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages'",
@@ -61,53 +64,13 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
             |row| row.get(0),
         )
         .optional()
-        .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+        .map_err(|err| format!("检查数据库表失败: {err}"))?;
 
     if table_exists.is_none() {
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS messages (\
-        endpoint_id TEXT NOT NULL,\
-        filename TEXT NOT NULL,\
-        sender TEXT NOT NULL,\
-        timestamp_ms INTEGER NOT NULL,\
-        size INTEGER NOT NULL,\
-        kind TEXT NOT NULL,\
-        original_name TEXT NOT NULL,\
-        etag TEXT,\
-        mtime TEXT,\
-        content TEXT,\
-        local_path TEXT,\
-        file_hash TEXT,\
-        PRIMARY KEY(endpoint_id, filename)\
-      );\
-      CREATE TABLE IF NOT EXISTS download_history (\
-        id INTEGER PRIMARY KEY AUTOINCREMENT,\
-        endpoint_id TEXT NOT NULL,\
-        filename TEXT NOT NULL,\
-        original_name TEXT NOT NULL,\
-        saved_path TEXT,\
-        status TEXT NOT NULL,\
-        error TEXT,\
-        file_size INTEGER NOT NULL DEFAULT 0,\
-        created_at_ms INTEGER NOT NULL,\
-        updated_at_ms INTEGER NOT NULL,\
-        UNIQUE(endpoint_id, filename)\
-      );\
-      CREATE TABLE IF NOT EXISTS partial_downloads (\
-        endpoint_id TEXT NOT NULL,\
-        filename TEXT NOT NULL,\
-        original_name TEXT NOT NULL,\
-        final_path TEXT NOT NULL,\
-        temp_path TEXT NOT NULL,\
-        downloaded_bytes INTEGER NOT NULL DEFAULT 0,\
-        total_bytes INTEGER NOT NULL DEFAULT 0,\
-        etag TEXT,\
-        mtime TEXT,\
-        updated_at_ms INTEGER NOT NULL,\
-        PRIMARY KEY(endpoint_id, filename)\
-      );",
+            "CREATE TABLE IF NOT EXISTS messages (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        sender TEXT NOT NULL,        timestamp_ms INTEGER NOT NULL,        size INTEGER NOT NULL,        kind TEXT NOT NULL,        original_name TEXT NOT NULL,        etag TEXT,        mtime TEXT,        content TEXT,        local_path TEXT,        remote_path TEXT,        file_hash TEXT,        PRIMARY KEY(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS download_history (        id INTEGER PRIMARY KEY AUTOINCREMENT,        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        saved_path TEXT,        status TEXT NOT NULL,        error TEXT,        file_size INTEGER NOT NULL DEFAULT 0,        created_at_ms INTEGER NOT NULL,        updated_at_ms INTEGER NOT NULL,        UNIQUE(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS partial_downloads (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        final_path TEXT NOT NULL,        temp_path TEXT NOT NULL,        downloaded_bytes INTEGER NOT NULL DEFAULT 0,        total_bytes INTEGER NOT NULL DEFAULT 0,        etag TEXT,        mtime TEXT,        updated_at_ms INTEGER NOT NULL,        PRIMARY KEY(endpoint_id, filename)      );",
         )
-        .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+        .map_err(|err| format!("初始化数据库表失败: {err}"))?;
         return Ok(());
     }
 
@@ -115,12 +78,12 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
     {
         let mut stmt = conn
             .prepare("PRAGMA table_info(messages)")
-            .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+            .map_err(|err| format!("读取消息表结构失败: {err}"))?;
         let rows = stmt
             .query_map([], |row| row.get::<_, String>(1))
-            .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+            .map_err(|err| format!("读取消息表结构失败: {err}"))?;
         for row in rows {
-            if row.map_err(|err| format!("兜兵晒方象垂払移: {err}"))? == "endpoint_id" {
+            if row.map_err(|err| format!("读取消息表结构失败: {err}"))? == "endpoint_id" {
                 has_endpoint_id = true;
                 break;
             }
@@ -136,49 +99,33 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
         };
         let tx = conn
             .transaction()
-            .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+            .map_err(|err| format!("迁移消息表失败: {err}"))?;
         tx.execute_batch(
-            "CREATE TABLE messages_new (\
-        endpoint_id TEXT NOT NULL,\
-        filename TEXT NOT NULL,\
-        sender TEXT NOT NULL,\
-        timestamp_ms INTEGER NOT NULL,\
-        size INTEGER NOT NULL,\
-        kind TEXT NOT NULL,\
-        original_name TEXT NOT NULL,\
-        etag TEXT,\
-        mtime TEXT,\
-        content TEXT,\
-        local_path TEXT,\
-        file_hash TEXT,\
-        PRIMARY KEY(endpoint_id, filename)\
-      );",
+            "CREATE TABLE messages_new (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        sender TEXT NOT NULL,        timestamp_ms INTEGER NOT NULL,        size INTEGER NOT NULL,        kind TEXT NOT NULL,        original_name TEXT NOT NULL,        etag TEXT,        mtime TEXT,        content TEXT,        local_path TEXT,        remote_path TEXT,        file_hash TEXT,        PRIMARY KEY(endpoint_id, filename)      );",
         )
-        .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+        .map_err(|err| format!("迁移消息表失败: {err}"))?;
         tx.execute(
-      "INSERT INTO messages_new\
-        (endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, file_hash)\
-        SELECT ?1, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, NULL FROM messages",
-      params![endpoint_id],
-    )
-    .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+            "INSERT INTO messages_new        (endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, remote_path, file_hash)        SELECT ?1, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, NULL, NULL FROM messages",
+            params![endpoint_id],
+        )
+        .map_err(|err| format!("迁移消息表失败: {err}"))?;
         tx.execute_batch("DROP TABLE messages; ALTER TABLE messages_new RENAME TO messages;")
-            .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+            .map_err(|err| format!("迁移消息表失败: {err}"))?;
         tx.commit()
-            .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+            .map_err(|err| format!("迁移消息表失败: {err}"))?;
     }
 
-    // 检查是否有 file_hash 列，如果没有则添加
+    // 补充 file_hash 列，兼容旧版本数据库
     let mut has_file_hash = false;
     {
         let mut stmt = conn
             .prepare("PRAGMA table_info(messages)")
-            .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+            .map_err(|err| format!("读取消息表结构失败: {err}"))?;
         let rows = stmt
             .query_map([], |row| row.get::<_, String>(1))
-            .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+            .map_err(|err| format!("读取消息表结构失败: {err}"))?;
         for row in rows {
-            if row.map_err(|err| format!("兜兵晒方象垂払移: {err}"))? == "file_hash" {
+            if row.map_err(|err| format!("读取消息表结构失败: {err}"))? == "file_hash" {
                 has_file_hash = true;
                 break;
             }
@@ -187,24 +134,45 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
 
     if !has_file_hash {
         conn.execute("ALTER TABLE messages ADD COLUMN file_hash TEXT", [])
-            .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+            .map_err(|err| format!("补充 file_hash 列失败: {err}"))?;
     }
 
-    // 检查是否有 marked 列，如果没有则添加
+    // 补充 marked 列，兼容旧版本数据库
     let mut has_marked = false;
     {
         let mut stmt = conn
             .prepare("PRAGMA table_info(messages)")
-            .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+            .map_err(|err| format!("读取消息表结构失败: {err}"))?;
         let rows = stmt
             .query_map([], |row| row.get::<_, String>(1))
-            .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+            .map_err(|err| format!("读取消息表结构失败: {err}"))?;
         for row in rows {
-            if row.map_err(|err| format!("兜兵晒方象垂払移: {err}"))? == "marked" {
+            if row.map_err(|err| format!("读取消息表结构失败: {err}"))? == "marked" {
                 has_marked = true;
                 break;
             }
         }
+    }
+
+    let mut has_remote_path = false;
+    {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(messages)")
+            .map_err(|err| format!("读取消息表结构失败: {err}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|err| format!("读取消息表结构失败: {err}"))?;
+        for row in rows {
+            if row.map_err(|err| format!("读取消息表结构失败: {err}"))? == "remote_path" {
+                has_remote_path = true;
+                break;
+            }
+        }
+    }
+
+    if !has_remote_path {
+        conn.execute("ALTER TABLE messages ADD COLUMN remote_path TEXT", [])
+            .map_err(|err| format!("补充 remote_path 列失败: {err}"))?;
     }
 
     if !has_marked {
@@ -212,20 +180,20 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
             "ALTER TABLE messages ADD COLUMN marked BOOLEAN NOT NULL DEFAULT 0",
             [],
         )
-        .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+        .map_err(|err| format!("补充 marked 列失败: {err}"))?;
     }
 
-    // 检查是否有 format 列，如果没有则添加
+    // 补充 format 列，兼容旧版本数据库
     let mut has_format = false;
     {
         let mut stmt = conn
             .prepare("PRAGMA table_info(messages)")
-            .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+            .map_err(|err| format!("读取消息表结构失败: {err}"))?;
         let rows = stmt
             .query_map([], |row| row.get::<_, String>(1))
-            .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+            .map_err(|err| format!("读取消息表结构失败: {err}"))?;
         for row in rows {
-            if row.map_err(|err| format!("兜兵晒方象垂払移: {err}"))? == "format" {
+            if row.map_err(|err| format!("读取消息表结构失败: {err}"))? == "format" {
                 has_format = true;
                 break;
             }
@@ -237,41 +205,17 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
             "ALTER TABLE messages ADD COLUMN format TEXT NOT NULL DEFAULT 'text'",
             [],
         )
-        .map_err(|err| format!("兜兵晒方象垂払移: {err}"))?;
+        .map_err(|err| format!("补充 format 列失败: {err}"))?;
     }
 
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS download_history (\
-        id INTEGER PRIMARY KEY AUTOINCREMENT,\
-        endpoint_id TEXT NOT NULL,\
-        filename TEXT NOT NULL,\
-        original_name TEXT NOT NULL,\
-        saved_path TEXT,\
-        status TEXT NOT NULL,\
-        error TEXT,\
-        file_size INTEGER NOT NULL DEFAULT 0,\
-        created_at_ms INTEGER NOT NULL,\
-        updated_at_ms INTEGER NOT NULL,\
-        UNIQUE(endpoint_id, filename)\
-      );\
-      CREATE TABLE IF NOT EXISTS partial_downloads (\
-        endpoint_id TEXT NOT NULL,\
-        filename TEXT NOT NULL,\
-        original_name TEXT NOT NULL,\
-        final_path TEXT NOT NULL,\
-        temp_path TEXT NOT NULL,\
-        downloaded_bytes INTEGER NOT NULL DEFAULT 0,\
-        total_bytes INTEGER NOT NULL DEFAULT 0,\
-        etag TEXT,\
-        mtime TEXT,\
-        updated_at_ms INTEGER NOT NULL,\
-        PRIMARY KEY(endpoint_id, filename)\
-      );",
+        "CREATE TABLE IF NOT EXISTS download_history (        id INTEGER PRIMARY KEY AUTOINCREMENT,        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        saved_path TEXT,        status TEXT NOT NULL,        error TEXT,        file_size INTEGER NOT NULL DEFAULT 0,        created_at_ms INTEGER NOT NULL,        updated_at_ms INTEGER NOT NULL,        UNIQUE(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS partial_downloads (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        final_path TEXT NOT NULL,        temp_path TEXT NOT NULL,        downloaded_bytes INTEGER NOT NULL DEFAULT 0,        total_bytes INTEGER NOT NULL DEFAULT 0,        etag TEXT,        mtime TEXT,        updated_at_ms INTEGER NOT NULL,        PRIMARY KEY(endpoint_id, filename)      );",
     )
-    .map_err(|err| format!("鍏滃叺鏅掓柟璞″瀭鎵曠Щ: {err}"))?;
+    .map_err(|err| format!("初始化下载相关数据表失败: {err}"))?;
 
     Ok(())
 }
+
 
 pub fn get_message(
     path: &Path,
@@ -281,7 +225,7 @@ pub fn get_message(
     let conn = Connection::open(path)?;
     conn
     .query_row(
-      "SELECT endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, file_hash, marked, format \
+      "SELECT endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, remote_path, file_hash, marked, format \
        FROM messages WHERE endpoint_id = ?1 AND filename = ?2",
       params![endpoint_id, filename],
       |row| {
@@ -297,9 +241,10 @@ pub fn get_message(
           mtime: row.get(8)?,
           content: row.get(9)?,
           local_path: row.get(10)?,
-          file_hash: row.get(11)?,
-          marked: row.get(12)?,
-          format: row.get(13)?,
+          remote_path: row.get(11)?,
+          file_hash: row.get(12)?,
+          marked: row.get(13)?,
+          format: row.get(14)?,
         })
       },
     )
@@ -310,8 +255,8 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
     let conn = Connection::open(path)?;
     conn.execute(
     "INSERT INTO messages\
-      (endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, file_hash, marked, format)\
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)\
+      (endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, remote_path, file_hash, marked, format)\
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)\
       ON CONFLICT(endpoint_id, filename) DO UPDATE SET \
         sender=excluded.sender,\
         timestamp_ms=excluded.timestamp_ms,\
@@ -322,6 +267,7 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
         mtime=excluded.mtime,\
         content=excluded.content,\
         local_path=excluded.local_path,\
+        remote_path=excluded.remote_path,\
         file_hash=excluded.file_hash,\
         marked=excluded.marked,\
         format=excluded.format",
@@ -337,6 +283,7 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
       message.mtime,
       message.content,
       message.local_path,
+      message.remote_path,
       message.file_hash,
       message.marked,
       message.format,
@@ -366,26 +313,26 @@ pub fn list_messages_paged(
 
     // 使用子查询实现：先按时间倒序取最新的 N 条，再按时间正序返回
     let sql = match (limit, offset) {
-    (Some(lim), Some(off)) => format!(
-      "SELECT * FROM (\
-        SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, file_hash, marked, format \
-        FROM messages {} ORDER BY timestamp_ms DESC LIMIT {} OFFSET {}\
-      ) ORDER BY timestamp_ms ASC",
-      where_clause, lim, off
-    ),
-    (Some(lim), None) => format!(
-      "SELECT * FROM (\
-        SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, file_hash, marked, format \
-        FROM messages {} ORDER BY timestamp_ms DESC LIMIT {}\
-      ) ORDER BY timestamp_ms ASC",
-      where_clause, lim
-    ),
-    _ => format!(
-      "SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, file_hash, marked, format \
-       FROM messages {} ORDER BY timestamp_ms ASC",
-      where_clause
-    ),
-  };
+        (Some(lim), Some(off)) => format!(
+            "SELECT * FROM (\
+              SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, remote_path, file_hash, marked, format \
+              FROM messages {} ORDER BY timestamp_ms DESC LIMIT {} OFFSET {}\
+            ) ORDER BY timestamp_ms ASC",
+            where_clause, lim, off
+        ),
+        (Some(lim), None) => format!(
+            "SELECT * FROM (\
+              SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, remote_path, file_hash, marked, format \
+              FROM messages {} ORDER BY timestamp_ms DESC LIMIT {}\
+            ) ORDER BY timestamp_ms ASC",
+            where_clause, lim
+        ),
+        _ => format!(
+            "SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, remote_path, file_hash, marked, format \
+             FROM messages {} ORDER BY timestamp_ms ASC",
+            where_clause
+        ),
+    };
 
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([endpoint_id], |row| {
@@ -398,10 +345,11 @@ pub fn list_messages_paged(
             original_name: row.get(5)?,
             content: row.get(6)?,
             local_path: row.get(7)?,
-            file_hash: row.get(8)?,
+            remote_path: row.get(8)?,
+            file_hash: row.get(9)?,
             download_exists: false,
-            marked: row.get(9)?,
-            format: row.get(10)?,
+            marked: row.get(10)?,
+            format: row.get(11)?,
         })
     })?;
 
@@ -411,6 +359,7 @@ pub fn list_messages_paged(
     }
     Ok(messages)
 }
+
 
 pub fn count_messages(path: &Path, endpoint_id: &str, only_marked: bool) -> rusqlite::Result<i64> {
     let conn = Connection::open(path)?;

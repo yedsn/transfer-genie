@@ -102,6 +102,8 @@ pub struct Message {
     pub original_name: String,
     pub content: Option<String>,
     pub local_path: Option<String>,
+    #[serde(default)]
+    pub remote_path: Option<String>,
     pub file_hash: Option<String>,
     pub download_exists: bool,
     #[serde(default)]

@@ -7,8 +7,11 @@ mod types;
 mod webdav;
 
 use crate::db::{DbDownloadHistory, DbMessage, DbPartialDownload};
-use crate::filenames::{build_message_filename, parse_message_filename, MessageKind};
-use crate::history::HistoryEntry;
+use crate::filenames::{
+    build_message_filename, message_remote_path, parse_message_filename, thumbnail_remote_path,
+    MessageKind,
+};
+use crate::history::{HistoryEntry, HistoryLayout};
 use crate::types::{
     DownloadHistoryRecord, Message, Settings, SyncStatus, TelegramBridgeSettings, WebDavEndpoint,
 };
@@ -676,10 +679,10 @@ async fn send_text(
 
     let timestamp_ms = now_ms();
     let filename = build_message_filename(&settings.sender_name, extension, timestamp_ms);
-    let remote_path = format!("files/{}", filename);
+    let remote_path = message_remote_path(&filename, timestamp_ms);
     let data = text.clone().into_bytes();
 
-    webdav::ensure_directory(&state.http, &endpoint, "files").await?;
+    webdav::ensure_parent_directories(&state.http, &endpoint, &remote_path).await?;
     webdav::upload_file(&state.http, &endpoint, &remote_path, data.clone()).await?;
 
     let message = DbMessage {
@@ -694,6 +697,7 @@ async fn send_text(
         mtime: None,
         content: Some(text),
         local_path: None,
+        remote_path: Some(remote_path),
         file_hash: None,
         marked: false,
         format,
@@ -757,7 +761,7 @@ async fn send_file(
     let file_hash = compute_file_hash(&data);
     let timestamp_ms = now_ms();
     let filename = build_message_filename(&settings.sender_name, &original_name, timestamp_ms);
-    let remote_path = format!("files/{}", filename);
+    let remote_path = message_remote_path(&filename, timestamp_ms);
 
     let client_id = client_id
         .and_then(|value| {
@@ -769,7 +773,7 @@ async fn send_file(
         })
         .unwrap_or_else(|| filename.clone());
 
-    webdav::ensure_directory(&state.http, &endpoint, "files").await?;
+    webdav::ensure_parent_directories(&state.http, &endpoint, &remote_path).await?;
     emit_upload_progress(
         &window,
         &client_id,
@@ -837,8 +841,12 @@ async fn send_file(
     // Generate and upload thumbnail if it's an image
     if is_image_file(&original_name) {
         if let Ok(thumb_data) = generate_thumbnail(&data) {
-            let thumb_remote_path = format!("files/.thumbs/{}", filename);
-            let _ = webdav::ensure_directory(&state.http, &endpoint, "files/.thumbs").await;
+            let thumb_remote_path = resolved_thumbnail_remote_path(
+                Some(&remote_path),
+                &filename,
+                Some(timestamp_ms),
+            );
+            let _ = webdav::ensure_parent_directories(&state.http, &endpoint, &thumb_remote_path).await;
             let _ = webdav::upload_file(
                 &state.http,
                 &endpoint,
@@ -866,6 +874,7 @@ async fn send_file(
         mtime: None,
         content: None,
         local_path: Some(local_path.to_string_lossy().to_string()),
+        remote_path: Some(remote_path),
         file_hash: Some(file_hash),
         marked: false,
         format: "text".to_string(),
@@ -892,7 +901,7 @@ async fn send_file_data(
     let file_hash = compute_file_hash(&data);
     let timestamp_ms = now_ms();
     let filename = build_message_filename(&settings.sender_name, &original_name, timestamp_ms);
-    let remote_path = format!("files/{}", filename);
+    let remote_path = message_remote_path(&filename, timestamp_ms);
 
     let client_id = client_id
         .and_then(|value| {
@@ -904,7 +913,7 @@ async fn send_file_data(
         })
         .unwrap_or_else(|| filename.clone());
 
-    webdav::ensure_directory(&state.http, &endpoint, "files").await?;
+    webdav::ensure_parent_directories(&state.http, &endpoint, &remote_path).await?;
     emit_upload_progress(
         &window,
         &client_id,
@@ -972,8 +981,12 @@ async fn send_file_data(
     // Generate and upload thumbnail if it's an image
     if is_image_file(&original_name) {
         if let Ok(thumb_data) = generate_thumbnail(&data) {
-            let thumb_remote_path = format!("files/.thumbs/{}", filename);
-            let _ = webdav::ensure_directory(&state.http, &endpoint, "files/.thumbs").await;
+            let thumb_remote_path = resolved_thumbnail_remote_path(
+                Some(&remote_path),
+                &filename,
+                Some(timestamp_ms),
+            );
+            let _ = webdav::ensure_parent_directories(&state.http, &endpoint, &thumb_remote_path).await;
             let _ = webdav::upload_file(
                 &state.http,
                 &endpoint,
@@ -1001,6 +1014,7 @@ async fn send_file_data(
         mtime: None,
         content: None,
         local_path: Some(local_path.to_string_lossy().to_string()),
+        remote_path: Some(remote_path),
         file_hash: Some(file_hash),
         marked: false,
         format: "text".to_string(),
@@ -1025,7 +1039,13 @@ async fn get_thumbnail(state: State<'_, AppState>, filename: String) -> Result<S
     }
 
     // Try to download from server
-    let thumb_remote_path = format!("files/.thumbs/{}", filename);
+    let message = db::get_message(&state.db_path, &endpoint.id, &filename)
+        .map_err(|err| format!("璇诲彇娑堟伅澶辫触: {err}"))?;
+    let thumb_remote_path = resolved_thumbnail_remote_path(
+        message.as_ref().and_then(|item| item.remote_path.as_deref()),
+        &filename,
+        message.as_ref().map(|item| item.timestamp_ms),
+    );
     match webdav::download_optional_file(&state.http, &endpoint, &thumb_remote_path).await? {
         Some(data) => {
             let thumb_local_dir = endpoint_dir.join(".thumbs");
@@ -1067,11 +1087,20 @@ async fn download_message_file(
         DownloadDecision::Ready(path) => path,
     };
 
+    let message = db::get_message(&state.db_path, &endpoint.id, &filename)
+        .map_err(|err| format!("Failed to read message: {err}"))?;
+    let remote_path = resolved_remote_path(
+        message.as_ref().and_then(|item| item.remote_path.as_deref()),
+        &filename,
+        message.as_ref().map(|item| item.timestamp_ms),
+    );
+
     let download = match execute_streamed_download(
         &window,
         &state,
         &endpoint,
         &filename,
+        &remote_path,
         &original_name,
         &final_path,
     )
@@ -1132,11 +1161,19 @@ async fn save_message_file_as(
     }
 
     let final_path = PathBuf::from(target_path);
+    let message = db::get_message(&state.db_path, &endpoint.id, &filename)
+        .map_err(|err| format!("Failed to read message: {err}"))?;
+    let remote_path = resolved_remote_path(
+        message.as_ref().and_then(|item| item.remote_path.as_deref()),
+        &filename,
+        message.as_ref().map(|item| item.timestamp_ms),
+    );
     let download = match execute_streamed_download(
         &window,
         &state,
         &endpoint,
         &filename,
+        &remote_path,
         &original_name,
         &final_path,
     )
@@ -1358,6 +1395,7 @@ async fn execute_streamed_download(
     state: &AppState,
     endpoint: &WebDavEndpoint,
     filename: &str,
+    remote_path: &str,
     original_name: &str,
     final_path: &Path,
 ) -> Result<DownloadExecutionResult, String> {
@@ -1390,7 +1428,7 @@ async fn execute_streamed_download(
             match webdav::download_file_stream_with_range(
                 &state.http,
                 endpoint,
-                &format!("files/{filename}"),
+                remote_path,
                 Some(partial.downloaded_bytes as u64),
             )
             .await
@@ -1499,8 +1537,7 @@ async fn execute_streamed_download(
         }
     }
 
-    let response =
-        webdav::download_file_stream(&state.http, endpoint, &format!("files/{filename}")).await?;
+    let response = webdav::download_file_stream(&state.http, endpoint, remote_path).await?;
     let downloaded_size = write_download_stream_to_partial(
         window,
         state,
@@ -1608,11 +1645,19 @@ async fn save_download_history_as(
 
     let settings = current_settings(&state)?;
     let endpoint = resolve_endpoint_by_id(&settings, &record.endpoint_id)?;
+    let message = db::get_message(&state.db_path, &endpoint.id, &record.filename)
+        .map_err(|err| format!("Failed to read message: {err}"))?;
+    let remote_path = resolved_remote_path(
+        message.as_ref().and_then(|item| item.remote_path.as_deref()),
+        &record.filename,
+        message.as_ref().map(|item| item.timestamp_ms),
+    );
     let download = execute_streamed_download(
         &window,
         &state,
         &endpoint,
         &record.filename,
+        &remote_path,
         &record.original_name,
         &final_path,
     )
@@ -1651,11 +1696,20 @@ async fn redownload_download_history(
         return Err("Target path is a directory and cannot be redownloaded".to_string());
     }
 
+    let message = db::get_message(&state.db_path, &record.endpoint_id, &record.filename)
+        .map_err(|err| format!("Failed to read message: {err}"))?;
+    let remote_path = resolved_remote_path(
+        message.as_ref().and_then(|item| item.remote_path.as_deref()),
+        &record.filename,
+        message.as_ref().map(|item| item.timestamp_ms),
+    );
+
     let download = match execute_streamed_download(
         &window,
         &state,
         &endpoint,
         &record.filename,
+        &remote_path,
         &record.original_name,
         &final_path,
     )
@@ -1894,7 +1948,13 @@ async fn fetch_image_preview(
         return Ok(target_path.to_string_lossy().to_string());
     }
 
-    let remote_path = format!("files/{}", filename);
+    let message = db::get_message(&state.db_path, &endpoint.id, &filename)
+        .map_err(|err| format!("璇诲彇娑堟伅澶辫触: {err}"))?;
+    let remote_path = resolved_remote_path(
+        message.as_ref().and_then(|item| item.remote_path.as_deref()),
+        &filename,
+        message.as_ref().map(|item| item.timestamp_ms),
+    );
     let bytes = webdav::download_file(&state.http, &endpoint, &remote_path).await?;
     fs::write(&target_path, &bytes).map_err(|err| format!("保存预览失败: {err}"))?;
     Ok(target_path.to_string_lossy().to_string())
@@ -1935,7 +1995,13 @@ async fn delete_messages(
     if delete_remote {
         succeeded.clear();
         for filename in &targets {
-            let remote_path = format!("files/{}", filename);
+            let message = db::get_message(&state.db_path, &endpoint.id, filename)
+                .map_err(|err| err.to_string())?;
+            let remote_path = resolved_remote_path(
+                message.as_ref().and_then(|item| item.remote_path.as_deref()),
+                filename,
+                message.as_ref().map(|item| item.timestamp_ms),
+            );
             match webdav::delete_file(&state.http, &endpoint, &remote_path, true).await {
                 Ok(_) => succeeded.push(filename.clone()),
                 Err(_) => failed.push(filename.clone()),
@@ -2020,13 +2086,7 @@ async fn cleanup_messages(
     };
     let messages =
         db::list_messages(&state.db_path, &endpoint.id).map_err(|err| err.to_string())?;
-    let candidates: Vec<Message> = messages
-        .into_iter()
-        .filter(|message| match cutoff_ms {
-            Some(cutoff) => message.timestamp_ms < cutoff,
-            None => true,
-        })
-        .collect();
+    let candidates = collect_cleanup_candidates(messages, cutoff_ms);
 
     if candidates.is_empty() {
         return Ok(DeleteSummary {
@@ -2061,7 +2121,11 @@ async fn cleanup_messages(
             let mut failed: Vec<String> = Vec::new();
             let mut succeeded: Vec<String> = Vec::new();
             for message in &candidates {
-                let remote_path = format!("files/{}", message.filename);
+                let remote_path = resolved_remote_path(
+                    message.remote_path.as_deref(),
+                    &message.filename,
+                    Some(message.timestamp_ms),
+                );
                 match webdav::delete_file(&state.http, &endpoint, &remote_path, true).await {
                     Ok(_) => succeeded.push(message.filename.clone()),
                     Err(_) => failed.push(message.filename.clone()),
@@ -2393,6 +2457,15 @@ async fn restore_webdav(
         }
         let _ = webdav::delete_file(&state.http, &endpoint, &remote_path, true).await;
     }
+    let existing_history = webdav::list_entries(&state.http, &endpoint, Some("history"), true).await?;
+    for entry in existing_history {
+        let remote_path = entry.remote_path;
+        if remote_path == "history" || remote_path == "history/" {
+            continue;
+        }
+        let _ = webdav::delete_file(&state.http, &endpoint, &remote_path, true).await;
+    }
+    let _ = webdav::delete_file(&state.http, &endpoint, "history", true).await;
     let _ = webdav::delete_file(&state.http, &endpoint, "history.json", true).await;
 
     // 收集所有文件数据
@@ -2400,10 +2473,12 @@ async fn restore_webdav(
     let mut archive = ZipArchive::new(file).map_err(|e| format!("解析备份文件失败: {}", e))?;
     let len = archive.len();
 
-    // 验证 history.json 是否存在
-    archive
-        .by_name("history.json")
-        .map_err(|_| "备份文件无效: 缺少 history.json".to_string())?;
+    // 验证历史索引是否存在
+    let has_legacy_history = archive.by_name("history.json").is_ok();
+    let has_manifest_history = archive.by_name("history/index.json").is_ok();
+    if !has_legacy_history && !has_manifest_history {
+        return Err("备份文件无效: 缺少 history.json 或 history/index.json".to_string());
+    }
 
     // 确保目录存在 (只做一次)
     webdav::ensure_directory(&state.http, &endpoint, "files").await?;
@@ -2438,6 +2513,8 @@ async fn restore_webdav(
             }
             continue;
         }
+
+        webdav::ensure_parent_directories(&state.http, &endpoint, &filename).await?;
 
         // Extract to temp file
         let temp_file_path = temp_dir.join(format!("restore_{}.tmp", i));
@@ -2955,6 +3032,46 @@ fn normalize_download_dir(raw: &str, fallback: &Path) -> String {
 
 fn endpoint_files_dir(state: &AppState, endpoint_id: &str) -> PathBuf {
     state.files_base_dir.join(endpoint_id)
+}
+
+fn history_cache_dir(state: &AppState, endpoint_id: &str) -> PathBuf {
+    endpoint_files_dir(state, endpoint_id).join("history-cache")
+}
+
+fn resolved_remote_path(
+    stored_remote_path: Option<&str>,
+    filename: &str,
+    timestamp_ms: Option<i64>,
+) -> String {
+    stored_remote_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            timestamp_ms
+                .filter(|timestamp| *timestamp > 0)
+                .map(|timestamp| message_remote_path(filename, timestamp))
+        })
+        .unwrap_or_else(|| format!("files/{filename}"))
+}
+
+fn resolved_thumbnail_remote_path(
+    stored_remote_path: Option<&str>,
+    filename: &str,
+    timestamp_ms: Option<i64>,
+) -> String {
+    if let Some(remote_path) = stored_remote_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if let Some(suffix) = remote_path.strip_prefix("files/") {
+            return format!("files/.thumbs/{suffix}");
+        }
+    }
+    timestamp_ms
+        .filter(|timestamp| *timestamp > 0)
+        .map(|timestamp| thumbnail_remote_path(filename, timestamp))
+        .unwrap_or_else(|| format!("files/.thumbs/{filename}"))
 }
 
 fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, String> {
@@ -3817,19 +3934,27 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
     let endpoint = resolve_active_endpoint(&settings)?;
     let endpoint_id = endpoint.id.clone();
 
-    let history = crate::history::load_history(&state.http, &endpoint).await?;
+    let history = crate::history::load_history_for_sync(
+        &state.http,
+        &endpoint,
+        &history_cache_dir(state, &endpoint_id),
+    )
+    .await?;
     let mut history_map: HashMap<String, HistoryEntry> = history
+        .entries
         .into_iter()
         .map(|entry| (entry.filename.clone(), entry))
         .collect();
 
-    let entries = webdav::list_entries(&state.http, &endpoint, Some("files"), true).await?;
     let mut files_map: HashMap<String, crate::types::DavEntry> = HashMap::new();
-    for entry in entries {
-        if entry.is_collection {
-            continue;
+    if history.layout != HistoryLayout::Manifest {
+        let entries = webdav::list_entries(&state.http, &endpoint, Some("files"), true).await?;
+        for entry in entries {
+            if entry.is_collection {
+                continue;
+            }
+            files_map.insert(entry.filename.clone(), entry);
         }
-        files_map.insert(entry.filename.clone(), entry);
     }
 
     let mut all_filenames: HashSet<String> = HashSet::new();
@@ -3851,7 +3976,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
         let history_entry = history_map.get(&filename);
 
         let parsed = parse_message_filename(&filename);
-        let (sender, timestamp_ms, kind, original_name, size_hint, marked, format) =
+        let (sender, timestamp_ms, kind, original_name, size_hint, remote_path_hint, marked, format) =
             if let Some(history) = history_entry {
                 (
                     history.sender.clone(),
@@ -3859,6 +3984,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
                     history.kind.clone(),
                     history.original_name.clone(),
                     history.size,
+                    history.remote_path.clone(),
                     history.marked,
                     history.format.clone(),
                 )
@@ -3874,6 +4000,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
                     parsed.kind.as_str().to_string(),
                     parsed.original_name.clone(),
                     file_entry.and_then(|entry| entry.size).unwrap_or(0) as i64,
+                    None,
                     false,
                     format,
                 )
@@ -3895,6 +4022,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
             mtime: None,
             content: None,
             local_path: None,
+            remote_path: remote_path_hint,
             file_hash: None,
             marked,
             format,
@@ -3905,6 +4033,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
             message.timestamp_ms = history.timestamp_ms;
             message.kind = history.kind.clone();
             message.original_name = history.original_name.clone();
+            message.remote_path = history.remote_path.clone();
             if history.size > 0 {
                 message.size = history.size;
             }
@@ -3918,6 +4047,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
             if let Some(size) = entry.size {
                 message.size = size as i64;
             }
+            message.remote_path = Some(entry.remote_path.clone());
         }
 
         let kind_enum = match message.kind.as_str() {
@@ -3929,9 +4059,12 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
                 .unwrap_or(MessageKind::File),
         };
 
-        let remote_path = file_entry
-            .map(|entry| entry.remote_path.clone())
-            .unwrap_or_else(|| format!("files/{}", filename));
+        let remote_path = resolved_remote_path(
+            message.remote_path.as_deref(),
+            &filename,
+            Some(message.timestamp_ms),
+        );
+        message.remote_path = Some(remote_path.clone());
 
         let mut changed = false;
 
@@ -3969,7 +4102,11 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
                 || existing.original_name != message.original_name
                 || existing.content != message.content
                 || existing.local_path != message.local_path
+                || existing.remote_path != message.remote_path
                 || existing.marked != message.marked
+                || existing.etag != message.etag
+                || existing.mtime != message.mtime
+                || existing.format != message.format
             {
                 should_upsert = true;
             }
@@ -4003,9 +4140,21 @@ fn message_to_history(message: &DbMessage) -> HistoryEntry {
         size: message.size,
         kind: message.kind.clone(),
         original_name: message.original_name.clone(),
+        remote_path: message.remote_path.clone(),
         marked: message.marked,
         format: message.format.clone(),
     }
+}
+
+fn collect_cleanup_candidates(messages: Vec<Message>, cutoff_ms: Option<i64>) -> Vec<Message> {
+    messages
+        .into_iter()
+        .filter(|message| !message.marked)
+        .filter(|message| match cutoff_ms {
+            Some(cutoff) => message.timestamp_ms < cutoff,
+            None => true,
+        })
+        .collect()
 }
 
 #[allow(dead_code)]
@@ -4642,6 +4791,7 @@ mod tests {
             size: 100,
             kind: "text".to_string(),
             original_name: "test.txt".to_string(),
+            remote_path: Some("files/test.txt".to_string()),
             marked: true,
             format: "text".to_string(),
         };
@@ -4658,6 +4808,61 @@ mod tests {
         let deserialized_old: HistoryEntry = serde_json::from_str(json_old).unwrap();
         assert_eq!(deserialized_old.marked, false);
         assert_eq!(deserialized_old.format, "");
+    }
+
+    #[test]
+    fn collect_cleanup_candidates_skips_marked_messages() {
+        let messages = vec![
+            Message {
+                filename: "old-unmarked.txt".to_string(),
+                sender: "tester".to_string(),
+                timestamp_ms: 10,
+                size: 1,
+                kind: "text".to_string(),
+                original_name: "old-unmarked.txt".to_string(),
+                content: None,
+                local_path: None,
+                remote_path: None,
+                file_hash: None,
+                download_exists: false,
+                marked: false,
+                format: "text".to_string(),
+            },
+            Message {
+                filename: "old-marked.txt".to_string(),
+                sender: "tester".to_string(),
+                timestamp_ms: 10,
+                size: 1,
+                kind: "text".to_string(),
+                original_name: "old-marked.txt".to_string(),
+                content: None,
+                local_path: None,
+                remote_path: None,
+                file_hash: None,
+                download_exists: false,
+                marked: true,
+                format: "text".to_string(),
+            },
+            Message {
+                filename: "new-unmarked.txt".to_string(),
+                sender: "tester".to_string(),
+                timestamp_ms: 100,
+                size: 1,
+                kind: "text".to_string(),
+                original_name: "new-unmarked.txt".to_string(),
+                content: None,
+                local_path: None,
+                remote_path: None,
+                file_hash: None,
+                download_exists: false,
+                marked: false,
+                format: "text".to_string(),
+            },
+        ];
+
+        let candidates = collect_cleanup_candidates(messages, Some(50));
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].filename, "old-unmarked.txt");
     }
 
     #[test]

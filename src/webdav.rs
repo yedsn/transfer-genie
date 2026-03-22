@@ -4,7 +4,9 @@ use futures_util::StreamExt;
 use log::info;
 use quick_xml::events::Event;
 use quick_xml::Reader;
-use reqwest::header::{CONTENT_RANGE, ETAG, LAST_MODIFIED, RANGE};
+use reqwest::header::{
+    CONTENT_RANGE, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, RANGE,
+};
 use reqwest::{Body, Client, Method, RequestBuilder};
 use std::pin::Pin;
 use std::time::Duration;
@@ -17,6 +19,18 @@ pub struct DownloadStreamResponse {
     pub etag: Option<String>,
     pub last_modified: Option<String>,
     pub status_code: u16,
+}
+
+pub enum ConditionalFileStatus {
+    Modified(Vec<u8>),
+    NotModified,
+    Missing,
+}
+
+pub struct ConditionalFileResponse {
+    pub status: ConditionalFileStatus,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
 }
 
 fn apply_auth(request: RequestBuilder, endpoint: &WebDavEndpoint) -> RequestBuilder {
@@ -443,6 +457,71 @@ pub async fn download_optional_file(
         .map_err(|err| format!("读取下载内容失败: {err}"))
 }
 
+pub async fn download_optional_file_conditional(
+    client: &Client,
+    endpoint: &WebDavEndpoint,
+    remote_path: &str,
+    etag: Option<&str>,
+    last_modified: Option<&str>,
+) -> Result<ConditionalFileResponse, String> {
+    let mut url = base_url(endpoint)?;
+    url = url
+        .join(remote_path)
+        .map_err(|err| format!("鏂囦欢鍦板潃鏃犳晥: {err}"))?;
+
+    let mut request = client.get(url);
+    if let Some(etag) = etag.filter(|value| !value.trim().is_empty()) {
+        request = request.header(IF_NONE_MATCH, etag);
+    }
+    if let Some(last_modified) = last_modified.filter(|value| !value.trim().is_empty()) {
+        request = request.header(IF_MODIFIED_SINCE, last_modified);
+    }
+
+    let response = apply_auth(request, endpoint)
+        .send()
+        .await
+        .map_err(|err| format!("涓嬭浇澶辫触: {err}"))?;
+
+    let headers = response.headers().clone();
+    let etag = headers
+        .get(ETAG)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim_matches('"').to_string());
+    let last_modified = headers
+        .get(LAST_MODIFIED)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string());
+    let status = response.status();
+
+    if status.as_u16() == 304 {
+        return Ok(ConditionalFileResponse {
+            status: ConditionalFileStatus::NotModified,
+            etag,
+            last_modified,
+        });
+    }
+    if status.as_u16() == 404 {
+        return Ok(ConditionalFileResponse {
+            status: ConditionalFileStatus::Missing,
+            etag,
+            last_modified,
+        });
+    }
+    if !status.is_success() {
+        return Err(format!("涓嬭浇澶辫触: HTTP {}", status));
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|err| format!("璇诲彇涓嬭浇鍐呭澶辫触: {err}"))?;
+    Ok(ConditionalFileResponse {
+        status: ConditionalFileStatus::Modified(bytes.to_vec()),
+        etag,
+        last_modified,
+    })
+}
+
 pub async fn upload_file(
     client: &Client,
     endpoint: &WebDavEndpoint,
@@ -564,6 +643,31 @@ pub async fn ensure_directory(
         return Ok(());
     }
     Err(format!("创建目录失败: HTTP {}", status))
+}
+
+pub async fn ensure_parent_directories(
+    client: &Client,
+    endpoint: &WebDavEndpoint,
+    remote_path: &str,
+) -> Result<(), String> {
+    let parts: Vec<&str> = remote_path
+        .trim_matches('/')
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.len() <= 1 {
+        return Ok(());
+    }
+
+    let mut current = String::new();
+    for part in &parts[..parts.len() - 1] {
+        if !current.is_empty() {
+            current.push('/');
+        }
+        current.push_str(part);
+        ensure_directory(client, endpoint, &current).await?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
