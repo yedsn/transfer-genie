@@ -426,7 +426,7 @@ async fn process_update(
         return Ok(true);
     };
 
-    let sender = resolve_sender(message.from.as_ref());
+    let sender = resolve_inbound_sender_name(config, message.from.as_ref());
     let filename = import_into_webdav(
         telegram_client,
         webdav_client,
@@ -835,6 +835,25 @@ fn resolve_sender(user: Option<&TelegramUser>) -> String {
     }
 }
 
+fn resolve_inbound_sender_name(
+    config: &TelegramBridgeConfig,
+    user: Option<&TelegramUser>,
+) -> String {
+    if !config.telegram_sender_name.is_empty() {
+        return config.telegram_sender_name.clone();
+    }
+
+    if let Some(user) = user {
+        if let Some(username) = user.username.as_deref() {
+            if !username.trim().is_empty() {
+                return username.trim().to_string();
+            }
+        }
+    }
+
+    resolve_sender(user)
+}
+
 async fn get_file(
     client: &Client,
     config: &TelegramBridgeConfig,
@@ -1162,6 +1181,69 @@ mod tests {
             username: None,
         };
         assert_eq!(resolve_sender(Some(&user)), "telegram-user-7");
+    }
+
+    #[test]
+    fn resolve_inbound_sender_name_uses_config_override_first() {
+        let config = TelegramBridgeConfig {
+            device_sender_name: "Device-A".to_string(),
+            telegram_sender_name: "Telegram-Alias".to_string(),
+            telegram_bot_token: "123:test".to_string(),
+            allowed_chat_id: 1,
+            proxy_url: String::new(),
+            webdav: WebDavEndpoint {
+                id: "endpoint".to_string(),
+                name: "Endpoint".to_string(),
+                url: "https://example.com".to_string(),
+                username: "user".to_string(),
+                password: "pass".to_string(),
+                enabled: true,
+            },
+            poll_interval_secs: 5,
+            state_path: String::new(),
+            temp_dir: String::new(),
+        };
+        let user = TelegramUser {
+            id: 7,
+            first_name: "Alice".to_string(),
+            last_name: Some("Z".to_string()),
+            username: Some("alicez".to_string()),
+        };
+
+        assert_eq!(
+            resolve_inbound_sender_name(&config, Some(&user)),
+            "Telegram-Alias"
+        );
+    }
+
+    #[test]
+    fn resolve_inbound_sender_name_prefers_username_when_no_override() {
+        let config = TelegramBridgeConfig {
+            device_sender_name: "Device-A".to_string(),
+            telegram_sender_name: String::new(),
+            telegram_bot_token: "123:test".to_string(),
+            allowed_chat_id: 1,
+            proxy_url: String::new(),
+            webdav: WebDavEndpoint {
+                id: "endpoint".to_string(),
+                name: "Endpoint".to_string(),
+                url: "https://example.com".to_string(),
+                username: "user".to_string(),
+                password: "pass".to_string(),
+                enabled: true,
+            },
+            poll_interval_secs: 5,
+            state_path: String::new(),
+            temp_dir: String::new(),
+        };
+        let user = TelegramUser {
+            id: 7,
+            first_name: "Alice".to_string(),
+            last_name: Some("Z".to_string()),
+            username: Some("alicez".to_string()),
+        };
+
+        assert_eq!(resolve_inbound_sender_name(&config, Some(&user)), "alicez");
     }
 
     #[test]
