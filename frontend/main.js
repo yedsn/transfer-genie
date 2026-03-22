@@ -1534,6 +1534,10 @@ function toggleSelectedMessage(filename, checked) {
   updateSelectionBar();
 }
 
+function isMessageSelectionRefreshPaused() {
+  return selectionMode;
+}
+
 function getSelectableMessages() {
   return mergeMessages(lastMessages).filter((message) => !message.uploading);
 }
@@ -3961,6 +3965,9 @@ async function loadMessages(options = {}) {
   if (isLoadMessagesRunning && options.checkNew) {
     return;
   }
+  if (options.checkNew && isMessageSelectionRefreshPaused()) {
+    return;
+  }
   isLoadMessagesRunning = true;
   const shouldScroll =
     typeof options.scrollToBottom === 'boolean'
@@ -4152,7 +4159,7 @@ function startRefreshTimer(intervalSecs) {
     }
 
     const hasSearchQuery = searchInput && searchInput.value.trim().length > 0;
-    if (hasSearchQuery || hasActiveContentTransfer()) {
+    if (hasSearchQuery || hasActiveContentTransfer() || isMessageSelectionRefreshPaused()) {
       updateRefreshCountdown();
       return;
     }

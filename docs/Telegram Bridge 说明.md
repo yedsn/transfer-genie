@@ -141,7 +141,7 @@ cargo run --bin telegram_bridge
   "device_sender_name": "My-PC",
   "telegram_sender_name": "My Telegram Alias",
   "telegram_bot_token": "123456:replace-me",
-  "allowed_chat_id": -1001234567890,
+  "allowed_chat_id": null,
   "proxy_url": "http://127.0.0.1:7890",
   "poll_interval_secs": 5,
   "state_path": "./data/telegram-bridge-state.json",
