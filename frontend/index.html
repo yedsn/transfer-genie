@@ -133,27 +133,30 @@
               <h2>下载任务</h2>
               <p>下载进度独立展示，消息刷新和切换列表不会打断正在进行的下载。</p>
             </div>
-            <div class="transfer-list-tabs" role="tablist" aria-label="传输列表切换">
-              <button
-                id="transfer-tab-downloads"
-                class="transfer-list-tab is-active"
-                type="button"
-                role="tab"
-                aria-selected="true"
-              >
-                下载列表
-                <span id="transfer-tab-downloads-count" class="transfer-list-tab-count">0</span>
-              </button>
-              <button
-                id="transfer-tab-uploads"
-                class="transfer-list-tab"
-                type="button"
-                role="tab"
-                aria-selected="false"
-              >
-                上传列表
-                <span id="transfer-tab-uploads-count" class="transfer-list-tab-count">0</span>
-              </button>
+            <div class="transfer-list-toolbar">
+              <div class="transfer-list-tabs" role="tablist" aria-label="传输列表切换">
+                <button
+                  id="transfer-tab-downloads"
+                  class="transfer-list-tab is-active"
+                  type="button"
+                  role="tab"
+                  aria-selected="true"
+                >
+                  下载列表
+                  <span id="transfer-tab-downloads-count" class="transfer-list-tab-count">0</span>
+                </button>
+                <button
+                  id="transfer-tab-uploads"
+                  class="transfer-list-tab"
+                  type="button"
+                  role="tab"
+                  aria-selected="false"
+                >
+                  上传列表
+                  <span id="transfer-tab-uploads-count" class="transfer-list-tab-count">0</span>
+                </button>
+              </div>
+              <button id="transfer-clear-button" class="button ghost small" type="button">清空列表</button>
             </div>
             <section id="upload-task-panel" class="download-task-panel" hidden>
               <div class="download-task-panel-header">

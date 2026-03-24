@@ -657,6 +657,26 @@ pub fn delete_download_history(path: &Path, id: i64) -> rusqlite::Result<usize> 
     conn.execute("DELETE FROM download_history WHERE id = ?1", params![id])
 }
 
+pub fn delete_download_history_many(path: &Path, ids: &[i64]) -> rusqlite::Result<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let conn = Connection::open(path)?;
+    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+    let sql = format!("DELETE FROM download_history WHERE id IN ({placeholders})");
+    conn.execute(&sql, params_from_iter(ids.iter()))
+}
+
+pub fn delete_upload_history_many(path: &Path, ids: &[i64]) -> rusqlite::Result<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let conn = Connection::open(path)?;
+    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+    let sql = format!("DELETE FROM upload_history WHERE id IN ({placeholders})");
+    conn.execute(&sql, params_from_iter(ids.iter()))
+}
+
 pub fn get_partial_download(
     path: &Path,
     endpoint_id: &str,

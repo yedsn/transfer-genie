@@ -1,4 +1,4 @@
-use crate::types::{DavEntry, WebDavEndpoint};
+﻿use crate::types::{DavEntry, WebDavEndpoint};
 use bytes::Bytes;
 use log::info;
 use quick_xml::events::Event;
@@ -10,6 +10,8 @@ use reqwest::{Body, Client, Method, RequestBuilder};
 use std::pin::Pin;
 use std::time::Duration;
 use url::Url;
+
+const DOWNLOAD_RESPONSE_TIMEOUT_SECS: u64 = 30;
 
 pub struct DownloadStreamResponse {
     pub stream: Pin<Box<dyn futures_util::Stream<Item = reqwest::Result<Bytes>> + Send>>,
@@ -62,12 +64,12 @@ fn apply_auth_with_timeout(
 fn base_url(endpoint: &WebDavEndpoint) -> Result<Url, String> {
     let mut raw = endpoint.url.trim().to_string();
     if raw.is_empty() {
-        return Err("WebDAV 地址为空".to_string());
+        return Err("WebDAV 鍦板潃涓虹┖".to_string());
     }
     if !raw.ends_with('/') {
         raw.push('/');
     }
-    Url::parse(&raw).map_err(|err| format!("WebDAV 地址无效: {err}"))
+    Url::parse(&raw).map_err(|err| format!("WebDAV 鍦板潃鏃犳晥: {err}"))
 }
 
 fn parse_content_range_total(value: Option<&str>) -> Option<u64> {
@@ -91,7 +93,7 @@ pub async fn list_entries(
         let target = format!("{}/", prefix_trim);
         url = url
             .join(&target)
-            .map_err(|err| format!("WebDAV 路径无效: {err}"))?;
+            .map_err(|err| format!("WebDAV 璺緞鏃犳晥: {err}"))?;
     }
 
     let body = r###"<?xml version="1.0" encoding="utf-8"?>
@@ -119,7 +121,7 @@ pub async fn list_entries(
     let response = apply_auth(request, endpoint)
         .send()
         .await
-        .map_err(|err| format!("WebDAV 请求失败: {err}"))?;
+        .map_err(|err| format!("WebDAV 璇锋眰澶辫触: {err}"))?;
 
     let status = response.status();
     info!("Received response with status: {}", status);
@@ -127,7 +129,7 @@ pub async fn list_entries(
     let text = response
         .text()
         .await
-        .map_err(|err| format!("读取 WebDAV 响应失败: {err}"))?;
+        .map_err(|err| format!("璇诲彇 WebDAV 鍝嶅簲澶辫触: {err}"))?;
 
     // info!("Received response body:\n---\n{}\n---", &text);
 
@@ -135,7 +137,7 @@ pub async fn list_entries(
         if allow_missing && status.as_u16() == 404 {
             return Ok(Vec::new());
         }
-        return Err(format!("WebDAV 列表失败: HTTP {}", status));
+        return Err(format!("WebDAV 鍒楄〃澶辫触: HTTP {}", status));
     }
 
     let entries = parse_propfind_response(&text, endpoint)?;
@@ -178,7 +180,7 @@ fn parse_propfind_response(
                     break;
                 }
             }
-            Err(e) => return Err(format!("XML (outer) aken解析错误: {}", e)),
+            Err(e) => return Err(format!("XML (outer) aken瑙ｆ瀽閿欒: {}", e)),
         }
         buffer.clear();
     }
@@ -244,7 +246,7 @@ fn parse_response_entry(
                     in_propstat = false;
                 }
             }
-            Err(e) => return Err(format!("XML (response) aken解析错误: {}", e)),
+            Err(e) => return Err(format!("XML (response) aken瑙ｆ瀽閿欒: {}", e)),
             Ok(Event::Eof) => break,
             _ => {}
         }
@@ -304,7 +306,7 @@ pub async fn download_file(
     let mut url = base_url(endpoint)?;
     url = url
         .join(remote_path)
-        .map_err(|err| format!("文件地址无效: {err}"))?;
+        .map_err(|err| format!("鏂囦欢鍦板潃鏃犳晥: {err}"))?;
 
     log::info!("Downloading file from: {}", url);
 
@@ -313,19 +315,19 @@ pub async fn download_file(
     let response = apply_auth_without_timeout(request, endpoint)
         .send()
         .await
-        .map_err(|err| format!("下载失败: {err}"))?;
+        .map_err(|err| format!("涓嬭浇澶辫触: {err}"))?;
 
     let status = response.status();
     if !(status.is_success() || status.as_u16() == 206) {
         info!("Failed to download '{}'. HTTP Status: {}", url, status);
-        return Err(format!("下载失败: HTTP {}", status));
+        return Err(format!("涓嬭浇澶辫触: HTTP {}", status));
     }
 
     response
         .bytes()
         .await
         .map(|bytes| bytes.to_vec())
-        .map_err(|err| format!("读取下载内容失败: {err}"))
+        .map_err(|err| format!("璇诲彇涓嬭浇鍐呭澶辫触: {err}"))
 }
 
 pub async fn download_file_stream(
@@ -345,7 +347,7 @@ pub async fn download_file_stream_with_range(
     let mut url = base_url(endpoint)?;
     url = url
         .join(remote_path)
-        .map_err(|err| format!("文件地址无效: {err}"))?;
+        .map_err(|err| format!("鏂囦欢鍦板潃鏃犳晥: {err}"))?;
 
     let request = if let Some(range_start) = range_start {
         client
@@ -354,14 +356,17 @@ pub async fn download_file_stream_with_range(
     } else {
         client.get(url)
     };
-    let response = apply_auth_without_timeout(request, endpoint)
-        .send()
-        .await
-        .map_err(|err| format!("下载失败: {err}"))?;
+    let response = tokio::time::timeout(
+        Duration::from_secs(DOWNLOAD_RESPONSE_TIMEOUT_SECS),
+        apply_auth_without_timeout(request, endpoint).send(),
+    )
+    .await
+    .map_err(|_| format!("下载失败: 等待服务器响应超时（超过 {} 秒）", DOWNLOAD_RESPONSE_TIMEOUT_SECS))?
+    .map_err(|err| format!("下载失败: {err}"))?;
 
     let status = response.status();
     if !status.is_success() {
-        return Err(format!("下载失败: HTTP {}", status));
+        return Err(format!("涓嬭浇澶辫触: HTTP {}", status));
     }
     let content_length = response.content_length();
     let headers = response.headers();
@@ -406,7 +411,7 @@ where
     let mut url = base_url(endpoint)?;
     url = url
         .join(remote_path)
-        .map_err(|err| format!("上传地址无效: {err}"))?;
+        .map_err(|err| format!("涓婁紶鍦板潃鏃犳晥: {err}"))?;
 
     // Explicitly set Content-Length to avoid "411 Length Required"
     let body = Body::wrap_stream(stream);
@@ -418,11 +423,11 @@ where
     let response = apply_auth(request, endpoint)
         .send()
         .await
-        .map_err(|err| format!("上传失败: {err}"))?;
+        .map_err(|err| format!("涓婁紶澶辫触: {err}"))?;
 
     let status = response.status();
     if !status.is_success() {
-        return Err(format!("上传失败: HTTP {}", status));
+        return Err(format!("涓婁紶澶辫触: HTTP {}", status));
     }
     Ok(())
 }
@@ -435,27 +440,27 @@ pub async fn download_optional_file(
     let mut url = base_url(endpoint)?;
     url = url
         .join(remote_path)
-        .map_err(|err| format!("文件地址无效: {err}"))?;
+        .map_err(|err| format!("鏂囦欢鍦板潃鏃犳晥: {err}"))?;
 
     let request = client.get(url);
     let response = apply_auth(request, endpoint)
         .send()
         .await
-        .map_err(|err| format!("下载失败: {err}"))?;
+        .map_err(|err| format!("涓嬭浇澶辫触: {err}"))?;
 
     let status = response.status();
     if status.as_u16() == 404 {
         return Ok(None);
     }
     if !status.is_success() {
-        return Err(format!("下载失败: HTTP {}", status));
+        return Err(format!("涓嬭浇澶辫触: HTTP {}", status));
     }
 
     response
         .bytes()
         .await
         .map(|bytes| Some(bytes.to_vec()))
-        .map_err(|err| format!("读取下载内容失败: {err}"))
+        .map_err(|err| format!("璇诲彇涓嬭浇鍐呭澶辫触: {err}"))
 }
 
 pub async fn download_optional_file_conditional(
@@ -468,7 +473,7 @@ pub async fn download_optional_file_conditional(
     let mut url = base_url(endpoint)?;
     url = url
         .join(remote_path)
-        .map_err(|err| format!("鏂囦欢鍦板潃鏃犳晥: {err}"))?;
+        .map_err(|err| format!("閺傚洣娆㈤崷鏉挎絻閺冪姵鏅? {err}"))?;
 
     let mut request = client.get(url);
     if let Some(etag) = etag.filter(|value| !value.trim().is_empty()) {
@@ -481,7 +486,7 @@ pub async fn download_optional_file_conditional(
     let response = apply_auth(request, endpoint)
         .send()
         .await
-        .map_err(|err| format!("涓嬭浇澶辫触: {err}"))?;
+        .map_err(|err| format!("娑撳娴囨径杈Е: {err}"))?;
 
     let headers = response.headers().clone();
     let etag = headers
@@ -509,13 +514,13 @@ pub async fn download_optional_file_conditional(
         });
     }
     if !status.is_success() {
-        return Err(format!("涓嬭浇澶辫触: HTTP {}", status));
+        return Err(format!("娑撳娴囨径杈Е: HTTP {}", status));
     }
 
     let bytes = response
         .bytes()
         .await
-        .map_err(|err| format!("璇诲彇涓嬭浇鍐呭澶辫触: {err}"))?;
+        .map_err(|err| format!("鐠囪褰囨稉瀣祰閸愬懎顔愭径杈Е: {err}"))?;
     Ok(ConditionalFileResponse {
         status: ConditionalFileStatus::Modified(bytes.to_vec()),
         etag,
@@ -532,17 +537,17 @@ pub async fn upload_file(
     let mut url = base_url(endpoint)?;
     url = url
         .join(remote_path)
-        .map_err(|err| format!("上传地址无效: {err}"))?;
+        .map_err(|err| format!("涓婁紶鍦板潃鏃犳晥: {err}"))?;
 
     let request = client.put(url).body(data);
     let response = apply_auth(request, endpoint)
         .send()
         .await
-        .map_err(|err| format!("上传失败: {err}"))?;
+        .map_err(|err| format!("涓婁紶澶辫触: {err}"))?;
 
     let status = response.status();
     if !status.is_success() {
-        return Err(format!("上传失败: HTTP {}", status));
+        return Err(format!("涓婁紶澶辫触: HTTP {}", status));
     }
     Ok(())
 }
@@ -560,7 +565,7 @@ where
     let mut url = base_url(endpoint)?;
     url = url
         .join(remote_path)
-        .map_err(|err| format!("上传地址无效: {err}"))?;
+        .map_err(|err| format!("涓婁紶鍦板潃鏃犳晥: {err}"))?;
 
     let data = Bytes::from(data);
     let total = data.len() as u64;
@@ -586,11 +591,11 @@ where
     let response = apply_auth(request, endpoint)
         .send()
         .await
-        .map_err(|err| format!("上传失败: {err}"))?;
+        .map_err(|err| format!("涓婁紶澶辫触: {err}"))?;
 
     let status = response.status();
     if !status.is_success() {
-        return Err(format!("上传失败: HTTP {}", status));
+        return Err(format!("涓婁紶澶辫触: HTTP {}", status));
     }
     Ok(())
 }
@@ -604,7 +609,7 @@ pub async fn delete_file(
     let mut url = base_url(endpoint)?;
     url = url
         .join(remote_path)
-        .map_err(|err| format!("删除地址无效: {err}"))?;
+        .map_err(|err| format!("鍒犻櫎鍦板潃鏃犳晥: {err}"))?;
 
     let request = client.request(
         Method::from_bytes(b"DELETE").map_err(|e| e.to_string())?,
@@ -613,13 +618,13 @@ pub async fn delete_file(
     let response = apply_auth(request, endpoint)
         .send()
         .await
-        .map_err(|err| format!("删除失败: {err}"))?;
+        .map_err(|err| format!("鍒犻櫎澶辫触: {err}"))?;
 
     let status = response.status();
     if status.is_success() || (allow_missing && status.as_u16() == 404) {
         return Ok(());
     }
-    Err(format!("删除失败: HTTP {}", status))
+    Err(format!("鍒犻櫎澶辫触: HTTP {}", status))
 }
 
 pub async fn ensure_directory(
@@ -631,7 +636,7 @@ pub async fn ensure_directory(
     let target = format!("{}/", remote_path.trim_matches('/'));
     url = url
         .join(&target)
-        .map_err(|err| format!("目录地址无效: {err}"))?;
+        .map_err(|err| format!("鐩綍鍦板潃鏃犳晥: {err}"))?;
 
     let request = client.request(
         Method::from_bytes(b"MKCOL").map_err(|e| e.to_string())?,
@@ -640,13 +645,13 @@ pub async fn ensure_directory(
     let response = apply_auth(request, endpoint)
         .send()
         .await
-        .map_err(|err| format!("创建目录失败: {err}"))?;
+        .map_err(|err| format!("鍒涘缓鐩綍澶辫触: {err}"))?;
 
     let status = response.status();
     if status.is_success() || status.as_u16() == 405 {
         return Ok(());
     }
-    Err(format!("创建目录失败: HTTP {}", status))
+    Err(format!("鍒涘缓鐩綍澶辫触: HTTP {}", status))
 }
 
 pub async fn ensure_parent_directories(

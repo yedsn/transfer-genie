@@ -267,6 +267,14 @@ body {
   width: fit-content;
 }
 
+.transfer-list-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .transfer-list-tab {
   display: inline-flex;
   align-items: center;

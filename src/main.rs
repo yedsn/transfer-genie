@@ -1882,6 +1882,24 @@ fn delete_download_history(
 }
 
 #[tauri::command]
+fn clear_download_history_records(
+    state: State<'_, AppState>,
+    record_ids: Vec<i64>,
+) -> Result<usize, String> {
+    db::delete_download_history_many(&state.db_path, &record_ids)
+        .map_err(|err| format!("清空下载记录失败: {err}"))
+}
+
+#[tauri::command]
+fn clear_upload_history_records(
+    state: State<'_, AppState>,
+    record_ids: Vec<i64>,
+) -> Result<usize, String> {
+    db::delete_upload_history_many(&state.db_path, &record_ids)
+        .map_err(|err| format!("清空上传记录失败: {err}"))
+}
+
+#[tauri::command]
 fn open_download_history_dir(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -4863,6 +4881,8 @@ fn main() {
             save_download_history_as,
             redownload_download_history,
             delete_download_history,
+            clear_download_history_records,
+            clear_upload_history_records,
             open_download_history_dir,
             save_local_data,
             open_message_file,

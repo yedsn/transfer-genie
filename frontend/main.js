@@ -24,6 +24,7 @@ const transferTabDownloadsButton = document.getElementById('transfer-tab-downloa
 const transferTabDownloadsCount = document.getElementById('transfer-tab-downloads-count');
 const transferTabUploadsButton = document.getElementById('transfer-tab-uploads');
 const transferTabUploadsCount = document.getElementById('transfer-tab-uploads-count');
+const transferClearButton = document.getElementById('transfer-clear-button');
 const downloadToggleSelectionButton = document.getElementById('download-toggle-selection');
 const downloadSelectionBar = document.getElementById('download-selection-bar');
 const downloadSelectionCount = document.getElementById('download-selection-count');
@@ -1235,6 +1236,45 @@ function getPendingTransferCount(tasks) {
   return (Array.isArray(tasks) ? tasks : []).filter((task) => task?.status !== 'complete').length;
 }
 
+function getClearableDownloadTasks() {
+  return Array.from(downloadTasks.values()).filter(
+    (task) => task?.historyId && !isDownloadTaskActive(task),
+  );
+}
+
+function getVisibleUploadTasks() {
+  const activeTasks = Array.from(pendingUploads.values()).map(createPendingUploadTask);
+  const activeHistoryKeys = new Set(
+    activeTasks
+      .filter((task) => task.filename)
+      .map((task) => getUploadHistoryKey(task.filename, task.endpointId)),
+  );
+  const persistedTasks = Array.from(uploadHistoryTasks.values()).filter(
+    (task) => !activeHistoryKeys.has(task.key),
+  );
+  return [...activeTasks, ...persistedTasks].sort((a, b) => {
+    const activityDelta = Number(b.status === 'progress') - Number(a.status === 'progress');
+    if (activityDelta !== 0) {
+      return activityDelta;
+    }
+    return (b.updatedAt || 0) - (a.updatedAt || 0);
+  });
+}
+
+function getClearableUploadTasks() {
+  return getVisibleUploadTasks().filter((task) => task?.historyId && task.status !== 'progress');
+}
+
+function updateTransferClearButton() {
+  if (!transferClearButton) {
+    return;
+  }
+  const isDownloads = currentTransferListView === 'downloads';
+  const clearable = isDownloads ? getClearableDownloadTasks() : getClearableUploadTasks();
+  transferClearButton.textContent = isDownloads ? '清空下载列表' : '清空上传列表';
+  transferClearButton.disabled = clearable.length === 0;
+}
+
 function setTransferListView(view) {
   currentTransferListView = view === 'uploads' ? 'uploads' : 'downloads';
   if (transferTabDownloadsButton) {
@@ -1256,6 +1296,7 @@ function setTransferListView(view) {
   if (downloadsPageToolbar) {
     downloadsPageToolbar.hidden = currentTransferListView !== 'downloads';
   }
+  updateTransferClearButton();
 }
 
 function renderDownloadTasks() {
@@ -1274,6 +1315,7 @@ function renderDownloadTasks() {
   transferTaskCounts.downloads = getPendingTransferCount(tasks);
   const activeCount = tasks.filter((task) => isDownloadTaskActive(task)).length;
   updateTransferTaskIndicators();
+  updateTransferClearButton();
   updateDownloadSelectionBar();
   updateDownloadSelectionToggleLabel();
   if (downloadTaskSummary) {
@@ -1579,26 +1621,13 @@ function renderUploadTasks() {
   if (!uploadTaskPanel || !uploadTaskList) {
     return;
   }
-  const activeTasks = Array.from(pendingUploads.values()).map(createPendingUploadTask);
-  const activeHistoryKeys = new Set(
-    activeTasks
-      .filter((task) => task.filename)
-      .map((task) => getUploadHistoryKey(task.filename, task.endpointId)),
-  );
-  const persistedTasks = Array.from(uploadHistoryTasks.values()).filter(
-    (task) => !activeHistoryKeys.has(task.key),
-  );
-  const tasks = [...activeTasks, ...persistedTasks].sort((a, b) => {
-    const activityDelta = Number(b.status === 'progress') - Number(a.status === 'progress');
-    if (activityDelta !== 0) {
-      return activityDelta;
-    }
-    return (b.updatedAt || 0) - (a.updatedAt || 0);
-  });
+  const tasks = getVisibleUploadTasks();
+  const activeTasks = tasks.filter((task) => task.status === 'progress');
 
   uploadTaskList.innerHTML = '';
   transferTaskCounts.uploads = getPendingTransferCount(tasks);
   updateTransferTaskIndicators();
+  updateTransferClearButton();
   const activeCount = activeTasks.length;
   if (uploadTaskSummary) {
     uploadTaskSummary.textContent =
@@ -1716,13 +1745,13 @@ function updateProgressUI(filename, endpointId = activeEndpointId) {
   if (!wrap) {
     return;
   }
-  if (!task || task.status !== 'progress') {
+  if (!task || !isDownloadTaskActive(task)) {
     wrap.classList.add('hidden');
     return;
   }
   const fill = wrap.querySelector('.download-progress-fill');
   const text = wrap.querySelector('.download-progress-text');
-  if (task.total) {
+  if (task.total && task.received > 0) {
     const percent = Math.min(100, Math.round(((task.received || 0) / task.total) * 100));
     if (fill) {
       fill.style.width = `${percent}%`;
@@ -1731,7 +1760,10 @@ function updateProgressUI(filename, endpointId = activeEndpointId) {
     fill.style.width = '30%';
   }
   if (text) {
-    text.textContent = formatDownloadProgressText(task, getSpeed(downloadSpeed, task.key));
+    text.textContent =
+      task.status === 'queued'
+        ? '准备下载...'
+        : formatDownloadProgressText(task, getSpeed(downloadSpeed, task.key));
   }
   wrap.classList.remove('hidden');
 }
@@ -3181,6 +3213,53 @@ async function deleteSelectedDownloadTasks() {
   }
 }
 
+async function clearCurrentTransferList() {
+  const isDownloads = currentTransferListView === 'downloads';
+  const clearableTasks = isDownloads ? getClearableDownloadTasks() : getClearableUploadTasks();
+  if (!clearableTasks.length) {
+    return;
+  }
+  const confirmed = await showConfirmationDialog({
+    title: isDownloads ? '清空下载列表' : '清空上传列表',
+    message: isDownloads
+      ? '只会清空下载记录，不会删除本地文件，也不会影响进行中的下载。确定继续吗？'
+      : '只会清空上传记录，不会删除本地文件，也不会影响进行中的上传。确定继续吗？',
+    confirmLabel: '清空',
+  });
+  if (!confirmed) {
+    return;
+  }
+  try {
+    if (!invoke) {
+      await showInfoDialog({
+        title: '清空失败',
+        message: '未检测到 Tauri API，请检查应用配置。',
+      });
+      return;
+    }
+    const recordIds = clearableTasks.map((task) => task.historyId).filter((id) => Number.isInteger(id));
+    if (isDownloads) {
+      setDownloadSelectionMode(false);
+      await invoke('clear_download_history_records', { recordIds });
+      await loadPersistedDownloadHistory({ silent: true });
+    } else {
+      await invoke('clear_upload_history_records', { recordIds });
+      await loadPersistedUploadHistory({ silent: true });
+    }
+    const successMessage = isDownloads
+      ? `已清空 ${recordIds.length} 条下载记录`
+      : `已清空 ${recordIds.length} 条上传记录`;
+    setSuccessStatus(successMessage);
+  } catch (error) {
+    console.error('[transfer] clear list error', error);
+    setErrorStatus(`清空列表失败：${error}`);
+    await showInfoDialog({
+      title: '清空列表失败',
+      message: String(error),
+    });
+  }
+}
+
 async function openDownloadHistoryDir(task) {
   if (!task?.historyId) {
     return;
@@ -4115,7 +4194,7 @@ function renderMessages(messages, options = {}) {
       progressWrap.appendChild(progressBar);
       progressWrap.appendChild(progressText);
 
-      if (progress && progress.status === 'progress') {
+      if (progress && isDownloadTaskActive(progress)) {
         const total = progress.total || 0;
         if (total > 0) {
           const percent = Math.min(100, Math.round((progress.received / total) * 100));
@@ -4281,7 +4360,7 @@ function hasActiveContentTransfer() {
     const status = send?.sendStatus || send?.status;
     return status === SEND_STATUS.SENDING;
   });
-  return hasSendingText || pendingUploads.size > 0;
+  return hasSendingText || pendingUploads.size > 0 || hasActiveDownloadTasks();
 }
 
 async function loadMessages(options = {}) {
@@ -5926,6 +6005,9 @@ if (transferTabDownloadsButton) {
 }
 if (transferTabUploadsButton) {
   transferTabUploadsButton.addEventListener('click', () => setTransferListView('uploads'));
+}
+if (transferClearButton) {
+  transferClearButton.addEventListener('click', clearCurrentTransferList);
 }
 sendTextButton.addEventListener('click', sendText);
 sendFileButton.addEventListener('click', selectFiles);
