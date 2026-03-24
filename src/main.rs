@@ -13,7 +13,7 @@ use crate::filenames::{
 };
 use crate::history::{HistoryEntry, HistoryLayout};
 use crate::types::{
-    DownloadHistoryRecord, Message, Settings, SyncStatus, TelegramBridgeSettings,
+    DownloadHistoryRecord, MarkedTag, Message, Settings, SyncStatus, TelegramBridgeSettings,
     UploadHistoryRecord, WebDavEndpoint,
 };
 use aes_gcm::aead::Aead;
@@ -583,63 +583,268 @@ struct MessagesResult {
     marked_count: i64,
 }
 
+fn generate_marked_tag_id() -> String {
+    format!("tag-{}-{}", now_ms(), OsRng.gen::<u32>())
+}
+
+fn normalize_marked_tag_name(name: &str) -> Result<String, String> {
+    let normalized = name.trim();
+    if normalized.is_empty() {
+        return Err("标签名不能为空".to_string());
+    }
+    Ok(normalized.to_string())
+}
+
+fn ensure_unique_marked_tag_name(
+    tags: &[MarkedTag],
+    name: &str,
+    excluding_id: Option<&str>,
+) -> Result<(), String> {
+    let target = name.trim().to_lowercase();
+    let duplicated = tags.iter().any(|tag| {
+        if excluding_id.is_some() && excluding_id == Some(tag.id.as_str()) {
+            return false;
+        }
+        tag.name.trim().to_lowercase() == target
+    });
+    if duplicated {
+        return Err("标签名已存在".to_string());
+    }
+    Ok(())
+}
+
+fn apply_marked_state(
+    marked_flag: &mut bool,
+    marked_tag_ids: &mut Vec<String>,
+    marked_pinned: &mut bool,
+    marked: bool,
+    tag_ids: &[String],
+) {
+    *marked_flag = marked;
+    if marked {
+        *marked_tag_ids = tag_ids.to_vec();
+    } else {
+        marked_tag_ids.clear();
+        *marked_pinned = false;
+    }
+}
+
+fn sync_marked_metadata_to_db(
+    state: &AppState,
+    endpoint_id: &str,
+    history_entries: &[HistoryEntry],
+    tags: &[MarkedTag],
+) -> Result<(), String> {
+    db::replace_marked_tags(&state.db_path, endpoint_id, tags).map_err(|err| err.to_string())?;
+    for history_entry in history_entries {
+        if let Some(mut message) = db::get_message(&state.db_path, endpoint_id, &history_entry.filename)
+            .map_err(|err| err.to_string())?
+        {
+            message.marked = history_entry.marked;
+            message.marked_tag_ids = history_entry.marked_tag_ids.clone();
+            message.marked_pinned = history_entry.marked_pinned;
+            db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
-async fn mark_message(state: State<'_, AppState>, filename: String) -> Result<(), String> {
-    set_message_marked(&state, filename, true).await
+async fn mark_message(
+    state: State<'_, AppState>,
+    filename: String,
+    tag_ids: Option<Vec<String>>,
+) -> Result<(), String> {
+    set_message_marked(&state, filename, true, tag_ids.unwrap_or_default()).await
 }
 
 #[tauri::command]
 async fn unmark_message(state: State<'_, AppState>, filename: String) -> Result<(), String> {
-    set_message_marked(&state, filename, false).await
+    set_message_marked(&state, filename, false, Vec::new()).await
 }
 
 async fn set_message_marked(
     state: &AppState,
     filename: String,
     marked: bool,
+    tag_ids: Vec<String>,
 ) -> Result<(), String> {
     let settings = current_settings(state)?;
     let endpoint = resolve_active_endpoint(&settings)?;
+    let _guard = state.sync_guard.lock().await;
+    let mut loaded = crate::history::load_history_with_layout(&state.http, &endpoint).await?;
+    let mut valid_tag_ids: Vec<String> = tag_ids
+        .into_iter()
+        .filter(|tag_id| loaded.tags.iter().any(|tag| tag.id == *tag_id))
+        .collect();
+    valid_tag_ids.sort();
+    valid_tag_ids.dedup();
 
-    // 1. Update local DB
+    let mut changed = false;
     let existing =
         db::get_message(&state.db_path, &endpoint.id, &filename).map_err(|err| err.to_string())?;
+    let mut local_message = existing.ok_or_else(|| "未找到消息".to_string())?;
 
-    if let Some(mut message) = existing {
-        message.marked = marked;
-        db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
-    } else {
-        return Err("未找到消息".to_string());
+    if local_message.marked != marked
+        || local_message.marked_tag_ids != valid_tag_ids
+        || local_message.marked_pinned != (if marked { local_message.marked_pinned } else { false })
+    {
+        apply_marked_state(
+            &mut local_message.marked,
+            &mut local_message.marked_tag_ids,
+            &mut local_message.marked_pinned,
+            marked,
+            &valid_tag_ids,
+        );
+        db::upsert_message(&state.db_path, &local_message).map_err(|err| err.to_string())?;
     }
 
-    // 2. Update remote history.json
-    let _guard = state.sync_guard.lock().await;
-
-    let mut history = crate::history::load_history(&state.http, &endpoint).await?;
-    let mut changed = false;
-
-    for entry in history.iter_mut() {
+    for entry in loaded.entries.iter_mut() {
         if entry.filename == filename {
-            if entry.marked != marked {
-                entry.marked = marked;
-                changed = true;
-            }
+            apply_marked_state(
+                &mut entry.marked,
+                &mut entry.marked_tag_ids,
+                &mut entry.marked_pinned,
+                marked,
+                &valid_tag_ids,
+            );
+            changed = true;
             break;
         }
     }
 
-    // If not found in history but exists locally, maybe we should add it to history?
-    // But history usually contains what's on remote. If it's local only, it shouldn't be in history.json yet?
-    // But sync_once adds local messages to history if they are missing?
-    // Wait, sync_once adds *downloaded* messages to history.
-    // If I sent a message, it is added to history.
-    // If I just mark a message, it should be in history.
-
     if changed {
-        crate::history::save_history(&state.http, &endpoint, &history).await?;
+        crate::history::save_history(&state.http, &endpoint, &loaded.entries, &loaded.tags).await?;
     }
 
     Ok(())
+}
+
+#[tauri::command]
+fn list_marked_tags(state: State<'_, AppState>) -> Result<Vec<MarkedTag>, String> {
+    let settings = current_settings(&state)?;
+    let endpoint = resolve_active_endpoint(&settings)?;
+    db::list_marked_tags(&state.db_path, &endpoint.id).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn create_marked_tag(state: State<'_, AppState>, name: String) -> Result<MarkedTag, String> {
+    let settings = current_settings(&state)?;
+    let endpoint = resolve_active_endpoint(&settings)?;
+    let _guard = state.sync_guard.lock().await;
+    let mut loaded = crate::history::load_history_with_layout(&state.http, &endpoint).await?;
+    let normalized = normalize_marked_tag_name(&name)?;
+    ensure_unique_marked_tag_name(&loaded.tags, &normalized, None)?;
+    let tag = MarkedTag {
+        id: generate_marked_tag_id(),
+        name: normalized,
+    };
+    loaded.tags.push(tag.clone());
+    loaded.tags.sort_by(|left, right| left.name.cmp(&right.name));
+    crate::history::save_history(&state.http, &endpoint, &loaded.entries, &loaded.tags).await?;
+    db::replace_marked_tags(&state.db_path, &endpoint.id, &loaded.tags)
+        .map_err(|err| err.to_string())?;
+    Ok(tag)
+}
+
+#[tauri::command]
+async fn delete_marked_tag(state: State<'_, AppState>, tag_id: String) -> Result<(), String> {
+    let settings = current_settings(&state)?;
+    let endpoint = resolve_active_endpoint(&settings)?;
+    let _guard = state.sync_guard.lock().await;
+    let mut loaded = crate::history::load_history_with_layout(&state.http, &endpoint).await?;
+    let before = loaded.tags.len();
+    loaded.tags.retain(|tag| tag.id != tag_id);
+    if before == loaded.tags.len() {
+        return Err("未找到标签".to_string());
+    }
+    for entry in loaded.entries.iter_mut() {
+        entry.marked_tag_ids.retain(|entry_tag_id| entry_tag_id != &tag_id);
+    }
+    crate::history::save_history(&state.http, &endpoint, &loaded.entries, &loaded.tags).await?;
+    sync_marked_metadata_to_db(state.inner(), &endpoint.id, &loaded.entries, &loaded.tags)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn rename_marked_tag(
+    state: State<'_, AppState>,
+    tag_id: String,
+    name: String,
+) -> Result<(), String> {
+    let settings = current_settings(&state)?;
+    let endpoint = resolve_active_endpoint(&settings)?;
+    let _guard = state.sync_guard.lock().await;
+    let mut loaded = crate::history::load_history_with_layout(&state.http, &endpoint).await?;
+    let normalized = normalize_marked_tag_name(&name)?;
+    ensure_unique_marked_tag_name(&loaded.tags, &normalized, Some(&tag_id))?;
+    let mut found = false;
+    for tag in loaded.tags.iter_mut() {
+        if tag.id == tag_id {
+            tag.name = normalized.clone();
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        return Err("未找到标签".to_string());
+    }
+    loaded.tags.sort_by(|left, right| left.name.cmp(&right.name));
+    crate::history::save_history(&state.http, &endpoint, &loaded.entries, &loaded.tags).await?;
+    db::replace_marked_tags(&state.db_path, &endpoint.id, &loaded.tags)
+        .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn toggle_marked_message_pin(
+    state: State<'_, AppState>,
+    filename: String,
+) -> Result<bool, String> {
+    let settings = current_settings(&state)?;
+    let endpoint = resolve_active_endpoint(&settings)?;
+    let _guard = state.sync_guard.lock().await;
+    let mut loaded = crate::history::load_history_with_layout(&state.http, &endpoint).await?;
+    let mut next_value = None;
+    for entry in loaded.entries.iter_mut() {
+        if entry.filename == filename {
+            if !entry.marked {
+                return Err("未标记消息不能置顶".to_string());
+            }
+            entry.marked_pinned = !entry.marked_pinned;
+            next_value = Some(entry.marked_pinned);
+            break;
+        }
+    }
+    let pinned = next_value.ok_or_else(|| "未找到消息".to_string())?;
+    if let Some(mut message) =
+        db::get_message(&state.db_path, &endpoint.id, &filename).map_err(|err| err.to_string())?
+    {
+        message.marked_pinned = pinned;
+        db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
+    }
+    crate::history::save_history(&state.http, &endpoint, &loaded.entries, &loaded.tags).await?;
+    Ok(pinned)
+}
+
+#[tauri::command]
+fn list_marked_messages(
+    state: State<'_, AppState>,
+    tag_id: Option<String>,
+) -> Result<MessagesResult, String> {
+    let settings = current_settings(&state)?;
+    let endpoint = resolve_active_endpoint(&settings)?;
+    let marked_count =
+        db::count_messages(&state.db_path, &endpoint.id, true).map_err(|err| err.to_string())?;
+    let messages = db::list_marked_messages(&state.db_path, &endpoint.id, tag_id.as_deref())
+        .map_err(|err| err.to_string())?;
+    let total = messages.len() as i64;
+    Ok(MessagesResult {
+        messages,
+        total,
+        has_more: false,
+        marked_count,
+    })
 }
 
 #[tauri::command]
@@ -719,6 +924,8 @@ async fn send_text(
         remote_path: Some(remote_path),
         file_hash: None,
         marked: false,
+        marked_tag_ids: Vec::new(),
+        marked_pinned: false,
         format,
     };
 
@@ -920,6 +1127,8 @@ async fn send_file(
         remote_path: Some(remote_path),
         file_hash: Some(file_hash),
         marked: false,
+        marked_tag_ids: Vec::new(),
+        marked_pinned: false,
         format: "text".to_string(),
     };
 
@@ -1055,6 +1264,8 @@ async fn send_file_data(
         remote_path: Some(remote_path),
         file_hash: Some(file_hash),
         marked: false,
+        marked_tag_ids: Vec::new(),
+        marked_pinned: false,
         format: "text".to_string(),
     };
 
@@ -4125,20 +4336,24 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
     let endpoint = resolve_active_endpoint(&settings)?;
     let endpoint_id = endpoint.id.clone();
 
-    let history = crate::history::load_history_for_sync(
+    let loaded_history = crate::history::load_history_for_sync(
         &state.http,
         &endpoint,
         &history_cache_dir(state, &endpoint_id),
     )
     .await?;
-    let mut history_map: HashMap<String, HistoryEntry> = history
+    db::replace_marked_tags(&state.db_path, &endpoint_id, &loaded_history.tags)
+        .map_err(|err| err.to_string())?;
+    let history_layout = loaded_history.layout;
+    let marked_tags = loaded_history.tags.clone();
+    let mut history_map: HashMap<String, HistoryEntry> = loaded_history
         .entries
         .into_iter()
         .map(|entry| (entry.filename.clone(), entry))
         .collect();
 
     let mut files_map: HashMap<String, crate::types::DavEntry> = HashMap::new();
-    if history.layout != HistoryLayout::Manifest {
+    if history_layout != HistoryLayout::Manifest {
         let entries = webdav::list_entries(&state.http, &endpoint, Some("files"), true).await?;
         for entry in entries {
             if entry.is_collection {
@@ -4175,6 +4390,8 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
             size_hint,
             remote_path_hint,
             marked,
+            marked_tag_ids,
+            marked_pinned,
             format,
         ) = if let Some(history) = history_entry {
             (
@@ -4185,6 +4402,8 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
                 history.size,
                 history.remote_path.clone(),
                 history.marked,
+                history.marked_tag_ids.clone(),
+                history.marked_pinned,
                 history.format.clone(),
             )
         } else if let Some(parsed) = parsed.as_ref() {
@@ -4200,6 +4419,8 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
                 parsed.original_name.clone(),
                 file_entry.and_then(|entry| entry.size).unwrap_or(0) as i64,
                 None,
+                false,
+                Vec::new(),
                 false,
                 format,
             )
@@ -4224,6 +4445,8 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
             remote_path: remote_path_hint,
             file_hash: None,
             marked,
+            marked_tag_ids,
+            marked_pinned,
             format,
         });
 
@@ -4237,6 +4460,8 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
                 message.size = history.size;
             }
             message.marked = history.marked;
+            message.marked_tag_ids = history.marked_tag_ids.clone();
+            message.marked_pinned = history.marked_pinned;
             message.format = history.format.clone();
         }
 
@@ -4303,6 +4528,8 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
                 || existing.local_path != message.local_path
                 || existing.remote_path != message.remote_path
                 || existing.marked != message.marked
+                || existing.marked_tag_ids != message.marked_tag_ids
+                || existing.marked_pinned != message.marked_pinned
                 || existing.etag != message.etag
                 || existing.mtime != message.mtime
                 || existing.format != message.format
@@ -4325,7 +4552,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
         }
         let mut history: Vec<HistoryEntry> = history_map.into_values().collect();
         history.sort_by_key(|item| item.timestamp_ms);
-        crate::history::save_history(&state.http, &endpoint, &history).await?;
+        crate::history::save_history(&state.http, &endpoint, &history, &marked_tags).await?;
     }
 
     Ok(new_count)
@@ -4341,6 +4568,8 @@ fn message_to_history(message: &DbMessage) -> HistoryEntry {
         original_name: message.original_name.clone(),
         remote_path: message.remote_path.clone(),
         marked: message.marked,
+        marked_tag_ids: message.marked_tag_ids.clone(),
+        marked_pinned: message.marked_pinned,
         format: message.format.clone(),
     }
 }
@@ -4870,6 +5099,8 @@ fn main() {
             export_settings,
             import_settings,
             list_messages,
+            list_marked_messages,
+            list_marked_tags,
             send_text,
             send_file,
             send_file_data,
@@ -4901,6 +5132,10 @@ fn main() {
             stop_telegram_bridge,
             mark_message,
             unmark_message,
+            create_marked_tag,
+            delete_marked_tag,
+            rename_marked_tag,
+            toggle_marked_message_pin,
             test_webdav_speed,
             backup_webdav,
             restore_webdav
@@ -4994,6 +5229,8 @@ mod tests {
             original_name: "test.txt".to_string(),
             remote_path: Some("files/test.txt".to_string()),
             marked: true,
+            marked_tag_ids: Vec::new(),
+            marked_pinned: false,
             format: "text".to_string(),
         };
 
@@ -5027,6 +5264,8 @@ mod tests {
                 file_hash: None,
                 download_exists: false,
                 marked: false,
+                marked_tag_ids: Vec::new(),
+                marked_pinned: false,
                 format: "text".to_string(),
             },
             Message {
@@ -5042,6 +5281,8 @@ mod tests {
                 file_hash: None,
                 download_exists: false,
                 marked: true,
+                marked_tag_ids: Vec::new(),
+                marked_pinned: false,
                 format: "text".to_string(),
             },
             Message {
@@ -5057,6 +5298,8 @@ mod tests {
                 file_hash: None,
                 download_exists: false,
                 marked: false,
+                marked_tag_ids: Vec::new(),
+                marked_pinned: false,
                 format: "text".to_string(),
             },
         ];
@@ -5064,6 +5307,39 @@ mod tests {
         let candidates = collect_cleanup_candidates(messages, Some(50));
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].filename, "old-unmarked.txt");
+    }
+
+    #[test]
+    fn apply_marked_state_clears_tags_and_pin_when_unmarked() {
+        let mut marked = true;
+        let mut marked_tag_ids = vec!["tag-1".to_string(), "tag-2".to_string()];
+        let mut marked_pinned = true;
+
+        apply_marked_state(
+            &mut marked,
+            &mut marked_tag_ids,
+            &mut marked_pinned,
+            false,
+            &[],
+        );
+
+        assert!(!marked);
+        assert!(marked_tag_ids.is_empty());
+        assert!(!marked_pinned);
+    }
+
+    #[test]
+    fn ensure_unique_marked_tag_name_rejects_case_insensitive_duplicates() {
+        let tags = vec![MarkedTag {
+            id: "tag-1".to_string(),
+            name: "重要".to_string(),
+        }];
+
+        let error =
+            ensure_unique_marked_tag_name(&tags, "  重要  ", None).expect_err("should reject duplicate");
+
+        assert!(error.contains("已存在"));
+        assert!(ensure_unique_marked_tag_name(&tags, "重要", Some("tag-1")).is_ok());
     }
 
     #[test]

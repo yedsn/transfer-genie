@@ -475,6 +475,8 @@ async fn import_into_webdav(
                     original_name: "message.txt".to_string(),
                     remote_path: Some(remote_path),
                     marked: false,
+                    marked_tag_ids: Vec::new(),
+                    marked_pinned: false,
                     format: "text".to_string(),
                 },
             )
@@ -540,6 +542,8 @@ async fn import_into_webdav(
                     original_name: original_name.clone(),
                     remote_path: Some(remote_path),
                     marked: false,
+                    marked_tag_ids: Vec::new(),
+                    marked_pinned: false,
                     format: "text".to_string(),
                 },
             )
@@ -655,6 +659,8 @@ async fn collect_remote_messages(
                         original_name: parsed.original_name.clone(),
                         remote_path: Some(entry.remote_path.clone()),
                         marked: false,
+                        marked_tag_ids: Vec::new(),
+                        marked_pinned: false,
                         format: if parsed.original_name.to_lowercase().ends_with(".md") {
                             "markdown".to_string()
                         } else {
@@ -670,7 +676,7 @@ async fn collect_remote_messages(
     let mut merged: Vec<HistoryEntry> = map.into_values().collect();
     merged.sort_by_key(|entry| entry.timestamp_ms);
     if derived {
-        save_history(client, &config.webdav, &merged)
+        save_history(client, &config.webdav, &merged, &loaded.tags)
             .await
             .map_err(|err| BridgeError::transient("webdav_history", err))?;
     }
@@ -1126,6 +1132,8 @@ mod tests {
             original_name: "message.txt".to_string(),
             remote_path: Some("files/a".to_string()),
             marked: false,
+            marked_tag_ids: Vec::new(),
+            marked_pinned: false,
             format: "text".to_string(),
         };
         let sent = HistoryEntry {

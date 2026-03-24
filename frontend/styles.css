@@ -737,6 +737,10 @@ body {
   opacity: 1;
 }
 
+#filter-marked {
+  display: none !important;
+}
+
 #filter-marked.is-active {
     background-color: var(--accent-strong);
     color: white;
@@ -751,6 +755,264 @@ body {
 .mark-action.is-marked img {
   opacity: 1;
   filter: invert(54%) sepia(95%) saturate(1391%) hue-rotate(350deg) brightness(96%) contrast(94%); /* Matches --accent #ff7a2f */
+}
+
+.marked-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+  flex: 1;
+  padding: 20px;
+  background: #fff;
+}
+
+.marked-page-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 6px 12px;
+}
+
+.marked-page-title h2 {
+  margin: 0;
+  font-size: 24px;
+}
+
+.marked-page-title p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.marked-page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.marked-tag-filter-panel {
+  padding: 10px 0 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow: hidden;
+}
+
+.marked-page-content {
+  flex: 1;
+  min-height: 0;
+  border: 1px solid var(--border);
+  background: var(--panel-soft);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.marked-tag-filter-header {
+  display: none;
+}
+
+.marked-tag-filter-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.marked-tag-filter-list,
+.marked-message-tags,
+.mark-message-tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.marked-tag-filter-list {
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 10px;
+  overflow-x: auto;
+  padding: 0 2px 8px;
+  scrollbar-width: thin;
+}
+
+.marked-tag-filter-prefix {
+  flex: 0 0 auto;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.marked-tag-chip,
+.marked-message-tag-chip {
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--ink);
+  padding: 7px 11px;
+  font-size: 12px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 999px;
+  transition: border-color 0.2s ease, background 0.2s ease, color 0.2s ease;
+}
+
+.marked-tag-chip {
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.marked-tag-chip.is-active {
+  border-color: var(--accent);
+  background: #fff5ed;
+  color: var(--accent-strong);
+}
+
+.marked-tag-chip-delete {
+  font-weight: 700;
+  color: inherit;
+}
+
+.marked-tag-chip-add {
+  min-width: 32px;
+  justify-content: center;
+  font-size: 16px;
+  padding: 5px 0 7px;
+}
+
+.marked-message-tag-chip.is-empty {
+  color: var(--muted);
+}
+
+.marked-message-list {
+  padding-top: 12px;
+  padding-right: 12px;
+}
+
+.marked-message-list .message-card {
+  width: 100%;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid rgba(225, 215, 206, 0.95);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 8px 24px rgba(15, 15, 25, 0.04);
+  align-items: stretch;
+}
+
+.marked-message-list .message-header,
+.marked-message-list .message-body,
+.marked-message-list .message-footer {
+  max-width: none;
+}
+
+.marked-message-list .message-header {
+  width: 100%;
+  justify-content: space-between;
+}
+
+.marked-message-list .message-body {
+  width: 100%;
+  background: #fff;
+}
+
+.marked-message-list .message-footer {
+  width: 100%;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.marked-message-list .message-meta {
+  width: auto;
+}
+
+.marked-message-list .message-actions {
+  margin-left: auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.marked-message-list .marked-message-tags {
+  width: 100%;
+}
+
+.marked-message-list .message-expand-toggle {
+  align-self: flex-start;
+}
+
+.mark-message-dialog {
+  max-width: 540px;
+}
+
+.mark-message-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.mark-message-create-row {
+  display: flex;
+  gap: 8px;
+}
+
+.mark-message-create-row input {
+  flex: 1;
+}
+
+.mark-message-tag-item {
+  max-width: 100%;
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--ink);
+  padding: 7px 11px;
+  display: inline-flex;
+  align-items: center;
+  flex-direction: row;
+  gap: 4px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease, color 0.2s ease;
+}
+
+.mark-message-tag-item.is-active {
+  border-color: var(--accent);
+  background: #fff5ed;
+  color: var(--accent-strong);
+}
+
+.mark-message-tag-item input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.mark-message-tag-item span {
+  min-width: 0;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tag-delete-button {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  color: inherit;
+}
+
+.marked-tag-empty {
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .scroll-to-bottom {
@@ -2122,7 +2384,7 @@ input {
   border-radius: 0;
   padding: 8px 16px 10px;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 6px;
   box-shadow: none;
   backdrop-filter: none;
@@ -2598,7 +2860,15 @@ body.preview-open {
     padding: 16px;
   }
 
+  .marked-page {
+    padding: 16px;
+  }
+
   .downloads-page-header {
+    grid-template-columns: 1fr;
+  }
+
+  .marked-page-header {
     grid-template-columns: 1fr;
   }
 
@@ -2607,6 +2877,10 @@ body.preview-open {
     grid-row: auto;
     justify-self: stretch;
     justify-content: space-between;
+  }
+
+  .marked-page-actions {
+    display: none;
   }
 
   .downloads-page-actions {
@@ -2624,6 +2898,10 @@ body.preview-open {
 
   .message-list {
     padding: 10px;
+  }
+
+  .marked-message-list {
+    padding-top: 10px;
   }
 
   .device-name {

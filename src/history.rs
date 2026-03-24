@@ -1,5 +1,5 @@
 use crate::filenames::{message_remote_path, timestamp_bucket_key};
-use crate::types::WebDavEndpoint;
+use crate::types::{MarkedTag, WebDavEndpoint};
 use crate::webdav::{self, ConditionalFileStatus};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 pub const LEGACY_HISTORY_PATH: &str = "history.json";
 pub const HISTORY_INDEX_PATH: &str = "history/index.json";
+pub const HISTORY_TAGS_PATH: &str = "history/tags.json";
 const HISTORY_INDEX_VERSION: u8 = 1;
 const HISTORY_CACHE_METADATA: &str = "history-cache-metadata.json";
 
@@ -25,6 +26,10 @@ pub struct HistoryEntry {
     #[serde(default)]
     pub marked: bool,
     #[serde(default)]
+    pub marked_tag_ids: Vec<String>,
+    #[serde(default)]
+    pub marked_pinned: bool,
+    #[serde(default)]
     pub format: String,
 }
 
@@ -38,6 +43,7 @@ pub enum HistoryLayout {
 pub struct LoadedHistory {
     pub entries: Vec<HistoryEntry>,
     pub layout: HistoryLayout,
+    pub tags: Vec<MarkedTag>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -81,24 +87,38 @@ pub async fn load_history(
     Ok(load_history_with_layout(client, endpoint).await?.entries)
 }
 
+pub async fn load_marked_tags(
+    client: &Client,
+    endpoint: &WebDavEndpoint,
+) -> Result<Vec<MarkedTag>, String> {
+    Ok(load_history_with_layout(client, endpoint).await?.tags)
+}
+
 pub async fn load_history_with_layout(
     client: &Client,
     endpoint: &WebDavEndpoint,
 ) -> Result<LoadedHistory, String> {
     if let Some(entries) = load_manifest_remote(client, endpoint).await? {
+        let tags = load_marked_tags_remote(client, endpoint).await?;
         return Ok(LoadedHistory {
             entries,
             layout: HistoryLayout::Manifest,
+            tags,
         });
     }
 
     let entries = load_legacy_history_remote(client, endpoint).await?;
+    let tags = load_marked_tags_remote(client, endpoint).await?;
     let layout = if entries.is_empty() {
         HistoryLayout::Empty
     } else {
         HistoryLayout::Legacy
     };
-    Ok(LoadedHistory { entries, layout })
+    Ok(LoadedHistory {
+        entries,
+        layout,
+        tags,
+    })
 }
 
 pub async fn load_history_for_sync(
@@ -120,35 +140,42 @@ pub async fn load_history_for_sync(
     else {
         let entries =
             load_legacy_history_cached(client, endpoint, cache_dir, &mut metadata).await?;
+        let tags = load_marked_tags_cached(client, endpoint, cache_dir, &mut metadata).await?;
         write_cache_metadata(cache_dir, &metadata)?;
         let layout = if entries.is_empty() {
             HistoryLayout::Empty
         } else {
             HistoryLayout::Legacy
         };
-        return Ok(LoadedHistory { entries, layout });
+        return Ok(LoadedHistory {
+            entries,
+            layout,
+            tags,
+        });
     };
 
     let index_bytes =
-        fs::read(&index_path).map_err(|err| format!("璇诲彇鍘嗗彶绱㈠紩缂撳瓨澶辫触: {err}"))?;
+        fs::read(&index_path).map_err(|err| format!("读取历史索引文件失败：{err}"))?;
     let index = serde_json::from_slice::<HistoryIndex>(&index_bytes)
-        .map_err(|err| format!("瑙ｆ瀽鍘嗗彶绱㈠紩澶辫触: {err}"))?;
+        .map_err(|err| format!("解析历史索引文件失败：{err}"))?;
 
     let mut entries = Vec::new();
     for shard in &index.shards {
         let shard_path =
             refresh_cached_file(client, endpoint, cache_dir, &mut metadata, &shard.path)
                 .await?
-                .ok_or_else(|| format!("鍘嗗彶鍒嗙墖涓嶅瓨鍦? {}", shard.path))?;
+                .ok_or_else(|| format!("历史分片图像未找到：{}", shard.path))?;
         let shard_bytes = fs::read(&shard_path)
-            .map_err(|err| format!("璇诲彇鍘嗗彶鍒嗙墖缂撳瓨澶辫触: {err}"))?;
+            .map_err(|err| format!("读取历史分片图像缓存失败：{err}"))?;
         entries.extend(parse_manifest_shard(&shard_bytes)?);
     }
 
+    let tags = load_marked_tags_cached(client, endpoint, cache_dir, &mut metadata).await?;
     write_cache_metadata(cache_dir, &metadata)?;
     Ok(LoadedHistory {
         entries: dedupe_and_sort(entries),
         layout: HistoryLayout::Manifest,
+        tags,
     })
 }
 
@@ -156,6 +183,7 @@ pub async fn save_history(
     client: &Client,
     endpoint: &WebDavEndpoint,
     history: &[HistoryEntry],
+    tags: &[MarkedTag],
 ) -> Result<(), String> {
     let history = dedupe_and_sort(history.to_vec());
     let mut grouped: BTreeMap<String, Vec<HistoryEntry>> = BTreeMap::new();
@@ -194,8 +222,12 @@ pub async fn save_history(
         shards,
     };
     let data = serde_json::to_vec_pretty(&index)
-        .map_err(|err| format!("搴忓垪鍖栧巻鍙茬储寮曞け璐? {err}"))?;
-    webdav::upload_file(client, endpoint, HISTORY_INDEX_PATH, data).await
+        .map_err(|err| format!("序列化历史索引失败：{err}"))?;
+    webdav::upload_file(client, endpoint, HISTORY_INDEX_PATH, data).await?;
+
+    let tags_data = serde_json::to_vec_pretty(tags)
+        .map_err(|err| format!("序列化历史标签失败：{err}"))?;
+    webdav::upload_file(client, endpoint, HISTORY_TAGS_PATH, tags_data).await
 }
 
 pub async fn append_history(
@@ -203,12 +235,13 @@ pub async fn append_history(
     endpoint: &WebDavEndpoint,
     entry: HistoryEntry,
 ) -> Result<(), String> {
-    let mut history = load_history(client, endpoint).await?;
+    let loaded = load_history_with_layout(client, endpoint).await?;
+    let mut history = loaded.entries;
     if history.iter().any(|item| item.filename == entry.filename) {
         return Ok(());
     }
     history.push(entry);
-    save_history(client, endpoint, &history).await
+    save_history(client, endpoint, &history, &loaded.tags).await
 }
 
 pub async fn remove_history_entries(
@@ -219,9 +252,10 @@ pub async fn remove_history_entries(
     if filenames.is_empty() {
         return Ok(());
     }
-    let mut history = load_history(client, endpoint).await?;
+    let loaded = load_history_with_layout(client, endpoint).await?;
+    let mut history = loaded.entries;
     history.retain(|entry| !filenames.contains(&entry.filename));
-    save_history(client, endpoint, &history).await
+    save_history(client, endpoint, &history, &loaded.tags).await
 }
 
 async fn load_manifest_remote(
@@ -234,13 +268,13 @@ async fn load_manifest_remote(
         return Ok(None);
     };
     let index = serde_json::from_slice::<HistoryIndex>(&index_bytes)
-        .map_err(|err| format!("瑙ｆ瀽鍘嗗彶绱㈠紩澶辫触: {err}"))?;
+        .map_err(|err| format!("解析历史索引失败：{err}"))?;
 
     let mut entries = Vec::new();
     for shard in index.shards {
         let shard_bytes = webdav::download_optional_file(client, endpoint, &shard.path)
             .await?
-            .ok_or_else(|| format!("鍘嗗彶鍒嗙墖涓嶅瓨鍦? {}", shard.path))?;
+            .ok_or_else(|| format!("历史分片图像未找到：{}", shard.path))?;
         entries.extend(parse_manifest_shard(&shard_bytes)?);
     }
     Ok(Some(dedupe_and_sort(entries)))
@@ -268,13 +302,40 @@ async fn load_legacy_history_cached(
     else {
         return Ok(Vec::new());
     };
-    let data = fs::read(&local_path).map_err(|err| format!("璇诲彇鍘嗗彶缂撳瓨澶辫触: {err}"))?;
+    let data = fs::read(&local_path).map_err(|err| format!("读取遗留历史缓存失败：{err}"))?;
     parse_legacy_history(&data)
+}
+
+async fn load_marked_tags_remote(
+    client: &Client,
+    endpoint: &WebDavEndpoint,
+) -> Result<Vec<MarkedTag>, String> {
+    let bytes = webdav::download_optional_file(client, endpoint, HISTORY_TAGS_PATH).await?;
+    match bytes {
+        Some(data) => parse_marked_tags(&data),
+        None => Ok(Vec::new()),
+    }
+}
+
+async fn load_marked_tags_cached(
+    client: &Client,
+    endpoint: &WebDavEndpoint,
+    cache_dir: &Path,
+    metadata: &mut CacheMetadata,
+) -> Result<Vec<MarkedTag>, String> {
+    let Some(local_path) =
+        refresh_cached_file(client, endpoint, cache_dir, metadata, HISTORY_TAGS_PATH).await?
+    else {
+        return Ok(Vec::new());
+    };
+    let data = fs::read(&local_path)
+        .map_err(|err| format!("读取历史标签缓存失败：{err}"))?;
+    parse_marked_tags(&data)
 }
 
 fn parse_legacy_history(data: &[u8]) -> Result<Vec<HistoryEntry>, String> {
     let entries = serde_json::from_slice::<Vec<HistoryEntry>>(data)
-        .map_err(|err| format!("瑙ｆ瀽鍘嗗彶璁板綍澶辫触: {err}"))?;
+        .map_err(|err| format!("解析遗留历史记录失败：{err}"))?;
     Ok(dedupe_and_sort(
         entries
             .into_iter()
@@ -285,12 +346,19 @@ fn parse_legacy_history(data: &[u8]) -> Result<Vec<HistoryEntry>, String> {
 
 fn parse_manifest_shard(data: &[u8]) -> Result<Vec<HistoryEntry>, String> {
     let shard = serde_json::from_slice::<HistoryShard>(data)
-        .map_err(|err| format!("瑙ｆ瀽鍘嗗彶鍒嗙墖澶辫触: {err}"))?;
+        .map_err(|err| format!("解析历史分片失败：{err}"))?;
     Ok(shard
         .entries
         .into_iter()
         .map(normalize_manifest_entry)
         .collect())
+}
+
+fn parse_marked_tags(data: &[u8]) -> Result<Vec<MarkedTag>, String> {
+    let mut tags = serde_json::from_slice::<Vec<MarkedTag>>(data)
+        .map_err(|err| format!("解析历史标签失败：{err}"))?;
+    tags.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(tags)
 }
 
 fn normalize_legacy_entry(mut entry: HistoryEntry) -> HistoryEntry {
@@ -300,6 +368,7 @@ fn normalize_legacy_entry(mut entry: HistoryEntry) -> HistoryEntry {
     if entry.format.is_empty() {
         entry.format = "text".to_string();
     }
+    entry.marked_tag_ids.sort();
     entry
 }
 
@@ -310,6 +379,7 @@ fn normalize_manifest_entry(mut entry: HistoryEntry) -> HistoryEntry {
     if entry.format.is_empty() {
         entry.format = "text".to_string();
     }
+    entry.marked_tag_ids.sort();
     entry
 }
 
@@ -336,16 +406,16 @@ fn read_cache_metadata(cache_dir: &Path) -> Result<CacheMetadata, String> {
     if !path.is_file() {
         return Ok(CacheMetadata::default());
     }
-    let data = fs::read(&path).map_err(|err| format!("璇诲彇鍘嗗彶缂撳瓨鍏冩暟鎹け璐? {err}"))?;
+    let data = fs::read(&path).map_err(|err| format!("读取历史缓存元数据失败：{err}"))?;
     serde_json::from_slice::<CacheMetadata>(&data)
-        .map_err(|err| format!("瑙ｆ瀽鍘嗗彶缂撳瓨鍏冩暟鎹け璐? {err}"))
+        .map_err(|err| format!("解析历史缓存元数据失败：{err}"))
 }
 
 fn write_cache_metadata(cache_dir: &Path, metadata: &CacheMetadata) -> Result<(), String> {
     let data = serde_json::to_vec_pretty(metadata)
-        .map_err(|err| format!("搴忓垪鍖栧巻鍙茬紦瀛樺厓鏁版嵁澶辫触: {err}"))?;
+        .map_err(|err| format!("序列化历史缓存元数据失败：{err}"))?;
     fs::write(cache_dir.join(HISTORY_CACHE_METADATA), data)
-        .map_err(|err| format!("鍐欏叆鍘嗗彶缂撳瓨鍏冩暟鎹け璐? {err}"))
+        .map_err(|err| format!("写入历史缓存元数据失败：{err}"))
 }
 
 async fn refresh_cached_file(
@@ -370,10 +440,10 @@ async fn refresh_cached_file(
         ConditionalFileStatus::Modified(data) => {
             if let Some(parent) = cached_path.parent() {
                 fs::create_dir_all(parent)
-                    .map_err(|err| format!("鍒涘缓鍘嗗彶缂撳瓨鏂囦欢澶辫触: {err}"))?;
+                    .map_err(|err| format!("创建缓存目录失败: {err}"))?;
             }
             fs::write(&cached_path, data)
-                .map_err(|err| format!("鍐欏叆鍘嗗彶缂撳瓨澶辫触: {err}"))?;
+                .map_err(|err| format!("写入缓存失败: {err}"))?;
             metadata.files.insert(
                 remote_path.to_string(),
                 CachedRemoteFile {
@@ -404,10 +474,10 @@ async fn refresh_cached_file(
                 Some(data) => {
                     if let Some(parent) = cached_path.parent() {
                         fs::create_dir_all(parent)
-                            .map_err(|err| format!("鍒涘缓鍘嗗彶缂撳瓨鏂囦欢澶辫触: {err}"))?;
+                            .map_err(|err| format!("创建缓存目录失败: {err}"))?;
                     }
                     fs::write(&cached_path, data)
-                        .map_err(|err| format!("鍐欏叆鍘嗗彶缂撳瓨澶辫触: {err}"))?;
+                        .map_err(|err| format!("写入缓存失败: {err}"))?;
                     Ok(Some(cached_path))
                 }
                 None => {
@@ -441,6 +511,8 @@ mod tests {
                 "files/2023/11/1700000000000__Alice__12345678__message.txt".to_string(),
             ),
             marked: false,
+            marked_tag_ids: Vec::new(),
+            marked_pinned: false,
             format: "text".to_string(),
         }];
 

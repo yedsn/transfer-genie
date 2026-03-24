@@ -94,7 +94,20 @@ const restoreWebdavButton = document.getElementById('restore-webdav');
 const openLogDirButton = document.getElementById('open-log-dir');
 const openDataDirButton = document.getElementById('open-data-dir');
 const filterMarkedButton = document.getElementById('filter-marked');
-const markedFilterLabel = document.getElementById('marked-filter-label');
+const markedTabBadge = document.getElementById('marked-tab-badge');
+const markedMessageList = document.getElementById('marked-message-list');
+const toggleMarkedTagFilterButton = document.getElementById('toggle-marked-tag-filter');
+const markedTagFilterPanel = document.getElementById('marked-tag-filter-panel');
+const markedTagFilterList = document.getElementById('marked-tag-filter-list');
+const markedTagAddButton = document.getElementById('marked-tag-add-button');
+const markMessageModal = document.getElementById('mark-message-modal');
+const markMessageCloseButton = document.getElementById('mark-message-close');
+const markMessageCancelButton = document.getElementById('mark-message-cancel');
+const markMessageConfirmButton = document.getElementById('mark-message-confirm');
+const markMessageNewTagInput = document.getElementById('mark-message-new-tag-input');
+const markMessageAddTagButton = document.getElementById('mark-message-add-tag');
+const markMessageTagList = document.getElementById('mark-message-tag-list');
+const markMessageSubtitle = document.getElementById('mark-message-subtitle');
 const messagePreview = document.getElementById('message-preview');
 const messagePreviewBody = document.getElementById('message-preview-body');
 const messagePreviewMeta = document.getElementById('message-preview-meta');
@@ -120,7 +133,6 @@ let lastMessages = [];
 const downloadSpeed = new Map();
 const uploadSpeed = new Map();
 let selectionMode = false;
-let markedFilterActive = false;
 const selectedMessages = new Set();
 let downloadSelectionMode = false;
 const selectedDownloadTasks = new Set();
@@ -130,6 +142,11 @@ const MESSAGE_BODY_COLLAPSE_HEIGHT = 260;
 let isRefreshRunning = false;
 let isLoadMessagesRunning = false;
 let isLoadSyncStatusRunning = false;
+let markedMessages = [];
+let markedTags = [];
+let activeMarkedTagId = null;
+let currentMarkingMessage = null;
+const selectedMarkTagIds = new Set();
 let telegramBridgeStatusPollTimer = null;
 let currentTransferListView = 'downloads';
 const transferTaskCounts = {
@@ -529,7 +546,6 @@ function prepareWindowForHide() {
   switchFormat('text');
   requestAnimationFrame(updateFormatToggleIndicator);
   setActiveTab('home', { scrollToBottom: false, focusInput: false });
-  resetMarkedFilter();
 }
 
 function generateEndpointId() {
@@ -2042,6 +2058,10 @@ function setActiveTab(name, options = {}) {
   if (target === 'downloads') {
     setTransferListView('downloads');
   }
+  if (target === 'marked') {
+    loadMarkedTags();
+    loadMarkedMessages();
+  }
   if (target === 'home') {
     if (scrollToBottom) {
       scrollMessageListToBottom();
@@ -3223,6 +3243,11 @@ async function deleteSelectedDownloadTasks() {
   }
 }
 
+function getActiveMainTab() {
+  const activeButton = tabButtons.find((button) => button.classList.contains('is-active'));
+  return activeButton?.dataset.tabTarget || 'home';
+}
+
 async function clearCurrentTransferList() {
   const isDownloads = currentTransferListView === 'downloads';
   const clearableTasks = isDownloads ? getClearableDownloadTasks() : getClearableUploadTasks();
@@ -3333,7 +3358,10 @@ async function deleteSingleMessage(message) {
       }
       deleted = true;
     }
-    await loadMessages();
+    await Promise.all([
+      loadMessages(),
+      loadMarkedMessages(),
+    ]);
     return deleted;
   } catch (error) {
     await showInfoDialog({
@@ -3394,7 +3422,10 @@ async function deleteSelectedMessages() {
     });
   } finally {
     setSelectionMode(false);
-    await loadMessages();
+    await Promise.all([
+      loadMessages(),
+      loadMarkedMessages(),
+    ]);
   }
 }
 async function cleanupMessages() {
@@ -3425,7 +3456,10 @@ async function cleanupMessages() {
         message: `已清理 ${result.deleted || 0} 条消息。`,
       });
     }
-    await loadMessages();
+    await Promise.all([
+      loadMessages(),
+      loadMarkedMessages(),
+    ]);
   } catch (error) {
     setErrorStatus(`清理失败：${error}`);
     await showInfoDialog({
@@ -3435,7 +3469,7 @@ async function cleanupMessages() {
   }
 }
 
-async function toggleMessageMarked(message) {
+async function legacyToggleMessageMarked(message) {
   if (!message || !message.filename) return;
   if (!invoke) return;
   
@@ -3498,7 +3532,7 @@ async function toggleMessageMarked(message) {
   }
 }
 
-function updateMarkedBadge(count) {
+function legacyUpdateMarkedBadge(count) {
   if (!markedFilterLabel || !filterMarkedButton) return;
   const validCount = Math.max(0, count);
   markedFilterLabel.textContent = `已标记 (${validCount})`;
@@ -3506,20 +3540,20 @@ function updateMarkedBadge(count) {
 }
 
 
-function setMarkedFilterActive(active) {
+function legacySetMarkedFilterActive(active) {
   markedFilterActive = !!active;
   if (filterMarkedButton) {
     filterMarkedButton.classList.toggle('is-active', markedFilterActive);
   }
 }
 
-function resetMarkedFilter(options = {}) {
+function legacyResetMarkedFilter(options = {}) {
   const shouldReload = options.reload !== false;
   if (!markedFilterActive) {
     return false;
   }
 
-  setMarkedFilterActive(false);
+  legacySetMarkedFilterActive(false);
   resetLoadedMessagesState();
 
   if (shouldReload) {
@@ -3564,6 +3598,12 @@ function renderPreviewActions(message) {
   markButton.appendChild(markIcon);
   markButton.addEventListener('click', async () => {
     await toggleMessageMarked(message);
+    if (!messagePreview?.classList.contains('is-active')) {
+      return;
+    }
+    if (currentPreviewMessage?.filename !== message.filename) {
+      return;
+    }
     currentPreviewMessage = message;
     renderPreviewActions(message);
   });
@@ -4403,7 +4443,7 @@ async function loadMessages(options = {}) {
       if (isLoadingMore || !hasMoreMessages) return;
       isLoadingMore = true;
       const newOffset = currentOffset + PAGE_SIZE;
-      const result = await invoke('list_messages', { limit: PAGE_SIZE, offset: newOffset, onlyMarked: markedFilterActive });
+      const result = await invoke('list_messages', { limit: PAGE_SIZE, offset: newOffset });
       isLoadingMore = false;
       
       if (result.marked_count !== undefined) {
@@ -4420,7 +4460,7 @@ async function loadMessages(options = {}) {
       }
     } else if (checkNew) {
       // 定时刷新模式：只检查新消息
-      const result = await invoke('list_messages', { limit: PAGE_SIZE, offset: 0, onlyMarked: markedFilterActive });
+      const result = await invoke('list_messages', { limit: PAGE_SIZE, offset: 0 });
       
       if (result.marked_count !== undefined) {
         updateMarkedBadge(result.marked_count);
@@ -4492,7 +4532,7 @@ async function loadMessages(options = {}) {
       }
     } else {
       // 初始加载或刷新：加载最新的消息
-      const result = await invoke('list_messages', { limit: PAGE_SIZE, offset: 0, onlyMarked: markedFilterActive });
+      const result = await invoke('list_messages', { limit: PAGE_SIZE, offset: 0 });
       
       if (result.marked_count !== undefined) {
         updateMarkedBadge(result.marked_count);
@@ -4509,6 +4549,9 @@ async function loadMessages(options = {}) {
     setErrorStatus(`加载消息失败：${error}`);
   } finally {
     isLoadMessagesRunning = false;
+    if (!loadMore && getActiveMainTab() === 'marked') {
+      loadMarkedMessages();
+    }
   }
 }
 
@@ -5779,6 +5822,8 @@ async function switchActiveEndpoint() {
     uploadSpeed.clear();
     renderUploadTasks();
     await refreshMessages();
+    await loadMarkedTags();
+    await loadMarkedMessages();
     didInitialSync = true;
   } catch (error) {
     setErrorStatus(`切换端点失败：${error}`);
@@ -5858,10 +5903,14 @@ async function refreshMessages(options = {}) {
     isRefreshRunning = true;
     setRefreshLoading(true);
     await invoke('refresh');
-    await Promise.all([
+    const refreshTasks = [
       loadMessages(manual ? { scrollToBottom: true } : { checkNew: true, scrollToBottom: false }),
       loadSyncStatus(),
-    ]);
+    ];
+    if (getActiveMainTab() === 'marked') {
+      refreshTasks.push(loadMarkedTags(), loadMarkedMessages());
+    }
+    await Promise.all(refreshTasks);
   } catch (error) {
     const reason = String(error || '');
     if (reason.includes('已取消')) {
@@ -6119,6 +6168,43 @@ if (openLogDirButton) {
 if (openDataDirButton) {
   openDataDirButton.addEventListener('click', openDataDir);
 }
+if (markedTagAddButton) {
+  markedTagAddButton.addEventListener('click', async () => {
+    const name = window.prompt('新增标签');
+    if (name === null) return;
+    try {
+      await createMarkedTagRecord(name);
+    } catch (error) {
+      showToast(`新增标签失败: ${error}`, 'error');
+    }
+  });
+}
+if (markMessageAddTagButton) {
+  markMessageAddTagButton.addEventListener('click', async () => {
+    const name = markMessageNewTagInput?.value || '';
+    try {
+      const tag = await createMarkedTagRecord(name);
+      if (tag) {
+        selectedMarkTagIds.add(tag.id);
+        renderMarkMessageTagList();
+      }
+      if (markMessageNewTagInput) {
+        markMessageNewTagInput.value = '';
+      }
+    } catch (error) {
+      showToast(`新增标签失败: ${error}`, 'error');
+    }
+  });
+}
+if (markMessageConfirmButton) {
+  markMessageConfirmButton.addEventListener('click', confirmMarkMessage);
+}
+if (markMessageCancelButton) {
+  markMessageCancelButton.addEventListener('click', closeMarkMessageModal);
+}
+if (markMessageCloseButton) {
+  markMessageCloseButton.addEventListener('click', closeMarkMessageModal);
+}
 if (telegramStartServiceButton) {
   telegramStartServiceButton.addEventListener('click', startTelegramBridge);
 }
@@ -6227,6 +6313,8 @@ syncTelegramControlsState();
 startTelegramBridgeStatusPolling();
 loadSettings();
 loadMessages({ scrollToBottom: true });
+loadMarkedTags();
+loadMarkedMessages();
 loadSyncStatus();
 focusHomeComposer();
 
@@ -6386,6 +6474,18 @@ if (messagePreviewBackdrop) {
   messagePreviewBackdrop.addEventListener('click', closeMessagePreview);
 }
 
+if (markMessageModal) {
+  const modalBackdrop = markMessageModal.querySelector('.message-preview-backdrop');
+  if (modalBackdrop) {
+    modalBackdrop.addEventListener('click', closeMarkMessageModal);
+  }
+  markMessageModal.addEventListener('click', (event) => {
+    if (event.target === markMessageModal) {
+      closeMarkMessageModal();
+    }
+  });
+}
+
 if (messagePreview) {
   messagePreview.addEventListener('click', (event) => {
     if (event.target === messagePreview) {
@@ -6395,6 +6495,10 @@ if (messagePreview) {
 }
 
 document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && markMessageModal?.classList.contains('is-active')) {
+    closeMarkMessageModal();
+    return;
+  }
   if (event.key === 'Escape' && messagePreview?.classList.contains('is-active')) {
     closeMessagePreview();
   }
@@ -6426,17 +6530,492 @@ document.addEventListener('paste', async (event) => {
   }
 });
 
-if (filterMarkedButton) {
-  filterMarkedButton.addEventListener('click', () => {
-    if (markedFilterActive) {
-      resetMarkedFilter();
-      return;
+function updateMarkedBadge(count) {
+  const validCount = Math.max(0, Number(count) || 0);
+  if (markedTabBadge) {
+    markedTabBadge.textContent = String(validCount);
+    markedTabBadge.hidden = validCount <= 0;
+  }
+}
+
+function renderMarkMessageTagList() {
+  if (!markMessageTagList) return;
+  markMessageTagList.innerHTML = '';
+  if (!markedTags.length) {
+    const empty = document.createElement('div');
+    empty.className = 'marked-tag-empty';
+    empty.textContent = '还没有标签，可以直接确认无标签标记。';
+    markMessageTagList.appendChild(empty);
+    return;
+  }
+
+  markedTags.forEach((tag) => {
+    const item = document.createElement('label');
+    item.className = 'mark-message-tag-item';
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = selectedMarkTagIds.has(tag.id);
+    item.classList.toggle('is-active', checkbox.checked);
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) {
+        selectedMarkTagIds.add(tag.id);
+      } else {
+        selectedMarkTagIds.delete(tag.id);
+      }
+      item.classList.toggle('is-active', checkbox.checked);
+    });
+
+    const text = document.createElement('span');
+    text.textContent = tag.name;
+
+    const removeButton = document.createElement('span');
+    removeButton.className = 'marked-tag-chip-delete';
+    removeButton.textContent = '×';
+    removeButton.addEventListener('click', async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      await deleteMarkedTagRecord(tag.id);
+    });
+
+    item.appendChild(checkbox);
+    item.appendChild(text);
+    item.appendChild(removeButton);
+    markMessageTagList.appendChild(item);
+  });
+}
+
+function closeMarkMessageModal() {
+  if (!markMessageModal) return;
+  markMessageModal.classList.remove('is-active');
+  markMessageModal.setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('preview-open');
+  currentMarkingMessage = null;
+  selectedMarkTagIds.clear();
+  if (markMessageNewTagInput) {
+    markMessageNewTagInput.value = '';
+  }
+}
+
+async function loadMarkedTags() {
+  if (!invoke) return;
+  if (!getActiveEndpoint()) {
+    markedTags = [];
+    renderMarkedTagFilters();
+    renderMarkMessageTagList();
+    return;
+  }
+
+  try {
+    markedTags = await invoke('list_marked_tags');
+    if (activeMarkedTagId && !markedTags.some((tag) => tag.id === activeMarkedTagId)) {
+      activeMarkedTagId = null;
+    }
+    renderMarkedTagFilters();
+    renderMarkMessageTagList();
+  } catch (error) {
+    showToast(`读取标签失败: ${error}`, 'error');
+  }
+}
+
+async function createMarkedTagRecord(name) {
+  if (!invoke) return null;
+  const trimmed = String(name || '').trim();
+  if (!trimmed) return null;
+  const tag = await invoke('create_marked_tag', { name: trimmed });
+  await loadMarkedTags();
+  return tag;
+}
+
+async function promptCreateMarkedTag() {
+  const name = window.prompt('新增标签');
+  if (name === null) return null;
+  try {
+    return await createMarkedTagRecord(name);
+  } catch (error) {
+    showToast(`新增标签失败: ${error}`, 'error');
+    return null;
+  }
+}
+
+async function deleteMarkedTagRecord(tagId) {
+  if (!invoke || !tagId) return;
+  try {
+    await invoke('delete_marked_tag', { tagId });
+    selectedMarkTagIds.delete(tagId);
+    if (activeMarkedTagId === tagId) {
+      activeMarkedTagId = null;
+    }
+    await Promise.all([
+      loadMarkedTags(),
+      loadMessages(),
+      loadMarkedMessages(),
+    ]);
+  } catch (error) {
+    showToast(`删除标签失败: ${error}`, 'error');
+  }
+}
+
+async function renameMarkedTagRecord(tag) {
+  if (!invoke || !tag) return;
+  const nextName = window.prompt('编辑标签', tag.name);
+  if (nextName === null) return;
+  const trimmed = nextName.trim();
+  if (!trimmed || trimmed === tag.name) return;
+  try {
+    await invoke('rename_marked_tag', { tagId: tag.id, name: trimmed });
+    await Promise.all([
+      loadMarkedTags(),
+      loadMarkedMessages(),
+    ]);
+  } catch (error) {
+    showToast(`重命名标签失败: ${error}`, 'error');
+  }
+}
+
+function renderMarkedTagFilters() {
+  if (!markedTagFilterList) return;
+  if (markedTagFilterPanel) {
+    markedTagFilterPanel.hidden = false;
+  }
+  markedTagFilterList.innerHTML = '';
+
+  const prefix = document.createElement('span');
+  prefix.className = 'marked-tag-filter-prefix';
+  prefix.textContent = '标签：';
+  markedTagFilterList.appendChild(prefix);
+
+  const allChip = document.createElement('button');
+  allChip.type = 'button';
+  allChip.className = 'marked-tag-chip';
+  allChip.classList.toggle('is-active', !activeMarkedTagId);
+  allChip.textContent = '全部';
+  allChip.addEventListener('click', async () => {
+    activeMarkedTagId = null;
+    renderMarkedTagFilters();
+    await loadMarkedMessages();
+  });
+  markedTagFilterList.appendChild(allChip);
+
+  markedTags.forEach((tag) => {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'marked-tag-chip';
+    chip.classList.toggle('is-active', activeMarkedTagId === tag.id);
+    chip.textContent = tag.name;
+    chip.addEventListener('click', async () => {
+      activeMarkedTagId = activeMarkedTagId === tag.id ? null : tag.id;
+      renderMarkedTagFilters();
+      await loadMarkedMessages();
+    });
+    chip.addEventListener('dblclick', (event) => {
+      event.preventDefault();
+      renameMarkedTagRecord(tag);
+    });
+
+    const removeButton = document.createElement('span');
+    removeButton.className = 'marked-tag-chip-delete';
+    removeButton.textContent = '×';
+    removeButton.addEventListener('click', async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      await deleteMarkedTagRecord(tag.id);
+    });
+
+    chip.appendChild(removeButton);
+    markedTagFilterList.appendChild(chip);
+  });
+
+  const addChip = document.createElement('button');
+  addChip.type = 'button';
+  addChip.className = 'marked-tag-chip marked-tag-chip-add';
+  addChip.setAttribute('aria-label', '新增标签');
+  addChip.textContent = '+';
+  addChip.addEventListener('click', async () => {
+    await promptCreateMarkedTag();
+  });
+  markedTagFilterList.appendChild(addChip);
+}
+
+async function openMarkMessageModal(message) {
+  if (!markMessageModal) return;
+  currentMarkingMessage = message;
+  selectedMarkTagIds.clear();
+  (message.marked_tag_ids || []).forEach((tagId) => selectedMarkTagIds.add(tagId));
+  await loadMarkedTags();
+  if (markMessageSubtitle) {
+    markMessageSubtitle.textContent = `${message.sender || '消息'}：选择标签后确认，也可以直接确认为无标签标记。`;
+  }
+  renderMarkMessageTagList();
+  markMessageModal.classList.add('is-active');
+  markMessageModal.setAttribute('aria-hidden', 'false');
+  document.body.classList.add('preview-open');
+}
+
+async function confirmMarkMessage() {
+  if (!invoke || !currentMarkingMessage?.filename) return;
+  try {
+    await invoke('mark_message', {
+      filename: currentMarkingMessage.filename,
+      tagIds: Array.from(selectedMarkTagIds),
+    });
+    closeMarkMessageModal();
+    await Promise.all([
+      loadMessages(),
+      loadMarkedMessages(),
+    ]);
+  } catch (error) {
+    showToast(`标记失败: ${error}`, 'error');
+  }
+}
+
+async function toggleMarkedMessagePin(message) {
+  if (!invoke || !message?.filename) return;
+  try {
+    await invoke('toggle_marked_message_pin', { filename: message.filename });
+    await Promise.all([
+      loadMessages(),
+      loadMarkedMessages(),
+    ]);
+  } catch (error) {
+    showToast(`置顶失败: ${error}`, 'error');
+  }
+}
+
+async function toggleMessageMarked(message) {
+  if (!message || !message.filename || !invoke) return;
+  if (!message.marked) {
+    if (currentPreviewMessage?.filename === message.filename) {
+      closeMessagePreview();
+    }
+    await openMarkMessageModal(message);
+    return;
+  }
+
+  try {
+    await invoke('unmark_message', { filename: message.filename });
+    await Promise.all([
+      loadMessages(),
+      loadMarkedMessages(),
+    ]);
+    if (currentPreviewMessage?.filename === message.filename) {
+      closeMessagePreview();
+    }
+  } catch (error) {
+    showToast(`操作失败: ${error}`, 'error');
+  }
+}
+
+function renderMarkedMessages(messages = []) {
+  if (!markedMessageList) return;
+  markedMessageList.innerHTML = '';
+
+  if (!messages.length) {
+    const empty = document.createElement('li');
+    empty.className = 'message-card';
+    empty.textContent = activeMarkedTagId ? '当前标签下暂无标记消息' : '暂无标记消息';
+    markedMessageList.appendChild(empty);
+    return;
+  }
+
+  messages.forEach((message) => {
+    const item = document.createElement('li');
+    item.className = 'message-card is-marked';
+    item.dataset.filename = message.filename;
+    item.classList.toggle('is-file', message.kind === 'file');
+    item.classList.toggle('is-text', message.kind !== 'file');
+
+    const header = document.createElement('div');
+    header.className = 'message-header';
+    const headerText = document.createElement('span');
+    headerText.textContent = `${message.sender} · ${formatTime(message.timestamp_ms)}`;
+    header.appendChild(headerText);
+
+    const body = document.createElement('div');
+    body.className = 'message-body';
+    body.textContent = message.kind === 'text'
+      ? (message.content || '')
+      : (message.original_name || message.filename || '');
+    if (message.kind === 'file') {
+      body.addEventListener('click', (event) => {
+        if (event.target.closest('button, summary, details')) return;
+        openMessageFile(message);
+      });
     }
 
-    setMarkedFilterActive(true);
-    resetLoadedMessagesState();
-    loadMessages();
+    const tagRow = document.createElement('div');
+    tagRow.className = 'marked-message-tags';
+    const resolvedTags = (message.marked_tag_ids || [])
+      .map((tagId) => markedTags.find((tag) => tag.id === tagId))
+      .filter(Boolean);
+    if (resolvedTags.length) {
+      resolvedTags.forEach((tag) => {
+        const chip = document.createElement('span');
+        chip.className = 'marked-message-tag-chip';
+        chip.textContent = tag.name;
+        tagRow.appendChild(chip);
+      });
+    } else {
+      const emptyTag = document.createElement('span');
+      emptyTag.className = 'marked-message-tag-chip is-empty';
+      emptyTag.textContent = '无标签';
+      tagRow.appendChild(emptyTag);
+    }
+
+    const meta = document.createElement('div');
+    meta.className = 'message-meta';
+    meta.textContent = `大小 ${formatBytes(message.size || 0)}`;
+
+    const actions = document.createElement('div');
+    actions.className = 'message-actions';
+
+    const tagButton = document.createElement('button');
+    tagButton.className = 'button ghost small';
+    tagButton.textContent = '标签';
+    tagButton.addEventListener('click', () => openMarkMessageModal(message));
+    actions.appendChild(tagButton);
+
+    const markButton = document.createElement('button');
+    markButton.className = 'button ghost small icon-only mark-action is-marked';
+    const markIcon = document.createElement('img');
+    markIcon.src = 'icons/mark.svg';
+    markIcon.alt = '取消标记';
+    markIcon.style.width = '16px';
+    markIcon.style.height = '16px';
+    markButton.appendChild(markIcon);
+    markButton.addEventListener('click', () => toggleMessageMarked(message));
+    actions.appendChild(markButton);
+
+    const pinButton = document.createElement('button');
+    pinButton.className = 'button ghost small';
+    pinButton.classList.toggle('is-active', !!message.marked_pinned);
+    pinButton.textContent = message.marked_pinned ? '已置顶' : '置顶';
+    pinButton.addEventListener('click', () => toggleMarkedMessagePin(message));
+    actions.appendChild(pinButton);
+
+    if (message.kind === 'text') {
+      const copyButton = document.createElement('button');
+      copyButton.className = 'button ghost small icon-only';
+      const copyIcon = document.createElement('img');
+      copyIcon.src = 'icons/copy.svg';
+      copyIcon.alt = '复制';
+      copyIcon.style.width = '16px';
+      copyIcon.style.height = '16px';
+      copyButton.appendChild(copyIcon);
+      copyButton.addEventListener('click', () => copyTextToClipboard(message.content || ''));
+      actions.appendChild(copyButton);
+
+      const downloadButton = document.createElement('button');
+      downloadButton.className = 'button primary small icon-only';
+      const downloadIcon = document.createElement('img');
+      downloadIcon.src = 'icons/download.svg';
+      downloadIcon.alt = '下载为文件';
+      downloadIcon.style.width = '16px';
+      downloadIcon.style.height = '16px';
+      downloadButton.appendChild(downloadIcon);
+      downloadButton.addEventListener('click', () => downloadTextMessageAsFile(message));
+      actions.appendChild(downloadButton);
+    } else {
+      const downloadButton = document.createElement('button');
+      downloadButton.className = 'button primary small icon-only download-action';
+      const downloadIcon = document.createElement('img');
+      downloadIcon.src = 'icons/download.svg';
+      downloadIcon.alt = '下载';
+      downloadIcon.style.width = '16px';
+      downloadIcon.style.height = '16px';
+      downloadButton.appendChild(downloadIcon);
+      downloadButton.addEventListener('click', () => downloadMessageFile(message));
+      actions.appendChild(downloadButton);
+    }
+
+    const menu = document.createElement('details');
+    menu.className = 'action-menu';
+    const summary = document.createElement('summary');
+    summary.className = 'button ghost small icon-only';
+    const moreIcon = document.createElement('img');
+    moreIcon.src = 'icons/more.svg';
+    moreIcon.alt = '更多';
+    moreIcon.style.width = '16px';
+    moreIcon.style.height = '16px';
+    summary.appendChild(moreIcon);
+
+    const menuList = document.createElement('div');
+    menuList.className = 'action-menu-list';
+    if (message.kind === 'text') {
+      const downloadAsFileButton = document.createElement('button');
+      downloadAsFileButton.className = 'button ghost small';
+      downloadAsFileButton.textContent = '下载为文件';
+      downloadAsFileButton.addEventListener('click', () => {
+        menu.open = false;
+        downloadTextMessageAsFile(message);
+      });
+      menuList.appendChild(downloadAsFileButton);
+    } else {
+      const saveAsButton = document.createElement('button');
+      saveAsButton.className = 'button ghost small';
+      saveAsButton.textContent = '另存为';
+      saveAsButton.addEventListener('click', () => {
+        menu.open = false;
+        saveMessageFileAs(message);
+      });
+      menuList.appendChild(saveAsButton);
+    }
+
+    const deleteButton = document.createElement('button');
+    deleteButton.className = 'button ghost small delete-action';
+    deleteButton.textContent = '删除';
+    deleteButton.addEventListener('click', () => {
+      menu.open = false;
+      deleteSingleMessage(message);
+    });
+    menuList.appendChild(deleteButton);
+    menu.appendChild(summary);
+    menu.appendChild(menuList);
+    actions.appendChild(menu);
+
+    const footer = document.createElement('div');
+    footer.className = 'message-footer';
+    footer.appendChild(meta);
+    footer.appendChild(actions);
+
+    item.appendChild(header);
+    item.appendChild(body);
+    item.appendChild(tagRow);
+    item.appendChild(footer);
+    item.addEventListener('dblclick', (event) => {
+      if (
+        event.target.closest(
+          'button, a, input, textarea, select, summary, details, .action-menu, .message-actions',
+        )
+      ) {
+        return;
+      }
+      openMessagePreview(message);
+    });
+    markedMessageList.appendChild(item);
+    if (message.kind === 'text') {
+      applyMessageBodyCollapse(item, body, message);
+    }
   });
+}
+
+async function loadMarkedMessages() {
+  if (!invoke || !markedMessageList) return;
+  if (!getActiveEndpoint()) {
+    markedMessages = [];
+    renderMarkedMessages([]);
+    updateMarkedBadge(0);
+    return;
+  }
+
+  try {
+    const result = await invoke('list_marked_messages', { tagId: activeMarkedTagId });
+    markedMessages = result.messages || [];
+    updateMarkedBadge(result.marked_count || 0);
+    renderMarkedMessages(markedMessages);
+  } catch (error) {
+    showToast(`读取标记列表失败: ${error}`, 'error');
+  }
 }
 
 document.addEventListener('pointerdown', (event) => {

@@ -71,6 +71,12 @@ impl Default for TelegramBridgeSettings {
     }
 }
 
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MarkedTag {
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
@@ -111,6 +117,10 @@ pub struct Message {
     pub download_exists: bool,
     #[serde(default)]
     pub marked: bool,
+    #[serde(default)]
+    pub marked_tag_ids: Vec<String>,
+    #[serde(default)]
+    pub marked_pinned: bool,
     #[serde(default)]
     pub format: String,
 }

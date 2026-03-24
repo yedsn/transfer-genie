@@ -115,6 +115,29 @@
           </section>
         </section>
 
+        <section class="tab-panel" data-tab-panel="marked" id="tab-marked" role="tabpanel">
+          <section class="marked-page">
+            <div class="marked-page-header">
+              <div class="marked-page-title">
+                <h2>标记</h2>
+                <p>集中查看当前端点下已标记的消息，并按标签整理。</p>
+              </div>
+              <div class="marked-page-actions">
+              </div>
+            </div>
+            <section id="marked-tag-filter-panel" class="marked-tag-filter-panel" hidden>
+              <div class="marked-tag-filter-header">
+                <span class="marked-tag-filter-title">标签</span>
+                <button id="marked-tag-add-button" class="button ghost small" type="button">新增标签</button>
+              </div>
+              <div id="marked-tag-filter-list" class="marked-tag-filter-list"></div>
+            </section>
+            <div class="marked-page-content">
+              <ul id="marked-message-list" class="message-list marked-message-list"></ul>
+            </div>
+          </section>
+        </section>
+
         <section class="tab-panel" data-tab-panel="downloads" id="tab-downloads" role="tabpanel">
           <section class="downloads-page">
             <div class="downloads-page-header">
@@ -393,6 +416,30 @@
         </div>
       </div>
 
+      <div id="mark-message-modal" class="message-preview mark-message-modal" aria-hidden="true">
+        <div class="message-preview-backdrop"></div>
+        <div class="message-preview-dialog mark-message-dialog" role="dialog" aria-modal="true" aria-labelledby="mark-message-title">
+          <div class="message-preview-header">
+            <div>
+              <div id="mark-message-title" class="dialog-title">标记消息</div>
+              <div id="mark-message-subtitle" class="dialog-text">选择标签后确认，也可以直接确认为无标签标记。</div>
+            </div>
+            <button type="button" id="mark-message-close" class="message-preview-close" aria-label="关闭标记弹框">×</button>
+          </div>
+          <div class="mark-message-body">
+            <div class="mark-message-create-row">
+              <input id="mark-message-new-tag-input" type="text" placeholder="输入新标签" />
+              <button id="mark-message-add-tag" class="button ghost small" type="button">新增</button>
+            </div>
+            <div id="mark-message-tag-list" class="mark-message-tag-list"></div>
+          </div>
+          <div class="dialog-actions">
+            <button id="mark-message-cancel" class="button ghost small" type="button">取消</button>
+            <button id="mark-message-confirm" class="button primary small" type="button">确认标记</button>
+          </div>
+        </div>
+      </div>
+
       <nav class="tabbar" role="tablist" aria-label="主菜单">
         <button
           class="tab-button is-active"
@@ -405,6 +452,19 @@
           <img src="icons/home.svg" alt="首页" class="tab-icon" />
           <span class="tab-label">首页</span>
           <span class="tab-caption">聊天</span>
+        </button>
+        <button
+          class="tab-button"
+          type="button"
+          data-tab-target="marked"
+          role="tab"
+          aria-selected="false"
+          aria-controls="tab-marked"
+        >
+          <img src="icons/mark.svg" alt="标记" class="tab-icon" />
+          <span id="marked-tab-badge" class="tab-badge" hidden>0</span>
+          <span class="tab-label">标记</span>
+          <span class="tab-caption">收藏</span>
         </button>
         <button
           class="tab-button"
