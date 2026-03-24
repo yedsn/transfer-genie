@@ -96,6 +96,8 @@ const openDataDirButton = document.getElementById('open-data-dir');
 const filterMarkedButton = document.getElementById('filter-marked');
 const markedTabBadge = document.getElementById('marked-tab-badge');
 const markedMessageList = document.getElementById('marked-message-list');
+const markedRefreshButton = document.getElementById('marked-refresh-btn');
+const markedRefreshLabel = markedRefreshButton ? markedRefreshButton.querySelector('.refresh-label') : null;
 const toggleMarkedTagFilterButton = document.getElementById('toggle-marked-tag-filter');
 const markedTagFilterPanel = document.getElementById('marked-tag-filter-panel');
 const markedTagFilterList = document.getElementById('marked-tag-filter-list');
@@ -2069,6 +2071,8 @@ function setActiveTab(name, options = {}) {
     if (focusInput) {
       focusTextInput();
     }
+    // 切换回首页时恢复自动刷新
+    restartRefreshTimer();
   }
 }
 
@@ -4615,6 +4619,13 @@ function startRefreshTimer(intervalSecs) {
       return;
     }
 
+    // 标签页不自动刷新
+    if (getActiveMainTab() === 'marked') {
+      refreshCountdownSecs = interval;
+      updateRefreshCountdown();
+      return;
+    }
+
     refreshCountdownSecs = Math.max(0, refreshCountdownSecs - 1);
     updateRefreshCountdown();
 
@@ -4642,6 +4653,12 @@ function updateRefreshCountdown() {
 
   if (isRefreshRunning) {
     refreshLabel.textContent = '刷新中...';
+    return;
+  }
+
+  // 标签页时不显示倒计时
+  if (getActiveMainTab() === 'marked') {
+    refreshLabel.textContent = refreshLabelDefault || '刷新';
     return;
   }
 
@@ -6053,6 +6070,33 @@ refreshButton.addEventListener('click', async () => {
   }
   await refreshMessages();
 });
+
+// 标签页刷新按钮
+if (markedRefreshButton) {
+  markedRefreshButton.addEventListener('click', async () => {
+    if (!getActiveEndpoint()) {
+      showToast('请先选择 WebDAV 端点', 'error');
+      return;
+    }
+    markedRefreshButton.disabled = true;
+    markedRefreshButton.classList.add('is-loading');
+    if (markedRefreshLabel) {
+      markedRefreshLabel.textContent = '刷新中...';
+    }
+    try {
+      await Promise.all([loadMarkedTags(), loadMarkedMessages()]);
+      showToast('刷新成功', 'success');
+    } catch (error) {
+      showToast(`刷新失败: ${error}`, 'error');
+    } finally {
+      markedRefreshButton.disabled = false;
+      markedRefreshButton.classList.remove('is-loading');
+      if (markedRefreshLabel) {
+        markedRefreshLabel.textContent = '刷新';
+      }
+    }
+  });
+}
 if (openDownloadDirButton) {
   openDownloadDirButton.addEventListener('click', openDownloadDir);
 }
