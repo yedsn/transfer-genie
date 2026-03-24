@@ -946,6 +946,29 @@ body {
   align-self: flex-start;
 }
 
+/* 标记列表分页 */
+.marked-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 12px 16px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+}
+
+.marked-pagination .pagination-info {
+  font-size: 14px;
+  color: var(--ink-secondary);
+  min-width: 60px;
+  text-align: center;
+}
+
+.marked-pagination .button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .mark-message-dialog {
   max-width: 540px;
 }
@@ -2902,6 +2925,16 @@ body.preview-open {
 
   .marked-message-list {
     padding-top: 10px;
+  }
+
+  .marked-pagination {
+    padding: 12px;
+    gap: 12px;
+  }
+
+  .marked-pagination .pagination-info {
+    font-size: 13px;
+    min-width: 50px;
   }
 
   .device-name {

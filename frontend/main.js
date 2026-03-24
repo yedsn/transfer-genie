@@ -149,6 +149,10 @@ let markedTags = [];
 let activeMarkedTagId = null;
 let currentMarkingMessage = null;
 const selectedMarkTagIds = new Set();
+
+// 标记列表分页
+let markedMessagesPage = 1;
+const MARKED_MESSAGES_PER_PAGE = 10;
 let telegramBridgeStatusPollTimer = null;
 let currentTransferListView = 'downloads';
 const transferTaskCounts = {
@@ -6575,10 +6579,9 @@ document.addEventListener('paste', async (event) => {
 });
 
 function updateMarkedBadge(count) {
-  const validCount = Math.max(0, Number(count) || 0);
+  // 标记tab图标不显示数量
   if (markedTabBadge) {
-    markedTabBadge.textContent = String(validCount);
-    markedTabBadge.hidden = validCount <= 0;
+    markedTabBadge.hidden = true;
   }
 }
 
@@ -6859,10 +6862,20 @@ function renderMarkedMessages(messages = []) {
     empty.className = 'message-card';
     empty.textContent = activeMarkedTagId ? '当前标签下暂无标记消息' : '暂无标记消息';
     markedMessageList.appendChild(empty);
+    renderMarkedPagination(0, 0);
     return;
   }
 
-  messages.forEach((message) => {
+  // 分页计算
+  const totalPages = Math.ceil(messages.length / MARKED_MESSAGES_PER_PAGE);
+  const validPage = Math.max(1, Math.min(markedMessagesPage, totalPages));
+  markedMessagesPage = validPage;
+  
+  const startIndex = (markedMessagesPage - 1) * MARKED_MESSAGES_PER_PAGE;
+  const endIndex = Math.min(startIndex + MARKED_MESSAGES_PER_PAGE, messages.length);
+  const pageMessages = messages.slice(startIndex, endIndex);
+
+  pageMessages.forEach((message) => {
     const item = document.createElement('li');
     item.className = 'message-card is-marked';
     item.dataset.filename = message.filename;
@@ -7041,6 +7054,58 @@ function renderMarkedMessages(messages = []) {
       applyMessageBodyCollapse(item, body, message);
     }
   });
+
+  // 渲染分页控件
+  renderMarkedPagination(messages.length, totalPages);
+}
+
+function renderMarkedPagination(totalCount, totalPages) {
+  // 移除旧的分页控件
+  const existingPagination = document.getElementById('marked-pagination');
+  if (existingPagination) {
+    existingPagination.remove();
+  }
+
+  const paginationContainer = document.createElement('div');
+  paginationContainer.id = 'marked-pagination';
+  paginationContainer.className = 'marked-pagination';
+
+  // 上一页按钮
+  const prevButton = document.createElement('button');
+  prevButton.className = 'button ghost small';
+  prevButton.textContent = '上一页';
+  prevButton.disabled = markedMessagesPage <= 1 || totalPages === 0;
+  prevButton.addEventListener('click', () => {
+    if (markedMessagesPage > 1) {
+      markedMessagesPage--;
+      renderMarkedMessages(markedMessages);
+    }
+  });
+  paginationContainer.appendChild(prevButton);
+
+  // 页码信息
+  const pageInfo = document.createElement('span');
+  pageInfo.className = 'pagination-info';
+  pageInfo.textContent = totalPages === 0 ? '0 / 0' : `${markedMessagesPage} / ${totalPages}`;
+  paginationContainer.appendChild(pageInfo);
+
+  // 下一页按钮
+  const nextButton = document.createElement('button');
+  nextButton.className = 'button ghost small';
+  nextButton.textContent = '下一页';
+  nextButton.disabled = markedMessagesPage >= totalPages || totalPages === 0;
+  nextButton.addEventListener('click', () => {
+    if (markedMessagesPage < totalPages) {
+      markedMessagesPage++;
+      renderMarkedMessages(markedMessages);
+    }
+  });
+  paginationContainer.appendChild(nextButton);
+
+  // 插入到消息列表后面
+  if (markedMessageList && markedMessageList.parentNode) {
+    markedMessageList.parentNode.appendChild(paginationContainer);
+  }
 }
 
 async function loadMarkedMessages() {
@@ -7055,6 +7120,8 @@ async function loadMarkedMessages() {
   try {
     const result = await invoke('list_marked_messages', { tagId: activeMarkedTagId });
     markedMessages = result.messages || [];
+    // 切换标签时重置页码
+    markedMessagesPage = 1;
     updateMarkedBadge(result.marked_count || 0);
     renderMarkedMessages(markedMessages);
   } catch (error) {
