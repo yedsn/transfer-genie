@@ -280,6 +280,16 @@ let totalMessages = 0;
 let hasMoreMessages = false;
 let isLoadingMore = false;
 
+function syncCurrentOffsetWithLoadedMessages() {
+  currentOffset = Math.max(0, lastMessages.length - PAGE_SIZE);
+}
+
+function resetLoadedMessagesState() {
+  currentOffset = 0;
+  lastMessages = [];
+  hasMoreMessages = false;
+}
+
 function formatBytes(bytes) {
   if (bytes <= 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -3510,9 +3520,7 @@ function resetMarkedFilter(options = {}) {
   }
 
   setMarkedFilterActive(false);
-  currentOffset = 0;
-  lastMessages = [];
-  hasMoreMessages = false;
+  resetLoadedMessagesState();
 
   if (shouldReload) {
     loadMessages(options.loadOptions || {});
@@ -4384,10 +4392,8 @@ async function loadMessages(options = {}) {
       return;
     }
     if (!getActiveEndpoint()) {
-      lastMessages = [];
+      resetLoadedMessagesState();
       totalMessages = 0;
-      hasMoreMessages = false;
-      currentOffset = 0;
       renderMessages([], { scrollToBottom: shouldScroll });
       return;
     }
@@ -4407,7 +4413,7 @@ async function loadMessages(options = {}) {
       if (result.messages && result.messages.length > 0) {
         // 将新加载的消息添加到开头
         lastMessages = [...result.messages, ...lastMessages];
-        currentOffset = newOffset;
+        syncCurrentOffsetWithLoadedMessages();
         hasMoreMessages = result.has_more;
         totalMessages = result.total;
         renderMessages(lastMessages, { scrollToBottom: false, preserveScroll: true });
@@ -4425,10 +4431,8 @@ async function loadMessages(options = {}) {
       if (newMessages.length === 0) {
         // 没有任何消息
         if (lastMessages.length > 0) {
-          lastMessages = [];
+          resetLoadedMessagesState();
           totalMessages = 0;
-          hasMoreMessages = false;
-          currentOffset = 0;
           renderMessages([], { scrollToBottom: shouldScroll });
         }
         return;
@@ -4437,6 +4441,7 @@ async function loadMessages(options = {}) {
       if (lastMessages.length === 0) {
         // 本地没有消息，直接使用服务器返回的消息
         lastMessages = newMessages;
+        syncCurrentOffsetWithLoadedMessages();
         totalMessages = result.total || 0;
         hasMoreMessages = result.has_more || false;
         renderMessages(lastMessages, { scrollToBottom: shouldScroll });
@@ -4470,23 +4475,23 @@ async function loadMessages(options = {}) {
         if (actualNewMessages.length > 0) {
           lastMessages = [...lastMessages, ...actualNewMessages];
         }
+        syncCurrentOffsetWithLoadedMessages();
         totalMessages = result.total || 0;
         hasMoreMessages = result.has_more || false;
         
         // 如果当前在底部，自动滚动到底��显示新消息
         // 如果当前在底部，或者由于状态更新触发，自动滚动/重新渲染
-        const autoScroll = isMessageListAtBottom();
-        renderMessages(lastMessages, { scrollToBottom: autoScroll });
+        renderMessages(lastMessages, { scrollToBottom: false });
       } else {
         // 没有新消息，但可能总数变化了（比如有消息被删除）
         if (totalMessages !== result.total) {
           totalMessages = result.total || 0;
           hasMoreMessages = result.has_more || false;
+          syncCurrentOffsetWithLoadedMessages();
         }
       }
     } else {
       // 初始加载或刷新：加载最新的消息
-      currentOffset = 0;
       const result = await invoke('list_messages', { limit: PAGE_SIZE, offset: 0, onlyMarked: markedFilterActive });
       
       if (result.marked_count !== undefined) {
@@ -4494,6 +4499,7 @@ async function loadMessages(options = {}) {
       }
 
       lastMessages = result.messages || [];
+      syncCurrentOffsetWithLoadedMessages();
       totalMessages = result.total || 0;
       hasMoreMessages = result.has_more || false;
       renderMessages(lastMessages, { scrollToBottom: shouldScroll });
@@ -4573,7 +4579,7 @@ function startRefreshTimer(intervalSecs) {
       return;
     }
 
-    await refreshMessages();
+    await refreshMessages({ manual: false });
   }, 1000);
 }
 
@@ -5828,14 +5834,15 @@ function setSenderNameDisplay(name) {
   deviceNameLabel.title = text;
 }
 
-async function refreshMessages() {
-  let didStartManualRefresh = false;
+async function refreshMessages(options = {}) {
+  const manual = options.manual !== false;
+  let didStartRefresh = false;
   if (isRefreshRunning) {
     setStatus('正在刷新...');
     return;
   }
 
-  if (searchInput) {
+  if (manual && searchInput) {
     searchInput.value = '';
   }
   try {
@@ -5847,11 +5854,14 @@ async function refreshMessages() {
       setErrorStatus('请先选择 WebDAV 端点');
       return;
     }
-    didStartManualRefresh = true;
+    didStartRefresh = true;
     isRefreshRunning = true;
     setRefreshLoading(true);
     await invoke('refresh');
-    await Promise.all([loadMessages(), loadSyncStatus()]);
+    await Promise.all([
+      loadMessages(manual ? { scrollToBottom: true } : { checkNew: true, scrollToBottom: false }),
+      loadSyncStatus(),
+    ]);
   } catch (error) {
     const reason = String(error || '');
     if (reason.includes('已取消')) {
@@ -5862,7 +5872,7 @@ async function refreshMessages() {
   } finally {
     isRefreshRunning = false;
     setRefreshLoading(false);
-    if (didStartManualRefresh) {
+    if (didStartRefresh) {
       restartRefreshTimer();
     }
   }
@@ -6424,9 +6434,7 @@ if (filterMarkedButton) {
     }
 
     setMarkedFilterActive(true);
-    currentOffset = 0;
-    lastMessages = [];
-    hasMoreMessages = false;
+    resetLoadedMessagesState();
     loadMessages();
   });
 }
