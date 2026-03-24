@@ -13,10 +13,17 @@ const refreshLabel = refreshButton ? refreshButton.querySelector('.refresh-label
 const refreshLabelDefault = refreshLabel ? refreshLabel.textContent : '';
 const openDownloadDirButton = document.getElementById('open-download-dir');
 const downloadsOpenDownloadDirButton = document.getElementById('downloads-open-download-dir');
+const uploadTaskPanel = document.getElementById('upload-task-panel');
+const uploadTaskList = document.getElementById('upload-task-list');
+const uploadTaskSummary = document.getElementById('upload-task-summary');
 const downloadTaskPanel = document.getElementById('download-task-panel');
 const downloadTaskList = document.getElementById('download-task-list');
 const downloadTaskSummary = document.getElementById('download-task-summary');
 const downloadTaskTabBadge = document.getElementById('download-task-tab-badge');
+const transferTabDownloadsButton = document.getElementById('transfer-tab-downloads');
+const transferTabDownloadsCount = document.getElementById('transfer-tab-downloads-count');
+const transferTabUploadsButton = document.getElementById('transfer-tab-uploads');
+const transferTabUploadsCount = document.getElementById('transfer-tab-uploads-count');
 const downloadToggleSelectionButton = document.getElementById('download-toggle-selection');
 const downloadSelectionBar = document.getElementById('download-selection-bar');
 const downloadSelectionCount = document.getElementById('download-selection-count');
@@ -36,6 +43,15 @@ const composerFullscreenIcon = document.getElementById('composer-fullscreen-icon
 const feed = document.querySelector('.feed');
 const tabButtons = Array.from(document.querySelectorAll('[data-tab-target]'));
 const tabPanels = Array.from(document.querySelectorAll('[data-tab-panel]'));
+const downloadsTabButton = document.querySelector('[data-tab-target="downloads"]');
+const downloadsTabLabel = downloadsTabButton ? downloadsTabButton.querySelector('.tab-label') : null;
+const downloadsTabCaption = downloadsTabButton ? downloadsTabButton.querySelector('.tab-caption') : null;
+const downloadsPageTitle = document.querySelector('#tab-downloads .downloads-page-header h2');
+const downloadsPageDescription = document.querySelector('#tab-downloads .downloads-page-header p');
+const downloadsPageToolbar = document.querySelector('#tab-downloads .downloads-page-toolbar');
+const downloadPanelTitle = downloadTaskPanel
+  ? downloadTaskPanel.querySelector('.download-task-panel-header h3')
+  : null;
 
 const endpointSelect = document.getElementById('active-endpoint');
 const webdavList = document.getElementById('webdav-list');
@@ -96,6 +112,7 @@ let webdavEndpoints = [];
 let activeEndpointId = null;
 const downloadProgress = new Map();
 const downloadTasks = new Map();
+const uploadHistoryTasks = new Map();
 const pendingUploads = new Map();
 const pendingSends = new Map(); // 待发送消息的状态管理
 let lastMessages = [];
@@ -113,10 +130,16 @@ let isRefreshRunning = false;
 let isLoadMessagesRunning = false;
 let isLoadSyncStatusRunning = false;
 let telegramBridgeStatusPollTimer = null;
+let currentTransferListView = 'downloads';
+const transferTaskCounts = {
+  downloads: 0,
+  uploads: 0,
+};
 const MANUAL_REFRESH_TIMEOUT_MS = 45_000;
 const DEFAULT_TELEGRAM_POLL_INTERVAL_SECS = 5;
 const TELEGRAM_BRIDGE_STATUS_POLL_MS = 5000;
 const MAX_RECENT_DOWNLOAD_TASKS = 8;
+const MAX_RECENT_UPLOAD_TASKS = 8;
 
 // 发送状态常量
 const SEND_STATUS = {
@@ -901,6 +924,14 @@ function uploadStatusLabel(upload) {
   return '已上传';
 }
 
+function getCurrentEndpointMeta() {
+  const endpoint = getActiveEndpoint();
+  return {
+    endpointId: endpoint?.id || activeEndpointId || '',
+    endpointLabel: endpoint ? getEndpointLabel(endpoint) : '未选择端点',
+  };
+}
+
 function getDownloadTaskKey(filename, endpointId = activeEndpointId) {
   return `${endpointId || 'default'}::${filename || ''}`;
 }
@@ -1183,13 +1214,48 @@ function refreshDownloadTaskEndpointLabels() {
   }
 }
 
-function updateDownloadTaskBadge(activeCount) {
+function updateTransferTaskIndicators() {
   if (!downloadTaskTabBadge) {
     return;
   }
-  const count = Math.max(0, Number(activeCount) || 0);
-  downloadTaskTabBadge.hidden = count <= 0;
-  downloadTaskTabBadge.textContent = count > 99 ? '99+' : String(count);
+  const downloadCount = Math.max(0, Number(transferTaskCounts.downloads) || 0);
+  const uploadCount = Math.max(0, Number(transferTaskCounts.uploads) || 0);
+  const totalCount = downloadCount + uploadCount;
+  downloadTaskTabBadge.hidden = totalCount <= 0;
+  downloadTaskTabBadge.textContent = totalCount > 99 ? '99+' : String(totalCount);
+  if (transferTabDownloadsCount) {
+    transferTabDownloadsCount.textContent = String(downloadCount);
+  }
+  if (transferTabUploadsCount) {
+    transferTabUploadsCount.textContent = String(uploadCount);
+  }
+}
+
+function getPendingTransferCount(tasks) {
+  return (Array.isArray(tasks) ? tasks : []).filter((task) => task?.status !== 'complete').length;
+}
+
+function setTransferListView(view) {
+  currentTransferListView = view === 'uploads' ? 'uploads' : 'downloads';
+  if (transferTabDownloadsButton) {
+    const active = currentTransferListView === 'downloads';
+    transferTabDownloadsButton.classList.toggle('is-active', active);
+    transferTabDownloadsButton.setAttribute('aria-selected', active ? 'true' : 'false');
+  }
+  if (transferTabUploadsButton) {
+    const active = currentTransferListView === 'uploads';
+    transferTabUploadsButton.classList.toggle('is-active', active);
+    transferTabUploadsButton.setAttribute('aria-selected', active ? 'true' : 'false');
+  }
+  if (downloadTaskPanel) {
+    downloadTaskPanel.hidden = currentTransferListView !== 'downloads';
+  }
+  if (uploadTaskPanel) {
+    uploadTaskPanel.hidden = currentTransferListView !== 'uploads';
+  }
+  if (downloadsPageToolbar) {
+    downloadsPageToolbar.hidden = currentTransferListView !== 'downloads';
+  }
 }
 
 function renderDownloadTasks() {
@@ -1205,8 +1271,9 @@ function renderDownloadTasks() {
   });
   pruneSelectedDownloadTasks();
   downloadTaskList.innerHTML = '';
+  transferTaskCounts.downloads = getPendingTransferCount(tasks);
   const activeCount = tasks.filter((task) => isDownloadTaskActive(task)).length;
-  updateDownloadTaskBadge(activeCount);
+  updateTransferTaskIndicators();
   updateDownloadSelectionBar();
   updateDownloadSelectionToggleLabel();
   if (downloadTaskSummary) {
@@ -1381,6 +1448,259 @@ function renderDownloadTasks() {
       toggleSelectedDownloadTask(task.key, selectionCheckbox.checked);
       item.classList.toggle('is-selected', selectionCheckbox.checked);
     });
+  });
+}
+
+function getUploadHistoryKey(filename, endpointId = activeEndpointId) {
+  return `${endpointId || 'default'}::${filename || ''}`;
+}
+
+function trimUploadHistoryTasks() {
+  const items = Array.from(uploadHistoryTasks.values()).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  const keepKeys = new Set(items.slice(0, MAX_RECENT_UPLOAD_TASKS).map((task) => task.key));
+  Array.from(uploadHistoryTasks.keys()).forEach((key) => {
+    if (!keepKeys.has(key)) {
+      uploadHistoryTasks.delete(key);
+    }
+  });
+}
+
+function createPersistedUploadTask(record) {
+  const endpoint = record?.endpoint_id
+    ? webdavEndpoints.find((item) => item.id === record.endpoint_id)
+    : null;
+  return {
+    key: getUploadHistoryKey(record?.filename, record?.endpoint_id || ''),
+    speedKey: null,
+    historyId: record?.id || null,
+    filename: record?.filename || '',
+    originalName: record?.original_name || record?.filename || 'upload.bin',
+    endpointId: record?.endpoint_id || '',
+    endpointLabel: endpoint ? getEndpointLabel(endpoint) : '未选择端点',
+    status: record?.status || 'complete',
+    received: Number(record?.file_size) || 0,
+    total: Number(record?.file_size) || 0,
+    createdAt: record?.created_at_ms || Date.now(),
+    updatedAt: record?.updated_at_ms || Date.now(),
+    path: record?.local_path || '',
+    error: record?.error || '',
+    localExists: record?.local_exists !== false,
+    persisted: true,
+  };
+}
+
+function mergePersistedUploadHistory(records) {
+  uploadHistoryTasks.clear();
+  (Array.isArray(records) ? records : []).forEach((record) => {
+    const task = createPersistedUploadTask(record);
+    uploadHistoryTasks.set(task.key, task);
+  });
+  trimUploadHistoryTasks();
+  renderUploadTasks();
+}
+
+async function loadPersistedUploadHistory(options = {}) {
+  const silent = options.silent !== false;
+  if (!invoke) {
+    return;
+  }
+  try {
+    const records = await invoke('list_upload_history');
+    mergePersistedUploadHistory(records);
+  } catch (error) {
+    if (!silent) {
+      setErrorStatus(`加载上传历史失败：${error}`);
+    }
+    console.error('[upload] load history error', error);
+  }
+}
+
+function applyTransferTabLabels() {
+  if (downloadsTabLabel) {
+    downloadsTabLabel.textContent = '传输';
+  }
+  if (downloadsTabCaption) {
+    downloadsTabCaption.textContent = '上传 / 下载';
+  }
+  if (downloadsPageTitle) {
+    downloadsPageTitle.textContent = '传输任务';
+  }
+  if (downloadsPageDescription) {
+    downloadsPageDescription.textContent = '这里会集中显示上传和下载进度，最近的传输结果也会保留在这里。';
+  }
+  if (downloadPanelTitle) {
+    downloadPanelTitle.textContent = '下载列表';
+  }
+  setTransferListView('downloads');
+  updateTransferTaskIndicators();
+}
+
+function createPendingUploadTask(upload) {
+  const endpoint = upload?.endpointId
+    ? webdavEndpoints.find((item) => item.id === upload.endpointId)
+    : null;
+  return {
+    key: `pending:${upload.clientId}`,
+    speedKey: upload.clientId,
+    historyId: null,
+    filename: upload.filename || '',
+    originalName: upload.originalName || upload.filename || '上传文件',
+    endpointId: upload.endpointId || '',
+    endpointLabel: endpoint ? getEndpointLabel(endpoint) : upload.endpointLabel || '未选择端点',
+    status: upload.status || 'progress',
+    received: upload.received || 0,
+    total: upload.total || 0,
+    createdAt: upload.timestamp_ms || Date.now(),
+    updatedAt: upload.updatedAt || upload.timestamp_ms || Date.now(),
+    path: upload.localPath || '',
+    error: upload.error || '',
+    localExists: true,
+    persisted: false,
+  };
+}
+
+function getUploadTaskStateLabel(task) {
+  if (!task) {
+    return '';
+  }
+  if (task.status === 'complete') {
+    return '已完成';
+  }
+  if (task.status === 'error') {
+    return '失败';
+  }
+  if (task.status === 'progress') {
+    return '上传中';
+  }
+  return '准备中';
+}
+
+function renderUploadTasks() {
+  if (!uploadTaskPanel || !uploadTaskList) {
+    return;
+  }
+  const activeTasks = Array.from(pendingUploads.values()).map(createPendingUploadTask);
+  const activeHistoryKeys = new Set(
+    activeTasks
+      .filter((task) => task.filename)
+      .map((task) => getUploadHistoryKey(task.filename, task.endpointId)),
+  );
+  const persistedTasks = Array.from(uploadHistoryTasks.values()).filter(
+    (task) => !activeHistoryKeys.has(task.key),
+  );
+  const tasks = [...activeTasks, ...persistedTasks].sort((a, b) => {
+    const activityDelta = Number(b.status === 'progress') - Number(a.status === 'progress');
+    if (activityDelta !== 0) {
+      return activityDelta;
+    }
+    return (b.updatedAt || 0) - (a.updatedAt || 0);
+  });
+
+  uploadTaskList.innerHTML = '';
+  transferTaskCounts.uploads = getPendingTransferCount(tasks);
+  updateTransferTaskIndicators();
+  const activeCount = activeTasks.length;
+  if (uploadTaskSummary) {
+    uploadTaskSummary.textContent =
+      activeCount > 0
+        ? `${activeCount} 个上传任务进行中，新完成的文件会自动写入传输记录。`
+        : tasks.length > 0
+          ? '显示最近的上传结果，正在上传的文件也会实时出现在这里。'
+          : '暂无上传任务。';
+  }
+
+  if (tasks.length === 0) {
+    const empty = document.createElement('li');
+    empty.className = 'download-task-empty';
+    empty.textContent = '暂无上传任务，发送文件后会显示在这里。';
+    uploadTaskList.appendChild(empty);
+    return;
+  }
+
+  tasks.forEach((task) => {
+    const item = document.createElement('li');
+    item.className = 'download-task-item';
+    item.classList.toggle('is-active', task.status === 'progress');
+    item.classList.toggle('is-complete', task.status === 'complete');
+    item.classList.toggle('is-error', task.status === 'error');
+
+    const badge = document.createElement('span');
+    badge.className = 'download-task-badge';
+
+    const main = document.createElement('div');
+    main.className = 'download-task-main';
+
+    const titleRow = document.createElement('div');
+    titleRow.className = 'download-task-title-row';
+
+    const title = document.createElement('div');
+    title.className = 'download-task-title';
+    title.textContent = task.originalName || task.filename;
+
+    const state = document.createElement('span');
+    state.className = 'download-task-state';
+    state.textContent = getUploadTaskStateLabel(task);
+
+    titleRow.appendChild(title);
+    titleRow.appendChild(state);
+
+    const meta = document.createElement('div');
+    meta.className = 'download-task-meta';
+    meta.textContent = `${task.endpointLabel || '未选择端点'} · ${formatBytes(task.total || 0)}`;
+
+    main.appendChild(titleRow);
+    main.appendChild(meta);
+
+    if (task.status === 'progress') {
+      const progressWrap = document.createElement('div');
+      progressWrap.className = 'download-task-progress';
+
+      const progressBar = document.createElement('div');
+      progressBar.className = 'download-task-progress-bar';
+
+      const progressFill = document.createElement('div');
+      progressFill.className = 'download-task-progress-fill';
+      if (task.total) {
+        const percent = Math.min(100, Math.round(((task.received || 0) / task.total) * 100));
+        progressFill.style.width = `${percent}%`;
+      } else {
+        progressFill.style.width = '30%';
+      }
+
+      const detail = document.createElement('div');
+      detail.className = 'download-task-detail';
+      detail.textContent = formatProgress(
+        task.received || 0,
+        task.total || 0,
+        uploadStatusLabel(task),
+        getSpeed(uploadSpeed, task.speedKey || task.key),
+      );
+
+      progressBar.appendChild(progressFill);
+      progressWrap.appendChild(progressBar);
+      progressWrap.appendChild(detail);
+      main.appendChild(progressWrap);
+    } else {
+      const detail = document.createElement('div');
+      detail.className = 'download-task-detail';
+      if (task.status === 'error') {
+        detail.textContent = task.error || '上传失败';
+      } else if (task.path) {
+        detail.textContent = task.localExists === false ? `${task.path}（文件不存在）` : task.path;
+      } else {
+        detail.textContent = '上传已完成';
+      }
+      main.appendChild(detail);
+    }
+
+    const updated = document.createElement('div');
+    updated.className = 'download-task-updated';
+    updated.textContent = formatTime(task.updatedAt || task.createdAt || Date.now());
+
+    item.appendChild(badge);
+    item.appendChild(main);
+    item.appendChild(updated);
+    uploadTaskList.appendChild(item);
   });
 }
 
@@ -1677,6 +1997,9 @@ function setActiveTab(name, options = {}) {
     panel.classList.toggle('is-active', isActive);
     panel.setAttribute('aria-hidden', isActive ? 'false' : 'true');
   });
+  if (target === 'downloads') {
+    setTransferListView('downloads');
+  }
   if (target === 'home') {
     if (scrollToBottom) {
       scrollMessageListToBottom();
@@ -4600,8 +4923,10 @@ function applySettings(settings) {
   }
   syncGlobalHotkeyInputState();
   setSendHotkey(settings.send_hotkey || SEND_HOTKEY.ENTER);
+  applyTransferTabLabels();
   renderWebdavEndpoints();
   renderEndpointSelect();
+  renderUploadTasks();
   refreshDownloadTaskEndpointLabels();
   renderDownloadTasks();
   clearTelegramChatCandidates();
@@ -4618,6 +4943,7 @@ async function loadSettings() {
     }
     const settings = await invoke('get_settings');
     applySettings(settings);
+    await loadPersistedUploadHistory({ silent: true });
     await loadPersistedDownloadHistory({ silent: true });
     await loadTelegramBridgeStatus({ silent: true });
     if (getActiveEndpoint()) {
@@ -4726,6 +5052,7 @@ async function saveSettings(options = {}) {
       setSelectionMode(false);
       pendingUploads.clear();
       uploadSpeed.clear();
+      renderUploadTasks();
       await refreshMessages();
       didInitialSync = true;
     }
@@ -4829,6 +5156,7 @@ async function importSettings() {
       setSelectionMode(false);
       pendingUploads.clear();
       uploadSpeed.clear();
+      renderUploadTasks();
       await refreshMessages();
       didInitialSync = true;
     }
@@ -5051,27 +5379,34 @@ async function sendText() {
         try {
             clientId = `upload-${Date.now()}-${Math.random().toString(16).slice(2)}`;
             const originalName = path.split(/[/\\]/).pop() || path;
+            const endpointMeta = getCurrentEndpointMeta();
             pendingUploads.set(clientId, {
               clientId,
               originalName,
               localPath: path,
+              endpointId: endpointMeta.endpointId,
+              endpointLabel: endpointMeta.endpointLabel,
               timestamp_ms: Date.now(),
               received: 0,
               total: 0,
               status: 'progress',
             });
             renderMessages(lastMessages, { scrollToBottom: true });
+            renderUploadTasks();
             await invoke('send_file', { path, clientId });
             if (clientId) {
               pendingUploads.delete(clientId);
               renderMessages(lastMessages);
+              renderUploadTasks();
             }
             await loadMessages({ scrollToBottom: true });
+            await loadPersistedUploadHistory({ silent: true });
             setSuccessStatus('发送成功');
         } catch (error) {
             if (clientId) {
               pendingUploads.delete(clientId);
               renderMessages(lastMessages);
+              renderUploadTasks();
             }
             setErrorStatus(`发送文件失败：${error}`);
         }
@@ -5357,6 +5692,7 @@ async function switchActiveEndpoint() {
     setSelectionMode(false);
     pendingUploads.clear();
     uploadSpeed.clear();
+    renderUploadTasks();
     await refreshMessages();
     didInitialSync = true;
   } catch (error) {
@@ -5503,18 +5839,23 @@ if (listen) {
       status: 'progress',
     };
     if (payload.status === 'progress') {
+      entry.filename = payload.filename || entry.filename || '';
+      entry.updatedAt = Date.now();
       entry.received = payload.received || 0;
       entry.total = payload.total || 0;
       entry.status = 'progress';
       pendingUploads.set(clientId, entry);
       updateSpeedTracker(uploadSpeed, clientId, entry.received);
       updateUploadProgressUI(clientId);
+      renderUploadTasks();
       return;
     }
     if (payload.status === 'complete') {
       pendingUploads.delete(clientId);
       uploadSpeed.delete(clientId);
       renderMessages(lastMessages);
+      renderUploadTasks();
+      loadPersistedUploadHistory({ silent: true });
       // 上传完成后使用增量更新，避免打断用户浏览
       loadMessages({ checkNew: true });
       return;
@@ -5523,6 +5864,7 @@ if (listen) {
       pendingUploads.delete(clientId);
       uploadSpeed.delete(clientId);
       renderMessages(lastMessages);
+      renderUploadTasks();
       if (payload.error) {
         setErrorStatus(`上传失败：${payload.error}`);
       }
@@ -5578,6 +5920,12 @@ if (openDownloadDirButton) {
 }
 if (downloadsOpenDownloadDirButton) {
   downloadsOpenDownloadDirButton.addEventListener('click', openDownloadDir);
+}
+if (transferTabDownloadsButton) {
+  transferTabDownloadsButton.addEventListener('click', () => setTransferListView('downloads'));
+}
+if (transferTabUploadsButton) {
+  transferTabUploadsButton.addEventListener('click', () => setTransferListView('uploads'));
 }
 sendTextButton.addEventListener('click', sendText);
 sendFileButton.addEventListener('click', selectFiles);
@@ -5806,27 +6154,34 @@ async function sendFileByPath(path) {
     }
     clientId = `upload-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const originalName = path.split(/[/\\]/).pop() || path;
+    const endpointMeta = getCurrentEndpointMeta();
     pendingUploads.set(clientId, {
       clientId,
       originalName,
       localPath: path,
+      endpointId: endpointMeta.endpointId,
+      endpointLabel: endpointMeta.endpointLabel,
       timestamp_ms: Date.now(),
       received: 0,
       total: 0,
       status: 'progress',
     });
     renderMessages(lastMessages, { scrollToBottom: true });
+    renderUploadTasks();
     await invoke('send_file', { path, clientId });
     if (clientId) {
       pendingUploads.delete(clientId);
       renderMessages(lastMessages);
+      renderUploadTasks();
     }
     await loadMessages({ scrollToBottom: true });
+    await loadPersistedUploadHistory({ silent: true });
     setSuccessStatus('发送成功');
   } catch (error) {
     if (clientId) {
       pendingUploads.delete(clientId);
       renderMessages(lastMessages);
+      renderUploadTasks();
     }
     setErrorStatus(`发送文件失败：${error}`);
   }
@@ -5884,27 +6239,34 @@ async function sendFileData(data, originalName) {
       return;
     }
     clientId = `upload-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const endpointMeta = getCurrentEndpointMeta();
     pendingUploads.set(clientId, {
       clientId,
       originalName,
       localPath: null,
+      endpointId: endpointMeta.endpointId,
+      endpointLabel: endpointMeta.endpointLabel,
       timestamp_ms: Date.now(),
       received: 0,
       total: data.length,
       status: 'progress',
     });
     renderMessages(lastMessages, { scrollToBottom: true });
+    renderUploadTasks();
     await invoke('send_file_data', { data: Array.from(data), originalName, clientId });
     if (clientId) {
       pendingUploads.delete(clientId);
       renderMessages(lastMessages);
+      renderUploadTasks();
     }
     await loadMessages({ scrollToBottom: true });
+    await loadPersistedUploadHistory({ silent: true });
     setSuccessStatus('发送成功');
   } catch (error) {
     if (clientId) {
       pendingUploads.delete(clientId);
       renderMessages(lastMessages);
+      renderUploadTasks();
     }
     setErrorStatus(`发送文件失败：${error}`);
   }

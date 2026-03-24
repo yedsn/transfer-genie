@@ -6,14 +6,15 @@ mod telegram_bridge;
 mod types;
 mod webdav;
 
-use crate::db::{DbDownloadHistory, DbMessage, DbPartialDownload};
+use crate::db::{DbDownloadHistory, DbMessage, DbPartialDownload, DbUploadHistory};
 use crate::filenames::{
     build_message_filename, message_remote_path, parse_message_filename, thumbnail_remote_path,
     MessageKind,
 };
 use crate::history::{HistoryEntry, HistoryLayout};
 use crate::types::{
-    DownloadHistoryRecord, Message, Settings, SyncStatus, TelegramBridgeSettings, WebDavEndpoint,
+    DownloadHistoryRecord, Message, Settings, SyncStatus, TelegramBridgeSettings,
+    UploadHistoryRecord, WebDavEndpoint,
 };
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
@@ -757,6 +758,55 @@ fn generate_thumbnail(data: &[u8]) -> Result<Vec<u8>, String> {
     Ok(buf.into_inner())
 }
 
+fn cache_uploaded_file_from_path(source_path: &Path, target_path: &Path) -> Result<(), String> {
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent).map_err(|err| format!("创建目录失败: {err}"))?;
+    }
+    match fs::hard_link(source_path, target_path) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            fs::copy(source_path, target_path).map_err(|err| format!("保存本地文件失败: {err}"))?;
+            Ok(())
+        }
+    }
+}
+
+fn cache_uploaded_bytes(target_path: &Path, data: &[u8]) -> Result<(), String> {
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent).map_err(|err| format!("创建目录失败: {err}"))?;
+    }
+    fs::write(target_path, data).map_err(|err| format!("保存本地文件失败: {err}"))
+}
+
+fn spawn_thumbnail_upload(
+    http: Client,
+    endpoint: WebDavEndpoint,
+    endpoint_dir: PathBuf,
+    remote_path: String,
+    filename: String,
+    timestamp_ms: i64,
+    original_name: String,
+    data: Vec<u8>,
+) {
+    if !is_image_file(&original_name) {
+        return;
+    }
+    tokio::spawn(async move {
+        let thumb_data = match tokio::task::spawn_blocking(move || generate_thumbnail(&data)).await {
+            Ok(Ok(bytes)) => bytes,
+            _ => return,
+        };
+        let thumb_remote_path =
+            resolved_thumbnail_remote_path(Some(&remote_path), &filename, Some(timestamp_ms));
+        let _ = webdav::ensure_parent_directories(&http, &endpoint, &thumb_remote_path).await;
+        let _ = webdav::upload_file(&http, &endpoint, &thumb_remote_path, thumb_data.clone()).await;
+
+        let thumb_local_dir = endpoint_dir.join(".thumbs");
+        let _ = fs::create_dir_all(&thumb_local_dir);
+        let _ = fs::write(thumb_local_dir.join(&filename), thumb_data);
+    });
+}
+
 #[tauri::command]
 async fn send_file(
     window: Window,
@@ -853,30 +903,7 @@ async fn send_file(
 
     let endpoint_dir = endpoint_files_dir(&state, &endpoint.id);
     let local_path = endpoint_dir.join(&filename);
-    fs::create_dir_all(&endpoint_dir).map_err(|err| format!("创建目录失败: {err}"))?;
-    fs::copy(&file_path, &local_path).map_err(|err| format!("保存本地文件失败: {err}"))?;
-
-    // Generate and upload thumbnail if it's an image
-    if is_image_file(&original_name) {
-        if let Ok(thumb_data) = generate_thumbnail(&data) {
-            let thumb_remote_path =
-                resolved_thumbnail_remote_path(Some(&remote_path), &filename, Some(timestamp_ms));
-            let _ =
-                webdav::ensure_parent_directories(&state.http, &endpoint, &thumb_remote_path).await;
-            let _ = webdav::upload_file(
-                &state.http,
-                &endpoint,
-                &thumb_remote_path,
-                thumb_data.clone(),
-            )
-            .await;
-
-            // Save local thumbnail cache
-            let thumb_local_dir = endpoint_dir.join(".thumbs");
-            let _ = fs::create_dir_all(&thumb_local_dir);
-            let _ = fs::write(thumb_local_dir.join(&filename), thumb_data);
-        }
-    }
+    cache_uploaded_file_from_path(&file_path, &local_path)?;
 
     let message = DbMessage {
         endpoint_id: endpoint.id.clone(),
@@ -899,6 +926,26 @@ async fn send_file(
     db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
     let _ =
         crate::history::append_history(&state.http, &endpoint, message_to_history(&message)).await;
+    persist_upload_history(
+        &state,
+        &endpoint.id,
+        &filename,
+        &original_name,
+        Some(&local_path),
+        "complete",
+        None,
+        total_bytes as i64,
+    )?;
+    spawn_thumbnail_upload(
+        state.http.clone(),
+        endpoint.clone(),
+        endpoint_dir,
+        message.remote_path.clone().unwrap_or_default(),
+        filename,
+        timestamp_ms,
+        original_name,
+        data,
+    );
     Ok(())
 }
 
@@ -991,30 +1038,7 @@ async fn send_file_data(
 
     let endpoint_dir = endpoint_files_dir(&state, &endpoint.id);
     let local_path = endpoint_dir.join(&filename);
-    fs::create_dir_all(&endpoint_dir).map_err(|err| format!("创建目录失败: {err}"))?;
-    fs::write(&local_path, &data).map_err(|err| format!("保存本地文件失败: {err}"))?;
-
-    // Generate and upload thumbnail if it's an image
-    if is_image_file(&original_name) {
-        if let Ok(thumb_data) = generate_thumbnail(&data) {
-            let thumb_remote_path =
-                resolved_thumbnail_remote_path(Some(&remote_path), &filename, Some(timestamp_ms));
-            let _ =
-                webdav::ensure_parent_directories(&state.http, &endpoint, &thumb_remote_path).await;
-            let _ = webdav::upload_file(
-                &state.http,
-                &endpoint,
-                &thumb_remote_path,
-                thumb_data.clone(),
-            )
-            .await;
-
-            // Save local thumbnail cache
-            let thumb_local_dir = endpoint_dir.join(".thumbs");
-            let _ = fs::create_dir_all(&thumb_local_dir);
-            let _ = fs::write(thumb_local_dir.join(&filename), thumb_data);
-        }
-    }
+    cache_uploaded_bytes(&local_path, &data)?;
 
     let message = DbMessage {
         endpoint_id: endpoint.id.clone(),
@@ -1037,6 +1061,26 @@ async fn send_file_data(
     db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
     let _ =
         crate::history::append_history(&state.http, &endpoint, message_to_history(&message)).await;
+    persist_upload_history(
+        &state,
+        &endpoint.id,
+        &filename,
+        &message.original_name,
+        Some(&local_path),
+        "complete",
+        None,
+        total_bytes as i64,
+    )?;
+    spawn_thumbnail_upload(
+        state.http.clone(),
+        endpoint.clone(),
+        endpoint_dir,
+        message.remote_path.clone().unwrap_or_default(),
+        filename,
+        timestamp_ms,
+        message.original_name.clone(),
+        data,
+    );
     Ok(())
 }
 
@@ -1261,6 +1305,34 @@ fn persist_download_history(
     db::upsert_download_history(&state.db_path, &entry)
         .map(|_| ())
         .map_err(|err| format!("写入下载历史失败: {err}"))
+}
+
+fn persist_upload_history(
+    state: &AppState,
+    endpoint_id: &str,
+    filename: &str,
+    original_name: &str,
+    local_path: Option<&Path>,
+    status: &str,
+    error: Option<String>,
+    file_size: i64,
+) -> Result<(), String> {
+    let now = now_ms();
+    let entry = DbUploadHistory {
+        id: 0,
+        endpoint_id: endpoint_id.to_string(),
+        filename: filename.to_string(),
+        original_name: original_name.to_string(),
+        local_path: local_path.map(|path| path.to_string_lossy().to_string()),
+        status: status.to_string(),
+        error,
+        file_size,
+        created_at_ms: now,
+        updated_at_ms: now,
+    };
+    db::upsert_upload_history(&state.db_path, &entry)
+        .map(|_| ())
+        .map_err(|err| format!("写入上传历史失败: {err}"))
 }
 
 fn require_download_history(state: &AppState, record_id: i64) -> Result<DbDownloadHistory, String> {
@@ -1641,6 +1713,11 @@ async fn execute_streamed_download(
 
 fn list_download_history(state: State<'_, AppState>) -> Result<Vec<DownloadHistoryRecord>, String> {
     db::list_download_history(&state.db_path).map_err(|err| format!("读取下载历史失败: {err}"))
+}
+
+#[tauri::command]
+fn list_upload_history(state: State<'_, AppState>) -> Result<Vec<UploadHistoryRecord>, String> {
+    db::list_upload_history(&state.db_path).map_err(|err| format!("读取上传历史失败: {err}"))
 }
 
 #[tauri::command]
@@ -4781,6 +4858,7 @@ fn main() {
             get_thumbnail,
             download_message_file,
             save_message_file_as,
+            list_upload_history,
             list_download_history,
             save_download_history_as,
             redownload_download_history,

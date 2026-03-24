@@ -1,7 +1,7 @@
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, ToSql};
 use std::path::Path;
 
-use crate::types::{DownloadHistoryRecord, Message};
+use crate::types::{DownloadHistoryRecord, Message, UploadHistoryRecord};
 
 #[derive(Clone)]
 pub struct DbMessage {
@@ -30,6 +30,21 @@ pub struct DbDownloadHistory {
     pub filename: String,
     pub original_name: String,
     pub saved_path: Option<String>,
+    pub status: String,
+    pub error: Option<String>,
+    pub file_size: i64,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Clone)]
+pub struct DbUploadHistory {
+    #[allow(dead_code)]
+    pub id: i64,
+    pub endpoint_id: String,
+    pub filename: String,
+    pub original_name: String,
+    pub local_path: Option<String>,
     pub status: String,
     pub error: Option<String>,
     pub file_size: i64,
@@ -68,7 +83,7 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
 
     if table_exists.is_none() {
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS messages (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        sender TEXT NOT NULL,        timestamp_ms INTEGER NOT NULL,        size INTEGER NOT NULL,        kind TEXT NOT NULL,        original_name TEXT NOT NULL,        etag TEXT,        mtime TEXT,        content TEXT,        local_path TEXT,        remote_path TEXT,        file_hash TEXT,        PRIMARY KEY(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS download_history (        id INTEGER PRIMARY KEY AUTOINCREMENT,        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        saved_path TEXT,        status TEXT NOT NULL,        error TEXT,        file_size INTEGER NOT NULL DEFAULT 0,        created_at_ms INTEGER NOT NULL,        updated_at_ms INTEGER NOT NULL,        UNIQUE(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS partial_downloads (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        final_path TEXT NOT NULL,        temp_path TEXT NOT NULL,        downloaded_bytes INTEGER NOT NULL DEFAULT 0,        total_bytes INTEGER NOT NULL DEFAULT 0,        etag TEXT,        mtime TEXT,        updated_at_ms INTEGER NOT NULL,        PRIMARY KEY(endpoint_id, filename)      );",
+            "CREATE TABLE IF NOT EXISTS messages (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        sender TEXT NOT NULL,        timestamp_ms INTEGER NOT NULL,        size INTEGER NOT NULL,        kind TEXT NOT NULL,        original_name TEXT NOT NULL,        etag TEXT,        mtime TEXT,        content TEXT,        local_path TEXT,        remote_path TEXT,        file_hash TEXT,        PRIMARY KEY(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS download_history (        id INTEGER PRIMARY KEY AUTOINCREMENT,        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        saved_path TEXT,        status TEXT NOT NULL,        error TEXT,        file_size INTEGER NOT NULL DEFAULT 0,        created_at_ms INTEGER NOT NULL,        updated_at_ms INTEGER NOT NULL,        UNIQUE(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS upload_history (        id INTEGER PRIMARY KEY AUTOINCREMENT,        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        local_path TEXT,        status TEXT NOT NULL,        error TEXT,        file_size INTEGER NOT NULL DEFAULT 0,        created_at_ms INTEGER NOT NULL,        updated_at_ms INTEGER NOT NULL,        UNIQUE(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS partial_downloads (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        final_path TEXT NOT NULL,        temp_path TEXT NOT NULL,        downloaded_bytes INTEGER NOT NULL DEFAULT 0,        total_bytes INTEGER NOT NULL DEFAULT 0,        etag TEXT,        mtime TEXT,        updated_at_ms INTEGER NOT NULL,        PRIMARY KEY(endpoint_id, filename)      );",
         )
         .map_err(|err| format!("初始化数据库表失败: {err}"))?;
         return Ok(());
@@ -209,7 +224,7 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
     }
 
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS download_history (        id INTEGER PRIMARY KEY AUTOINCREMENT,        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        saved_path TEXT,        status TEXT NOT NULL,        error TEXT,        file_size INTEGER NOT NULL DEFAULT 0,        created_at_ms INTEGER NOT NULL,        updated_at_ms INTEGER NOT NULL,        UNIQUE(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS partial_downloads (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        final_path TEXT NOT NULL,        temp_path TEXT NOT NULL,        downloaded_bytes INTEGER NOT NULL DEFAULT 0,        total_bytes INTEGER NOT NULL DEFAULT 0,        etag TEXT,        mtime TEXT,        updated_at_ms INTEGER NOT NULL,        PRIMARY KEY(endpoint_id, filename)      );",
+        "CREATE TABLE IF NOT EXISTS download_history (        id INTEGER PRIMARY KEY AUTOINCREMENT,        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        saved_path TEXT,        status TEXT NOT NULL,        error TEXT,        file_size INTEGER NOT NULL DEFAULT 0,        created_at_ms INTEGER NOT NULL,        updated_at_ms INTEGER NOT NULL,        UNIQUE(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS upload_history (        id INTEGER PRIMARY KEY AUTOINCREMENT,        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        local_path TEXT,        status TEXT NOT NULL,        error TEXT,        file_size INTEGER NOT NULL DEFAULT 0,        created_at_ms INTEGER NOT NULL,        updated_at_ms INTEGER NOT NULL,        UNIQUE(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS partial_downloads (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        final_path TEXT NOT NULL,        temp_path TEXT NOT NULL,        downloaded_bytes INTEGER NOT NULL DEFAULT 0,        total_bytes INTEGER NOT NULL DEFAULT 0,        etag TEXT,        mtime TEXT,        updated_at_ms INTEGER NOT NULL,        PRIMARY KEY(endpoint_id, filename)      );",
     )
     .map_err(|err| format!("初始化下载相关数据表失败: {err}"))?;
 
@@ -530,6 +545,98 @@ pub fn list_download_history(path: &Path) -> rusqlite::Result<Vec<DownloadHistor
             filename: row.get(2)?,
             original_name: row.get(3)?,
             saved_path,
+            status: row.get(5)?,
+            error: row.get(6)?,
+            file_size: row.get(7)?,
+            created_at_ms: row.get(8)?,
+            updated_at_ms: row.get(9)?,
+            local_exists,
+        })
+    })?;
+    let mut records = Vec::new();
+    for row in rows {
+        records.push(row?);
+    }
+    Ok(records)
+}
+
+fn get_upload_history_by_key(
+    conn: &Connection,
+    endpoint_id: &str,
+    filename: &str,
+) -> rusqlite::Result<Option<DbUploadHistory>> {
+    conn.query_row(
+        "SELECT id, endpoint_id, filename, original_name, local_path, status, error, file_size, created_at_ms, updated_at_ms \
+         FROM upload_history WHERE endpoint_id = ?1 AND filename = ?2",
+        params![endpoint_id, filename],
+        |row| {
+            Ok(DbUploadHistory {
+                id: row.get(0)?,
+                endpoint_id: row.get(1)?,
+                filename: row.get(2)?,
+                original_name: row.get(3)?,
+                local_path: row.get(4)?,
+                status: row.get(5)?,
+                error: row.get(6)?,
+                file_size: row.get(7)?,
+                created_at_ms: row.get(8)?,
+                updated_at_ms: row.get(9)?,
+            })
+        },
+    )
+    .optional()
+}
+
+pub fn upsert_upload_history(
+    path: &Path,
+    entry: &DbUploadHistory,
+) -> rusqlite::Result<DbUploadHistory> {
+    let conn = Connection::open(path)?;
+    conn.execute(
+        "INSERT INTO upload_history \
+         (endpoint_id, filename, original_name, local_path, status, error, file_size, created_at_ms, updated_at_ms) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+         ON CONFLICT(endpoint_id, filename) DO UPDATE SET \
+           original_name=excluded.original_name, \
+           local_path=COALESCE(excluded.local_path, upload_history.local_path), \
+           status=excluded.status, \
+           error=excluded.error, \
+           file_size=excluded.file_size, \
+           updated_at_ms=excluded.updated_at_ms",
+        params![
+            entry.endpoint_id,
+            entry.filename,
+            entry.original_name,
+            entry.local_path,
+            entry.status,
+            entry.error,
+            entry.file_size,
+            entry.created_at_ms,
+            entry.updated_at_ms,
+        ],
+    )?;
+    get_upload_history_by_key(&conn, &entry.endpoint_id, &entry.filename)?
+        .ok_or(rusqlite::Error::QueryReturnedNoRows)
+}
+
+pub fn list_upload_history(path: &Path) -> rusqlite::Result<Vec<UploadHistoryRecord>> {
+    let conn = Connection::open(path)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, endpoint_id, filename, original_name, local_path, status, error, file_size, created_at_ms, updated_at_ms \
+         FROM upload_history ORDER BY updated_at_ms DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let local_path: Option<String> = row.get(4)?;
+        let local_exists = local_path
+            .as_ref()
+            .map(|path| Path::new(path).is_file())
+            .unwrap_or(false);
+        Ok(UploadHistoryRecord {
+            id: row.get(0)?,
+            endpoint_id: row.get(1)?,
+            filename: row.get(2)?,
+            original_name: row.get(3)?,
+            local_path,
             status: row.get(5)?,
             error: row.get(6)?,
             file_size: row.get(7)?,

@@ -1,11 +1,10 @@
 use crate::types::{DavEntry, WebDavEndpoint};
 use bytes::Bytes;
-use futures_util::StreamExt;
 use log::info;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use reqwest::header::{
-    CONTENT_RANGE, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, RANGE,
+    CONTENT_LENGTH, CONTENT_RANGE, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, RANGE,
 };
 use reqwest::{Body, Client, Method, RequestBuilder};
 use std::pin::Pin;
@@ -563,24 +562,27 @@ where
         .join(remote_path)
         .map_err(|err| format!("上传地址无效: {err}"))?;
 
+    let data = Bytes::from(data);
     let total = data.len() as u64;
-    let chunk_size = 64 * 1024;
+    let chunk_size = 512 * 1024;
     on_progress(0, total);
 
-    let mut sent = 0u64;
-    let mut on_progress = on_progress;
-    let chunks: Vec<Bytes> = data
-        .chunks(chunk_size)
-        .map(Bytes::copy_from_slice)
-        .collect();
-    let stream = futures_util::stream::iter(chunks.into_iter()).map(move |chunk| {
-        sent += chunk.len() as u64;
-        on_progress(sent, total);
-        Ok::<Bytes, std::io::Error>(chunk)
+    let stream = futures_util::stream::unfold((data, 0usize, on_progress), move |state| async move {
+        let (data, offset, mut on_progress) = state;
+        if offset >= data.len() {
+            return None;
+        }
+        let end = (offset + chunk_size).min(data.len());
+        let chunk = data.slice(offset..end);
+        on_progress(end as u64, total);
+        Some((Ok::<Bytes, std::io::Error>(chunk), (data, end, on_progress)))
     });
 
     let body = Body::wrap_stream(stream);
-    let request = client.put(url).body(body);
+    let request = client
+        .put(url)
+        .header(CONTENT_LENGTH, total.to_string())
+        .body(body);
     let response = apply_auth(request, endpoint)
         .send()
         .await

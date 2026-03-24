@@ -133,6 +133,39 @@
               <h2>下载任务</h2>
               <p>下载进度独立展示，消息刷新和切换列表不会打断正在进行的下载。</p>
             </div>
+            <div class="transfer-list-tabs" role="tablist" aria-label="传输列表切换">
+              <button
+                id="transfer-tab-downloads"
+                class="transfer-list-tab is-active"
+                type="button"
+                role="tab"
+                aria-selected="true"
+              >
+                下载列表
+                <span id="transfer-tab-downloads-count" class="transfer-list-tab-count">0</span>
+              </button>
+              <button
+                id="transfer-tab-uploads"
+                class="transfer-list-tab"
+                type="button"
+                role="tab"
+                aria-selected="false"
+              >
+                上传列表
+                <span id="transfer-tab-uploads-count" class="transfer-list-tab-count">0</span>
+              </button>
+            </div>
+            <section id="upload-task-panel" class="download-task-panel" hidden>
+              <div class="download-task-panel-header">
+                <div>
+                  <h3>上传列表</h3>
+                  <p id="upload-task-summary" class="download-task-summary">
+                    暂无上传任务。
+                  </p>
+                </div>
+              </div>
+              <ul id="upload-task-list" class="download-task-list"></ul>
+            </section>
             <section id="download-task-panel" class="download-task-panel">
               <div class="download-task-panel-header">
                 <div>

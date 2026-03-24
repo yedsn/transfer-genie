@@ -139,6 +139,21 @@ pub struct DownloadHistoryRecord {
     pub local_exists: bool,
 }
 
+#[derive(Clone, Serialize)]
+pub struct UploadHistoryRecord {
+    pub id: i64,
+    pub endpoint_id: String,
+    pub filename: String,
+    pub original_name: String,
+    pub local_path: Option<String>,
+    pub status: String,
+    pub error: Option<String>,
+    pub file_size: i64,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub local_exists: bool,
+}
+
 impl SyncStatus {
     pub fn idle() -> Self {
         Self {

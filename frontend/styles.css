@@ -256,6 +256,53 @@ body {
   grid-row: 2;
 }
 
+.transfer-list-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px;
+  border-radius: 14px;
+  background: #f6efe8;
+  border: 1px solid rgba(225, 215, 206, 0.9);
+  width: fit-content;
+}
+
+.transfer-list-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted);
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.transfer-list-tab:hover {
+  color: var(--ink);
+}
+
+.transfer-list-tab.is-active {
+  background: #fff;
+  color: var(--accent-strong);
+  box-shadow: 0 6px 18px rgba(15, 15, 25, 0.08);
+}
+
+.transfer-list-tab-count {
+  min-width: 24px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(255, 122, 47, 0.12);
+  color: inherit;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .download-task-panel[hidden] {
   display: none !important;
 }
