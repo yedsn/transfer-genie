@@ -50,6 +50,10 @@ const downloadsTabCaption = downloadsTabButton ? downloadsTabButton.querySelecto
 const downloadsPageTitle = document.querySelector('#tab-downloads .downloads-page-header h2');
 const downloadsPageDescription = document.querySelector('#tab-downloads .downloads-page-header p');
 const downloadsPageToolbar = document.querySelector('#tab-downloads .downloads-page-toolbar');
+const transferListToolbar = document.querySelector('#tab-downloads .transfer-list-toolbar');
+let selectionRow = document.getElementById('selection-row');
+let downloadSelectionRow = document.getElementById('download-selection-row');
+let transferListActions = document.querySelector('#tab-downloads .transfer-list-actions');
 const downloadPanelTitle = downloadTaskPanel
   ? downloadTaskPanel.querySelector('.download-task-panel-header h3')
   : null;
@@ -127,6 +131,72 @@ const messagePreviewActions = document.getElementById('message-preview-actions')
 const messagePreviewClose = document.querySelector('.message-preview-close');
 const messagePreviewBackdrop = messagePreview ? messagePreview.querySelector('.message-preview-backdrop') : null;
 const searchInput = document.getElementById('search-input');
+
+function ensureInlineSelectionRows() {
+  if (selectionBar && selectionCount && !selectionRow) {
+    const toolbar = selectionBar.closest('.feed-toolbar');
+    if (toolbar?.parentElement) {
+      selectionRow = document.createElement('div');
+      selectionRow.id = 'selection-row';
+      selectionRow.className = 'selection-row';
+      selectionRow.hidden = true;
+      toolbar.insertAdjacentElement('afterend', selectionRow);
+    }
+  }
+
+  if (selectionRow && selectionBar && selectionCount) {
+    if (selectionBar.parentElement !== selectionRow) {
+      selectionRow.appendChild(selectionBar);
+    }
+    if (selectionCount.parentElement !== selectionRow) {
+      selectionRow.appendChild(selectionCount);
+    }
+  }
+
+  if (downloadSelectionBar && downloadSelectionCount && !downloadSelectionRow) {
+    const toolbar = document.querySelector('#tab-downloads .transfer-list-toolbar');
+    if (toolbar?.parentElement) {
+      downloadSelectionRow = document.createElement('div');
+      downloadSelectionRow.id = 'download-selection-row';
+      downloadSelectionRow.className = 'selection-row';
+      downloadSelectionRow.hidden = true;
+      toolbar.insertAdjacentElement('afterend', downloadSelectionRow);
+    }
+  }
+
+  if (downloadSelectionRow && downloadSelectionBar && downloadSelectionCount) {
+    if (transferListToolbar && downloadSelectionRow.previousElementSibling !== transferListToolbar) {
+      transferListToolbar.insertAdjacentElement('afterend', downloadSelectionRow);
+    }
+    if (downloadSelectionBar.parentElement !== downloadSelectionRow) {
+      downloadSelectionRow.appendChild(downloadSelectionBar);
+    }
+    if (downloadSelectionCount.parentElement !== downloadSelectionRow) {
+      downloadSelectionRow.appendChild(downloadSelectionCount);
+    }
+  }
+}
+
+ensureInlineSelectionRows();
+
+function ensureTransferToolbarActions() {
+  if (!transferListToolbar || !transferClearButton) {
+    return;
+  }
+  if (!transferListActions) {
+    transferListActions = document.createElement('div');
+    transferListActions.className = 'transfer-list-actions';
+    transferListToolbar.appendChild(transferListActions);
+  }
+  if (transferClearButton.parentElement !== transferListActions) {
+    transferListActions.appendChild(transferClearButton);
+  }
+  if (downloadToggleSelectionButton && downloadToggleSelectionButton.parentElement !== transferListActions) {
+    transferListActions.appendChild(downloadToggleSelectionButton);
+  }
+}
+
+ensureTransferToolbarActions();
 
 function ensureMarkedSelectionControls() {
   if (markedSearchInput && !markedToggleSelectionButton) {
@@ -228,6 +298,7 @@ let markedSelectionMode = false;
 const selectedMarkedMessages = new Set();
 let downloadSelectionMode = false;
 const selectedDownloadTasks = new Set();
+const selectedUploadTasks = new Set();
 const expandedTextMessages = new Set();
 let currentPreviewMessage = null;
 const MESSAGE_BODY_COLLAPSE_HEIGHT = 260;
@@ -251,10 +322,13 @@ const MARKED_MESSAGES_PER_PAGE = 10;
 const UNTAGGED_MARKED_TAG_FILTER_ID = '__untagged__';
 let telegramBridgeStatusPollTimer = null;
 let currentTransferListView = 'downloads';
+let downloadTasksPage = 1;
+let uploadTasksPage = 1;
 const transferTaskCounts = {
   downloads: 0,
   uploads: 0,
 };
+const TRANSFER_TASKS_PER_PAGE = 10;
 const MANUAL_REFRESH_TIMEOUT_MS = 45_000;
 const DEFAULT_TELEGRAM_POLL_INTERVAL_SECS = 5;
 const TELEGRAM_BRIDGE_STATUS_POLL_MS = 5000;
@@ -1393,6 +1467,18 @@ function getClearableUploadTasks() {
   return getVisibleUploadTasks().filter((task) => task?.historyId && task.status !== 'progress');
 }
 
+function getSelectableUploadTasks() {
+  return getVisibleUploadTasks().filter((task) => task?.historyId && task.status !== 'progress');
+}
+
+function getCurrentTransferSelectionSet() {
+  return currentTransferListView === 'uploads' ? selectedUploadTasks : selectedDownloadTasks;
+}
+
+function getSelectableTransferTasks() {
+  return currentTransferListView === 'uploads' ? getSelectableUploadTasks() : getSelectableDownloadTasks();
+}
+
 function updateTransferClearButton() {
   if (!transferClearButton) {
     return;
@@ -1425,6 +1511,72 @@ function setTransferListView(view) {
     downloadsPageToolbar.hidden = currentTransferListView !== 'downloads';
   }
   updateTransferClearButton();
+  updateDownloadSelectionBar();
+}
+
+function paginateTransferTasks(tasks, page) {
+  const safeTasks = Array.isArray(tasks) ? tasks : [];
+  const totalPages = Math.max(1, Math.ceil(safeTasks.length / TRANSFER_TASKS_PER_PAGE));
+  const currentPage = Math.max(1, Math.min(page, totalPages));
+  const startIndex = (currentPage - 1) * TRANSFER_TASKS_PER_PAGE;
+  return {
+    totalPages,
+    currentPage,
+    pageTasks: safeTasks.slice(startIndex, startIndex + TRANSFER_TASKS_PER_PAGE),
+  };
+}
+
+function scrollTransferTaskListToTop(listElement) {
+  if (!listElement) return;
+  requestAnimationFrame(() => {
+    listElement.scrollTop = 0;
+  });
+}
+
+function renderTransferPagination(listElement, options = {}) {
+  if (!listElement) return;
+  const {
+    id,
+    currentPage = 1,
+    totalPages = 1,
+    onPageChange,
+  } = options;
+  const paginationContainer = document.createElement('li');
+  paginationContainer.id = id;
+  paginationContainer.className = 'transfer-pagination';
+
+  const prevButton = document.createElement('button');
+  prevButton.className = 'button ghost small';
+  prevButton.textContent = '上一页';
+  prevButton.disabled = currentPage <= 1 || totalPages <= 0;
+  prevButton.addEventListener('click', () => {
+    if (currentPage <= 1 || typeof onPageChange !== 'function') {
+      return;
+    }
+    onPageChange(currentPage - 1);
+    scrollTransferTaskListToTop(listElement);
+  });
+  paginationContainer.appendChild(prevButton);
+
+  const pageInfo = document.createElement('span');
+  pageInfo.className = 'pagination-info';
+  pageInfo.textContent = totalPages <= 0 ? '0 / 0' : `${currentPage} / ${totalPages}`;
+  paginationContainer.appendChild(pageInfo);
+
+  const nextButton = document.createElement('button');
+  nextButton.className = 'button ghost small';
+  nextButton.textContent = '下一页';
+  nextButton.disabled = currentPage >= totalPages || totalPages <= 0;
+  nextButton.addEventListener('click', () => {
+    if (currentPage >= totalPages || typeof onPageChange !== 'function') {
+      return;
+    }
+    onPageChange(currentPage + 1);
+    scrollTransferTaskListToTop(listElement);
+  });
+  paginationContainer.appendChild(nextButton);
+
+  listElement.appendChild(paginationContainer);
 }
 
 function renderDownloadTasks() {
@@ -1440,6 +1592,8 @@ function renderDownloadTasks() {
   });
   pruneSelectedDownloadTasks();
   downloadTaskList.innerHTML = '';
+  const { currentPage, totalPages, pageTasks } = paginateTransferTasks(tasks, downloadTasksPage);
+  downloadTasksPage = currentPage;
   transferTaskCounts.downloads = getPendingTransferCount(tasks);
   const activeCount = tasks.filter((task) => isDownloadTaskActive(task)).length;
   updateTransferTaskIndicators();
@@ -1463,7 +1617,7 @@ function renderDownloadTasks() {
     return;
   }
 
-  tasks.forEach((task) => {
+  pageTasks.forEach((task) => {
     const item = document.createElement('li');
     item.className = 'download-task-item';
     item.classList.toggle('is-active', isDownloadTaskActive(task));
@@ -1619,6 +1773,16 @@ function renderDownloadTasks() {
       item.classList.toggle('is-selected', selectionCheckbox.checked);
     });
   });
+
+  renderTransferPagination(downloadTaskList, {
+    id: 'download-task-pagination',
+    currentPage,
+    totalPages,
+    onPageChange: (nextPage) => {
+      downloadTasksPage = nextPage;
+      renderDownloadTasks();
+    },
+  });
 }
 
 function getUploadHistoryKey(filename, endpointId = activeEndpointId) {
@@ -1752,10 +1916,15 @@ function renderUploadTasks() {
   const tasks = getVisibleUploadTasks();
   const activeTasks = tasks.filter((task) => task.status === 'progress');
 
+  pruneSelectedUploadTasks();
   uploadTaskList.innerHTML = '';
+  const { currentPage, totalPages, pageTasks } = paginateTransferTasks(tasks, uploadTasksPage);
+  uploadTasksPage = currentPage;
   transferTaskCounts.uploads = getPendingTransferCount(tasks);
   updateTransferTaskIndicators();
   updateTransferClearButton();
+  updateDownloadSelectionBar();
+  updateDownloadSelectionToggleLabel();
   const activeCount = activeTasks.length;
   if (uploadTaskSummary) {
     uploadTaskSummary.textContent =
@@ -1774,15 +1943,32 @@ function renderUploadTasks() {
     return;
   }
 
-  tasks.forEach((task) => {
+  pageTasks.forEach((task) => {
     const item = document.createElement('li');
     item.className = 'download-task-item';
     item.classList.toggle('is-active', task.status === 'progress');
     item.classList.toggle('is-complete', task.status === 'complete');
     item.classList.toggle('is-error', task.status === 'error');
+    item.classList.toggle('with-selection', downloadSelectionMode);
+    item.classList.toggle('is-selected', selectedUploadTasks.has(task.key));
 
     const badge = document.createElement('span');
     badge.className = 'download-task-badge';
+
+    let selectionCheckbox = null;
+    if (downloadSelectionMode) {
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.className = 'message-select download-task-select';
+      checkbox.checked = selectedUploadTasks.has(task.key);
+      checkbox.disabled = !task.historyId || task.status === 'progress';
+      checkbox.addEventListener('change', () => {
+        toggleSelectedDownloadTask(task.key, checkbox.checked);
+        item.classList.toggle('is-selected', checkbox.checked);
+      });
+      selectionCheckbox = checkbox;
+      item.appendChild(checkbox);
+    }
 
     const main = document.createElement('div');
     main.className = 'download-task-main';
@@ -1858,6 +2044,28 @@ function renderUploadTasks() {
     item.appendChild(main);
     item.appendChild(updated);
     uploadTaskList.appendChild(item);
+
+    item.addEventListener('click', (event) => {
+      if (!downloadSelectionMode || !selectionCheckbox || selectionCheckbox.disabled) {
+        return;
+      }
+      if (event.target.closest('button, a, input, textarea, select, summary, details')) {
+        return;
+      }
+      selectionCheckbox.checked = !selectionCheckbox.checked;
+      toggleSelectedDownloadTask(task.key, selectionCheckbox.checked);
+      item.classList.toggle('is-selected', selectionCheckbox.checked);
+    });
+  });
+
+  renderTransferPagination(uploadTaskList, {
+    id: 'upload-task-pagination',
+    currentPage,
+    totalPages,
+    onPageChange: (nextPage) => {
+      uploadTasksPage = nextPage;
+      renderUploadTasks();
+    },
   });
 }
 
@@ -1972,9 +2180,11 @@ function setHint(element, text) {
 }
 
 function updateSelectionBar() {
-  if (!selectionBar || !selectionCount || !deleteSelectedButton) return;
+  if (!selectionRow || !selectionBar || !selectionCount || !deleteSelectedButton) return;
   const count = selectedMessages.size;
   const selectableCount = selectionMode ? getSelectableMessages().length : 0;
+  selectionRow.hidden = !selectionMode;
+  selectionRow.style.display = selectionMode ? 'flex' : 'none';
   selectionBar.hidden = !selectionMode;
   selectionBar.style.display = selectionMode ? 'flex' : 'none';
   selectionCount.hidden = !selectionMode;
@@ -2122,10 +2332,21 @@ function getSelectableDownloadTasks() {
   );
 }
 
+function pruneSelectedUploadTasks() {
+  const selectable = new Set(getSelectableUploadTasks().map((task) => task.key));
+  Array.from(selectedUploadTasks).forEach((key) => {
+    if (!selectable.has(key)) {
+      selectedUploadTasks.delete(key);
+    }
+  });
+}
+
 function updateDownloadSelectionBar() {
-  if (!downloadSelectionBar || !downloadSelectionCount || !downloadDeleteSelectedButton) return;
-  const count = selectedDownloadTasks.size;
-  const selectableCount = downloadSelectionMode ? getSelectableDownloadTasks().length : 0;
+  if (!downloadSelectionRow || !downloadSelectionBar || !downloadSelectionCount || !downloadDeleteSelectedButton) return;
+  const count = getCurrentTransferSelectionSet().size;
+  const selectableCount = downloadSelectionMode ? getSelectableTransferTasks().length : 0;
+  downloadSelectionRow.hidden = !downloadSelectionMode;
+  downloadSelectionRow.style.display = downloadSelectionMode ? 'flex' : 'none';
   downloadSelectionBar.hidden = !downloadSelectionMode;
   downloadSelectionBar.style.display = downloadSelectionMode ? 'flex' : 'none';
   downloadSelectionCount.hidden = !downloadSelectionMode;
@@ -2145,10 +2366,15 @@ function setDownloadSelectionMode(enabled) {
   downloadSelectionMode = enabled;
   if (!downloadSelectionMode) {
     selectedDownloadTasks.clear();
+    selectedUploadTasks.clear();
+  } else {
+    pruneSelectedDownloadTasks();
+    pruneSelectedUploadTasks();
   }
   updateDownloadSelectionToggleLabel();
   updateDownloadSelectionBar();
   renderDownloadTasks();
+  renderUploadTasks();
 }
 
 function toggleDownloadSelectionMode() {
@@ -2157,10 +2383,11 @@ function toggleDownloadSelectionMode() {
 
 function toggleSelectedDownloadTask(key, checked) {
   if (!key) return;
+  const selectedTasks = getCurrentTransferSelectionSet();
   if (checked) {
-    selectedDownloadTasks.add(key);
+    selectedTasks.add(key);
   } else {
-    selectedDownloadTasks.delete(key);
+    selectedTasks.delete(key);
   }
   updateDownloadSelectionBar();
 }
@@ -2169,10 +2396,12 @@ function selectAllDownloadTasks() {
   if (!downloadSelectionMode) {
     setDownloadSelectionMode(true);
   }
-  selectedDownloadTasks.clear();
-  getSelectableDownloadTasks().forEach((task) => selectedDownloadTasks.add(task.key));
+  const selectedTasks = getCurrentTransferSelectionSet();
+  selectedTasks.clear();
+  getSelectableTransferTasks().forEach((task) => selectedTasks.add(task.key));
   updateDownloadSelectionBar();
   renderDownloadTasks();
+  renderUploadTasks();
 }
 
 function pruneSelectedDownloadTasks() {
@@ -3443,6 +3672,57 @@ async function deleteDownloadHistoryRecord(task) {
 }
 
 async function deleteSelectedDownloadTasks() {
+  if (currentTransferListView === 'uploads') {
+    const uploadTasksByKey = new Map(getVisibleUploadTasks().map((task) => [task.key, task]));
+    const selectedUploads = Array.from(selectedUploadTasks)
+      .map((key) => uploadTasksByKey.get(key))
+      .filter((task) => task?.historyId && task.status !== 'progress');
+    if (!selectedUploads.length) {
+      await showInfoDialog({
+        title: '删除失败',
+        message: '请先选择要删除的上传记录',
+      });
+      return;
+    }
+    try {
+      if (!invoke) {
+        await showInfoDialog({
+          title: '删除失败',
+          message: '未检测到 Tauri API，请检查 app.withGlobalTauri 设置',
+        });
+        return;
+      }
+      const confirmed = await showConfirmationDialog({
+        title: '删除上传记录',
+        message: `确认删除 ${selectedUploads.length} 条上传记录，包括本地文件吗？`,
+        confirmLabel: '删除',
+      });
+      if (!confirmed) {
+        return;
+      }
+      const recordIds = selectedUploads
+        .map((task) => task.historyId)
+        .filter((id) => Number.isInteger(id));
+      await invoke('clear_upload_history_records', { recordIds });
+      setDownloadSelectionMode(false);
+      await loadPersistedUploadHistory({ silent: true });
+      const successMessage = `已删除 ${recordIds.length} 条上传记录`;
+      setSuccessStatus(successMessage);
+      await showInfoDialog({
+        title: '删除成功',
+        message: successMessage,
+      });
+    } catch (error) {
+      console.error('[upload] delete selected history error', error);
+      setErrorStatus(`删除上传记录失败：${error}`);
+      await showInfoDialog({
+        title: '删除上传记录失败',
+        message: String(error),
+      });
+    }
+    return;
+  }
+
   const selected = Array.from(selectedDownloadTasks)
     .map((key) => downloadTasks.get(key))
     .filter((task) => task?.historyId && !isDownloadTaskActive(task));
@@ -4183,34 +4463,23 @@ function renderMessages(messages, options = {}) {
         body.textContent = message.original_name || message.filename || '';
       }
       
-      body.addEventListener('click', (event) => {
-        if (selectionMode) {
-          return;
-        }
+    }
+
+    body.addEventListener('click', (event) => {
+      if (
+        event.target.closest(
+          'button, a, input, textarea, select, summary, details, .action-menu, .message-actions',
+        )
+      ) {
+        return;
+      }
+      if (selectionMode) {
         if (message.uploading) {
-          return;
-        }
-        if (event.target.closest('button, a, input, textarea, select, summary, details')) {
           return;
         }
         if (fileBodyClickTimer) {
           clearTimeout(fileBodyClickTimer);
-        }
-        fileBodyClickTimer = setTimeout(() => {
-          openMessageFile(message);
           fileBodyClickTimer = null;
-        }, 180);
-      });
-    }
-
-    if (selectionMode && !message.uploading) {
-      item.addEventListener('click', (event) => {
-        if (
-          event.target.closest(
-            'button, a, input, textarea, select, summary, details, .action-menu, .message-actions',
-          )
-        ) {
-          return;
         }
         const nextChecked = !selectedMessages.has(message.filename);
         toggleSelectedMessage(message.filename, nextChecked);
@@ -4218,8 +4487,19 @@ function renderMessages(messages, options = {}) {
         if (selectionCheckbox) {
           selectionCheckbox.checked = nextChecked;
         }
-      });
-    }
+        return;
+      }
+      if (message.kind !== 'file' || message.uploading) {
+        return;
+      }
+      if (fileBodyClickTimer) {
+        clearTimeout(fileBodyClickTimer);
+      }
+      fileBodyClickTimer = setTimeout(() => {
+        openMessageFile(message);
+        fileBodyClickTimer = null;
+      }, 180);
+    });
 
     const meta = document.createElement('div');
     meta.className = 'message-meta';

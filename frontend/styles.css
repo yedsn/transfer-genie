@@ -191,6 +191,8 @@ body {
 .download-task-panel {
   display: flex;
   flex-direction: column;
+  flex: 1;
+  min-height: 0;
   gap: 12px;
   padding: 14px 16px;
   border: 1px solid rgba(255, 122, 47, 0.18);
@@ -199,6 +201,7 @@ body {
     linear-gradient(135deg, rgba(255, 122, 47, 0.08), rgba(255, 255, 255, 0.92)),
     var(--panel);
   box-shadow: 0 10px 28px rgba(15, 15, 25, 0.06);
+  overflow: hidden;
 }
 
 .downloads-page {
@@ -275,6 +278,15 @@ body {
   flex-wrap: wrap;
 }
 
+.transfer-list-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
 .transfer-list-tab {
   display: inline-flex;
   align-items: center;
@@ -332,9 +344,31 @@ body {
   padding: 0;
   display: flex;
   flex-direction: column;
+  flex: 1;
+  min-height: 0;
   gap: 8px;
-  max-height: min(100%, 520px);
   overflow-y: auto;
+  padding-right: 8px;
+}
+
+.transfer-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 8px 0 4px;
+}
+
+.transfer-pagination .pagination-info {
+  font-size: 14px;
+  color: var(--ink-secondary);
+  min-width: 60px;
+  text-align: center;
+}
+
+.transfer-pagination .button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .download-task-empty {
@@ -876,6 +910,7 @@ body {
   margin-left: auto;
 }
 
+.selection-row,
 .marked-selection-row {
   display: flex;
   align-items: center;
@@ -884,6 +919,7 @@ body {
   flex-wrap: wrap;
 }
 
+.selection-row .selection-bar,
 .marked-selection-row .selection-bar {
   flex-wrap: wrap;
 }
@@ -3037,7 +3073,16 @@ body.preview-open {
     gap: 12px;
   }
 
+  .transfer-pagination {
+    gap: 12px;
+  }
+
   .marked-pagination .pagination-info {
+    font-size: 13px;
+    min-width: 50px;
+  }
+
+  .transfer-pagination .pagination-info {
     font-size: 13px;
     min-width: 50px;
   }
