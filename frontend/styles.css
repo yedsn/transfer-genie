@@ -627,10 +627,11 @@ body {
 
 .message-body.is-collapsible {
   position: relative;
+  --message-collapse-height: 260px;
 }
 
 .message-body.is-collapsible.is-collapsed {
-  max-height: 260px;
+  max-height: var(--message-collapse-height);
   overflow: hidden;
 }
 
@@ -769,7 +770,7 @@ body {
 
 .marked-page-header {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
   gap: 6px 12px;
 }
@@ -820,6 +821,9 @@ body {
 }
 
 .marked-tag-filter-panel {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   padding: 0;
   border: none;
   border-radius: 0;
@@ -857,11 +861,18 @@ body {
 }
 
 .marked-tag-filter-list {
+  flex: 1 1 auto;
+  min-width: 0;
   flex-wrap: nowrap;
   align-items: center;
   gap: 10px;
   overflow-x: auto;
   scrollbar-width: thin;
+}
+
+.marked-tag-filter-panel > .refresh-button {
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 
 .marked-tag-filter-prefix {
@@ -920,6 +931,7 @@ body {
 
 .marked-message-list .message-card {
   width: 100%;
+  position: relative;
   gap: 12px;
   padding: 14px 16px;
   border: 1px solid rgba(225, 215, 206, 0.95);
@@ -927,6 +939,12 @@ body {
   background: rgba(255, 255, 255, 0.9);
   box-shadow: 0 8px 24px rgba(15, 15, 25, 0.04);
   align-items: stretch;
+}
+
+.marked-message-list .message-card.is-pinned {
+  border-color: rgba(255, 122, 47, 0.45);
+  background: linear-gradient(180deg, rgba(255, 245, 237, 0.95) 0%, rgba(255, 255, 255, 0.96) 100%);
+  box-shadow: 0 10px 28px rgba(233, 100, 27, 0.12);
 }
 
 .marked-message-list .message-header,
@@ -938,11 +956,17 @@ body {
 .marked-message-list .message-header {
   width: 100%;
   justify-content: space-between;
+  padding-right: 64px;
 }
 
 .marked-message-list .message-body {
   width: 100%;
   background: #fff;
+}
+
+.marked-message-list .message-card.is-pinned .message-body {
+  background: #fff5ed;
+  border-color: var(--accent);
 }
 
 .marked-message-list .message-footer {
@@ -965,6 +989,25 @@ body {
 
 .marked-message-list .marked-message-tags {
   width: 100%;
+}
+
+.marked-message-corner-badge {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 56px;
+  height: 28px;
+  padding: 0 12px;
+  border-bottom-left-radius: 14px;
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  box-shadow: 0 8px 18px rgba(233, 100, 27, 0.24);
 }
 
 .marked-message-list .message-expand-toggle {

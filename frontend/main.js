@@ -143,6 +143,7 @@ const selectedDownloadTasks = new Set();
 const expandedTextMessages = new Set();
 let currentPreviewMessage = null;
 const MESSAGE_BODY_COLLAPSE_HEIGHT = 260;
+const MARKED_MESSAGE_BODY_COLLAPSE_HEIGHT = 130;
 let isRefreshRunning = false;
 let isLoadMessagesRunning = false;
 let isLoadSyncStatusRunning = false;
@@ -2029,6 +2030,13 @@ function scrollMessageListToBottom() {
   });
 }
 
+function scrollMarkedMessageListToTop() {
+  if (!markedMessageList) return;
+  requestAnimationFrame(() => {
+    markedMessageList.scrollTop = 0;
+  });
+}
+
 function focusTextInput() {
   if (currentFormat === 'markdown' && mdEditor) {
     // editormd doesn't always have a simple focus() but we can try its cm instance
@@ -2751,10 +2759,14 @@ async function downloadTextMessageAsFile(message) {
   }
 }
 
-function applyMessageBodyCollapse(item, body, message) {
+function applyMessageBodyCollapse(item, body, message, options = {}) {
   if (!item || !body || !message || message.kind !== 'text') {
     return;
   }
+
+  const collapseHeight = Number(options.collapseHeight) > 0
+    ? Number(options.collapseHeight)
+    : MESSAGE_BODY_COLLAPSE_HEIGHT;
 
   const oldToggle = item.querySelector('.message-expand-toggle');
   if (oldToggle) {
@@ -2762,7 +2774,8 @@ function applyMessageBodyCollapse(item, body, message) {
   }
 
   body.classList.remove('is-collapsible', 'is-collapsed');
-  const exceedsLimit = body.scrollHeight > MESSAGE_BODY_COLLAPSE_HEIGHT + 4;
+  body.style.setProperty('--message-collapse-height', `${collapseHeight}px`);
+  const exceedsLimit = body.scrollHeight > collapseHeight + 4;
   if (!exceedsLimit) {
     expandedTextMessages.delete(message.filename);
     return;
@@ -6092,6 +6105,7 @@ if (markedRefreshButton) {
     }
     try {
       await Promise.all([loadMarkedTags(), loadMarkedMessages()]);
+      scrollMarkedMessageListToTop();
       showToast('刷新成功', 'success');
     } catch (error) {
       showToast(`刷新失败: ${error}`, 'error');
@@ -6727,6 +6741,9 @@ function renderMarkedTagFilters() {
   if (!markedTagFilterList) return;
   if (markedTagFilterPanel) {
     markedTagFilterPanel.hidden = false;
+    if (markedRefreshButton && markedRefreshButton.parentElement !== markedTagFilterPanel) {
+      markedTagFilterPanel.appendChild(markedRefreshButton);
+    }
   }
   markedTagFilterList.innerHTML = '';
 
@@ -6893,10 +6910,19 @@ function renderMarkedMessages(messages = [], options = {}) {
 
   pageMessages.forEach((message) => {
     const item = document.createElement('li');
-    item.className = 'message-card is-marked';
+    item.className = 'message-card';
     item.dataset.filename = message.filename;
     item.classList.toggle('is-file', message.kind === 'file');
     item.classList.toggle('is-text', message.kind !== 'file');
+    item.classList.toggle('is-pinned', !!message.marked_pinned);
+
+    if (message.marked_pinned) {
+      const pinnedBadge = document.createElement('span');
+      pinnedBadge.className = 'marked-message-corner-badge';
+      pinnedBadge.textContent = '置顶';
+      pinnedBadge.setAttribute('aria-label', '已置顶');
+      item.appendChild(pinnedBadge);
+    }
 
     const header = document.createElement('div');
     header.className = 'message-header';
@@ -7067,7 +7093,9 @@ function renderMarkedMessages(messages = [], options = {}) {
     });
     markedMessageList.appendChild(item);
     if (message.kind === 'text') {
-      applyMessageBodyCollapse(item, body, message);
+      applyMessageBodyCollapse(item, body, message, {
+        collapseHeight: MARKED_MESSAGE_BODY_COLLAPSE_HEIGHT,
+      });
     }
   });
 
