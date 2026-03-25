@@ -793,8 +793,34 @@ body {
   gap: 8px;
 }
 
+.marked-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#marked-search-input {
+  width: min(100%, 420px);
+  flex: 1 1 420px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  padding: 10px 12px;
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--ink);
+  background: #fff;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+
+#marked-search-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: #fff;
+  box-shadow: 0 0 0 2px rgba(255, 122, 47, 0.15);
+}
+
 .marked-tag-filter-panel {
-  padding: 10px 0 0;
+  padding: 0;
   border: none;
   border-radius: 0;
   background: transparent;
@@ -835,7 +861,6 @@ body {
   align-items: center;
   gap: 10px;
   overflow-x: auto;
-  padding: 0 2px 8px;
   scrollbar-width: thin;
 }
 
@@ -2904,6 +2929,10 @@ body.preview-open {
 
   .marked-page-actions {
     display: none;
+  }
+
+  #marked-search-input {
+    width: 100%;
   }
 
   .downloads-page-actions {

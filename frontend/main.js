@@ -98,6 +98,8 @@ const markedTabBadge = document.getElementById('marked-tab-badge');
 const markedMessageList = document.getElementById('marked-message-list');
 const markedRefreshButton = document.getElementById('marked-refresh-btn');
 const markedRefreshLabel = markedRefreshButton ? markedRefreshButton.querySelector('.refresh-label') : null;
+const markedSearchInput = document.getElementById('marked-search-input');
+const markedSearchButton = document.getElementById('marked-search-button');
 const toggleMarkedTagFilterButton = document.getElementById('toggle-marked-tag-filter');
 const markedTagFilterPanel = document.getElementById('marked-tag-filter-panel');
 const markedTagFilterList = document.getElementById('marked-tag-filter-list');
@@ -147,6 +149,7 @@ let isLoadSyncStatusRunning = false;
 let markedMessages = [];
 let markedTags = [];
 let activeMarkedTagId = null;
+let appliedMarkedSearchQuery = '';
 let currentMarkingMessage = null;
 const selectedMarkTagIds = new Set();
 
@@ -6853,14 +6856,27 @@ async function toggleMessageMarked(message) {
   }
 }
 
-function renderMarkedMessages(messages = []) {
+function getAppliedMarkedSearchQuery() {
+  return appliedMarkedSearchQuery;
+}
+
+async function executeMarkedSearch() {
+  appliedMarkedSearchQuery = markedSearchInput ? markedSearchInput.value.trim() : '';
+  markedMessagesPage = 1;
+  await loadMarkedMessages();
+}
+
+function renderMarkedMessages(messages = [], options = {}) {
   if (!markedMessageList) return;
+  const { query = '' } = options;
   markedMessageList.innerHTML = '';
 
   if (!messages.length) {
     const empty = document.createElement('li');
     empty.className = 'message-card';
-    empty.textContent = activeMarkedTagId ? '当前标签下暂无标记消息' : '暂无标记消息';
+    empty.textContent = query
+      ? `没有找到与 "${query}" 匹配的标记消息`
+      : (activeMarkedTagId ? '当前标签下暂无标记消息' : '暂无标记消息');
     markedMessageList.appendChild(empty);
     renderMarkedPagination(0, 0);
     return;
@@ -7078,7 +7094,9 @@ function renderMarkedPagination(totalCount, totalPages) {
   prevButton.addEventListener('click', () => {
     if (markedMessagesPage > 1) {
       markedMessagesPage--;
-      renderMarkedMessages(markedMessages);
+      renderMarkedMessages(markedMessages, {
+        query: getAppliedMarkedSearchQuery(),
+      });
     }
   });
   paginationContainer.appendChild(prevButton);
@@ -7097,7 +7115,9 @@ function renderMarkedPagination(totalCount, totalPages) {
   nextButton.addEventListener('click', () => {
     if (markedMessagesPage < totalPages) {
       markedMessagesPage++;
-      renderMarkedMessages(markedMessages);
+      renderMarkedMessages(markedMessages, {
+        query: getAppliedMarkedSearchQuery(),
+      });
     }
   });
   paginationContainer.appendChild(nextButton);
@@ -7118,12 +7138,17 @@ async function loadMarkedMessages() {
   }
 
   try {
-    const result = await invoke('list_marked_messages', { tagId: activeMarkedTagId });
+    const result = await invoke('list_marked_messages', {
+      tagId: activeMarkedTagId,
+      searchQuery: getAppliedMarkedSearchQuery() || null,
+    });
     markedMessages = result.messages || [];
     // 切换标签时重置页码
     markedMessagesPage = 1;
     updateMarkedBadge(result.marked_count || 0);
-    renderMarkedMessages(markedMessages);
+    renderMarkedMessages(markedMessages, {
+      query: getAppliedMarkedSearchQuery(),
+    });
   } catch (error) {
     showToast(`读取标记列表失败: ${error}`, 'error');
   }
@@ -7163,5 +7188,19 @@ function updateAndRender(options = {}) {
 if (searchInput) {
   searchInput.addEventListener('input', () => {
     updateAndRender({ preserveScroll: true });
+  });
+}
+
+if (markedSearchButton) {
+  markedSearchButton.addEventListener('click', async () => {
+    await executeMarkedSearch();
+  });
+}
+
+if (markedSearchInput) {
+  markedSearchInput.addEventListener('keydown', async (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    await executeMarkedSearch();
   });
 }

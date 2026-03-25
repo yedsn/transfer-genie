@@ -831,13 +831,19 @@ async fn toggle_marked_message_pin(
 fn list_marked_messages(
     state: State<'_, AppState>,
     tag_id: Option<String>,
+    search_query: Option<String>,
 ) -> Result<MessagesResult, String> {
     let settings = current_settings(&state)?;
     let endpoint = resolve_active_endpoint(&settings)?;
     let marked_count =
         db::count_messages(&state.db_path, &endpoint.id, true).map_err(|err| err.to_string())?;
-    let messages = db::list_marked_messages(&state.db_path, &endpoint.id, tag_id.as_deref())
-        .map_err(|err| err.to_string())?;
+    let messages = db::list_marked_messages(
+        &state.db_path,
+        &endpoint.id,
+        tag_id.as_deref(),
+        search_query.as_deref(),
+    )
+    .map_err(|err| err.to_string())?;
     let total = messages.len() as i64;
     Ok(MessagesResult {
         messages,

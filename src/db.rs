@@ -1,4 +1,4 @@
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension, ToSql};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row, ToSql};
 use serde_json;
 use std::path::Path;
 
@@ -466,13 +466,25 @@ pub fn list_marked_messages(
     path: &Path,
     endpoint_id: &str,
     tag_id: Option<&str>,
+    search_query: Option<&str>,
 ) -> rusqlite::Result<Vec<Message>> {
     let conn = Connection::open(path)?;
-    let mut stmt = conn.prepare(
+    let normalized_search = search_query
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .map(|query| format!("%{}%", query.to_lowercase()));
+    let mut sql =
         "SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, format \
-         FROM messages WHERE endpoint_id = ?1 AND marked = 1 ORDER BY marked_pinned DESC, timestamp_ms DESC",
-    )?;
-    let rows = stmt.query_map([endpoint_id], |row| {
+         FROM messages WHERE endpoint_id = ?1 AND marked = 1"
+            .to_string();
+    if normalized_search.is_some() {
+        sql.push_str(
+            " AND (LOWER(COALESCE(content, '')) LIKE ?2 OR LOWER(COALESCE(original_name, '')) LIKE ?2 OR LOWER(filename) LIKE ?2)",
+        );
+    }
+    sql.push_str(" ORDER BY marked_pinned DESC, timestamp_ms DESC");
+    let mut stmt = conn.prepare(&sql)?;
+    let map_row = |row: &Row<'_>| -> rusqlite::Result<Message> {
         let marked_tag_ids: String = row.get(11)?;
         Ok(Message {
             filename: row.get(0)?,
@@ -491,7 +503,12 @@ pub fn list_marked_messages(
             marked_pinned: row.get(12)?,
             format: row.get(13)?,
         })
-    })?;
+    };
+    let rows = if let Some(search_term) = normalized_search.as_deref() {
+        stmt.query_map(params![endpoint_id, search_term], map_row)?
+    } else {
+        stmt.query_map(params![endpoint_id], map_row)?
+    };
 
     let mut messages = Vec::new();
     for row in rows {
@@ -1025,8 +1042,8 @@ mod tests {
         upsert_message(&path, &sample_message("tag-b-new.txt", 300, &["tag-b"], false))
             .expect("insert second tag message");
 
-        let all_messages =
-            list_marked_messages(&path, "endpoint-1", None).expect("list all marked messages");
+        let all_messages = list_marked_messages(&path, "endpoint-1", None, None)
+            .expect("list all marked messages");
         let all_filenames: Vec<_> = all_messages
             .iter()
             .map(|message| message.filename.as_str())
@@ -1036,13 +1053,54 @@ mod tests {
             vec!["tag-a-pinned.txt", "tag-b-new.txt", "tag-a-old.txt"]
         );
 
-        let filtered_messages = list_marked_messages(&path, "endpoint-1", Some("tag-a"))
+        let filtered_messages = list_marked_messages(&path, "endpoint-1", Some("tag-a"), None)
             .expect("list filtered marked messages");
         let filtered_filenames: Vec<_> = filtered_messages
             .iter()
             .map(|message| message.filename.as_str())
             .collect();
         assert_eq!(filtered_filenames, vec!["tag-a-pinned.txt", "tag-a-old.txt"]);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn list_marked_messages_filters_by_search_query() {
+        let path = temp_db_path("marked-message-search");
+        init_db(&path, None).expect("initialize database");
+
+        upsert_message(&path, &sample_message("合同-草稿.txt", 100, &["tag-a"], false))
+            .expect("insert matching text message");
+
+        let mut file_message = sample_message("archive.bin", 200, &["tag-b"], false);
+        file_message.kind = "file".to_string();
+        file_message.original_name = "客户合同.pdf".to_string();
+        file_message.content = None;
+        upsert_message(&path, &file_message).expect("insert matching file message");
+
+        upsert_message(&path, &sample_message("无关记录.txt", 300, &["tag-a"], false))
+            .expect("insert non-matching message");
+
+        let matched_messages = list_marked_messages(&path, "endpoint-1", None, Some("合同"))
+            .expect("list searched marked messages");
+        let matched_filenames: Vec<_> = matched_messages
+            .iter()
+            .map(|message| message.filename.as_str())
+            .collect();
+        assert_eq!(matched_filenames, vec!["archive.bin", "合同-草稿.txt"]);
+
+        let tag_filtered_messages =
+            list_marked_messages(&path, "endpoint-1", Some("tag-a"), Some("合同"))
+                .expect("list searched tag-filtered messages");
+        let tag_filtered_filenames: Vec<_> = tag_filtered_messages
+            .iter()
+            .map(|message| message.filename.as_str())
+            .collect();
+        assert_eq!(tag_filtered_filenames, vec!["合同-草稿.txt"]);
+
+        let all_messages = list_marked_messages(&path, "endpoint-1", None, Some("   "))
+            .expect("blank search should behave like no search");
+        assert_eq!(all_messages.len(), 3);
 
         let _ = std::fs::remove_file(path);
     }
