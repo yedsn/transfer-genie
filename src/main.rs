@@ -613,6 +613,42 @@ fn ensure_unique_marked_tag_name(
     Ok(())
 }
 
+fn sanitize_marked_tag_ids(tags: &[MarkedTag], tag_ids: Vec<String>) -> Vec<String> {
+    let mut valid_tag_ids: Vec<String> = tag_ids
+        .into_iter()
+        .filter(|tag_id| tags.iter().any(|tag| tag.id == *tag_id))
+        .collect();
+    valid_tag_ids.sort();
+    valid_tag_ids.dedup();
+    valid_tag_ids
+}
+
+fn apply_marked_tag_ids_to_entries(
+    history_entries: &mut [HistoryEntry],
+    filenames: &[String],
+    tag_ids: &[String],
+) -> usize {
+    if filenames.is_empty() {
+        return 0;
+    }
+
+    let filename_set: HashSet<&str> = filenames.iter().map(String::as_str).collect();
+    let mut changed = 0;
+
+    for entry in history_entries.iter_mut() {
+        if !entry.marked || !filename_set.contains(entry.filename.as_str()) {
+            continue;
+        }
+        if entry.marked_tag_ids == tag_ids {
+            continue;
+        }
+        entry.marked_tag_ids = tag_ids.to_vec();
+        changed += 1;
+    }
+
+    changed
+}
+
 fn apply_marked_state(
     marked_flag: &mut bool,
     marked_tag_ids: &mut Vec<String>,
@@ -673,12 +709,7 @@ async fn set_message_marked(
     let endpoint = resolve_active_endpoint(&settings)?;
     let _guard = state.sync_guard.lock().await;
     let mut loaded = crate::history::load_history_with_layout(&state.http, &endpoint).await?;
-    let mut valid_tag_ids: Vec<String> = tag_ids
-        .into_iter()
-        .filter(|tag_id| loaded.tags.iter().any(|tag| tag.id == *tag_id))
-        .collect();
-    valid_tag_ids.sort();
-    valid_tag_ids.dedup();
+    let valid_tag_ids = sanitize_marked_tag_ids(&loaded.tags, tag_ids);
 
     let mut changed = false;
     let existing =
@@ -718,6 +749,41 @@ async fn set_message_marked(
     }
 
     Ok(())
+}
+
+#[tauri::command]
+async fn set_marked_messages_tags(
+    state: State<'_, AppState>,
+    filenames: Vec<String>,
+    tag_ids: Vec<String>,
+) -> Result<usize, String> {
+    let settings = current_settings(&state)?;
+    let endpoint = resolve_active_endpoint(&settings)?;
+    let _guard = state.sync_guard.lock().await;
+
+    let mut unique_filenames: Vec<String> = filenames
+        .into_iter()
+        .map(|filename| filename.trim().to_string())
+        .filter(|filename| !filename.is_empty())
+        .collect();
+    unique_filenames.sort();
+    unique_filenames.dedup();
+    if unique_filenames.is_empty() {
+        return Ok(0);
+    }
+
+    let mut loaded = crate::history::load_history_with_layout(&state.http, &endpoint).await?;
+    let valid_tag_ids = sanitize_marked_tag_ids(&loaded.tags, tag_ids);
+    let changed =
+        apply_marked_tag_ids_to_entries(&mut loaded.entries, &unique_filenames, &valid_tag_ids);
+
+    if changed == 0 {
+        return Ok(0);
+    }
+
+    crate::history::save_history(&state.http, &endpoint, &loaded.entries, &loaded.tags).await?;
+    sync_marked_metadata_to_db(state.inner(), &endpoint.id, &loaded.entries, &loaded.tags)?;
+    Ok(changed)
 }
 
 #[tauri::command]
@@ -5138,6 +5204,7 @@ fn main() {
             stop_telegram_bridge,
             mark_message,
             unmark_message,
+            set_marked_messages_tags,
             create_marked_tag,
             delete_marked_tag,
             rename_marked_tag,
@@ -5332,6 +5399,113 @@ mod tests {
         assert!(!marked);
         assert!(marked_tag_ids.is_empty());
         assert!(!marked_pinned);
+    }
+
+    #[test]
+    fn sanitize_marked_tag_ids_filters_invalid_and_duplicate_values() {
+        let tags = vec![
+            MarkedTag {
+                id: "tag-2".to_string(),
+                name: "Two".to_string(),
+            },
+            MarkedTag {
+                id: "tag-1".to_string(),
+                name: "One".to_string(),
+            },
+        ];
+
+        let sanitized = sanitize_marked_tag_ids(
+            &tags,
+            vec![
+                "tag-2".to_string(),
+                "missing".to_string(),
+                "tag-1".to_string(),
+                "tag-2".to_string(),
+            ],
+        );
+
+        assert_eq!(sanitized, vec!["tag-1".to_string(), "tag-2".to_string()]);
+    }
+
+    #[test]
+    fn apply_marked_tag_ids_to_entries_updates_only_selected_marked_messages() {
+        let mut entries = vec![
+            HistoryEntry {
+                filename: "selected.txt".to_string(),
+                sender: "tester".to_string(),
+                timestamp_ms: 1,
+                size: 1,
+                kind: "text".to_string(),
+                original_name: "selected.txt".to_string(),
+                remote_path: None,
+                marked: true,
+                marked_tag_ids: vec!["old".to_string()],
+                marked_pinned: false,
+                format: "text".to_string(),
+            },
+            HistoryEntry {
+                filename: "unselected.txt".to_string(),
+                sender: "tester".to_string(),
+                timestamp_ms: 2,
+                size: 1,
+                kind: "text".to_string(),
+                original_name: "unselected.txt".to_string(),
+                remote_path: None,
+                marked: true,
+                marked_tag_ids: vec!["keep".to_string()],
+                marked_pinned: false,
+                format: "text".to_string(),
+            },
+            HistoryEntry {
+                filename: "not-marked.txt".to_string(),
+                sender: "tester".to_string(),
+                timestamp_ms: 3,
+                size: 1,
+                kind: "text".to_string(),
+                original_name: "not-marked.txt".to_string(),
+                remote_path: None,
+                marked: false,
+                marked_tag_ids: vec!["keep".to_string()],
+                marked_pinned: false,
+                format: "text".to_string(),
+            },
+        ];
+
+        let changed = apply_marked_tag_ids_to_entries(
+            &mut entries,
+            &["selected.txt".to_string(), "not-marked.txt".to_string()],
+            &["tag-a".to_string(), "tag-b".to_string()],
+        );
+
+        assert_eq!(changed, 1);
+        assert_eq!(
+            entries[0].marked_tag_ids,
+            vec!["tag-a".to_string(), "tag-b".to_string()]
+        );
+        assert_eq!(entries[1].marked_tag_ids, vec!["keep".to_string()]);
+        assert_eq!(entries[2].marked_tag_ids, vec!["keep".to_string()]);
+    }
+
+    #[test]
+    fn apply_marked_tag_ids_to_entries_is_noop_without_selection() {
+        let mut entries = vec![HistoryEntry {
+            filename: "selected.txt".to_string(),
+            sender: "tester".to_string(),
+            timestamp_ms: 1,
+            size: 1,
+            kind: "text".to_string(),
+            original_name: "selected.txt".to_string(),
+            remote_path: None,
+            marked: true,
+            marked_tag_ids: vec!["old".to_string()],
+            marked_pinned: false,
+            format: "text".to_string(),
+        }];
+
+        let changed = apply_marked_tag_ids_to_entries(&mut entries, &[], &["tag-a".to_string()]);
+
+        assert_eq!(changed, 0);
+        assert_eq!(entries[0].marked_tag_ids, vec!["old".to_string()]);
     }
 
     #[test]

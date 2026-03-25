@@ -104,6 +104,14 @@ const toggleMarkedTagFilterButton = document.getElementById('toggle-marked-tag-f
 const markedTagFilterPanel = document.getElementById('marked-tag-filter-panel');
 const markedTagFilterList = document.getElementById('marked-tag-filter-list');
 const markedTagAddButton = document.getElementById('marked-tag-add-button');
+let markedToggleSelectionButton = document.getElementById('marked-toggle-selection');
+let markedSelectionRow = document.querySelector('.marked-selection-row');
+let markedSelectionBar = document.getElementById('marked-selection-bar');
+let markedSelectionCount = document.getElementById('marked-selection-count');
+let markedSelectAllButton = document.getElementById('marked-select-all');
+let markedEditTagsButton = document.getElementById('marked-edit-tags');
+let markedDeleteSelectedButton = document.getElementById('marked-delete-selected');
+let markedCancelSelectionButton = document.getElementById('marked-cancel-selection');
 const markMessageModal = document.getElementById('mark-message-modal');
 const markMessageCloseButton = document.getElementById('mark-message-close');
 const markMessageCancelButton = document.getElementById('mark-message-cancel');
@@ -119,6 +127,84 @@ const messagePreviewActions = document.getElementById('message-preview-actions')
 const messagePreviewClose = document.querySelector('.message-preview-close');
 const messagePreviewBackdrop = messagePreview ? messagePreview.querySelector('.message-preview-backdrop') : null;
 const searchInput = document.getElementById('search-input');
+
+function ensureMarkedSelectionControls() {
+  if (markedSearchInput && !markedToggleSelectionButton) {
+    const searchRow = markedSearchInput.closest('.marked-search');
+    if (searchRow) {
+      markedToggleSelectionButton = document.createElement('button');
+      markedToggleSelectionButton.id = 'marked-toggle-selection';
+      markedToggleSelectionButton.className = 'button ghost small';
+      markedToggleSelectionButton.type = 'button';
+      markedToggleSelectionButton.textContent = '选择';
+    }
+  }
+
+  if (markedMessageList && !markedSelectionBar) {
+    const content = markedMessageList.parentElement;
+    if (content?.parentElement) {
+      const selectionRow = document.createElement('div');
+      selectionRow.className = 'marked-selection-row';
+      selectionRow.hidden = true;
+      markedSelectionRow = selectionRow;
+
+      markedSelectionBar = document.createElement('div');
+      markedSelectionBar.id = 'marked-selection-bar';
+      markedSelectionBar.className = 'selection-bar';
+      markedSelectionBar.hidden = true;
+
+      markedSelectAllButton = document.createElement('button');
+      markedSelectAllButton.id = 'marked-select-all';
+      markedSelectAllButton.className = 'button ghost small';
+      markedSelectAllButton.type = 'button';
+      markedSelectAllButton.textContent = '全选';
+
+      markedEditTagsButton = document.createElement('button');
+      markedEditTagsButton.id = 'marked-edit-tags';
+      markedEditTagsButton.className = 'button ghost small';
+      markedEditTagsButton.type = 'button';
+      markedEditTagsButton.textContent = '批量标签';
+
+      markedDeleteSelectedButton = document.createElement('button');
+      markedDeleteSelectedButton.id = 'marked-delete-selected';
+      markedDeleteSelectedButton.className = 'button small';
+      markedDeleteSelectedButton.type = 'button';
+      markedDeleteSelectedButton.textContent = '删除';
+
+      markedCancelSelectionButton = document.createElement('button');
+      markedCancelSelectionButton.id = 'marked-cancel-selection';
+      markedCancelSelectionButton.className = 'button ghost small';
+      markedCancelSelectionButton.type = 'button';
+      markedCancelSelectionButton.textContent = '取消';
+
+      markedSelectionCount = document.createElement('span');
+      markedSelectionCount.id = 'marked-selection-count';
+      markedSelectionCount.className = 'selection-count';
+      markedSelectionCount.hidden = true;
+      markedSelectionCount.textContent = '已选中 0 项';
+
+      markedSelectionBar.appendChild(markedSelectAllButton);
+      markedSelectionBar.appendChild(markedEditTagsButton);
+      markedSelectionBar.appendChild(markedDeleteSelectedButton);
+      markedSelectionBar.appendChild(markedCancelSelectionButton);
+      selectionRow.appendChild(markedSelectionBar);
+      selectionRow.appendChild(markedSelectionCount);
+      content.parentElement.insertBefore(selectionRow, content);
+    }
+  }
+}
+
+ensureMarkedSelectionControls();
+
+if (markMessageConfirmButton) {
+  markMessageConfirmButton.classList.add('has-spinner');
+  if (!markMessageConfirmButton.querySelector('.button-spinner')) {
+    const spinner = document.createElement('span');
+    spinner.className = 'button-spinner';
+    spinner.setAttribute('aria-hidden', 'true');
+    markMessageConfirmButton.appendChild(spinner);
+  }
+}
 
 let selectedFiles = [];
 
@@ -138,6 +224,8 @@ const downloadSpeed = new Map();
 const uploadSpeed = new Map();
 let selectionMode = false;
 const selectedMessages = new Set();
+let markedSelectionMode = false;
+const selectedMarkedMessages = new Set();
 let downloadSelectionMode = false;
 const selectedDownloadTasks = new Set();
 const expandedTextMessages = new Set();
@@ -148,15 +236,19 @@ let isRefreshRunning = false;
 let isLoadMessagesRunning = false;
 let isLoadSyncStatusRunning = false;
 let markedMessages = [];
+let visibleMarkedMessages = [];
 let markedTags = [];
 let activeMarkedTagId = null;
 let appliedMarkedSearchQuery = '';
 let currentMarkingMessage = null;
+let currentMarkingMessages = [];
+let currentMarkingMode = 'single';
 const selectedMarkTagIds = new Set();
 
 // 标记列表分页
 let markedMessagesPage = 1;
 const MARKED_MESSAGES_PER_PAGE = 10;
+const UNTAGGED_MARKED_TAG_FILTER_ID = '__untagged__';
 let telegramBridgeStatusPollTimer = null;
 let currentTransferListView = 'downloads';
 const transferTaskCounts = {
@@ -1941,6 +2033,89 @@ function selectAllMessages() {
   renderMessages(lastMessages);
 }
 
+function getSelectableMarkedMessages() {
+  return visibleMarkedMessages.filter((message) => !!message?.filename);
+}
+
+function pruneSelectedMarkedMessages() {
+  const selectable = new Set(getSelectableMarkedMessages().map((message) => message.filename));
+  Array.from(selectedMarkedMessages).forEach((filename) => {
+    if (!selectable.has(filename)) {
+      selectedMarkedMessages.delete(filename);
+    }
+  });
+}
+
+function updateMarkedSelectionBar() {
+  if (
+    !markedSelectionRow
+    || !markedSelectionBar
+    || !markedSelectionCount
+    || !markedDeleteSelectedButton
+    || !markedEditTagsButton
+  ) {
+    return;
+  }
+  const count = selectedMarkedMessages.size;
+  const selectableCount = markedSelectionMode ? getSelectableMarkedMessages().length : 0;
+  markedSelectionRow.hidden = !markedSelectionMode;
+  markedSelectionRow.style.display = markedSelectionMode ? 'flex' : 'none';
+  markedSelectionBar.hidden = !markedSelectionMode;
+  markedSelectionBar.style.display = markedSelectionMode ? 'flex' : 'none';
+  markedSelectionCount.hidden = !markedSelectionMode;
+  markedSelectionCount.textContent = `已选中 ${count} 项`;
+  markedDeleteSelectedButton.disabled = count === 0;
+  markedEditTagsButton.disabled = count === 0;
+  if (markedSelectAllButton) {
+    markedSelectAllButton.disabled = selectableCount === 0;
+  }
+}
+
+function updateMarkedSelectionToggleLabel() {
+  if (!markedToggleSelectionButton) return;
+  markedToggleSelectionButton.textContent = markedSelectionMode ? '完成' : '选择';
+}
+
+function setMarkedSelectionMode(enabled) {
+  markedSelectionMode = enabled;
+  if (!markedSelectionMode) {
+    selectedMarkedMessages.clear();
+  } else {
+    pruneSelectedMarkedMessages();
+  }
+  updateMarkedSelectionToggleLabel();
+  updateMarkedSelectionBar();
+  renderMarkedMessages(markedMessages, {
+    query: getAppliedMarkedSearchQuery(),
+  });
+}
+
+function toggleMarkedSelectionMode() {
+  setMarkedSelectionMode(!markedSelectionMode);
+}
+
+function toggleSelectedMarkedMessage(filename, checked) {
+  if (!filename) return;
+  if (checked) {
+    selectedMarkedMessages.add(filename);
+  } else {
+    selectedMarkedMessages.delete(filename);
+  }
+  updateMarkedSelectionBar();
+}
+
+function selectAllMarkedMessages() {
+  if (!markedSelectionMode) {
+    setMarkedSelectionMode(true);
+  }
+  selectedMarkedMessages.clear();
+  getSelectableMarkedMessages().forEach((message) => selectedMarkedMessages.add(message.filename));
+  updateMarkedSelectionBar();
+  renderMarkedMessages(markedMessages, {
+    query: getAppliedMarkedSearchQuery(),
+  });
+}
+
 function getSelectableDownloadTasks() {
   return Array.from(downloadTasks.values()).filter(
     (task) => task.historyId && !isDownloadTaskActive(task),
@@ -2062,6 +2237,9 @@ function syncComposerOffset() {
 function setActiveTab(name, options = {}) {
   const target = name || 'home';
   const { scrollToBottom = false, focusInput = false } = options;
+  if (target !== 'marked' && markedSelectionMode) {
+    setMarkedSelectionMode(false);
+  }
   tabButtons.forEach((button) => {
     const isActive = button.dataset.tabTarget === target;
     button.classList.toggle('is-active', isActive);
@@ -2077,7 +2255,7 @@ function setActiveTab(name, options = {}) {
   }
   if (target === 'marked') {
     loadMarkedTags();
-    loadMarkedMessages();
+    loadMarkedMessages({ scrollToTop: true });
   }
   if (target === 'home') {
     if (scrollToBottom) {
@@ -2444,6 +2622,71 @@ function showInfoDialog(options = {}) {
     confirmButton.addEventListener('click', close);
 
     actions.appendChild(confirmButton);
+    dialog.appendChild(title);
+    dialog.appendChild(message);
+    dialog.appendChild(actions);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    document.addEventListener('keydown', onKeyDown);
+  });
+}
+
+function showConfirmDialog(options = {}) {
+  const titleText = options.title || '确认';
+  const messageText = options.message || '';
+  const confirmText = options.confirmLabel || '确认';
+  const cancelText = options.cancelLabel || '取消';
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+
+    const dialog = document.createElement('div');
+    dialog.className = 'dialog';
+
+    const title = document.createElement('h3');
+    title.className = 'dialog-title';
+    title.textContent = titleText;
+
+    const message = document.createElement('p');
+    message.className = 'dialog-text';
+    message.textContent = messageText;
+
+    const actions = document.createElement('div');
+    actions.className = 'dialog-actions';
+
+    const confirmButton = document.createElement('button');
+    confirmButton.className = 'button primary small';
+    confirmButton.textContent = confirmText;
+
+    const cancelButton = document.createElement('button');
+    cancelButton.className = 'button ghost small';
+    cancelButton.textContent = cancelText;
+
+    const cleanup = (confirmed) => {
+      document.removeEventListener('keydown', onKeyDown);
+      overlay.remove();
+      resolve(confirmed);
+    };
+
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        cleanup(false);
+      }
+      if (event.key === 'Enter') {
+        cleanup(true);
+      }
+    };
+
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) {
+        cleanup(false);
+      }
+    });
+    confirmButton.addEventListener('click', () => cleanup(true));
+    cancelButton.addEventListener('click', () => cleanup(false));
+
+    actions.appendChild(confirmButton);
+    actions.appendChild(cancelButton);
     dialog.appendChild(title);
     dialog.appendChild(message);
     dialog.appendChild(actions);
@@ -3957,6 +4200,24 @@ function renderMessages(messages, options = {}) {
           openMessageFile(message);
           fileBodyClickTimer = null;
         }, 180);
+      });
+    }
+
+    if (selectionMode && !message.uploading) {
+      item.addEventListener('click', (event) => {
+        if (
+          event.target.closest(
+            'button, a, input, textarea, select, summary, details, .action-menu, .message-actions',
+          )
+        ) {
+          return;
+        }
+        const nextChecked = !selectedMessages.has(message.filename);
+        toggleSelectedMessage(message.filename, nextChecked);
+        item.classList.toggle('is-selected', nextChecked);
+        if (selectionCheckbox) {
+          selectionCheckbox.checked = nextChecked;
+        }
       });
     }
 
@@ -5855,6 +6116,7 @@ async function switchActiveEndpoint() {
     const updated = await invoke('save_settings', { settings });
     applySettings(updated);
     setSelectionMode(false);
+    setMarkedSelectionMode(false);
     pendingUploads.clear();
     uploadSpeed.clear();
     renderUploadTasks();
@@ -6199,6 +6461,21 @@ if (deleteSelectedButton) {
 }
 if (cancelSelectionButton) {
   cancelSelectionButton.addEventListener('click', () => setSelectionMode(false));
+}
+if (markedToggleSelectionButton) {
+  markedToggleSelectionButton.addEventListener('click', toggleMarkedSelectionMode);
+}
+if (markedSelectAllButton) {
+  markedSelectAllButton.addEventListener('click', selectAllMarkedMessages);
+}
+if (markedEditTagsButton) {
+  markedEditTagsButton.addEventListener('click', editSelectedMarkedMessageTags);
+}
+if (markedDeleteSelectedButton) {
+  markedDeleteSelectedButton.addEventListener('click', deleteSelectedMarkedMessages);
+}
+if (markedCancelSelectionButton) {
+  markedCancelSelectionButton.addEventListener('click', () => setMarkedSelectionMode(false));
 }
 if (downloadToggleSelectionButton) {
   downloadToggleSelectionButton.addEventListener('click', toggleDownloadSelectionMode);
@@ -6654,7 +6931,13 @@ function closeMarkMessageModal() {
   markMessageModal.classList.remove('is-active');
   markMessageModal.setAttribute('aria-hidden', 'true');
   document.body.classList.remove('preview-open');
+  if (markMessageConfirmButton) {
+    markMessageConfirmButton.disabled = false;
+    markMessageConfirmButton.classList.remove('is-loading');
+  }
   currentMarkingMessage = null;
+  currentMarkingMessages = [];
+  currentMarkingMode = 'single';
   selectedMarkTagIds.clear();
   if (markMessageNewTagInput) {
     markMessageNewTagInput.value = '';
@@ -6672,7 +6955,11 @@ async function loadMarkedTags() {
 
   try {
     markedTags = await invoke('list_marked_tags');
-    if (activeMarkedTagId && !markedTags.some((tag) => tag.id === activeMarkedTagId)) {
+    if (
+      activeMarkedTagId
+      && activeMarkedTagId !== UNTAGGED_MARKED_TAG_FILTER_ID
+      && !markedTags.some((tag) => tag.id === activeMarkedTagId)
+    ) {
       activeMarkedTagId = null;
     }
     renderMarkedTagFilters();
@@ -6704,6 +6991,17 @@ async function promptCreateMarkedTag() {
 
 async function deleteMarkedTagRecord(tagId) {
   if (!invoke || !tagId) return;
+  const tag = markedTags.find((item) => item.id === tagId);
+  const confirmed = await showConfirmDialog({
+    title: '删除标签',
+    message: tag
+      ? `确认删除标签“${tag.name}”吗？已引用该标签的消息会移除这个标签。`
+      : '确认删除这个标签吗？已引用该标签的消息会移除这个标签。',
+    confirmLabel: '删除',
+  });
+  if (!confirmed) {
+    return;
+  }
   try {
     await invoke('delete_marked_tag', { tagId });
     selectedMarkTagIds.delete(tagId);
@@ -6739,8 +7037,17 @@ async function renameMarkedTagRecord(tag) {
 
 function renderMarkedTagFilters() {
   if (!markedTagFilterList) return;
+  const previousScrollLeft = markedTagFilterList.scrollLeft;
+  const previousScrollTop = markedTagFilterList.scrollTop;
   if (markedTagFilterPanel) {
     markedTagFilterPanel.hidden = false;
+    if (markedToggleSelectionButton && markedToggleSelectionButton.parentElement !== markedTagFilterPanel) {
+      if (markedRefreshButton && markedRefreshButton.parentElement === markedTagFilterPanel) {
+        markedTagFilterPanel.insertBefore(markedToggleSelectionButton, markedRefreshButton);
+      } else {
+        markedTagFilterPanel.appendChild(markedToggleSelectionButton);
+      }
+    }
     if (markedRefreshButton && markedRefreshButton.parentElement !== markedTagFilterPanel) {
       markedTagFilterPanel.appendChild(markedRefreshButton);
     }
@@ -6763,6 +7070,19 @@ function renderMarkedTagFilters() {
     await loadMarkedMessages();
   });
   markedTagFilterList.appendChild(allChip);
+
+  const untaggedChip = document.createElement('button');
+  untaggedChip.type = 'button';
+  untaggedChip.className = 'marked-tag-chip';
+  untaggedChip.classList.toggle('is-active', activeMarkedTagId === UNTAGGED_MARKED_TAG_FILTER_ID);
+  untaggedChip.textContent = '无标签';
+  untaggedChip.addEventListener('click', async () => {
+    activeMarkedTagId =
+      activeMarkedTagId === UNTAGGED_MARKED_TAG_FILTER_ID ? null : UNTAGGED_MARKED_TAG_FILTER_ID;
+    renderMarkedTagFilters();
+    await loadMarkedMessages();
+  });
+  markedTagFilterList.appendChild(untaggedChip);
 
   markedTags.forEach((tag) => {
     const chip = document.createElement('button');
@@ -6802,13 +7122,27 @@ function renderMarkedTagFilters() {
     await promptCreateMarkedTag();
   });
   markedTagFilterList.appendChild(addChip);
+
+  requestAnimationFrame(() => {
+    if (!markedTagFilterList) return;
+    markedTagFilterList.scrollLeft = previousScrollLeft;
+    markedTagFilterList.scrollTop = previousScrollTop;
+  });
 }
 
-async function openMarkMessageModal(message) {
+async function openMarkMessageModal(messageOrMessages, options = {}) {
   if (!markMessageModal) return;
-  currentMarkingMessage = message;
+  const messages = Array.isArray(messageOrMessages)
+    ? messageOrMessages.filter(Boolean)
+    : [messageOrMessages].filter(Boolean);
+  if (!messages.length) return;
+  currentMarkingMessage = messages[0];
+  currentMarkingMessages = messages;
+  currentMarkingMode = options.mode || (messages.length > 1 ? 'batch' : 'single');
   selectedMarkTagIds.clear();
-  (message.marked_tag_ids || []).forEach((tagId) => selectedMarkTagIds.add(tagId));
+  if (currentMarkingMode !== 'batch') {
+    (messages[0].marked_tag_ids || []).forEach((tagId) => selectedMarkTagIds.add(tagId));
+  }
   await loadMarkedTags();
   if (markMessageSubtitle) {
     markMessageSubtitle.textContent = `${message.sender || '消息'}：选择标签后确认，也可以直接确认为无标签标记。`;
@@ -6836,8 +7170,143 @@ async function confirmMarkMessage() {
   }
 }
 
-async function toggleMarkedMessagePin(message) {
+async function openMarkMessageModal(messageOrMessages, options = {}) {
+  if (!markMessageModal) return;
+  const messages = Array.isArray(messageOrMessages)
+    ? messageOrMessages.filter(Boolean)
+    : [messageOrMessages].filter(Boolean);
+  if (!messages.length) return;
+  currentMarkingMessages = messages;
+  currentMarkingMode = options.mode || (messages.length > 1 ? 'batch' : 'single');
+  selectedMarkTagIds.clear();
+  if (currentMarkingMode !== 'batch') {
+    (messages[0].marked_tag_ids || []).forEach((tagId) => selectedMarkTagIds.add(tagId));
+  }
+  await loadMarkedTags();
+  if (markMessageSubtitle) {
+    if (currentMarkingMode === 'batch') {
+      markMessageSubtitle.textContent = `已选中 ${messages.length} 条消息。确认后会统一覆盖这些消息的标签集合。`;
+    } else {
+      const message = messages[0];
+      markMessageSubtitle.textContent = `${message.sender || '消息'}：选择标签后确认，也可以直接确认为无标签标记。`;
+    }
+  }
+  renderMarkMessageTagList();
+  markMessageModal.classList.add('is-active');
+  markMessageModal.setAttribute('aria-hidden', 'false');
+  document.body.classList.add('preview-open');
+}
+
+async function confirmMarkMessage() {
+  if (!invoke || currentMarkingMessages.length === 0) return;
+  if (markMessageConfirmButton) {
+    markMessageConfirmButton.disabled = true;
+    markMessageConfirmButton.classList.add('is-loading');
+  }
+  try {
+    if (currentMarkingMode === 'batch') {
+      await invoke('set_marked_messages_tags', {
+        filenames: currentMarkingMessages.map((message) => message.filename),
+        tagIds: Array.from(selectedMarkTagIds),
+      });
+      closeMarkMessageModal();
+      setMarkedSelectionMode(false);
+    } else {
+      await invoke('mark_message', {
+        filename: currentMarkingMessages[0].filename,
+        tagIds: Array.from(selectedMarkTagIds),
+      });
+      closeMarkMessageModal();
+    }
+    await Promise.all([
+      loadMessages(),
+      loadMarkedMessages(),
+    ]);
+  } catch (error) {
+    showToast(`标记失败: ${error}`, 'error');
+  } finally {
+    if (markMessageConfirmButton) {
+      markMessageConfirmButton.disabled = false;
+      markMessageConfirmButton.classList.remove('is-loading');
+    }
+  }
+}
+
+async function editSelectedMarkedMessageTags() {
+  const messages = getSelectableMarkedMessages().filter((message) =>
+    selectedMarkedMessages.has(message.filename),
+  );
+  if (!messages.length) {
+    showToast('请先选择要设置标签的消息', 'error');
+    return;
+  }
+  await openMarkMessageModal(messages, { mode: 'batch' });
+}
+
+async function deleteSelectedMarkedMessages() {
+  const filenames = Array.from(selectedMarkedMessages);
+  if (!filenames.length) {
+    await showInfoDialog({
+      title: '删除失败',
+      message: '请先选择要删除的标记消息',
+    });
+    return;
+  }
+  if (!invoke) {
+    await showInfoDialog({
+      title: '删除失败',
+      message: '未检测到 Tauri API，请检查 app.withGlobalTauri 配置',
+    });
+    return;
+  }
+
+  const choice = await showDeleteConfirmDialog(filenames.length);
+  if (choice === 'cancel') {
+    return;
+  }
+
+  try {
+    const result = await invoke('delete_messages', {
+      filenames,
+      deleteRemote: choice === 'remote',
+    });
+    const failed = result.failed || [];
+    if (failed.length > 0) {
+      await showInfoDialog({
+        title: '删除完成',
+        message: `已删除 ${result.deleted || 0} 条标记消息，${failed.length} 条处理失败`,
+      });
+    } else if (choice === 'remote') {
+      await showInfoDialog({
+        title: '删除成功',
+        message: `已删除 ${result.deleted || filenames.length} 条标记消息`,
+      });
+    } else {
+      await showInfoDialog({
+        title: '删除成功',
+        message: `已删除 ${result.deleted || filenames.length} 个文件的本地副本`,
+      });
+    }
+  } catch (error) {
+    await showInfoDialog({
+      title: '删除失败',
+      message: String(error),
+    });
+  } finally {
+    setMarkedSelectionMode(false);
+    await Promise.all([
+      loadMessages(),
+      loadMarkedMessages(),
+    ]);
+  }
+}
+
+async function toggleMarkedMessagePin(message, button) {
   if (!invoke || !message?.filename) return;
+  if (button) {
+    button.disabled = true;
+    button.classList.add('is-loading');
+  }
   try {
     await invoke('toggle_marked_message_pin', { filename: message.filename });
     await Promise.all([
@@ -6846,6 +7315,11 @@ async function toggleMarkedMessagePin(message) {
     ]);
   } catch (error) {
     showToast(`置顶失败: ${error}`, 'error');
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.classList.remove('is-loading');
+    }
   }
 }
 
@@ -6887,8 +7361,11 @@ function renderMarkedMessages(messages = [], options = {}) {
   if (!markedMessageList) return;
   const { query = '' } = options;
   markedMessageList.innerHTML = '';
+  visibleMarkedMessages = [];
 
   if (!messages.length) {
+    pruneSelectedMarkedMessages();
+    updateMarkedSelectionBar();
     const empty = document.createElement('li');
     empty.className = 'message-card';
     empty.textContent = query
@@ -6907,6 +7384,9 @@ function renderMarkedMessages(messages = [], options = {}) {
   const startIndex = (markedMessagesPage - 1) * MARKED_MESSAGES_PER_PAGE;
   const endIndex = Math.min(startIndex + MARKED_MESSAGES_PER_PAGE, messages.length);
   const pageMessages = messages.slice(startIndex, endIndex);
+  visibleMarkedMessages = pageMessages;
+  pruneSelectedMarkedMessages();
+  updateMarkedSelectionBar();
 
   pageMessages.forEach((message) => {
     const item = document.createElement('li');
@@ -6915,6 +7395,8 @@ function renderMarkedMessages(messages = [], options = {}) {
     item.classList.toggle('is-file', message.kind === 'file');
     item.classList.toggle('is-text', message.kind !== 'file');
     item.classList.toggle('is-pinned', !!message.marked_pinned);
+    item.classList.toggle('with-selection', markedSelectionMode);
+    item.classList.toggle('is-selected', selectedMarkedMessages.has(message.filename));
 
     if (message.marked_pinned) {
       const pinnedBadge = document.createElement('span');
@@ -6926,6 +7408,17 @@ function renderMarkedMessages(messages = [], options = {}) {
 
     const header = document.createElement('div');
     header.className = 'message-header';
+    if (markedSelectionMode) {
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.className = 'message-select';
+      checkbox.checked = selectedMarkedMessages.has(message.filename);
+      checkbox.addEventListener('change', () => {
+        toggleSelectedMarkedMessage(message.filename, checkbox.checked);
+        item.classList.toggle('is-selected', checkbox.checked);
+      });
+      item.appendChild(checkbox);
+    }
     const headerText = document.createElement('span');
     headerText.textContent = `${message.sender} · ${formatTime(message.timestamp_ms)}`;
     header.appendChild(headerText);
@@ -6937,8 +7430,28 @@ function renderMarkedMessages(messages = [], options = {}) {
       : (message.original_name || message.filename || '');
     if (message.kind === 'file') {
       body.addEventListener('click', (event) => {
+        if (markedSelectionMode) return;
         if (event.target.closest('button, summary, details')) return;
         openMessageFile(message);
+      });
+    }
+
+    if (markedSelectionMode) {
+      item.addEventListener('click', (event) => {
+        if (
+          event.target.closest(
+            'button, a, input, textarea, select, summary, details, .action-menu, .message-actions',
+          )
+        ) {
+          return;
+        }
+        const nextChecked = !selectedMarkedMessages.has(message.filename);
+        toggleSelectedMarkedMessage(message.filename, nextChecked);
+        item.classList.toggle('is-selected', nextChecked);
+        const checkbox = item.querySelector('.message-select');
+        if (checkbox) {
+          checkbox.checked = nextChecked;
+        }
       });
     }
 
@@ -6968,11 +7481,6 @@ function renderMarkedMessages(messages = [], options = {}) {
     const actions = document.createElement('div');
     actions.className = 'message-actions';
 
-    const tagButton = document.createElement('button');
-    tagButton.className = 'button ghost small';
-    tagButton.textContent = '标签';
-    tagButton.addEventListener('click', () => openMarkMessageModal(message));
-    actions.appendChild(tagButton);
 
     const markButton = document.createElement('button');
     markButton.className = 'button ghost small icon-only mark-action is-marked';
@@ -6985,11 +7493,21 @@ function renderMarkedMessages(messages = [], options = {}) {
     markButton.addEventListener('click', () => toggleMessageMarked(message));
     actions.appendChild(markButton);
 
+    const tagButton = document.createElement('button');
+    tagButton.className = 'button ghost small';
+    tagButton.textContent = '标签';
+    tagButton.addEventListener('click', () => openMarkMessageModal(message));
+    actions.appendChild(tagButton);
+
     const pinButton = document.createElement('button');
-    pinButton.className = 'button ghost small';
+    pinButton.className = `button small has-spinner marked-pin-button ${message.marked_pinned ? 'primary' : 'ghost'}`;
     pinButton.classList.toggle('is-active', !!message.marked_pinned);
     pinButton.textContent = message.marked_pinned ? '已置顶' : '置顶';
-    pinButton.addEventListener('click', () => toggleMarkedMessagePin(message));
+    const pinSpinner = document.createElement('span');
+    pinSpinner.className = 'button-spinner';
+    pinSpinner.setAttribute('aria-hidden', 'true');
+    pinButton.appendChild(pinSpinner);
+    pinButton.addEventListener('click', () => toggleMarkedMessagePin(message, pinButton));
     actions.appendChild(pinButton);
 
     if (message.kind === 'text') {
@@ -7082,6 +7600,9 @@ function renderMarkedMessages(messages = [], options = {}) {
     item.appendChild(tagRow);
     item.appendChild(footer);
     item.addEventListener('dblclick', (event) => {
+      if (markedSelectionMode) {
+        return;
+      }
       if (
         event.target.closest(
           'button, a, input, textarea, select, summary, details, .action-menu, .message-actions',
@@ -7110,7 +7631,7 @@ function renderMarkedPagination(totalCount, totalPages) {
     existingPagination.remove();
   }
 
-  const paginationContainer = document.createElement('div');
+  const paginationContainer = document.createElement('li');
   paginationContainer.id = 'marked-pagination';
   paginationContainer.className = 'marked-pagination';
 
@@ -7151,32 +7672,49 @@ function renderMarkedPagination(totalCount, totalPages) {
   paginationContainer.appendChild(nextButton);
 
   // 插入到消息列表后面
-  if (markedMessageList && markedMessageList.parentNode) {
-    markedMessageList.parentNode.appendChild(paginationContainer);
+  if (markedMessageList) {
+    markedMessageList.appendChild(paginationContainer);
   }
 }
 
-async function loadMarkedMessages() {
+async function loadMarkedMessages(options = {}) {
   if (!invoke || !markedMessageList) return;
+  const { scrollToTop = false } = options;
   if (!getActiveEndpoint()) {
     markedMessages = [];
+    visibleMarkedMessages = [];
+    setMarkedSelectionMode(false);
     renderMarkedMessages([]);
     updateMarkedBadge(0);
+    if (scrollToTop) {
+      scrollMarkedMessageListToTop();
+    }
     return;
   }
 
   try {
     const result = await invoke('list_marked_messages', {
-      tagId: activeMarkedTagId,
+      tagId:
+        activeMarkedTagId && activeMarkedTagId !== UNTAGGED_MARKED_TAG_FILTER_ID
+          ? activeMarkedTagId
+          : null,
       searchQuery: getAppliedMarkedSearchQuery() || null,
     });
     markedMessages = result.messages || [];
+    if (activeMarkedTagId === UNTAGGED_MARKED_TAG_FILTER_ID) {
+      markedMessages = markedMessages.filter(
+        (message) => !Array.isArray(message.marked_tag_ids) || message.marked_tag_ids.length === 0,
+      );
+    }
     // 切换标签时重置页码
     markedMessagesPage = 1;
     updateMarkedBadge(result.marked_count || 0);
     renderMarkedMessages(markedMessages, {
       query: getAppliedMarkedSearchQuery(),
     });
+    if (scrollToTop) {
+      scrollMarkedMessageListToTop();
+    }
   } catch (error) {
     showToast(`读取标记列表失败: ${error}`, 'error');
   }

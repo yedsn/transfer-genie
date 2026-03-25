@@ -1106,6 +1106,37 @@ mod tests {
     }
 
     #[test]
+    fn delete_messages_removes_entries_from_marked_list_results() {
+        let path = temp_db_path("marked-message-delete-refresh");
+        init_db(&path, None).expect("initialize database");
+
+        upsert_message(&path, &sample_message("keep.txt", 300, &["tag-a"], false))
+            .expect("insert kept message");
+        upsert_message(&path, &sample_message("delete-a.txt", 200, &["tag-a"], false))
+            .expect("insert deleted message");
+        upsert_message(&path, &sample_message("delete-b.txt", 100, &["tag-b"], true))
+            .expect("insert deleted pinned message");
+
+        let deleted = delete_messages(
+            &path,
+            "endpoint-1",
+            &["delete-a.txt".to_string(), "delete-b.txt".to_string()],
+        )
+        .expect("delete marked messages");
+        assert_eq!(deleted, 2);
+
+        let remaining = list_marked_messages(&path, "endpoint-1", None, None)
+            .expect("list marked messages after delete");
+        let remaining_filenames: Vec<_> = remaining
+            .iter()
+            .map(|message| message.filename.as_str())
+            .collect();
+        assert_eq!(remaining_filenames, vec!["keep.txt"]);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn replace_marked_tags_overwrites_endpoint_catalog_and_keeps_name_sorting() {
         let path = temp_db_path("marked-tag-catalog");
         init_db(&path, None).expect("initialize database");
