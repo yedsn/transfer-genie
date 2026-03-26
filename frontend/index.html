@@ -100,6 +100,29 @@
                   </label>
                 </div>
                 <div class="composer-actions">
+                  <div id="composer-marking" class="composer-marking">
+                    <button
+                      id="composer-mark-toggle"
+                      class="button ghost small icon-only mark-action composer-mark-toggle"
+                      type="button"
+                      title="标记"
+                      aria-label="标记"
+                      aria-pressed="false"
+                    >
+                      <img src="icons/mark.svg" alt="标记" style="width: 16px; height: 16px;" />
+                    </button>
+                    <div id="composer-mark-panel" class="composer-mark-panel" role="group" aria-label="发送前标记标签">
+                      <div class="composer-mark-panel-header">
+                        <span class="composer-mark-panel-title">发送时标签</span>
+                        <span id="composer-mark-summary" class="composer-mark-summary">未标记</span>
+                      </div>
+                      <div class="mark-message-create-row composer-mark-create-row">
+                        <input id="composer-mark-new-tag-input" type="text" placeholder="输入新标签" />
+                        <button id="composer-mark-add-tag" class="button ghost small" type="button">新增</button>
+                      </div>
+                      <div id="composer-mark-tag-list" class="mark-message-tag-list composer-mark-tag-list"></div>
+                    </div>
+                  </div>
                   <button id="send-file" class="icon-button" type="button">
                     <img src="icons/attachment.svg" alt="附件" style="width: 16px; height: 16px;" />
                     <span>附件</span>

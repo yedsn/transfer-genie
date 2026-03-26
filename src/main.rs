@@ -224,6 +224,33 @@ struct DownloadResult {
     transfer_mode: Option<String>,
 }
 
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingCreatedTagInput {
+    name: String,
+    #[serde(default)]
+    selected: bool,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SendMarkedOptionsInput {
+    #[serde(default)]
+    marked: bool,
+    #[serde(default)]
+    selected_tag_ids: Vec<String>,
+    #[serde(default)]
+    created_tags: Vec<PendingCreatedTagInput>,
+    #[serde(default)]
+    deleted_tag_ids: Vec<String>,
+}
+
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SendMessageResult {
+    marked_tag_ids: Vec<String>,
+}
+
 #[derive(Serialize)]
 struct DeleteSummary {
     deleted: usize,
@@ -623,6 +650,83 @@ fn sanitize_marked_tag_ids(tags: &[MarkedTag], tag_ids: Vec<String>) -> Vec<Stri
     valid_tag_ids
 }
 
+fn sanitize_existing_marked_tag_ids(tags: &[MarkedTag], tag_ids: Vec<String>) -> Vec<String> {
+    sanitize_marked_tag_ids(tags, tag_ids)
+}
+
+fn sanitize_deleted_marked_tag_ids(tags: &[MarkedTag], tag_ids: Vec<String>) -> Vec<String> {
+    sanitize_marked_tag_ids(tags, tag_ids)
+}
+
+fn apply_send_marked_options(
+    loaded: &mut crate::history::LoadedHistory,
+    options: SendMarkedOptionsInput,
+) -> Result<(bool, Vec<String>), String> {
+    let deleted_tag_ids = sanitize_deleted_marked_tag_ids(&loaded.tags, options.deleted_tag_ids);
+    if !deleted_tag_ids.is_empty() {
+        let deleted_set: HashSet<&str> = deleted_tag_ids.iter().map(String::as_str).collect();
+        loaded
+            .tags
+            .retain(|tag| !deleted_set.contains(tag.id.as_str()));
+        for entry in loaded.entries.iter_mut() {
+            entry.marked_tag_ids
+                .retain(|tag_id| !deleted_set.contains(tag_id.as_str()));
+        }
+    }
+
+    let mut selected_created_tag_ids = Vec::new();
+    for created_tag in options.created_tags {
+        let normalized = normalize_marked_tag_name(&created_tag.name)?;
+        ensure_unique_marked_tag_name(&loaded.tags, &normalized, None)?;
+        let tag = MarkedTag {
+            id: generate_marked_tag_id(),
+            name: normalized,
+        };
+        if created_tag.selected {
+            selected_created_tag_ids.push(tag.id.clone());
+        }
+        loaded.tags.push(tag);
+    }
+    loaded.tags.sort_by(|left, right| left.name.cmp(&right.name));
+
+    let mut final_tag_ids =
+        sanitize_existing_marked_tag_ids(&loaded.tags, options.selected_tag_ids);
+    final_tag_ids.extend(selected_created_tag_ids);
+    final_tag_ids.sort();
+    final_tag_ids.dedup();
+
+    if !options.marked {
+        final_tag_ids.clear();
+    }
+
+    Ok((options.marked, final_tag_ids))
+}
+
+async fn persist_sent_message_with_marked_options(
+    state: &AppState,
+    endpoint: &WebDavEndpoint,
+    message: &mut DbMessage,
+    marked_options: Option<SendMarkedOptionsInput>,
+) -> Result<SendMessageResult, String> {
+    let _guard = state.sync_guard.lock().await;
+    let mut loaded = crate::history::load_history_with_layout(&state.http, endpoint).await?;
+    let (marked, final_tag_ids) =
+        apply_send_marked_options(&mut loaded, marked_options.unwrap_or_default())?;
+
+    message.marked = marked;
+    message.marked_tag_ids = final_tag_ids.clone();
+    message.marked_pinned = false;
+
+    db::upsert_message(&state.db_path, message).map_err(|err| err.to_string())?;
+    loaded.entries.push(message_to_history(message));
+    crate::history::save_history(&state.http, endpoint, &loaded.entries, &loaded.tags).await?;
+    sync_marked_metadata_to_db(state, &endpoint.id, &loaded.entries, &loaded.tags)?;
+
+    Ok(SendMessageResult {
+        marked_tag_ids: final_tag_ids,
+    })
+}
+
 fn apply_marked_tag_ids_to_entries(
     history_entries: &mut [HistoryEntry],
     filenames: &[String],
@@ -961,7 +1065,8 @@ async fn send_text(
     state: State<'_, AppState>,
     text: String,
     format: Option<String>,
-) -> Result<(), String> {
+    marked_options: Option<SendMarkedOptionsInput>,
+) -> Result<SendMessageResult, String> {
     let settings = current_settings(&state)?;
     let endpoint = resolve_active_endpoint(&settings)?;
 
@@ -981,7 +1086,7 @@ async fn send_text(
     webdav::ensure_parent_directories(&state.http, &endpoint, &remote_path).await?;
     webdav::upload_file(&state.http, &endpoint, &remote_path, data.clone()).await?;
 
-    let message = DbMessage {
+    let mut message = DbMessage {
         endpoint_id: endpoint.id.clone(),
         filename: filename.clone(),
         sender: settings.sender_name.clone(),
@@ -1001,10 +1106,13 @@ async fn send_text(
         format,
     };
 
-    db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
-    let _ =
-        crate::history::append_history(&state.http, &endpoint, message_to_history(&message)).await;
-    Ok(())
+    persist_sent_message_with_marked_options(
+        state.inner(),
+        &endpoint,
+        &mut message,
+        marked_options,
+    )
+    .await
 }
 
 fn is_image_file(filename: &str) -> bool {
@@ -1092,7 +1200,8 @@ async fn send_file(
     state: State<'_, AppState>,
     path: String,
     client_id: Option<String>,
-) -> Result<(), String> {
+    marked_options: Option<SendMarkedOptionsInput>,
+) -> Result<SendMessageResult, String> {
     let settings = current_settings(&state)?;
     let endpoint = resolve_active_endpoint(&settings)?;
 
@@ -1184,7 +1293,7 @@ async fn send_file(
     let local_path = endpoint_dir.join(&filename);
     cache_uploaded_file_from_path(&file_path, &local_path)?;
 
-    let message = DbMessage {
+    let mut message = DbMessage {
         endpoint_id: endpoint.id.clone(),
         filename: filename.clone(),
         sender: settings.sender_name.clone(),
@@ -1204,9 +1313,13 @@ async fn send_file(
         format: "text".to_string(),
     };
 
-    db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
-    let _ =
-        crate::history::append_history(&state.http, &endpoint, message_to_history(&message)).await;
+    let result = persist_sent_message_with_marked_options(
+        state.inner(),
+        &endpoint,
+        &mut message,
+        marked_options,
+    )
+    .await?;
     persist_upload_history(
         &state,
         &endpoint.id,
@@ -1227,7 +1340,7 @@ async fn send_file(
         original_name,
         data,
     );
-    Ok(())
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1237,7 +1350,8 @@ async fn send_file_data(
     data: Vec<u8>,
     original_name: String,
     client_id: Option<String>,
-) -> Result<(), String> {
+    marked_options: Option<SendMarkedOptionsInput>,
+) -> Result<SendMessageResult, String> {
     let settings = current_settings(&state)?;
     let endpoint = resolve_active_endpoint(&settings)?;
 
@@ -1321,7 +1435,7 @@ async fn send_file_data(
     let local_path = endpoint_dir.join(&filename);
     cache_uploaded_bytes(&local_path, &data)?;
 
-    let message = DbMessage {
+    let mut message = DbMessage {
         endpoint_id: endpoint.id.clone(),
         filename: filename.clone(),
         sender: settings.sender_name.clone(),
@@ -1341,9 +1455,13 @@ async fn send_file_data(
         format: "text".to_string(),
     };
 
-    db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
-    let _ =
-        crate::history::append_history(&state.http, &endpoint, message_to_history(&message)).await;
+    let result = persist_sent_message_with_marked_options(
+        state.inner(),
+        &endpoint,
+        &mut message,
+        marked_options,
+    )
+    .await?;
     persist_upload_history(
         &state,
         &endpoint.id,
@@ -1364,7 +1482,7 @@ async fn send_file_data(
         message.original_name.clone(),
         data,
     );
-    Ok(())
+    Ok(result)
 }
 
 #[tauri::command]

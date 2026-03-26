@@ -41,6 +41,13 @@ const scrollToBottomButton = document.getElementById('scroll-to-bottom');
 const composer = document.querySelector('.composer');
 const composerFullscreenToggle = document.getElementById('composer-fullscreen-toggle');
 const composerFullscreenIcon = document.getElementById('composer-fullscreen-icon');
+const composerMarking = document.getElementById('composer-marking');
+const composerMarkToggle = document.getElementById('composer-mark-toggle');
+const composerMarkPanel = document.getElementById('composer-mark-panel');
+const composerMarkSummary = document.getElementById('composer-mark-summary');
+const composerMarkTagList = document.getElementById('composer-mark-tag-list');
+const composerMarkNewTagInput = document.getElementById('composer-mark-new-tag-input');
+const composerMarkAddTagButton = document.getElementById('composer-mark-add-tag');
 const feed = document.querySelector('.feed');
 const tabButtons = Array.from(document.querySelectorAll('[data-tab-target]'));
 const tabPanels = Array.from(document.querySelectorAll('[data-tab-panel]'));
@@ -315,6 +322,11 @@ let currentMarkingMessage = null;
 let currentMarkingMessages = [];
 let currentMarkingMode = 'single';
 const selectedMarkTagIds = new Set();
+let composerMarkEnabled = false;
+const composerSelectedTagIds = new Set();
+const composerDeletedTagIds = new Set();
+let composerCreatedTags = [];
+let composerTagDraftSequence = 0;
 
 // 标记列表分页
 let markedMessagesPage = 1;
@@ -584,6 +596,179 @@ function exitComposerFullscreenAfterSendSuccess() {
   if (!isComposerFullscreen) return;
   setComposerFullscreen(false);
   focusHomeComposer({ scrollToBottom: false });
+}
+
+function nextComposerDraftTagId() {
+  composerTagDraftSequence += 1;
+  return `draft-tag-${Date.now()}-${composerTagDraftSequence}`;
+}
+
+function getComposerDraftTags() {
+  const persisted = (Array.isArray(markedTags) ? markedTags : []).map((tag) => ({
+    ...tag,
+    isDraft: false,
+    pendingDelete: composerDeletedTagIds.has(tag.id),
+  }));
+  const draft = composerCreatedTags.map((tag) => ({
+    ...tag,
+    isDraft: true,
+    pendingDelete: false,
+  }));
+  return [...persisted, ...draft];
+}
+
+function pruneComposerSelectedTagIds() {
+  const validIds = new Set(
+    getComposerDraftTags()
+      .filter((tag) => !tag.pendingDelete)
+      .map((tag) => tag.id),
+  );
+  Array.from(composerSelectedTagIds).forEach((tagId) => {
+    if (!validIds.has(tagId)) {
+      composerSelectedTagIds.delete(tagId);
+    }
+  });
+}
+
+function syncComposerMarkToggleState() {
+  if (!composerMarkToggle) return;
+  composerMarkToggle.classList.toggle('is-marked', composerMarkEnabled);
+  composerMarkToggle.setAttribute('aria-pressed', composerMarkEnabled ? 'true' : 'false');
+  composerMarkToggle.title = composerMarkEnabled ? '取消标记' : '标记';
+  composerMarkToggle.setAttribute('aria-label', composerMarkEnabled ? '取消标记' : '标记');
+  if (composerMarkSummary) {
+    const selectedCount = getComposerDraftTags().filter(
+      (tag) => !tag.pendingDelete && composerSelectedTagIds.has(tag.id),
+    ).length;
+    composerMarkSummary.textContent = composerMarkEnabled
+      ? selectedCount > 0
+        ? `已标记 · ${selectedCount} 个标签`
+        : '已标记 · 无标签'
+      : '未标记';
+    composerMarkSummary.classList.toggle('is-active', composerMarkEnabled);
+  }
+}
+
+function renderComposerMarkTagList() {
+  if (!composerMarkTagList) return;
+  pruneComposerSelectedTagIds();
+  composerMarkTagList.innerHTML = '';
+  const tags = getComposerDraftTags();
+  if (tags.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'marked-tag-empty';
+    empty.textContent = '还没有标签，可先新增后发送。';
+    composerMarkTagList.appendChild(empty);
+    syncComposerMarkToggleState();
+    return;
+  }
+
+  tags.forEach((tag) => {
+    const item = document.createElement('label');
+    item.className = 'mark-message-tag-item composer-mark-tag-item';
+    item.classList.toggle('is-active', !tag.pendingDelete && composerSelectedTagIds.has(tag.id));
+    item.classList.toggle('is-pending-delete', tag.pendingDelete);
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = !tag.pendingDelete && composerSelectedTagIds.has(tag.id);
+    checkbox.disabled = tag.pendingDelete;
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) {
+        composerSelectedTagIds.add(tag.id);
+        composerMarkEnabled = true;
+      } else {
+        composerSelectedTagIds.delete(tag.id);
+      }
+      renderComposerMarkTagList();
+    });
+
+    const text = document.createElement('span');
+    text.textContent = tag.pendingDelete ? `${tag.name}（发送后删除）` : tag.name;
+
+    const removeButton = document.createElement('span');
+    removeButton.className = 'marked-tag-chip-delete';
+    removeButton.textContent = tag.isDraft ? '×' : tag.pendingDelete ? '撤' : '×';
+    removeButton.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (tag.isDraft) {
+        composerCreatedTags = composerCreatedTags.filter((item) => item.id !== tag.id);
+        composerSelectedTagIds.delete(tag.id);
+      } else if (tag.pendingDelete) {
+        composerDeletedTagIds.delete(tag.id);
+      } else {
+        composerDeletedTagIds.add(tag.id);
+        composerSelectedTagIds.delete(tag.id);
+      }
+      renderComposerMarkTagList();
+    });
+
+    item.appendChild(checkbox);
+    item.appendChild(text);
+    item.appendChild(removeButton);
+    composerMarkTagList.appendChild(item);
+  });
+
+  syncComposerMarkToggleState();
+}
+
+function resetComposerMarkDraft() {
+  composerMarkEnabled = false;
+  composerSelectedTagIds.clear();
+  composerDeletedTagIds.clear();
+  composerCreatedTags = [];
+  if (composerMarkNewTagInput) {
+    composerMarkNewTagInput.value = '';
+  }
+  renderComposerMarkTagList();
+}
+
+function normalizeComposerDraftAfterSuccessfulSend(result) {
+  const resolvedTagIds = Array.isArray(result?.markedTagIds) ? result.markedTagIds : [];
+  composerCreatedTags = [];
+  composerDeletedTagIds.clear();
+  composerSelectedTagIds.clear();
+  resolvedTagIds.forEach((tagId) => composerSelectedTagIds.add(tagId));
+  renderComposerMarkTagList();
+}
+
+function hasComposerDraftTagName(name) {
+  const normalized = String(name || '').trim().toLowerCase();
+  if (!normalized) return false;
+  return getComposerDraftTags()
+    .filter((tag) => !tag.pendingDelete)
+    .some((tag) => String(tag.name || '').trim().toLowerCase() === normalized);
+}
+
+function getComposerMarkedOptions() {
+  return {
+    marked: composerMarkEnabled,
+    selectedTagIds: Array.from(composerSelectedTagIds).filter(
+      (tagId) =>
+        !composerDeletedTagIds.has(tagId)
+        && !composerCreatedTags.some((tag) => tag.id === tagId),
+    ),
+    createdTags: composerCreatedTags.map((tag) => ({
+      name: tag.name,
+      selected: composerSelectedTagIds.has(tag.id),
+    })),
+    deletedTagIds: Array.from(composerDeletedTagIds),
+  };
+}
+
+function cloneComposerMarkedOptions(options) {
+  return {
+    marked: !!options?.marked,
+    selectedTagIds: Array.isArray(options?.selectedTagIds) ? [...options.selectedTagIds] : [],
+    createdTags: Array.isArray(options?.createdTags)
+      ? options.createdTags.map((tag) => ({
+        name: tag.name,
+        selected: !!tag.selected,
+      }))
+      : [],
+    deletedTagIds: Array.isArray(options?.deletedTagIds) ? [...options.deletedTagIds] : [],
+  };
 }
 
 function normalizeGlobalHotkey(value) {
@@ -5600,6 +5785,7 @@ function startTelegramBridgeStatusPolling() {
 }
 
 function applySettings(settings) {
+  const previousActiveEndpointId = activeEndpointId;
   const endpoints = Array.isArray(settings.webdav_endpoints)
     ? settings.webdav_endpoints
     : [];
@@ -5675,6 +5861,11 @@ function applySettings(settings) {
   syncTelegramProxyControlsState();
   syncTelegramControlsState();
   startRefreshTimer(settings.refresh_interval_secs || 5);
+  if (previousActiveEndpointId !== activeEndpointId) {
+    resetComposerMarkDraft();
+  } else {
+    renderComposerMarkTagList();
+  }
 }
 
 async function loadSettings() {
@@ -6065,6 +6256,19 @@ async function sendText() {
     return;
   }
 
+  let activeMarkedOptions = cloneComposerMarkedOptions(getComposerMarkedOptions());
+  let hadSendFailure = false;
+
+  const applySuccessfulSendResult = (result) => {
+    normalizeComposerDraftAfterSuccessfulSend(result);
+    activeMarkedOptions = {
+      marked: !!activeMarkedOptions.marked,
+      selectedTagIds: Array.isArray(result?.markedTagIds) ? [...result.markedTagIds] : [],
+      createdTags: [],
+      deletedTagIds: [],
+    };
+  };
+
   if (text.trim()) {
       const timestamp_ms = Date.now();
       const filename = `sending-${timestamp_ms}`;
@@ -6079,6 +6283,8 @@ async function sendText() {
         sending: true,
         sendStatus: SEND_STATUS.SENDING,
         format: currentFormat,
+        marked: activeMarkedOptions.marked,
+        marked_tag_ids: [...activeMarkedOptions.selectedTagIds],
       });
 
       if (currentFormat === 'markdown' && mdEditor) {
@@ -6091,17 +6297,23 @@ async function sendText() {
       scrollMessageListToBottom();
 
       try {
-        await invoke('send_text', { text, format: currentFormat });
+        const result = await invoke('send_text', {
+          text,
+          format: currentFormat,
+          markedOptions: activeMarkedOptions,
+        });
         pendingSends.set(filename, {
           ...pendingSends.get(filename),
           sendStatus: SEND_STATUS.SUCCESS,
         });
+        applySuccessfulSendResult(result);
         exitComposerFullscreenAfterSendSuccess();
         setTimeout(() => {
           pendingSends.delete(filename);
           loadMessages();
         }, 1000);
       } catch (error) {
+        hadSendFailure = true;
         pendingSends.set(filename, {
           ...pendingSends.get(filename),
           sendStatus: SEND_STATUS.FAILED,
@@ -6136,7 +6348,11 @@ async function sendText() {
             });
             renderMessages(lastMessages, { scrollToBottom: true });
             renderUploadTasks();
-            await invoke('send_file', { path, clientId });
+            const result = await invoke('send_file', {
+              path,
+              clientId,
+              markedOptions: activeMarkedOptions,
+            });
             if (clientId) {
               pendingUploads.delete(clientId);
               renderMessages(lastMessages);
@@ -6144,9 +6360,11 @@ async function sendText() {
             }
             await loadMessages({ scrollToBottom: true });
             await loadPersistedUploadHistory({ silent: true });
+            applySuccessfulSendResult(result);
             exitComposerFullscreenAfterSendSuccess();
             setSuccessStatus('发送成功');
         } catch (error) {
+            hadSendFailure = true;
             if (clientId) {
               pendingUploads.delete(clientId);
               renderMessages(lastMessages);
@@ -6155,6 +6373,10 @@ async function sendText() {
             setErrorStatus(`发送文件失败：${error}`);
         }
     }
+  }
+
+  if (!hadSendFailure) {
+    resetComposerMarkDraft();
   }
 }
 
@@ -6715,6 +6937,43 @@ if (transferClearButton) {
 }
 sendTextButton.addEventListener('click', sendText);
 sendFileButton.addEventListener('click', selectFiles);
+if (composerMarkToggle) {
+  composerMarkToggle.addEventListener('click', () => {
+    composerMarkEnabled = !composerMarkEnabled;
+    syncComposerMarkToggleState();
+  });
+}
+if (composerMarkAddTagButton) {
+  composerMarkAddTagButton.addEventListener('click', () => {
+    const trimmed = String(composerMarkNewTagInput?.value || '').trim();
+    if (!trimmed) {
+      return;
+    }
+    if (hasComposerDraftTagName(trimmed)) {
+      showToast('标签名已存在', 'error');
+      return;
+    }
+    const draftTag = {
+      id: nextComposerDraftTagId(),
+      name: trimmed,
+    };
+    composerCreatedTags = [...composerCreatedTags, draftTag];
+    composerSelectedTagIds.add(draftTag.id);
+    composerMarkEnabled = true;
+    if (composerMarkNewTagInput) {
+      composerMarkNewTagInput.value = '';
+    }
+    renderComposerMarkTagList();
+  });
+}
+if (composerMarkNewTagInput) {
+  composerMarkNewTagInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      composerMarkAddTagButton?.click();
+    }
+  });
+}
 saveSettingsButton.addEventListener('click', saveSettingsWithFeedback);
 if (chooseDownloadDirButton) {
   chooseDownloadDirButton.addEventListener('click', chooseDownloadDir);
@@ -6971,6 +7230,7 @@ function handleWindowFocus() {
 syncTelegramProxyControlsState();
 syncTelegramControlsState();
 startTelegramBridgeStatusPolling();
+renderComposerMarkTagList();
 loadSettings();
 loadMessages({ scrollToBottom: true });
 loadMarkedTags();
@@ -7008,7 +7268,11 @@ async function sendFileByPath(path) {
     });
     renderMessages(lastMessages, { scrollToBottom: true });
     renderUploadTasks();
-    await invoke('send_file', { path, clientId });
+    const result = await invoke('send_file', {
+      path,
+      clientId,
+      markedOptions: cloneComposerMarkedOptions(getComposerMarkedOptions()),
+    });
     if (clientId) {
       pendingUploads.delete(clientId);
       renderMessages(lastMessages);
@@ -7016,7 +7280,9 @@ async function sendFileByPath(path) {
     }
     await loadMessages({ scrollToBottom: true });
     await loadPersistedUploadHistory({ silent: true });
+    normalizeComposerDraftAfterSuccessfulSend(result);
     exitComposerFullscreenAfterSendSuccess();
+    resetComposerMarkDraft();
     setSuccessStatus('发送成功');
   } catch (error) {
     if (clientId) {
@@ -7094,7 +7360,12 @@ async function sendFileData(data, originalName) {
     });
     renderMessages(lastMessages, { scrollToBottom: true });
     renderUploadTasks();
-    await invoke('send_file_data', { data: Array.from(data), originalName, clientId });
+    const result = await invoke('send_file_data', {
+      data: Array.from(data),
+      originalName,
+      clientId,
+      markedOptions: cloneComposerMarkedOptions(getComposerMarkedOptions()),
+    });
     if (clientId) {
       pendingUploads.delete(clientId);
       renderMessages(lastMessages);
@@ -7102,7 +7373,9 @@ async function sendFileData(data, originalName) {
     }
     await loadMessages({ scrollToBottom: true });
     await loadPersistedUploadHistory({ silent: true });
+    normalizeComposerDraftAfterSuccessfulSend(result);
     exitComposerFullscreenAfterSendSuccess();
+    resetComposerMarkDraft();
     setSuccessStatus('发送成功');
   } catch (error) {
     if (clientId) {
@@ -7270,6 +7543,7 @@ async function loadMarkedTags() {
     markedTags = [];
     renderMarkedTagFilters();
     renderMarkMessageTagList();
+    renderComposerMarkTagList();
     return;
   }
 
@@ -7284,6 +7558,7 @@ async function loadMarkedTags() {
     }
     renderMarkedTagFilters();
     renderMarkMessageTagList();
+    renderComposerMarkTagList();
   } catch (error) {
     showToast(`读取标签失败: ${error}`, 'error');
   }
