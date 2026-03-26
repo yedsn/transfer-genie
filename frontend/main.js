@@ -2688,6 +2688,50 @@ function focusTextInput() {
   }
 }
 
+function getLineBoundaryIndex(value, caretIndex, key) {
+  const lineStart = value.lastIndexOf('\n', Math.max(caretIndex - 1, 0)) + 1;
+  const nextLineBreak = value.indexOf('\n', caretIndex);
+  const lineEnd = nextLineBreak === -1 ? value.length : nextLineBreak;
+  return key === 'Home' ? lineStart : lineEnd;
+}
+
+function handleTextareaLineBoundaryKey(textarea, event) {
+  if (!textarea || event.defaultPrevented || event.isComposing) {
+    return false;
+  }
+  if (!['Home', 'End'].includes(event.key) || event.ctrlKey || event.metaKey || event.altKey) {
+    return false;
+  }
+  if (typeof textarea.selectionStart !== 'number' || typeof textarea.selectionEnd !== 'number') {
+    return false;
+  }
+
+  const selectionDirection = textarea.selectionDirection || 'none';
+  const focusIndex = selectionDirection === 'backward'
+    ? textarea.selectionStart
+    : textarea.selectionEnd;
+  const targetIndex = getLineBoundaryIndex(textarea.value, focusIndex, event.key);
+
+  if (event.shiftKey) {
+    const anchorIndex = selectionDirection === 'backward'
+      ? textarea.selectionEnd
+      : textarea.selectionStart;
+    const rangeStart = Math.min(anchorIndex, targetIndex);
+    const rangeEnd = Math.max(anchorIndex, targetIndex);
+    const nextDirection = targetIndex < anchorIndex
+      ? 'backward'
+      : targetIndex > anchorIndex
+        ? 'forward'
+        : 'none';
+    textarea.setSelectionRange(rangeStart, rangeEnd, nextDirection);
+  } else {
+    textarea.setSelectionRange(targetIndex, targetIndex, 'none');
+  }
+
+  event.preventDefault();
+  return true;
+}
+
 function syncComposerOffset() {
   if (!composer || !feed) return;
   const offset = Math.round(composer.offsetHeight + 12);
@@ -7219,6 +7263,9 @@ document.addEventListener('click', (event) => {
 
 if (textInput) {
   textInput.addEventListener('keydown', (event) => {
+    if (handleTextareaLineBoundaryKey(textInput, event)) {
+      return;
+    }
     if (event.key !== 'Enter') {
       return;
     }
