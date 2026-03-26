@@ -328,6 +328,7 @@ const composerDeletedTagIds = new Set();
 let composerCreatedTags = [];
 let composerTagDraftSequence = 0;
 let composerMarkPanelHideTimer = null;
+let composerMarkPanelRefreshPromise = null;
 
 // 标记列表分页
 let markedMessagesPage = 1;
@@ -611,9 +612,19 @@ function cancelComposerMarkPanelHide() {
   }
 }
 
-function openComposerMarkPanel() {
+function refreshComposerMarkPanelTags() {
+  if (!composerMarkPanelRefreshPromise) {
+    composerMarkPanelRefreshPromise = loadMarkedTags().finally(() => {
+      composerMarkPanelRefreshPromise = null;
+    });
+  }
+  return composerMarkPanelRefreshPromise;
+}
+
+async function openComposerMarkPanel() {
   cancelComposerMarkPanelHide();
   composerMarking?.classList.add('is-open');
+  await refreshComposerMarkPanelTags();
 }
 
 function scheduleComposerMarkPanelHide() {
