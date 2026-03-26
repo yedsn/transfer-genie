@@ -580,6 +580,12 @@ function setComposerFullscreen(enabled) {
   }
 }
 
+function exitComposerFullscreenAfterSendSuccess() {
+  if (!isComposerFullscreen) return;
+  setComposerFullscreen(false);
+  focusHomeComposer({ scrollToBottom: false });
+}
+
 function normalizeGlobalHotkey(value) {
   if (!value) return '';
   const normalized = value.toLowerCase().trim();
@@ -1731,6 +1737,13 @@ function renderDownloadTasks() {
         redownloadButton.textContent = '重新下载';
         redownloadButton.addEventListener('click', () => redownloadDownloadHistory(task));
 
+        const openFileButton = document.createElement('button');
+        openFileButton.className = 'button ghost small';
+        openFileButton.type = 'button';
+        openFileButton.textContent = '打开文件';
+        openFileButton.disabled = task.localExists === false;
+        openFileButton.addEventListener('click', () => openDownloadHistoryFile(task));
+
         const openDirButton = document.createElement('button');
         openDirButton.className = 'button ghost small';
         openDirButton.type = 'button';
@@ -1746,6 +1759,7 @@ function renderDownloadTasks() {
 
         actions.appendChild(saveAsButton);
         actions.appendChild(redownloadButton);
+        actions.appendChild(openFileButton);
         actions.appendChild(openDirButton);
         actions.appendChild(deleteButton);
         main.appendChild(actions);
@@ -3859,6 +3873,28 @@ async function openDownloadHistoryDir(task) {
     setErrorStatus(`打开目录失败：${error}`);
     await showInfoDialog({
       title: '打开目录失败',
+      message: String(error),
+    });
+  }
+}
+
+async function openDownloadHistoryFile(task) {
+  if (!task?.historyId) {
+    return;
+  }
+  try {
+    if (!invoke) {
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 配置');
+      return;
+    }
+    await invoke('open_download_history_file', {
+      recordId: task.historyId,
+    });
+  } catch (error) {
+    console.error('[download] open history file error', error);
+    setErrorStatus(`打开文件失败：${error}`);
+    await showInfoDialog({
+      title: '打开文件失败',
       message: String(error),
     });
   }
@@ -6060,6 +6096,7 @@ async function sendText() {
           ...pendingSends.get(filename),
           sendStatus: SEND_STATUS.SUCCESS,
         });
+        exitComposerFullscreenAfterSendSuccess();
         setTimeout(() => {
           pendingSends.delete(filename);
           loadMessages();
@@ -6107,6 +6144,7 @@ async function sendText() {
             }
             await loadMessages({ scrollToBottom: true });
             await loadPersistedUploadHistory({ silent: true });
+            exitComposerFullscreenAfterSendSuccess();
             setSuccessStatus('发送成功');
         } catch (error) {
             if (clientId) {
@@ -6978,6 +7016,7 @@ async function sendFileByPath(path) {
     }
     await loadMessages({ scrollToBottom: true });
     await loadPersistedUploadHistory({ silent: true });
+    exitComposerFullscreenAfterSendSuccess();
     setSuccessStatus('发送成功');
   } catch (error) {
     if (clientId) {
@@ -7063,6 +7102,7 @@ async function sendFileData(data, originalName) {
     }
     await loadMessages({ scrollToBottom: true });
     await loadPersistedUploadHistory({ silent: true });
+    exitComposerFullscreenAfterSendSuccess();
     setSuccessStatus('发送成功');
   } catch (error) {
     if (clientId) {

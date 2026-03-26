@@ -2208,6 +2208,28 @@ fn open_download_history_dir(
 }
 
 #[tauri::command]
+fn open_download_history_file(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    record_id: i64,
+) -> Result<(), String> {
+    let record = require_download_history(&state, record_id)?;
+    let saved_path = record
+        .saved_path
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "下载记录没有本地文件路径".to_string())?;
+    let file_path = PathBuf::from(saved_path);
+    if !file_path.is_file() {
+        return Err("本地文件不存在".to_string());
+    }
+    app.opener()
+        .open_path(file_path.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|err| format!("打开文件失败: {err}"))?;
+    Ok(())
+}
+
+#[tauri::command]
 async fn open_message_file(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -5187,6 +5209,7 @@ fn main() {
             clear_download_history_records,
             clear_upload_history_records,
             open_download_history_dir,
+            open_download_history_file,
             save_local_data,
             open_message_file,
             open_download_dir,

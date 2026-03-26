@@ -80,20 +80,6 @@ struct CachedRemoteFile {
     last_modified: Option<String>,
 }
 
-pub async fn load_history(
-    client: &Client,
-    endpoint: &WebDavEndpoint,
-) -> Result<Vec<HistoryEntry>, String> {
-    Ok(load_history_with_layout(client, endpoint).await?.entries)
-}
-
-pub async fn load_marked_tags(
-    client: &Client,
-    endpoint: &WebDavEndpoint,
-) -> Result<Vec<MarkedTag>, String> {
-    Ok(load_history_with_layout(client, endpoint).await?.tags)
-}
-
 pub async fn load_history_with_layout(
     client: &Client,
     endpoint: &WebDavEndpoint,
