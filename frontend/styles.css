@@ -1632,7 +1632,7 @@ body {
   transform: rotate(45deg) translateY(-6px);
 }
 
-.composer-marking:hover .composer-mark-panel,
+.composer-marking.is-open .composer-mark-panel,
 .composer-marking:focus-within .composer-mark-panel {
   display: flex;
 }

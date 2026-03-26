@@ -327,6 +327,7 @@ const composerSelectedTagIds = new Set();
 const composerDeletedTagIds = new Set();
 let composerCreatedTags = [];
 let composerTagDraftSequence = 0;
+let composerMarkPanelHideTimer = null;
 
 // 标记列表分页
 let markedMessagesPage = 1;
@@ -601,6 +602,26 @@ function exitComposerFullscreenAfterSendSuccess() {
 function nextComposerDraftTagId() {
   composerTagDraftSequence += 1;
   return `draft-tag-${Date.now()}-${composerTagDraftSequence}`;
+}
+
+function cancelComposerMarkPanelHide() {
+  if (composerMarkPanelHideTimer) {
+    clearTimeout(composerMarkPanelHideTimer);
+    composerMarkPanelHideTimer = null;
+  }
+}
+
+function openComposerMarkPanel() {
+  cancelComposerMarkPanelHide();
+  composerMarking?.classList.add('is-open');
+}
+
+function scheduleComposerMarkPanelHide() {
+  cancelComposerMarkPanelHide();
+  composerMarkPanelHideTimer = setTimeout(() => {
+    composerMarking?.classList.remove('is-open');
+    composerMarkPanelHideTimer = null;
+  }, 300);
 }
 
 function getComposerDraftTags() {
@@ -6942,6 +6963,8 @@ if (composerMarkToggle) {
     composerMarkEnabled = !composerMarkEnabled;
     syncComposerMarkToggleState();
   });
+  composerMarkToggle.addEventListener('mouseenter', openComposerMarkPanel);
+  composerMarkToggle.addEventListener('focus', openComposerMarkPanel);
 }
 if (composerMarkAddTagButton) {
   composerMarkAddTagButton.addEventListener('click', () => {
@@ -6973,6 +6996,14 @@ if (composerMarkNewTagInput) {
       composerMarkAddTagButton?.click();
     }
   });
+}
+if (composerMarking) {
+  composerMarking.addEventListener('mouseenter', openComposerMarkPanel);
+  composerMarking.addEventListener('mouseleave', scheduleComposerMarkPanelHide);
+}
+if (composerMarkPanel) {
+  composerMarkPanel.addEventListener('mouseenter', openComposerMarkPanel);
+  composerMarkPanel.addEventListener('mouseleave', scheduleComposerMarkPanelHide);
 }
 saveSettingsButton.addEventListener('click', saveSettingsWithFeedback);
 if (chooseDownloadDirButton) {
