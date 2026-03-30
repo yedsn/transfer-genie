@@ -245,7 +245,19 @@
               <p>配置 WebDAV 连接与本地同步偏好。</p>
             </div>
             <div class="settings-body">
-              <div class="endpoint-settings">
+              <aside class="settings-nav" aria-label="设置导航">
+                <div class="settings-nav-title">快捷导航</div>
+                <div class="settings-nav-list">
+                  <button class="settings-nav-button is-active" type="button" data-settings-nav-target="settings-section-webdav">WebDAV 端点</button>
+                  <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-basic">基本设置</button>
+                  <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-system">系统设置</button>
+                  <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-api">API 接口</button>
+                  <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-telegram">Telegram Bridge</button>
+                  <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-data">数据管理</button>
+                </div>
+              </aside>
+              <div class="settings-content">
+                <div class="endpoint-settings settings-section" id="settings-section-webdav" data-settings-section>
                 <div class="endpoint-header">
                   <div>
                     <h3>WebDAV 端点</h3>
@@ -264,6 +276,7 @@
                 <span class="field-hint">仅启用的端点可在首页选择。</span>
               </div>
 
+              <div class="settings-section-anchor" id="settings-section-basic" data-settings-section aria-hidden="true"></div>
               <div class="settings-group">
                 <h3 class="settings-group-title">基本设置</h3>
                 <div class="settings-group-content">
@@ -310,6 +323,7 @@
                 </div>
               </div>
 
+              <div class="settings-section-anchor" id="settings-section-system" data-settings-section aria-hidden="true"></div>
               <div class="settings-group">
                 <h3 class="settings-group-title">系统设置</h3>
                 <div class="settings-group-content">
@@ -329,6 +343,42 @@
                 </div>
               </div>
 
+              <div class="settings-section-anchor" id="settings-section-api" data-settings-section aria-hidden="true"></div>
+              <div class="settings-group">
+                <h3 class="settings-group-title">API 接口</h3>
+                <div class="settings-group-content">
+                  <label class="toggle-left">
+                    <span class="toggle-label">启用 API 接口</span>
+                    <input id="local-http-api-enabled" type="checkbox" />
+                  </label>
+                  <label>
+                    监听地址
+                    <input id="local-http-api-bind-address" type="text" placeholder="127.0.0.1" />
+                    <span class="field-hint">默认 `127.0.0.1`；可填写 `0.0.0.0` 或局域网 IP，接口会暴露到该地址</span>
+                  </label>
+                  <label>
+                    监听端口
+                    <input id="local-http-api-bind-port" type="number" min="1" max="65535" step="1" placeholder="6011" />
+                    <span class="field-hint">默认 `6011`，可用路径为 `/api/send-file` 和 `/api/send-text`</span>
+                  </label>
+                  <div class="local-http-api-status-card">
+                    <div class="local-http-api-status-row">
+                      <span class="local-http-api-status-label">运行状态</span>
+                      <span id="local-http-api-status" class="local-http-api-status-value">未获取</span>
+                    </div>
+                    <div class="local-http-api-status-row">
+                      <span class="local-http-api-status-label">调用地址</span>
+                      <span id="local-http-api-address" class="local-http-api-status-value">未获取</span>
+                    </div>
+                    <div class="local-http-api-status-row">
+                      <span class="local-http-api-status-label">最近错误</span>
+                      <span id="local-http-api-last-error" class="local-http-api-error">无</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-section-anchor" id="settings-section-telegram" data-settings-section aria-hidden="true"></div>
               <div class="settings-group">
                 <h3 class="settings-group-title">Telegram Bridge</h3>
                 <div class="settings-group-content">

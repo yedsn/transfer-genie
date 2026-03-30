@@ -77,9 +77,8 @@ fn parse_tag_ids(raw: String) -> Vec<String> {
 }
 
 fn serialize_tag_ids(tag_ids: &[String]) -> rusqlite::Result<String> {
-    serde_json::to_string(tag_ids).map_err(|err| {
-        rusqlite::Error::ToSqlConversionFailure(Box::new(err))
-    })
+    serde_json::to_string(tag_ids)
+        .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))
 }
 
 pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), String> {
@@ -224,8 +223,7 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
             .query_map([], |row| row.get::<_, String>(1))
             .map_err(|err| format!("读取消息表结构失败：{err}"))?;
         for row in rows {
-            if row.map_err(|err| format!("读取消息表结构失败：{err}"))?
-                == "marked_tag_ids"
+            if row.map_err(|err| format!("读取消息表结构失败：{err}"))? == "marked_tag_ids"
             {
                 has_marked_tag_ids = true;
                 break;
@@ -250,8 +248,7 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
             .query_map([], |row| row.get::<_, String>(1))
             .map_err(|err| format!("读取消息表结构失败：{err}"))?;
         for row in rows {
-            if row.map_err(|err| format!("读取消息表结构失败：{err}"))?
-                == "marked_pinned"
+            if row.map_err(|err| format!("读取消息表结构失败：{err}"))? == "marked_pinned"
             {
                 has_marked_pinned = true;
                 break;
@@ -1035,12 +1032,21 @@ mod tests {
         let path = temp_db_path("marked-message-order");
         init_db(&path, None).expect("initialize database");
 
-        upsert_message(&path, &sample_message("tag-a-old.txt", 100, &["tag-a"], false))
-            .expect("insert old tagged message");
-        upsert_message(&path, &sample_message("tag-a-pinned.txt", 200, &["tag-a"], true))
-            .expect("insert pinned tagged message");
-        upsert_message(&path, &sample_message("tag-b-new.txt", 300, &["tag-b"], false))
-            .expect("insert second tag message");
+        upsert_message(
+            &path,
+            &sample_message("tag-a-old.txt", 100, &["tag-a"], false),
+        )
+        .expect("insert old tagged message");
+        upsert_message(
+            &path,
+            &sample_message("tag-a-pinned.txt", 200, &["tag-a"], true),
+        )
+        .expect("insert pinned tagged message");
+        upsert_message(
+            &path,
+            &sample_message("tag-b-new.txt", 300, &["tag-b"], false),
+        )
+        .expect("insert second tag message");
 
         let all_messages = list_marked_messages(&path, "endpoint-1", None, None)
             .expect("list all marked messages");
@@ -1059,7 +1065,10 @@ mod tests {
             .iter()
             .map(|message| message.filename.as_str())
             .collect();
-        assert_eq!(filtered_filenames, vec!["tag-a-pinned.txt", "tag-a-old.txt"]);
+        assert_eq!(
+            filtered_filenames,
+            vec!["tag-a-pinned.txt", "tag-a-old.txt"]
+        );
 
         let _ = std::fs::remove_file(path);
     }
@@ -1069,8 +1078,11 @@ mod tests {
         let path = temp_db_path("marked-message-search");
         init_db(&path, None).expect("initialize database");
 
-        upsert_message(&path, &sample_message("合同-草稿.txt", 100, &["tag-a"], false))
-            .expect("insert matching text message");
+        upsert_message(
+            &path,
+            &sample_message("合同-草稿.txt", 100, &["tag-a"], false),
+        )
+        .expect("insert matching text message");
 
         let mut file_message = sample_message("archive.bin", 200, &["tag-b"], false);
         file_message.kind = "file".to_string();
@@ -1078,8 +1090,11 @@ mod tests {
         file_message.content = None;
         upsert_message(&path, &file_message).expect("insert matching file message");
 
-        upsert_message(&path, &sample_message("无关记录.txt", 300, &["tag-a"], false))
-            .expect("insert non-matching message");
+        upsert_message(
+            &path,
+            &sample_message("无关记录.txt", 300, &["tag-a"], false),
+        )
+        .expect("insert non-matching message");
 
         let matched_messages = list_marked_messages(&path, "endpoint-1", None, Some("合同"))
             .expect("list searched marked messages");
@@ -1112,10 +1127,16 @@ mod tests {
 
         upsert_message(&path, &sample_message("keep.txt", 300, &["tag-a"], false))
             .expect("insert kept message");
-        upsert_message(&path, &sample_message("delete-a.txt", 200, &["tag-a"], false))
-            .expect("insert deleted message");
-        upsert_message(&path, &sample_message("delete-b.txt", 100, &["tag-b"], true))
-            .expect("insert deleted pinned message");
+        upsert_message(
+            &path,
+            &sample_message("delete-a.txt", 200, &["tag-a"], false),
+        )
+        .expect("insert deleted message");
+        upsert_message(
+            &path,
+            &sample_message("delete-b.txt", 100, &["tag-b"], true),
+        )
+        .expect("insert deleted pinned message");
 
         let deleted = delete_messages(
             &path,

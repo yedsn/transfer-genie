@@ -2119,9 +2119,85 @@ input {
 }
 
 .settings-body {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.settings-nav {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: linear-gradient(180deg, #fffefb 0%, #fff8f0 100%);
+  box-shadow: 0 10px 24px rgba(76, 49, 25, 0.06);
+}
+
+.settings-nav-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.settings-nav-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-nav-button {
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: transparent;
+  color: var(--muted);
+  text-align: left;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background-color 0.18s ease,
+    border-color 0.18s ease,
+    color 0.18s ease,
+    transform 0.18s ease;
+}
+
+.settings-nav-button:hover {
+  background: rgba(207, 145, 67, 0.08);
+  color: var(--ink);
+}
+
+.settings-nav-button.is-active {
+  background: rgba(207, 145, 67, 0.14);
+  border-color: rgba(207, 145, 67, 0.22);
+  color: var(--ink);
+  transform: translateX(4px);
+}
+
+.settings-content {
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.settings-section,
+.settings-section-anchor {
+  scroll-margin-top: 18px;
+}
+
+.settings-section-anchor {
+  height: 0;
+  margin: -2px 0;
 }
 
 .endpoint-settings {
@@ -2369,7 +2445,8 @@ input {
   word-break: break-all;
 }
 
-.telegram-bridge-status-card {
+.telegram-bridge-status-card,
+.local-http-api-status-card {
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -2379,34 +2456,40 @@ input {
   background: #fff;
 }
 
-.telegram-bridge-status-row {
+.telegram-bridge-status-row,
+.local-http-api-status-row {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
 }
 
-.telegram-bridge-status-label {
+.telegram-bridge-status-label,
+.local-http-api-status-label {
   font-size: 12px;
   color: var(--muted);
 }
 
-.telegram-bridge-status-value {
+.telegram-bridge-status-value,
+.local-http-api-status-value {
   font-size: 13px;
   font-weight: 600;
   color: var(--ink);
   text-align: right;
 }
 
-.telegram-bridge-status-value.is-running {
+.telegram-bridge-status-value.is-running,
+.local-http-api-status-value.is-running {
   color: #2e7d32;
 }
 
-.telegram-bridge-status-value.is-stopped {
+.telegram-bridge-status-value.is-stopped,
+.local-http-api-status-value.is-stopped {
   color: var(--muted);
 }
 
-.telegram-bridge-error {
+.telegram-bridge-error,
+.local-http-api-error {
   font-size: 12px;
   color: #c2472d;
   text-align: right;
@@ -2617,6 +2700,7 @@ input {
   flex: 1;
   width: 100%;
   margin: 0;
+  scroll-padding-top: 18px;
 }
 
 .settings-header h2 {
@@ -3120,6 +3204,33 @@ body.preview-open {
 
   .marked-page {
     padding: 16px;
+  }
+
+  .settings {
+    padding: 16px;
+  }
+
+  .settings-body {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-nav {
+    position: static;
+    padding: 12px;
+  }
+
+  .settings-nav-list {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .settings-nav-button {
+    width: auto;
+    min-width: calc(50% - 3px);
+  }
+
+  .settings-nav-button.is-active {
+    transform: none;
   }
 
   .downloads-page-header {

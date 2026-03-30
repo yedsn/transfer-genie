@@ -151,8 +151,8 @@ pub async fn load_history_for_sync(
             refresh_cached_file(client, endpoint, cache_dir, &mut metadata, &shard.path)
                 .await?
                 .ok_or_else(|| format!("历史分片图像未找到：{}", shard.path))?;
-        let shard_bytes = fs::read(&shard_path)
-            .map_err(|err| format!("读取历史分片图像缓存失败：{err}"))?;
+        let shard_bytes =
+            fs::read(&shard_path).map_err(|err| format!("读取历史分片图像缓存失败：{err}"))?;
         entries.extend(parse_manifest_shard(&shard_bytes)?);
     }
 
@@ -207,12 +207,12 @@ pub async fn save_history(
         version: HISTORY_INDEX_VERSION,
         shards,
     };
-    let data = serde_json::to_vec_pretty(&index)
-        .map_err(|err| format!("序列化历史索引失败：{err}"))?;
+    let data =
+        serde_json::to_vec_pretty(&index).map_err(|err| format!("序列化历史索引失败：{err}"))?;
     webdav::upload_file(client, endpoint, HISTORY_INDEX_PATH, data).await?;
 
-    let tags_data = serde_json::to_vec_pretty(tags)
-        .map_err(|err| format!("序列化历史标签失败：{err}"))?;
+    let tags_data =
+        serde_json::to_vec_pretty(tags).map_err(|err| format!("序列化历史标签失败：{err}"))?;
     webdav::upload_file(client, endpoint, HISTORY_TAGS_PATH, tags_data).await
 }
 
@@ -314,8 +314,7 @@ async fn load_marked_tags_cached(
     else {
         return Ok(Vec::new());
     };
-    let data = fs::read(&local_path)
-        .map_err(|err| format!("读取历史标签缓存失败：{err}"))?;
+    let data = fs::read(&local_path).map_err(|err| format!("读取历史标签缓存失败：{err}"))?;
     parse_marked_tags(&data)
 }
 
@@ -425,11 +424,9 @@ async fn refresh_cached_file(
     match response.status {
         ConditionalFileStatus::Modified(data) => {
             if let Some(parent) = cached_path.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|err| format!("创建缓存目录失败: {err}"))?;
+                fs::create_dir_all(parent).map_err(|err| format!("创建缓存目录失败: {err}"))?;
             }
-            fs::write(&cached_path, data)
-                .map_err(|err| format!("写入缓存失败: {err}"))?;
+            fs::write(&cached_path, data).map_err(|err| format!("写入缓存失败: {err}"))?;
             metadata.files.insert(
                 remote_path.to_string(),
                 CachedRemoteFile {
@@ -462,8 +459,7 @@ async fn refresh_cached_file(
                         fs::create_dir_all(parent)
                             .map_err(|err| format!("创建缓存目录失败: {err}"))?;
                     }
-                    fs::write(&cached_path, data)
-                        .map_err(|err| format!("写入缓存失败: {err}"))?;
+                    fs::write(&cached_path, data).map_err(|err| format!("写入缓存失败: {err}"))?;
                     Ok(Some(cached_path))
                 }
                 None => {

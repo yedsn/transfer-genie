@@ -37,6 +37,9 @@ const formatInputs = document.querySelectorAll('input[name="message-format"]');
 const sendTextButton = document.getElementById('send-text');
 const sendFileButton = document.getElementById('send-file');
 const saveSettingsButton = document.getElementById('save-settings');
+const settingsPanel = document.querySelector('#tab-settings .settings');
+const settingsBody = document.querySelector('#tab-settings .settings-body');
+const settingsNavButtons = Array.from(document.querySelectorAll('[data-settings-nav-target]'));
 const scrollToBottomButton = document.getElementById('scroll-to-bottom');
 const composer = document.querySelector('.composer');
 const composerFullscreenToggle = document.getElementById('composer-fullscreen-toggle');
@@ -76,6 +79,13 @@ const downloadDirInput = document.getElementById('download-dir');
 const chooseDownloadDirButton = document.getElementById('choose-download-dir');
 const downloadDirHint = document.getElementById('download-dir-hint');
 const autoStartInput = document.getElementById('auto-start');
+const localHttpApiEnabledInput = document.getElementById('local-http-api-enabled');
+const localHttpApiBindAddressInput = document.getElementById('local-http-api-bind-address');
+const localHttpApiBindPortInput = document.getElementById('local-http-api-bind-port');
+const localHttpApiStatusLabel = document.getElementById('local-http-api-status');
+const localHttpApiAddressLabel = document.getElementById('local-http-api-address');
+const localHttpApiLastErrorLabel = document.getElementById('local-http-api-last-error');
+const localHttpApiStatusText = document.getElementById('local-http-api-status-text');
 const telegramAutoStartInput = document.getElementById('telegram-auto-start');
 const telegramBotTokenInput = document.getElementById('telegram-bot-token');
 const telegramProxyEnabledInput = document.getElementById('telegram-proxy-enabled');
@@ -138,6 +148,9 @@ const messagePreviewActions = document.getElementById('message-preview-actions')
 const messagePreviewClose = document.querySelector('.message-preview-close');
 const messagePreviewBackdrop = messagePreview ? messagePreview.querySelector('.message-preview-backdrop') : null;
 const searchInput = document.getElementById('search-input');
+let settingsSections = [];
+let activeSettingsSectionId = '';
+let settingsNavUpdateQueued = false;
 
 function ensureInlineSelectionRows() {
   if (selectionBar && selectionCount && !selectionRow) {
@@ -345,6 +358,8 @@ const transferTaskCounts = {
 const TRANSFER_TASKS_PER_PAGE = 10;
 const MANUAL_REFRESH_TIMEOUT_MS = 45_000;
 const DEFAULT_TELEGRAM_POLL_INTERVAL_SECS = 5;
+const DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS = '127.0.0.1';
+const DEFAULT_LOCAL_HTTP_API_BIND_PORT = 6011;
 const TELEGRAM_BRIDGE_STATUS_POLL_MS = 5000;
 const MAX_RECENT_DOWNLOAD_TASKS = 8;
 const MAX_RECENT_UPLOAD_TASKS = 8;
@@ -2738,6 +2753,91 @@ function syncComposerOffset() {
   feed.style.setProperty('--composer-offset', `${offset}px`);
 }
 
+function ensureSettingsSectionTargets() {
+  const dataGroup = exportSettingsButton ? exportSettingsButton.closest('.settings-group') : null;
+  if (dataGroup && !dataGroup.id) {
+    dataGroup.id = 'settings-section-data';
+  }
+  if (dataGroup && !Object.prototype.hasOwnProperty.call(dataGroup.dataset, 'settingsSection')) {
+    dataGroup.dataset.settingsSection = '';
+  }
+
+  settingsSections = Array.from(document.querySelectorAll('[data-settings-section]')).filter(
+    (section) => section.id,
+  );
+}
+
+function setActiveSettingsSection(id) {
+  if (!id || activeSettingsSectionId === id) {
+    return;
+  }
+  activeSettingsSectionId = id;
+  settingsNavButtons.forEach((button) => {
+    button.classList.toggle('is-active', button.dataset.settingsNavTarget === id);
+  });
+}
+
+function updateActiveSettingsSection() {
+  if (!settingsPanel || !settingsSections.length) {
+    return;
+  }
+
+  const panelTop = settingsPanel.getBoundingClientRect().top;
+  const threshold = 120;
+  let activeSection = settingsSections[0];
+
+  settingsSections.forEach((section) => {
+    const offsetTop = section.getBoundingClientRect().top - panelTop;
+    if (offsetTop <= threshold) {
+      activeSection = section;
+    }
+  });
+
+  setActiveSettingsSection(activeSection.id);
+}
+
+function queueSettingsSectionUpdate() {
+  if (settingsNavUpdateQueued) {
+    return;
+  }
+  settingsNavUpdateQueued = true;
+  requestAnimationFrame(() => {
+    settingsNavUpdateQueued = false;
+    updateActiveSettingsSection();
+  });
+}
+
+function initializeSettingsNavigation() {
+  ensureSettingsSectionTargets();
+  if (!settingsPanel || !settingsBody || !settingsNavButtons.length || !settingsSections.length) {
+    return;
+  }
+
+  if (!settingsPanel.dataset.settingsNavInitialized) {
+    settingsNavButtons.forEach((button) => {
+      button.addEventListener('click', () => {
+        const targetId = button.dataset.settingsNavTarget;
+        const targetSection = document.getElementById(targetId);
+        if (!targetSection) {
+          return;
+        }
+        setActiveSettingsSection(targetId);
+        targetSection.scrollIntoView({
+          behavior: 'smooth',
+          block: 'start',
+          inline: 'nearest',
+        });
+      });
+    });
+
+    settingsPanel.addEventListener('scroll', queueSettingsSectionUpdate, { passive: true });
+    window.addEventListener('resize', queueSettingsSectionUpdate);
+    settingsPanel.dataset.settingsNavInitialized = 'true';
+  }
+
+  queueSettingsSectionUpdate();
+}
+
 function setActiveTab(name, options = {}) {
   const target = name || 'home';
   const { scrollToBottom = false, focusInput = false } = options;
@@ -2760,6 +2860,9 @@ function setActiveTab(name, options = {}) {
   if (target === 'marked') {
     loadMarkedTags();
     loadMarkedMessages({ scrollToTop: true });
+  }
+  if (target === 'settings') {
+    queueSettingsSectionUpdate();
   }
   if (target === 'home') {
     if (scrollToBottom) {
@@ -5562,6 +5665,91 @@ function hasUsableActiveEndpoint() {
   return !!getActiveEndpoint();
 }
 
+function setLocalHttpApiStatusLegacy(status) {
+  if (!localHttpApiStatusLabel || !localHttpApiAddressLabel || !localHttpApiLastErrorLabel) return;
+  const state = status?.state || 'disabled';
+  const running = state === 'running';
+  const failed = state === 'start_failed';
+  localHttpApiStatusLabel.classList.toggle('is-running', running);
+  localHttpApiStatusLabel.classList.toggle('is-stopped', !running);
+  localHttpApiStatusLabel.textContent = running
+    ? '运行中'
+    : failed
+      ? '启动失败'
+      : '已关闭';
+  localHttpApiAddressLabel.textContent = status?.address || '未启用';
+  localHttpApiLastErrorLabel.textContent = status?.lastError || status?.last_error || '无';
+}
+
+async function loadLocalHttpApiStatus(options = {}) {
+  try {
+    if (!invoke) return;
+    const status = await invoke('get_local_http_api_status');
+    renderLocalHttpApiStatus(status);
+  } catch (error) {
+    if (!options.silent) {
+      setErrorStatus(`读取本机 HTTP 接口状态失败：${error}`);
+    }
+  }
+}
+
+function setLocalHttpApiStatusLegacyText(status) {
+  if (!localHttpApiStatusText) return;
+  const state = status?.state || 'disabled';
+  const address = status?.address || '';
+  const lastError = status?.lastError || status?.last_error || '';
+  if (state === 'running') {
+    localHttpApiStatusText.textContent = address ? `状态：已启用（${address}）` : '状态：已启用';
+    return;
+  }
+  if (state === 'start_failed') {
+    localHttpApiStatusText.textContent = lastError
+      ? `状态：启动失败（${lastError}）`
+      : '状态：启动失败';
+    return;
+  }
+  localHttpApiStatusText.textContent = '状态：已关闭';
+}
+
+
+function normalizeLocalHttpApiBindPort(value) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+    return null;
+  }
+  return parsed;
+}
+
+function getLocalHttpApiConfiguredUrl() {
+  const bindAddress = localHttpApiBindAddressInput?.value?.trim() || DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS;
+  const bindPort =
+    normalizeLocalHttpApiBindPort(localHttpApiBindPortInput?.value) || DEFAULT_LOCAL_HTTP_API_BIND_PORT;
+  const wrappedAddress =
+    bindAddress.includes(':') && !bindAddress.startsWith('[') ? `[${bindAddress}]` : bindAddress;
+  return `http://${wrappedAddress}:${bindPort}/api/send-file`;
+}
+
+function renderLocalHttpApiStatus(status) {
+  if (!localHttpApiStatusLabel || !localHttpApiAddressLabel || !localHttpApiLastErrorLabel) return;
+  const state = status?.state || 'disabled';
+  const running = state === 'running';
+  const failed = state === 'start_failed';
+  const pending = state === 'pending';
+  const address = status?.address || getLocalHttpApiConfiguredUrl();
+  const lastError = status?.lastError || status?.last_error || '';
+
+  localHttpApiStatusLabel.classList.toggle('is-running', running);
+  localHttpApiStatusLabel.classList.toggle('is-stopped', !running && !pending);
+  localHttpApiStatusLabel.textContent = running
+    ? '运行中'
+    : failed
+      ? '启动失败'
+      : pending
+        ? '状态获取中'
+        : '已关闭';
+  localHttpApiAddressLabel.textContent = address || '未配置';
+  localHttpApiLastErrorLabel.textContent = lastError || '无';
+}
 
 function syncTelegramProxyControlsState() {
   const proxyEnabled = telegramProxyEnabledInput ? telegramProxyEnabledInput.checked : false;
@@ -5897,6 +6085,26 @@ function applySettings(settings) {
   if (autoStartInput) {
     autoStartInput.checked = settings.auto_start || false;
   }
+  if (localHttpApiEnabledInput) {
+    localHttpApiEnabledInput.checked = !!settings.local_http_api?.enabled;
+  }
+  if (localHttpApiBindAddressInput) {
+    localHttpApiBindAddressInput.value =
+      settings.local_http_api?.bind_address || DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS;
+  }
+  if (localHttpApiBindPortInput) {
+    localHttpApiBindPortInput.value =
+      settings.local_http_api?.bind_port || DEFAULT_LOCAL_HTTP_API_BIND_PORT;
+  }
+  renderLocalHttpApiStatus({
+    state: settings.local_http_api?.enabled ? 'pending' : 'disabled',
+    lastError: '',
+  });
+  if (localHttpApiStatusText) {
+    localHttpApiStatusText.textContent = settings.local_http_api?.enabled
+      ? '状态：正在获取...'
+      : '状态：已关闭';
+  }
   if (globalHotkeyInput) {
     globalHotkeyInput.value = (settings.global_hotkey || DEFAULT_GLOBAL_HOTKEY).toLowerCase();
   }
@@ -5936,6 +6144,7 @@ function applySettings(settings) {
   clearTelegramChatCandidates();
   syncTelegramProxyControlsState();
   syncTelegramControlsState();
+  queueSettingsSectionUpdate();
   startRefreshTimer(settings.refresh_interval_secs || 5);
   if (previousActiveEndpointId !== activeEndpointId) {
     resetComposerMarkDraft();
@@ -5952,6 +6161,7 @@ async function loadSettings() {
     }
     const settings = await invoke('get_settings');
     applySettings(settings);
+    await loadLocalHttpApiStatus({ silent: true });
     await loadPersistedUploadHistory({ silent: true });
     await loadPersistedDownloadHistory({ silent: true });
     await loadTelegramBridgeStatus({ silent: true });
@@ -6001,6 +6211,20 @@ async function saveSettings(options = {}) {
   const telegramPollInterval = normalizeTelegramPollInterval(
     telegramPollIntervalInput ? telegramPollIntervalInput.value : DEFAULT_TELEGRAM_POLL_INTERVAL_SECS,
   );
+  const localHttpApiBindAddress = localHttpApiBindAddressInput
+    ? localHttpApiBindAddressInput.value.trim()
+    : DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS;
+  const localHttpApiBindPort = normalizeLocalHttpApiBindPort(
+    localHttpApiBindPortInput ? localHttpApiBindPortInput.value : DEFAULT_LOCAL_HTTP_API_BIND_PORT,
+  );
+  if (!localHttpApiBindAddress) {
+    setErrorStatus('HTTP API 监听地址不能为空');
+    return;
+  }
+  if (!localHttpApiBindPort) {
+    setErrorStatus('HTTP API 监听端口必须是 1-65535 之间的整数');
+    return;
+  }
   const telegramEnabled =
     requireTelegramBridgeConfig || (telegramAutoStartInput ? telegramAutoStartInput.checked : false);
   if (telegramEnabled) {
@@ -6034,6 +6258,11 @@ async function saveSettings(options = {}) {
     global_hotkey: normalizedGlobalHotkey || DEFAULT_GLOBAL_HOTKEY,
     send_hotkey: sendHotkey,
     auto_start: autoStartInput ? autoStartInput.checked : false,
+    local_http_api: {
+      enabled: localHttpApiEnabledInput ? localHttpApiEnabledInput.checked : false,
+      bind_address: localHttpApiBindAddress,
+      bind_port: localHttpApiBindPort,
+    },
     telegram: {
       enabled: telegramFormState.isConfigured,
       auto_start: telegramAutoStartInput ? telegramAutoStartInput.checked : false,
@@ -6055,6 +6284,7 @@ async function saveSettings(options = {}) {
     const updated = await invoke('save_settings', { settings: payload });
     setSuccessStatus('设置已保存');
     applySettings(updated);
+    await loadLocalHttpApiStatus({ silent: true });
     await loadTelegramBridgeStatus({ silent: true });
     setHint(downloadDirHint, '下载目录已保存');
     if (previousActive !== activeEndpointId && getActiveEndpoint()) {
@@ -6159,6 +6389,7 @@ async function importSettings() {
     const previousActive = activeEndpointId;
     const updated = await invoke('import_settings', { path, password });
     applySettings(updated);
+    await loadLocalHttpApiStatus({ silent: true });
     await loadTelegramBridgeStatus({ silent: true });
     setSuccessStatus('配置已导入并生效');
     if (previousActive !== activeEndpointId && getActiveEndpoint()) {
@@ -7073,6 +7304,28 @@ if (batchSpeedTestButton) {
 if (globalHotkeyEnabledInput) {
   globalHotkeyEnabledInput.addEventListener('change', syncGlobalHotkeyInputState);
 }
+if (localHttpApiEnabledInput) {
+  localHttpApiEnabledInput.addEventListener('change', () => {
+    if (localHttpApiStatusText) {
+      localHttpApiStatusText.textContent = '状态：更改将在保存后生效';
+    }
+  });
+}
+if (localHttpApiEnabledInput) {
+  localHttpApiEnabledInput.addEventListener('change', () => {
+    renderLocalHttpApiStatus({ state: 'pending', lastError: '' });
+  });
+}
+if (localHttpApiBindAddressInput) {
+  localHttpApiBindAddressInput.addEventListener('input', () => {
+    renderLocalHttpApiStatus({ state: 'pending', lastError: '' });
+  });
+}
+if (localHttpApiBindPortInput) {
+  localHttpApiBindPortInput.addEventListener('input', () => {
+    renderLocalHttpApiStatus({ state: 'pending', lastError: '' });
+  });
+}
 if (telegramProxyEnabledInput) {
   telegramProxyEnabledInput.addEventListener('change', () => {
     syncTelegramProxyControlsState();
@@ -7320,6 +7573,7 @@ syncTelegramProxyControlsState();
 syncTelegramControlsState();
 startTelegramBridgeStatusPolling();
 renderComposerMarkTagList();
+initializeSettingsNavigation();
 loadSettings();
 loadMessages({ scrollToBottom: true });
 loadMarkedTags();

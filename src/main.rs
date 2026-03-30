@@ -1,4 +1,4 @@
-﻿#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod db;
 mod filenames;
 mod history;
@@ -13,11 +13,17 @@ use crate::filenames::{
 };
 use crate::history::{HistoryEntry, HistoryLayout};
 use crate::types::{
-    DownloadHistoryRecord, MarkedTag, Message, Settings, SyncStatus, TelegramBridgeSettings,
-    UploadHistoryRecord, WebDavEndpoint,
+    DownloadHistoryRecord, LocalHttpApiSettings, MarkedTag, Message, Settings, SyncStatus,
+    TelegramBridgeSettings, UploadHistoryRecord, WebDavEndpoint,
+    DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS, DEFAULT_LOCAL_HTTP_API_BIND_PORT,
 };
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+use axum::body::Bytes;
+use axum::extract::{DefaultBodyLimit, Multipart, State as AxumState};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::{Json, Router};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use log::info;
@@ -31,6 +37,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Mutex;
@@ -56,6 +63,7 @@ struct AppState {
     http: Client,
     registered_hotkey: Mutex<Option<Shortcut>>,
     telegram_bridge: Mutex<TelegramBridgeManager>,
+    local_http_api: Mutex<LocalHttpApiManager>,
 }
 
 const EXPORT_VERSION: u8 = 1;
@@ -69,6 +77,8 @@ const REFRESH_SYNC_SOURCE: &str = "正在刷新";
 const AUTO_SYNC_SOURCE: &str = "定时同步";
 const TELEGRAM_BRIDGE_ARG: &str = "--telegram-bridge";
 const DEFAULT_TELEGRAM_POLL_INTERVAL_SECS: u64 = 5;
+const LOCAL_HTTP_API_ROUTE: &str = "/api/send-file";
+const LOCAL_HTTP_TEXT_API_ROUTE: &str = "/api/send-text";
 
 fn default_export_global_hotkey_enabled() -> bool {
     true
@@ -122,6 +132,8 @@ struct ExportSettings {
     global_hotkey: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     send_hotkey: Option<String>,
+    #[serde(default)]
+    local_http_api: LocalHttpApiSettings,
     #[serde(default)]
     telegram: ExportTelegramSettings,
 }
@@ -216,6 +228,113 @@ struct TelegramBridgeManager {
     last_pid: Option<u32>,
 }
 
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum LocalHttpApiState {
+    Disabled,
+    Running,
+    StartFailed,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalHttpApiStatus {
+    state: LocalHttpApiState,
+    address: Option<String>,
+    last_error: Option<String>,
+}
+
+struct LocalHttpApiManager {
+    state: LocalHttpApiState,
+    last_error: Option<String>,
+    bind_address: String,
+    bind_port: u16,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    task: Option<tauri::async_runtime::JoinHandle<()>>,
+}
+
+impl Default for LocalHttpApiManager {
+    fn default() -> Self {
+        Self {
+            state: LocalHttpApiState::Disabled,
+            last_error: None,
+            bind_address: DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS.to_string(),
+            bind_port: DEFAULT_LOCAL_HTTP_API_BIND_PORT,
+            shutdown_tx: None,
+            task: None,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct LocalHttpApiContext {
+    app_handle: AppHandle,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalHttpApiSendTextRequest {
+    text: String,
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
+    marked_options: Option<LocalHttpApiMarkedOptionsInput>,
+}
+
+#[derive(Clone, Default, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LocalHttpApiMarkedOptionsInput {
+    #[serde(default)]
+    marked: bool,
+    #[serde(default)]
+    tag_names: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalHttpApiSendResponse {
+    status: &'static str,
+    result: SendMessageResult,
+}
+
+#[derive(Serialize)]
+struct LocalHttpApiErrorResponse {
+    error: String,
+}
+
+struct LocalHttpApiError {
+    status: StatusCode,
+    message: String,
+}
+
+impl LocalHttpApiError {
+    fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+        }
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: message.into(),
+        }
+    }
+}
+
+impl IntoResponse for LocalHttpApiError {
+    fn into_response(self) -> Response {
+        (
+            self.status,
+            Json(LocalHttpApiErrorResponse {
+                error: self.message,
+            }),
+        )
+            .into_response()
+    }
+}
+
 #[derive(Serialize)]
 struct DownloadResult {
     status: String,
@@ -224,7 +343,7 @@ struct DownloadResult {
     transfer_mode: Option<String>,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Clone, Default, Deserialize, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct PendingCreatedTagInput {
     name: String,
@@ -232,7 +351,7 @@ struct PendingCreatedTagInput {
     selected: bool,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Clone, Default, Deserialize, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct SendMarkedOptionsInput {
     #[serde(default)]
@@ -249,6 +368,9 @@ struct SendMarkedOptionsInput {
 #[serde(rename_all = "camelCase")]
 struct SendMessageResult {
     marked_tag_ids: Vec<String>,
+    filename: String,
+    original_name: String,
+    endpoint_id: String,
 }
 
 #[derive(Serialize)]
@@ -412,6 +534,11 @@ fn get_telegram_bridge_status(state: State<'_, AppState>) -> Result<TelegramBrid
 }
 
 #[tauri::command]
+fn get_local_http_api_status(state: State<'_, AppState>) -> Result<LocalHttpApiStatus, String> {
+    local_http_api_status(&state)
+}
+
+#[tauri::command]
 async fn discover_telegram_chats(
     bot_token: String,
     proxy_url: Option<String>,
@@ -443,9 +570,9 @@ async fn save_settings(
 
     write_settings(&state.settings_path, &normalized)?;
 
-    #[cfg(desktop)]
     {
         // 设置开机自启动
+        #[cfg(desktop)]
         if let Err(err) = set_autostart(&app, normalized.auto_start) {
             // 自启动设置失败时返回错误，让用户知道设置失败
             return Err(format!("设置开机自启动失败: {err}"));
@@ -462,6 +589,9 @@ async fn save_settings(
 
     if should_restart_telegram_bridge(&previous, &normalized) {
         restart_telegram_bridge_after_settings_change(&state, "settings update").await;
+    }
+    if let Err(err) = ensure_local_http_api_state(&app, &state).await {
+        eprintln!("Local HTTP API apply settings failed: {err}");
     }
 
     signal_sync_loop_reset(&state);
@@ -509,6 +639,7 @@ fn export_settings(
         global_hotkey_enabled: settings.global_hotkey_enabled,
         global_hotkey: Some(settings.global_hotkey.clone()),
         send_hotkey: Some(settings.send_hotkey.clone()),
+        local_http_api: settings.local_http_api.clone(),
         telegram: ExportTelegramSettings {
             enabled: settings.telegram.enabled,
             auto_start: settings.telegram.auto_start,
@@ -538,7 +669,7 @@ fn export_settings(
 }
 
 #[tauri::command]
-fn import_settings(
+async fn import_settings(
     app: AppHandle,
     state: State<'_, AppState>,
     path: String,
@@ -575,6 +706,7 @@ fn import_settings(
             .unwrap_or_else(|| existing.send_hotkey.clone()),
         download_dir: existing.download_dir,
         auto_start: existing.auto_start,
+        local_http_api: bundle.settings.local_http_api,
         telegram: TelegramBridgeSettings {
             enabled: bundle.settings.telegram.enabled,
             auto_start: bundle.settings.telegram.auto_start,
@@ -593,11 +725,16 @@ fn import_settings(
     update_global_hotkey_registration(&app, &state, &normalized)?;
 
     write_settings(&state.settings_path, &normalized)?;
-    let mut guard = state
-        .settings
-        .lock()
-        .map_err(|_| "写入设置失败".to_string())?;
-    *guard = normalized.clone();
+    {
+        let mut guard = state
+            .settings
+            .lock()
+            .map_err(|_| "写入设置失败".to_string())?;
+        *guard = normalized.clone();
+    }
+    if let Err(err) = ensure_local_http_api_state(&app, &state).await {
+        eprintln!("Local HTTP API apply imported settings failed: {err}");
+    }
     signal_sync_loop_reset(&state);
     Ok(normalized)
 }
@@ -669,7 +806,8 @@ fn apply_send_marked_options(
             .tags
             .retain(|tag| !deleted_set.contains(tag.id.as_str()));
         for entry in loaded.entries.iter_mut() {
-            entry.marked_tag_ids
+            entry
+                .marked_tag_ids
                 .retain(|tag_id| !deleted_set.contains(tag_id.as_str()));
         }
     }
@@ -687,7 +825,9 @@ fn apply_send_marked_options(
         }
         loaded.tags.push(tag);
     }
-    loaded.tags.sort_by(|left, right| left.name.cmp(&right.name));
+    loaded
+        .tags
+        .sort_by(|left, right| left.name.cmp(&right.name));
 
     let mut final_tag_ids =
         sanitize_existing_marked_tag_ids(&loaded.tags, options.selected_tag_ids);
@@ -724,6 +864,9 @@ async fn persist_sent_message_with_marked_options(
 
     Ok(SendMessageResult {
         marked_tag_ids: final_tag_ids,
+        filename: message.filename.clone(),
+        original_name: message.original_name.clone(),
+        endpoint_id: endpoint.id.clone(),
     })
 }
 
@@ -777,8 +920,9 @@ fn sync_marked_metadata_to_db(
 ) -> Result<(), String> {
     db::replace_marked_tags(&state.db_path, endpoint_id, tags).map_err(|err| err.to_string())?;
     for history_entry in history_entries {
-        if let Some(mut message) = db::get_message(&state.db_path, endpoint_id, &history_entry.filename)
-            .map_err(|err| err.to_string())?
+        if let Some(mut message) =
+            db::get_message(&state.db_path, endpoint_id, &history_entry.filename)
+                .map_err(|err| err.to_string())?
         {
             message.marked = history_entry.marked;
             message.marked_tag_ids = history_entry.marked_tag_ids.clone();
@@ -822,7 +966,12 @@ async fn set_message_marked(
 
     if local_message.marked != marked
         || local_message.marked_tag_ids != valid_tag_ids
-        || local_message.marked_pinned != (if marked { local_message.marked_pinned } else { false })
+        || local_message.marked_pinned
+            != (if marked {
+                local_message.marked_pinned
+            } else {
+                false
+            })
     {
         apply_marked_state(
             &mut local_message.marked,
@@ -910,7 +1059,9 @@ async fn create_marked_tag(state: State<'_, AppState>, name: String) -> Result<M
         name: normalized,
     };
     loaded.tags.push(tag.clone());
-    loaded.tags.sort_by(|left, right| left.name.cmp(&right.name));
+    loaded
+        .tags
+        .sort_by(|left, right| left.name.cmp(&right.name));
     crate::history::save_history(&state.http, &endpoint, &loaded.entries, &loaded.tags).await?;
     db::replace_marked_tags(&state.db_path, &endpoint.id, &loaded.tags)
         .map_err(|err| err.to_string())?;
@@ -929,7 +1080,9 @@ async fn delete_marked_tag(state: State<'_, AppState>, tag_id: String) -> Result
         return Err("未找到标签".to_string());
     }
     for entry in loaded.entries.iter_mut() {
-        entry.marked_tag_ids.retain(|entry_tag_id| entry_tag_id != &tag_id);
+        entry
+            .marked_tag_ids
+            .retain(|entry_tag_id| entry_tag_id != &tag_id);
     }
     crate::history::save_history(&state.http, &endpoint, &loaded.entries, &loaded.tags).await?;
     sync_marked_metadata_to_db(state.inner(), &endpoint.id, &loaded.entries, &loaded.tags)?;
@@ -959,7 +1112,9 @@ async fn rename_marked_tag(
     if !found {
         return Err("未找到标签".to_string());
     }
-    loaded.tags.sort_by(|left, right| left.name.cmp(&right.name));
+    loaded
+        .tags
+        .sort_by(|left, right| left.name.cmp(&right.name));
     crate::history::save_history(&state.http, &endpoint, &loaded.entries, &loaded.tags).await?;
     db::replace_marked_tags(&state.db_path, &endpoint.id, &loaded.tags)
         .map_err(|err| err.to_string())?;
@@ -1067,10 +1222,130 @@ async fn send_text(
     format: Option<String>,
     marked_options: Option<SendMarkedOptionsInput>,
 ) -> Result<SendMessageResult, String> {
+    send_text_impl(&state, text, format, marked_options).await
+}
+
+fn normalize_send_text_format(format: Option<String>) -> Result<String, String> {
+    let normalized = format
+        .unwrap_or_else(|| "text".to_string())
+        .trim()
+        .to_lowercase();
+    match normalized.as_str() {
+        "" | "text" => Ok("text".to_string()),
+        "markdown" => Ok("markdown".to_string()),
+        _ => Err("文本格式仅支持 text 或 markdown".to_string()),
+    }
+}
+
+fn reject_legacy_local_http_marked_option_fields(value: &serde_json::Value) -> Result<(), String> {
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+    for legacy_field in ["selectedTagIds", "createdTags", "deletedTagIds"] {
+        if object.contains_key(legacy_field) {
+            return Err(format!(
+                "markedOptions 不再支持 {legacy_field}，请改用 tagNames"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn normalize_local_http_tag_names(tag_names: Vec<String>) -> Result<Vec<String>, String> {
+    let mut normalized_tag_names = Vec::new();
+    let mut seen_names = HashSet::new();
+
+    for tag_name in tag_names {
+        let normalized = normalize_marked_tag_name(&tag_name)?;
+        let dedupe_key = normalized.to_lowercase();
+        if seen_names.insert(dedupe_key) {
+            normalized_tag_names.push(normalized);
+        }
+    }
+
+    Ok(normalized_tag_names)
+}
+
+fn build_local_http_marked_options(
+    tags: &[MarkedTag],
+    options: LocalHttpApiMarkedOptionsInput,
+) -> Result<SendMarkedOptionsInput, String> {
+    let normalized_tag_names = normalize_local_http_tag_names(options.tag_names)?;
+    let marked = options.marked || !normalized_tag_names.is_empty();
+    let mut selected_tag_ids = Vec::new();
+    let mut created_tags = Vec::new();
+
+    for tag_name in normalized_tag_names {
+        if let Some(existing_tag) = tags
+            .iter()
+            .find(|tag| tag.name.trim().to_lowercase() == tag_name.to_lowercase())
+        {
+            selected_tag_ids.push(existing_tag.id.clone());
+        } else {
+            created_tags.push(PendingCreatedTagInput {
+                name: tag_name,
+                selected: true,
+            });
+        }
+    }
+
+    Ok(SendMarkedOptionsInput {
+        marked,
+        selected_tag_ids,
+        created_tags,
+        deleted_tag_ids: Vec::new(),
+    })
+}
+
+fn parse_local_http_marked_options_json(
+    raw: &str,
+) -> Result<LocalHttpApiMarkedOptionsInput, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("markedOptions 不能为空".to_string());
+    }
+    let value: serde_json::Value = serde_json::from_str(trimmed)
+        .map_err(|err| format!("markedOptions 必须是合法 JSON: {err}"))?;
+    reject_legacy_local_http_marked_option_fields(&value)?;
+    serde_json::from_value(value).map_err(|err| format!("markedOptions 格式不正确: {err}"))
+}
+
+fn parse_local_http_send_text_request_json(
+    raw: &[u8],
+) -> Result<LocalHttpApiSendTextRequest, String> {
+    let value: serde_json::Value =
+        serde_json::from_slice(raw).map_err(|err| format!("请求体必须是合法 JSON: {err}"))?;
+    if let Some(marked_options) = value.get("markedOptions") {
+        reject_legacy_local_http_marked_option_fields(marked_options)?;
+    }
+    serde_json::from_value(value).map_err(|err| format!("请求体格式不正确: {err}"))
+}
+
+async fn resolve_local_http_marked_options(
+    state: &AppState,
+    marked_options: Option<LocalHttpApiMarkedOptionsInput>,
+) -> Result<Option<SendMarkedOptionsInput>, String> {
+    let Some(marked_options) = marked_options else {
+        return Ok(None);
+    };
+
+    let settings = current_settings(state)?;
+    let endpoint = resolve_active_endpoint(&settings)?;
+    let loaded = crate::history::load_history_with_layout(&state.http, &endpoint).await?;
+    let resolved = build_local_http_marked_options(&loaded.tags, marked_options)?;
+    Ok(Some(resolved))
+}
+
+async fn send_text_impl(
+    state: &AppState,
+    text: String,
+    format: Option<String>,
+    marked_options: Option<SendMarkedOptionsInput>,
+) -> Result<SendMessageResult, String> {
     let settings = current_settings(&state)?;
     let endpoint = resolve_active_endpoint(&settings)?;
 
-    let format = format.unwrap_or_else(|| "text".to_string());
+    let format = normalize_send_text_format(format)?;
     let is_markdown = format == "markdown";
     let extension = if is_markdown {
         "message.md"
@@ -1106,13 +1381,7 @@ async fn send_text(
         format,
     };
 
-    persist_sent_message_with_marked_options(
-        state.inner(),
-        &endpoint,
-        &mut message,
-        marked_options,
-    )
-    .await
+    persist_sent_message_with_marked_options(state, &endpoint, &mut message, marked_options).await
 }
 
 fn is_image_file(filename: &str) -> bool {
@@ -1145,19 +1414,6 @@ fn generate_thumbnail(data: &[u8]) -> Result<Vec<u8>, String> {
     Ok(buf.into_inner())
 }
 
-fn cache_uploaded_file_from_path(source_path: &Path, target_path: &Path) -> Result<(), String> {
-    if let Some(parent) = target_path.parent() {
-        fs::create_dir_all(parent).map_err(|err| format!("创建目录失败: {err}"))?;
-    }
-    match fs::hard_link(source_path, target_path) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            fs::copy(source_path, target_path).map_err(|err| format!("保存本地文件失败: {err}"))?;
-            Ok(())
-        }
-    }
-}
-
 fn cache_uploaded_bytes(target_path: &Path, data: &[u8]) -> Result<(), String> {
     if let Some(parent) = target_path.parent() {
         fs::create_dir_all(parent).map_err(|err| format!("创建目录失败: {err}"))?;
@@ -1179,7 +1435,8 @@ fn spawn_thumbnail_upload(
         return;
     }
     tokio::spawn(async move {
-        let thumb_data = match tokio::task::spawn_blocking(move || generate_thumbnail(&data)).await {
+        let thumb_data = match tokio::task::spawn_blocking(move || generate_thumbnail(&data)).await
+        {
             Ok(Ok(bytes)) => bytes,
             _ => return,
         };
@@ -1194,25 +1451,21 @@ fn spawn_thumbnail_upload(
     });
 }
 
-#[tauri::command]
-async fn send_file(
-    window: Window,
-    state: State<'_, AppState>,
-    path: String,
+async fn send_file_data_impl(
+    state: &AppState,
+    window: Option<&Window>,
+    data: Vec<u8>,
+    original_name: String,
     client_id: Option<String>,
     marked_options: Option<SendMarkedOptionsInput>,
 ) -> Result<SendMessageResult, String> {
-    let settings = current_settings(&state)?;
+    let settings = current_settings(state)?;
     let endpoint = resolve_active_endpoint(&settings)?;
+    let original_name = original_name.trim().to_string();
+    if original_name.is_empty() {
+        return Err("文件名不能为空".to_string());
+    }
 
-    let file_path = PathBuf::from(path);
-    let original_name = file_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| "无法读取文件名".to_string())?
-        .to_string();
-
-    let data = fs::read(&file_path).map_err(|err| format!("读取文件失败: {err}"))?;
     let total_bytes = data.len() as u64;
     let file_hash = compute_file_hash(&data);
     let timestamp_ms = now_ms();
@@ -1230,18 +1483,20 @@ async fn send_file(
         .unwrap_or_else(|| filename.clone());
 
     webdav::ensure_parent_directories(&state.http, &endpoint, &remote_path).await?;
-    emit_upload_progress(
-        &window,
-        &client_id,
-        Some(&filename),
-        Some(&original_name),
-        0,
-        total_bytes,
-        "progress",
-        None,
-    );
+    if let Some(window) = window {
+        emit_upload_progress(
+            window,
+            &client_id,
+            Some(&filename),
+            Some(&original_name),
+            0,
+            total_bytes,
+            "progress",
+            None,
+        );
+    }
 
-    let progress_window = window.clone();
+    let progress_window = window.cloned();
     let progress_client_id = client_id.clone();
     let progress_filename = filename.clone();
     let progress_original_name = original_name.clone();
@@ -1251,47 +1506,54 @@ async fn send_file(
         &remote_path,
         data.clone(),
         move |sent, total| {
-            emit_upload_progress(
-                &progress_window,
-                &progress_client_id,
-                Some(&progress_filename),
-                Some(&progress_original_name),
-                sent,
-                total,
-                "progress",
-                None,
-            );
+            if let Some(progress_window) = progress_window.as_ref() {
+                emit_upload_progress(
+                    progress_window,
+                    &progress_client_id,
+                    Some(&progress_filename),
+                    Some(&progress_original_name),
+                    sent,
+                    total,
+                    "progress",
+                    None,
+                );
+            }
         },
     )
     .await;
 
     if let Err(err) = upload_result {
+        if let Some(window) = window {
+            emit_upload_progress(
+                window,
+                &client_id,
+                Some(&filename),
+                Some(&original_name),
+                0,
+                total_bytes,
+                "error",
+                Some(err.clone()),
+            );
+        }
+        return Err(err);
+    }
+
+    if let Some(window) = window {
         emit_upload_progress(
-            &window,
+            window,
             &client_id,
             Some(&filename),
             Some(&original_name),
-            0,
             total_bytes,
-            "error",
-            Some(err.clone()),
+            total_bytes,
+            "complete",
+            None,
         );
-        return Err(err);
     }
-    emit_upload_progress(
-        &window,
-        &client_id,
-        Some(&filename),
-        Some(&original_name),
-        total_bytes,
-        total_bytes,
-        "complete",
-        None,
-    );
 
-    let endpoint_dir = endpoint_files_dir(&state, &endpoint.id);
+    let endpoint_dir = endpoint_files_dir(state, &endpoint.id);
     let local_path = endpoint_dir.join(&filename);
-    cache_uploaded_file_from_path(&file_path, &local_path)?;
+    cache_uploaded_bytes(&local_path, &data)?;
 
     let mut message = DbMessage {
         endpoint_id: endpoint.id.clone(),
@@ -1313,157 +1575,11 @@ async fn send_file(
         format: "text".to_string(),
     };
 
-    let result = persist_sent_message_with_marked_options(
-        state.inner(),
-        &endpoint,
-        &mut message,
-        marked_options,
-    )
-    .await?;
+    let result =
+        persist_sent_message_with_marked_options(state, &endpoint, &mut message, marked_options)
+            .await?;
     persist_upload_history(
-        &state,
-        &endpoint.id,
-        &filename,
-        &original_name,
-        Some(&local_path),
-        "complete",
-        None,
-        total_bytes as i64,
-    )?;
-    spawn_thumbnail_upload(
-        state.http.clone(),
-        endpoint.clone(),
-        endpoint_dir,
-        message.remote_path.clone().unwrap_or_default(),
-        filename,
-        timestamp_ms,
-        original_name,
-        data,
-    );
-    Ok(result)
-}
-
-#[tauri::command]
-async fn send_file_data(
-    window: Window,
-    state: State<'_, AppState>,
-    data: Vec<u8>,
-    original_name: String,
-    client_id: Option<String>,
-    marked_options: Option<SendMarkedOptionsInput>,
-) -> Result<SendMessageResult, String> {
-    let settings = current_settings(&state)?;
-    let endpoint = resolve_active_endpoint(&settings)?;
-
-    let total_bytes = data.len() as u64;
-    let file_hash = compute_file_hash(&data);
-    let timestamp_ms = now_ms();
-    let filename = build_message_filename(&settings.sender_name, &original_name, timestamp_ms);
-    let remote_path = message_remote_path(&filename, timestamp_ms);
-
-    let client_id = client_id
-        .and_then(|value| {
-            if value.trim().is_empty() {
-                None
-            } else {
-                Some(value)
-            }
-        })
-        .unwrap_or_else(|| filename.clone());
-
-    webdav::ensure_parent_directories(&state.http, &endpoint, &remote_path).await?;
-    emit_upload_progress(
-        &window,
-        &client_id,
-        Some(&filename),
-        Some(&original_name),
-        0,
-        total_bytes,
-        "progress",
-        None,
-    );
-
-    let progress_window = window.clone();
-    let progress_client_id = client_id.clone();
-    let progress_filename = filename.clone();
-    let progress_original_name = original_name.clone();
-    let upload_result = webdav::upload_file_with_progress(
-        &state.http,
-        &endpoint,
-        &remote_path,
-        data.clone(),
-        move |sent, total| {
-            emit_upload_progress(
-                &progress_window,
-                &progress_client_id,
-                Some(&progress_filename),
-                Some(&progress_original_name),
-                sent,
-                total,
-                "progress",
-                None,
-            );
-        },
-    )
-    .await;
-
-    if let Err(err) = upload_result {
-        emit_upload_progress(
-            &window,
-            &client_id,
-            Some(&filename),
-            Some(&original_name),
-            0,
-            total_bytes,
-            "error",
-            Some(err.clone()),
-        );
-        return Err(err);
-    }
-    emit_upload_progress(
-        &window,
-        &client_id,
-        Some(&filename),
-        Some(&original_name),
-        total_bytes,
-        total_bytes,
-        "complete",
-        None,
-    );
-
-    let endpoint_dir = endpoint_files_dir(&state, &endpoint.id);
-    let local_path = endpoint_dir.join(&filename);
-    cache_uploaded_bytes(&local_path, &data)?;
-
-    let mut message = DbMessage {
-        endpoint_id: endpoint.id.clone(),
-        filename: filename.clone(),
-        sender: settings.sender_name.clone(),
-        timestamp_ms,
-        size: total_bytes as i64,
-        kind: MessageKind::File.as_str().to_string(),
-        original_name,
-        etag: None,
-        mtime: None,
-        content: None,
-        local_path: Some(local_path.to_string_lossy().to_string()),
-        remote_path: Some(remote_path),
-        file_hash: Some(file_hash),
-        marked: false,
-        marked_tag_ids: Vec::new(),
-        marked_pinned: false,
-        format: "text".to_string(),
-    };
-
-    let result = persist_sent_message_with_marked_options(
-        state.inner(),
-        &endpoint,
-        &mut message,
-        marked_options,
-    )
-    .await?;
-    persist_upload_history(
-        &state,
+        state,
         &endpoint.id,
         &filename,
         &message.original_name,
@@ -1483,6 +1599,52 @@ async fn send_file_data(
         data,
     );
     Ok(result)
+}
+
+#[tauri::command]
+async fn send_file(
+    window: Window,
+    state: State<'_, AppState>,
+    path: String,
+    client_id: Option<String>,
+    marked_options: Option<SendMarkedOptionsInput>,
+) -> Result<SendMessageResult, String> {
+    let file_path = PathBuf::from(path);
+    let original_name = file_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "无法读取文件名".to_string())?
+        .to_string();
+    let data = fs::read(&file_path).map_err(|err| format!("读取文件失败: {err}"))?;
+    send_file_data_impl(
+        state.inner(),
+        Some(&window),
+        data,
+        original_name,
+        client_id,
+        marked_options,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn send_file_data(
+    window: Window,
+    state: State<'_, AppState>,
+    data: Vec<u8>,
+    original_name: String,
+    client_id: Option<String>,
+    marked_options: Option<SendMarkedOptionsInput>,
+) -> Result<SendMessageResult, String> {
+    send_file_data_impl(
+        state.inner(),
+        Some(&window),
+        data,
+        original_name,
+        client_id,
+        marked_options,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -3303,6 +3465,26 @@ fn normalize_telegram_proxy_url(raw: &str) -> Result<String, String> {
     Ok(normalized)
 }
 
+fn normalize_local_http_api_bind_address(raw: &str) -> Result<String, String> {
+    let normalized = if raw.trim().is_empty() {
+        DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS.to_string()
+    } else {
+        raw.trim().to_string()
+    };
+    normalized
+        .parse::<IpAddr>()
+        .map(|ip| ip.to_string())
+        .map_err(|err| format!("HTTP API 监听地址无效: {err}"))
+}
+
+fn normalize_local_http_api_bind_port(port: u16) -> u16 {
+    if port == 0 {
+        DEFAULT_LOCAL_HTTP_API_BIND_PORT
+    } else {
+        port
+    }
+}
+
 fn normalize_settings(
     mut settings: Settings,
     default_download_dir: &Path,
@@ -3362,6 +3544,11 @@ fn normalize_settings(
         });
         settings.active_webdav_id = if active_ok { Some(active_id) } else { None };
     }
+
+    settings.local_http_api.bind_address =
+        normalize_local_http_api_bind_address(&settings.local_http_api.bind_address)?;
+    settings.local_http_api.bind_port =
+        normalize_local_http_api_bind_port(settings.local_http_api.bind_port);
 
     settings.telegram.bot_token = settings.telegram.bot_token.trim().to_string();
     settings.telegram.chat_id = settings.telegram.chat_id.trim().to_string();
@@ -3680,6 +3867,7 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
                 global_hotkey: DEFAULT_GLOBAL_HOTKEY.to_string(),
                 send_hotkey: DEFAULT_SEND_HOTKEY.to_string(),
                 auto_start: false,
+                local_http_api: LocalHttpApiSettings::default(),
                 telegram: TelegramBridgeSettings::default(),
             }
         };
@@ -3697,6 +3885,7 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
             global_hotkey: DEFAULT_GLOBAL_HOTKEY.to_string(),
             send_hotkey: DEFAULT_SEND_HOTKEY.to_string(),
             auto_start: false,
+            local_http_api: LocalHttpApiSettings::default(),
             telegram: TelegramBridgeSettings::default(),
         };
         write_settings(path, &settings)?;
@@ -4182,6 +4371,263 @@ fn stop_telegram_bridge_impl(state: &AppState) -> Result<TelegramBridgeStatus, S
         finish_telegram_bridge_process(&mut manager, process, None);
     }
     Ok(telegram_bridge_status_from_manager(&manager))
+}
+
+fn local_http_api_socket_addr(settings: &LocalHttpApiSettings) -> Result<SocketAddr, String> {
+    let bind_address = normalize_local_http_api_bind_address(&settings.bind_address)?;
+    let bind_port = normalize_local_http_api_bind_port(settings.bind_port);
+    let ip = bind_address
+        .parse::<IpAddr>()
+        .map_err(|err| format!("HTTP API 监听地址无效: {err}"))?;
+    Ok(SocketAddr::new(ip, bind_port))
+}
+
+fn local_http_api_url(bind_address: &str, bind_port: u16) -> String {
+    match bind_address.parse::<IpAddr>() {
+        Ok(IpAddr::V6(_)) => format!("http://[{bind_address}]:{bind_port}{LOCAL_HTTP_API_ROUTE}"),
+        _ => format!("http://{bind_address}:{bind_port}{LOCAL_HTTP_API_ROUTE}"),
+    }
+}
+
+fn refresh_local_http_api_manager(manager: &mut LocalHttpApiManager) {
+    if manager.task.is_none() {
+        manager.shutdown_tx = None;
+        if matches!(manager.state, LocalHttpApiState::Running) {
+            manager.state = LocalHttpApiState::StartFailed;
+            if manager.last_error.is_none() {
+                manager.last_error = Some("本机 HTTP 接口已停止".to_string());
+            }
+        }
+    }
+}
+
+fn local_http_api_status_from_manager(manager: &LocalHttpApiManager) -> LocalHttpApiStatus {
+    LocalHttpApiStatus {
+        state: manager.state.clone(),
+        address: if matches!(manager.state, LocalHttpApiState::Running) {
+            Some(local_http_api_url(&manager.bind_address, manager.bind_port))
+        } else {
+            None
+        },
+        last_error: manager.last_error.clone(),
+    }
+}
+
+fn local_http_api_status(state: &AppState) -> Result<LocalHttpApiStatus, String> {
+    let mut manager = state
+        .local_http_api
+        .lock()
+        .map_err(|_| "读取本机 HTTP 接口状态失败".to_string())?;
+    refresh_local_http_api_manager(&mut manager);
+    Ok(local_http_api_status_from_manager(&manager))
+}
+
+fn should_auto_start_local_http_api(settings: &Settings) -> bool {
+    settings.local_http_api.enabled
+}
+
+fn record_local_http_api_start_failure(state: &AppState, err: String) {
+    if let Ok(mut manager) = state.local_http_api.lock() {
+        manager.state = LocalHttpApiState::StartFailed;
+        manager.last_error = Some(err);
+        manager.shutdown_tx = None;
+        manager.task = None;
+    }
+}
+
+async fn local_http_api_send_file(
+    AxumState(context): AxumState<LocalHttpApiContext>,
+    mut multipart: Multipart,
+) -> Result<Json<LocalHttpApiSendResponse>, LocalHttpApiError> {
+    let mut uploaded_name = None;
+    let mut uploaded_bytes = None;
+    let mut marked_options = None;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|err| LocalHttpApiError::bad_request(format!("解析上传请求失败: {err}")))?
+    {
+        let field_name = field.name().map(str::to_owned);
+        let file_name = field
+            .file_name()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(ToOwned::to_owned);
+
+        if field_name.as_deref() == Some("markedOptions") {
+            let raw = field.text().await.map_err(|err| {
+                LocalHttpApiError::bad_request(format!("读取 markedOptions 失败: {err}"))
+            })?;
+            marked_options = Some(
+                parse_local_http_marked_options_json(&raw)
+                    .map_err(LocalHttpApiError::bad_request)?,
+            );
+            continue;
+        }
+
+        if let Some(file_name) = file_name {
+            let bytes = field.bytes().await.map_err(|err| {
+                LocalHttpApiError::bad_request(format!("读取上传文件失败: {err}"))
+            })?;
+            if uploaded_name.is_none() {
+                uploaded_name = Some(file_name);
+                uploaded_bytes = Some(bytes.to_vec());
+            }
+        }
+    }
+
+    let original_name =
+        uploaded_name.ok_or_else(|| LocalHttpApiError::bad_request("请求缺少文件部分"))?;
+    let data = uploaded_bytes.ok_or_else(|| LocalHttpApiError::bad_request("请求缺少文件内容"))?;
+
+    let state = context.app_handle.state::<AppState>();
+    let marked_options = resolve_local_http_marked_options(&state, marked_options)
+        .await
+        .map_err(LocalHttpApiError::bad_request)?;
+    let result = send_file_data_impl(&state, None, data, original_name, None, marked_options)
+        .await
+        .map_err(|err| LocalHttpApiError::internal(err))?;
+
+    Ok(Json(LocalHttpApiSendResponse {
+        status: "ok",
+        result,
+    }))
+}
+
+async fn local_http_api_send_text(
+    AxumState(context): AxumState<LocalHttpApiContext>,
+    body: Bytes,
+) -> Result<Json<LocalHttpApiSendResponse>, LocalHttpApiError> {
+    let payload =
+        parse_local_http_send_text_request_json(&body).map_err(LocalHttpApiError::bad_request)?;
+    let format =
+        normalize_send_text_format(payload.format).map_err(LocalHttpApiError::bad_request)?;
+    let state = context.app_handle.state::<AppState>();
+    let marked_options = resolve_local_http_marked_options(&state, payload.marked_options)
+        .await
+        .map_err(LocalHttpApiError::bad_request)?;
+    let result = send_text_impl(&state, payload.text, Some(format), marked_options)
+        .await
+        .map_err(|err| LocalHttpApiError::internal(err))?;
+
+    Ok(Json(LocalHttpApiSendResponse {
+        status: "ok",
+        result,
+    }))
+}
+
+async fn start_local_http_api_impl(
+    app_handle: &AppHandle,
+    state: &AppState,
+    settings: &LocalHttpApiSettings,
+) -> Result<LocalHttpApiStatus, String> {
+    let socket_addr = local_http_api_socket_addr(settings)?;
+    let bind_address = normalize_local_http_api_bind_address(&settings.bind_address)?;
+    let bind_port = normalize_local_http_api_bind_port(settings.bind_port);
+    let mut previous_shutdown: Option<oneshot::Sender<()>> = None;
+    let mut previous_task: Option<tauri::async_runtime::JoinHandle<()>> = None;
+    {
+        let mut manager = state
+            .local_http_api
+            .lock()
+            .map_err(|_| "更新本机 HTTP 接口状态失败".to_string())?;
+        refresh_local_http_api_manager(&mut manager);
+        let same_binding = manager.bind_address == bind_address && manager.bind_port == bind_port;
+        if matches!(manager.state, LocalHttpApiState::Running)
+            && manager.task.is_some()
+            && same_binding
+        {
+            return Ok(local_http_api_status_from_manager(&manager));
+        }
+        if manager.task.is_some() {
+            previous_shutdown = manager.shutdown_tx.take();
+            previous_task = manager.task.take();
+            manager.state = LocalHttpApiState::Disabled;
+        }
+    }
+
+    if let Some(shutdown_tx) = previous_shutdown {
+        let _ = shutdown_tx.send(());
+    }
+    if let Some(task) = previous_task {
+        let _ = task.await;
+    }
+
+    let listener = tokio::net::TcpListener::bind(socket_addr)
+        .await
+        .map_err(|err| format!("启动本机 HTTP 接口失败: {err}"))?;
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let router = Router::new()
+        .route(
+            LOCAL_HTTP_API_ROUTE,
+            axum::routing::post(local_http_api_send_file),
+        )
+        .route(
+            LOCAL_HTTP_TEXT_API_ROUTE,
+            axum::routing::post(local_http_api_send_text),
+        )
+        .layer(DefaultBodyLimit::disable())
+        .with_state(LocalHttpApiContext {
+            app_handle: app_handle.clone(),
+        });
+    let app_handle = app_handle.clone();
+    let task = tauri::async_runtime::spawn(async move {
+        let result = axum::serve(listener, router)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await;
+        if let Err(err) = result {
+            let state = app_handle.state::<AppState>();
+            record_local_http_api_start_failure(&state, format!("本机 HTTP 接口运行失败: {err}"));
+        }
+    });
+
+    let mut manager = state
+        .local_http_api
+        .lock()
+        .map_err(|_| "更新本机 HTTP 接口状态失败".to_string())?;
+    manager.state = LocalHttpApiState::Running;
+    manager.last_error = None;
+    manager.bind_address = bind_address;
+    manager.bind_port = bind_port;
+    manager.shutdown_tx = Some(shutdown_tx);
+    manager.task = Some(task);
+    Ok(local_http_api_status_from_manager(&manager))
+}
+
+fn stop_local_http_api_impl(state: &AppState) -> Result<LocalHttpApiStatus, String> {
+    let mut manager = state
+        .local_http_api
+        .lock()
+        .map_err(|_| "更新本机 HTTP 接口状态失败".to_string())?;
+    refresh_local_http_api_manager(&mut manager);
+    if let Some(shutdown_tx) = manager.shutdown_tx.take() {
+        let _ = shutdown_tx.send(());
+    }
+    manager.task = None;
+    manager.state = LocalHttpApiState::Disabled;
+    manager.last_error = None;
+    Ok(local_http_api_status_from_manager(&manager))
+}
+
+async fn ensure_local_http_api_state(
+    app_handle: &AppHandle,
+    state: &AppState,
+) -> Result<(), String> {
+    let settings = current_settings(state)?;
+    if should_auto_start_local_http_api(&settings) {
+        if let Err(err) =
+            start_local_http_api_impl(app_handle, state, &settings.local_http_api).await
+        {
+            record_local_http_api_start_failure(state, err.clone());
+            return Err(err);
+        }
+    } else {
+        let _ = stop_local_http_api_impl(state);
+    }
+    Ok(())
 }
 
 enum ConflictAction {
@@ -5116,6 +5562,7 @@ fn main() {
                     .map_err(|err| format!("创建 HTTP 客户端失败: {err}"))?,
                 registered_hotkey: Mutex::new(None),
                 telegram_bridge: Mutex::new(TelegramBridgeManager::default()),
+                local_http_api: Mutex::new(LocalHttpApiManager::default()),
             });
 
             #[cfg(desktop)]
@@ -5284,6 +5731,16 @@ fn main() {
                 });
             }
 
+            {
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = app_handle.state::<AppState>();
+                    if let Err(err) = ensure_local_http_api_state(&app_handle, &state).await {
+                        eprintln!("Local HTTP API auto start failed: {err}");
+                    }
+                });
+            }
+
             start_sync_loop(app.handle().clone());
             Ok(())
         })
@@ -5304,6 +5761,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             get_telegram_bridge_status,
+            get_local_http_api_status,
             discover_telegram_chats,
             save_settings,
             save_send_hotkey,
@@ -5364,6 +5822,7 @@ fn main() {
         ) {
             let state = app_handle.state::<AppState>();
             let _ = stop_telegram_bridge_impl(&state);
+            let _ = stop_local_http_api_impl(&state);
         }
 
         #[cfg(target_os = "macos")]
@@ -5396,6 +5855,7 @@ mod tests {
             global_hotkey_enabled: false,
             global_hotkey: DEFAULT_GLOBAL_HOTKEY.to_string(),
             auto_start: false,
+            local_http_api: LocalHttpApiSettings::default(),
             telegram: TelegramBridgeSettings::default(),
         }
     }
@@ -5656,8 +6116,8 @@ mod tests {
             name: "重要".to_string(),
         }];
 
-        let error =
-            ensure_unique_marked_tag_name(&tags, "  重要  ", None).expect_err("should reject duplicate");
+        let error = ensure_unique_marked_tag_name(&tags, "  重要  ", None)
+            .expect_err("should reject duplicate");
 
         assert!(error.contains("已存在"));
         assert!(ensure_unique_marked_tag_name(&tags, "重要", Some("tag-1")).is_ok());
@@ -5684,6 +6144,170 @@ mod tests {
     }
 
     #[test]
+    fn normalize_settings_applies_local_http_api_defaults() {
+        let mut settings = test_settings();
+        settings.local_http_api.bind_address.clear();
+        settings.local_http_api.bind_port = 0;
+        let download_dir = std::env::temp_dir().join("transfer-genie-settings-test");
+
+        let normalized = normalize_settings(settings, &download_dir).unwrap();
+
+        assert_eq!(normalized.local_http_api.bind_address, "127.0.0.1");
+        assert_eq!(normalized.local_http_api.bind_port, 6011);
+    }
+
+    #[test]
+    fn normalize_settings_rejects_invalid_local_http_api_bind_address() {
+        let mut settings = test_settings();
+        settings.local_http_api.bind_address = "not-an-ip".to_string();
+        let download_dir = std::env::temp_dir().join("transfer-genie-settings-test");
+
+        let error = match normalize_settings(settings, &download_dir) {
+            Ok(_) => panic!("expected invalid local HTTP API address"),
+            Err(err) => err,
+        };
+
+        assert!(error.contains("HTTP API"));
+    }
+
+    #[test]
+    fn normalize_send_text_format_accepts_supported_values() {
+        assert_eq!(normalize_send_text_format(None).unwrap(), "text");
+        assert_eq!(
+            normalize_send_text_format(Some("markdown".to_string())).unwrap(),
+            "markdown"
+        );
+        assert_eq!(
+            normalize_send_text_format(Some(" TEXT ".to_string())).unwrap(),
+            "text"
+        );
+    }
+
+    #[test]
+    fn normalize_send_text_format_rejects_unknown_value() {
+        let error = normalize_send_text_format(Some("html".to_string())).unwrap_err();
+        assert!(error.contains("text"));
+        assert!(error.contains("markdown"));
+    }
+
+    #[test]
+    fn parse_local_http_marked_options_json_accepts_marked_tags() {
+        let options = parse_local_http_marked_options_json(
+            r#"{
+                "tagNames": ["  New Tag  ", "urgent", "urgent"]
+            }"#,
+        )
+        .unwrap();
+
+        assert!(!options.marked);
+        assert_eq!(
+            options.tag_names,
+            vec![
+                "  New Tag  ".to_string(),
+                "urgent".to_string(),
+                "urgent".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_local_http_marked_options_json_rejects_invalid_json() {
+        let error = parse_local_http_marked_options_json("{not-json}").unwrap_err();
+        assert!(error.contains("markedOptions"));
+    }
+
+    #[test]
+    fn parse_local_http_marked_options_json_rejects_legacy_tag_fields() {
+        let error = parse_local_http_marked_options_json(
+            r#"{
+                "marked": true,
+                "selectedTagIds": ["tag-1"]
+            }"#,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("selectedTagIds"));
+        assert!(error.contains("tagNames"));
+    }
+
+    #[test]
+    fn build_local_http_marked_options_reuses_existing_and_creates_missing_tags() {
+        let tags = vec![MarkedTag {
+            id: "tag-1".to_string(),
+            name: "Urgent".to_string(),
+        }];
+
+        let options = build_local_http_marked_options(
+            &tags,
+            LocalHttpApiMarkedOptionsInput {
+                marked: false,
+                tag_names: vec![
+                    " urgent ".to_string(),
+                    "Follow-Up".to_string(),
+                    "follow-up".to_string(),
+                ],
+            },
+        )
+        .unwrap();
+
+        assert!(options.marked);
+        assert_eq!(options.selected_tag_ids, vec!["tag-1".to_string()]);
+        assert_eq!(
+            options.created_tags,
+            vec![PendingCreatedTagInput {
+                name: "Follow-Up".to_string(),
+                selected: true,
+            }]
+        );
+        assert!(options.deleted_tag_ids.is_empty());
+    }
+
+    #[test]
+    fn local_http_api_send_text_request_supports_marked_options() {
+        let payload = parse_local_http_send_text_request_json(
+            r#"{
+                "text": "hello",
+                "format": "markdown",
+                "markedOptions": {
+                    "marked": true,
+                    "tagNames": ["urgent", "follow-up"]
+                }
+            }"#
+            .as_bytes(),
+        )
+        .unwrap();
+
+        assert_eq!(payload.text, "hello");
+        assert_eq!(payload.format.as_deref(), Some("markdown"));
+        assert_eq!(
+            payload.marked_options,
+            Some(LocalHttpApiMarkedOptionsInput {
+                marked: true,
+                tag_names: vec!["urgent".to_string(), "follow-up".to_string()],
+            })
+        );
+    }
+
+    #[test]
+    fn parse_local_http_send_text_request_json_rejects_legacy_tag_fields() {
+        let error = parse_local_http_send_text_request_json(
+            r#"{
+                "text": "hello",
+                "markedOptions": {
+                    "createdTags": [
+                        { "name": "urgent", "selected": true }
+                    ]
+                }
+            }"#
+            .as_bytes(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("createdTags"));
+        assert!(error.contains("tagNames"));
+    }
+
+    #[test]
     fn should_auto_start_telegram_bridge_requires_valid_config_and_auto_start() {
         let mut settings = test_settings();
         assert!(!should_auto_start_telegram_bridge(&settings));
@@ -5705,6 +6329,56 @@ mod tests {
         settings.active_webdav_id = None;
 
         assert!(!should_auto_start_telegram_bridge(&settings));
+    }
+
+    #[test]
+    fn should_auto_start_local_http_api_requires_enabled() {
+        let mut settings = test_settings();
+        assert!(!should_auto_start_local_http_api(&settings));
+
+        settings.local_http_api.enabled = true;
+        assert!(should_auto_start_local_http_api(&settings));
+    }
+
+    #[test]
+    fn local_http_api_status_reports_running_address() {
+        let manager = LocalHttpApiManager {
+            state: LocalHttpApiState::Running,
+            last_error: None,
+            bind_address: "127.0.0.1".to_string(),
+            bind_port: 6011,
+            shutdown_tx: None,
+            task: None,
+        };
+
+        let status = local_http_api_status_from_manager(&manager);
+
+        assert!(matches!(status.state, LocalHttpApiState::Running));
+        assert_eq!(
+            status.address.as_deref(),
+            Some(local_http_api_url("127.0.0.1", 6011).as_str())
+        );
+        assert!(status.last_error.is_none());
+    }
+
+    #[test]
+    fn write_and_load_settings_preserve_local_http_api_flag() {
+        let mut settings = test_settings();
+        settings.local_http_api.enabled = true;
+        settings.local_http_api.bind_address = "0.0.0.0".to_string();
+        settings.local_http_api.bind_port = 6012;
+        let temp_dir = std::env::temp_dir().join(format!("transfer-genie-local-http-{}", now_ms()));
+        let settings_path = temp_dir.join("settings.json");
+
+        write_settings(&settings_path, &settings).expect("write settings");
+        let loaded = load_settings(&settings_path, &temp_dir).expect("load settings");
+
+        assert!(loaded.local_http_api.enabled);
+        assert_eq!(loaded.local_http_api.bind_address, "0.0.0.0");
+        assert_eq!(loaded.local_http_api.bind_port, 6012);
+
+        let _ = fs::remove_file(&settings_path);
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 
     #[test]

@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS: &str = "127.0.0.1";
+pub const DEFAULT_LOCAL_HTTP_API_BIND_PORT: u16 = 6011;
+
 fn default_endpoint_enabled() -> bool {
     true
 }
@@ -22,6 +25,34 @@ fn default_telegram_poll_interval_secs() -> u64 {
 
 fn default_telegram_proxy_url() -> String {
     "http://127.0.0.1:7890".to_string()
+}
+
+fn default_local_http_api_bind_address() -> String {
+    DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS.to_string()
+}
+
+fn default_local_http_api_bind_port() -> u16 {
+    DEFAULT_LOCAL_HTTP_API_BIND_PORT
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalHttpApiSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_local_http_api_bind_address")]
+    pub bind_address: String,
+    #[serde(default = "default_local_http_api_bind_port")]
+    pub bind_port: u16,
+}
+
+impl Default for LocalHttpApiSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind_address: default_local_http_api_bind_address(),
+            bind_port: default_local_http_api_bind_port(),
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -97,6 +128,8 @@ pub struct Settings {
     pub global_hotkey: String,
     #[serde(default)]
     pub auto_start: bool,
+    #[serde(default)]
+    pub local_http_api: LocalHttpApiSettings,
     #[serde(default)]
     pub telegram: TelegramBridgeSettings,
 }
