@@ -497,10 +497,14 @@ if (formatInputs) {
 
 // 分页相关状态
 const PAGE_SIZE = 10;
+const LOAD_MORE_TRIGGER_TOP = 50;
+const LOAD_MORE_DEBOUNCE_MS = 120;
 let currentOffset = 0;
 let totalMessages = 0;
 let hasMoreMessages = false;
 let isLoadingMore = false;
+let loadMoreDebounceTimer = null;
+let lastMessageListScrollTop = 0;
 
 function syncCurrentOffsetWithLoadedMessages() {
   currentOffset = Math.max(0, lastMessages.length - PAGE_SIZE);
@@ -2453,7 +2457,7 @@ function setSelectionMode(enabled) {
   }
   updateSelectionToggleLabel();
   updateSelectionBar();
-  renderMessages(lastMessages);
+  renderCurrentMessageView();
 }
 
 function toggleSelectionMode() {
@@ -2486,7 +2490,7 @@ function selectAllMessages() {
   const selectable = getSelectableMessages();
   selectable.forEach((message) => selectedMessages.add(message.filename));
   updateSelectionBar();
-  renderMessages(lastMessages);
+  renderCurrentMessageView();
 }
 
 function getSelectableMarkedMessages() {
@@ -2676,8 +2680,31 @@ function scrollMessageListToBottom() {
   if (!messageList) return;
   requestAnimationFrame(() => {
     messageList.scrollTop = messageList.scrollHeight;
+    lastMessageListScrollTop = messageList.scrollTop;
     updateScrollToBottomButton();
   });
+}
+
+function queueLoadMoreIfNeeded() {
+  if (!messageList || loadMoreDebounceTimer) return;
+  loadMoreDebounceTimer = setTimeout(() => {
+    loadMoreDebounceTimer = null;
+    if (!messageList) return;
+    if (messageList.scrollTop < LOAD_MORE_TRIGGER_TOP && hasMoreMessages && !isLoadingMore) {
+      loadMessages({ loadMore: true });
+    }
+  }, LOAD_MORE_DEBOUNCE_MS);
+}
+
+function handleMessageListScroll() {
+  if (!messageList) return;
+  updateScrollToBottomButton();
+  const currentScrollTop = messageList.scrollTop;
+  const isScrollingUp = currentScrollTop <= lastMessageListScrollTop;
+  lastMessageListScrollTop = currentScrollTop;
+  if (isScrollingUp && currentScrollTop < LOAD_MORE_TRIGGER_TOP && hasMoreMessages && !isLoadingMore) {
+    queueLoadMoreIfNeeded();
+  }
 }
 
 function scrollMarkedMessageListToTop() {
@@ -4449,7 +4476,7 @@ async function legacyToggleMessageMarked(message) {
     }
   } else {
       // Fallback if not found (unlikely)
-      renderMessages(lastMessages);
+      renderCurrentMessageView();
   }
   
   try {
@@ -4470,10 +4497,10 @@ async function legacyToggleMessageMarked(message) {
         // For simplicity, just re-render on error if we messed up the list structure.
         if (markedFilterActive && !newMarked) { // We tried to mark it but failed? No, we tried to UNmark.
              // If we unmarked and removed it, and now revert (mark again), we need to show it.
-             renderMessages(lastMessages);
+             renderCurrentMessageView();
         }
     } else {
-        renderMessages(lastMessages);
+        renderCurrentMessageView();
     }
     showToast(`操作失败: ${error}`, 'error');
   }
@@ -4729,6 +4756,52 @@ function shouldShowMenuAbove(item) {
   return spaceBelow < menuHeight && spaceAbove >= menuHeight;
 }
 
+function captureMessageListAnchor() {
+  if (!messageList) return null;
+  const listRect = messageList.getBoundingClientRect();
+  const items = Array.from(messageList.querySelectorAll('.message-card[data-filename]'));
+  const anchorItem = items.find((item) => item.getBoundingClientRect().bottom > listRect.top + 1) || items[0];
+  if (!anchorItem) {
+    return null;
+  }
+  const anchorRect = anchorItem.getBoundingClientRect();
+  return {
+    filename: anchorItem.dataset.filename || '',
+    offsetTop: anchorRect.top - listRect.top,
+  };
+}
+
+function restoreMessageListAnchor(anchor, previousScrollTop, previousScrollHeight) {
+  if (!messageList) return;
+
+  if (anchor?.filename) {
+    const items = Array.from(messageList.querySelectorAll('.message-card[data-filename]'));
+    const anchorItem = items.find((item) => item.dataset.filename === anchor.filename);
+    if (anchorItem) {
+      const listRect = messageList.getBoundingClientRect();
+      const anchorRect = anchorItem.getBoundingClientRect();
+      messageList.scrollTop += anchorRect.top - listRect.top - anchor.offsetTop;
+      lastMessageListScrollTop = messageList.scrollTop;
+      updateScrollToBottomButton();
+      return;
+    }
+  }
+
+  const newScrollHeight = messageList.scrollHeight;
+  const scrollDiff = newScrollHeight - previousScrollHeight;
+  messageList.scrollTop = previousScrollTop + scrollDiff;
+  lastMessageListScrollTop = messageList.scrollTop;
+  updateScrollToBottomButton();
+}
+
+function getLoadMoreHintText(options = {}) {
+  const { isSearchResult = false } = options;
+  if (isLoadingMore) {
+    return isSearchResult ? '加载中，继续筛选更多结果...' : '加载中...';
+  }
+  return isSearchResult ? '向上滚动加载更多并保持搜索结果' : '向上滚动加载更多';
+}
+
 function renderMessages(messages, options = {}) {
   const { scrollToBottom = false, preserveScroll = false, isSearchResult = false, query = '' } = options;
   // The `messages` parameter is now the single source of truth for this render pass.
@@ -4736,6 +4809,7 @@ function renderMessages(messages, options = {}) {
   const merged = mergeMessages(messages, options);
   const previousScrollTop = messageList ? messageList.scrollTop : 0;
   const previousScrollHeight = messageList ? messageList.scrollHeight : 0;
+  const scrollAnchor = preserveScroll ? captureMessageListAnchor() : null;
   const available = new Set(merged.map((message) => message.filename));
   expandedTextMessages.forEach((filename) => {
     if (!available.has(filename)) {
@@ -4752,13 +4826,19 @@ function renderMessages(messages, options = {}) {
   
   const markdownRenderQueue = [];
   const collapseQueue = [];
+  const applyPreservedScroll = () => {
+    if (!preserveScroll || !messageList) {
+      return;
+    }
+    restoreMessageListAnchor(scrollAnchor, previousScrollTop, previousScrollHeight);
+  };
 
-  // 添加"加载更多"提示
-  if (hasMoreMessages && !isSearchResult) {
+  // 添加顶部加载提示
+  if (hasMoreMessages || isLoadingMore) {
     const loadMoreItem = document.createElement('li');
     loadMoreItem.className = 'load-more-hint';
     loadMoreItem.id = 'load-more-hint';
-    loadMoreItem.textContent = isLoadingMore ? '加载中...' : '向上滚动加载更多';
+    loadMoreItem.textContent = getLoadMoreHintText({ isSearchResult });
     messageList.appendChild(loadMoreItem);
   }
   
@@ -4946,7 +5026,7 @@ function renderMessages(messages, options = {}) {
             } else {
               textInput.value = message.content || '';
             }
-            renderMessages(lastMessages);
+            renderCurrentMessageView();
             sendText();
           });
           actions.appendChild(retryButton);
@@ -4957,7 +5037,7 @@ function renderMessages(messages, options = {}) {
           cancelButton.textContent = '取消';
           cancelButton.addEventListener('click', () => {
             pendingSends.delete(message.filename);
-            renderMessages(lastMessages);
+            renderCurrentMessageView();
           });
           actions.appendChild(cancelButton);
         }
@@ -5276,6 +5356,9 @@ function renderMessages(messages, options = {}) {
     collapseQueue.forEach(({ item, body, message }) => {
       applyMessageBodyCollapse(item, body, message);
     });
+    if (preserveScroll) {
+      requestAnimationFrame(applyPreservedScroll);
+    }
   };
   if (markdownRenderQueue.length > 0 && window.editormd) {
     // execute after DOM update
@@ -5310,15 +5393,13 @@ function renderMessages(messages, options = {}) {
   if (scrollToBottom) {
     scrollMessageListToBottom();
   } else if (preserveScroll && messageList) {
-    // 加载更多时，保持滚动位置（补偿新增内容的高度）
-    const newScrollHeight = messageList.scrollHeight;
-    const scrollDiff = newScrollHeight - previousScrollHeight;
-    messageList.scrollTop = previousScrollTop + scrollDiff;
-    updateScrollToBottomButton();
+    // 加载更多历史消息时，优先按首个可见消息锚点恢复视口位置。
+    applyPreservedScroll();
   } else {
     if (messageList) {
       const maxScrollTop = Math.max(0, messageList.scrollHeight - messageList.clientHeight);
       messageList.scrollTop = Math.min(previousScrollTop, maxScrollTop);
+      lastMessageListScrollTop = messageList.scrollTop;
     }
     updateScrollToBottomButton();
   }
@@ -5399,7 +5480,7 @@ async function loadMessages(options = {}) {
     if (!getActiveEndpoint()) {
       resetLoadedMessagesState();
       totalMessages = 0;
-      renderMessages([], { scrollToBottom: shouldScroll });
+      renderCurrentMessageView({ scrollToBottom: shouldScroll });
       return;
     }
     
@@ -5407,9 +5488,13 @@ async function loadMessages(options = {}) {
       // 加载更多历史消息
       if (isLoadingMore || !hasMoreMessages) return;
       isLoadingMore = true;
+      updateLoadMoreHintForCurrentView();
       const newOffset = currentOffset + PAGE_SIZE;
       const result = await invoke('list_messages', { limit: PAGE_SIZE, offset: newOffset });
       isLoadingMore = false;
+      hasMoreMessages = result.has_more || false;
+      totalMessages = result.total || totalMessages;
+      updateLoadMoreHintForCurrentView();
       
       if (result.marked_count !== undefined) {
         updateMarkedBadge(result.marked_count);
@@ -5419,9 +5504,7 @@ async function loadMessages(options = {}) {
         // 将新加载的消息添加到开头
         lastMessages = [...result.messages, ...lastMessages];
         syncCurrentOffsetWithLoadedMessages();
-        hasMoreMessages = result.has_more;
-        totalMessages = result.total;
-        renderMessages(lastMessages, { scrollToBottom: false, preserveScroll: true });
+        renderCurrentMessageView({ scrollToBottom: false, preserveScroll: true });
       }
     } else if (checkNew) {
       // 定时刷新模式：只检查新消息
@@ -5438,7 +5521,7 @@ async function loadMessages(options = {}) {
         if (lastMessages.length > 0) {
           resetLoadedMessagesState();
           totalMessages = 0;
-          renderMessages([], { scrollToBottom: shouldScroll });
+          renderCurrentMessageView({ scrollToBottom: shouldScroll });
         }
         return;
       }
@@ -5449,7 +5532,7 @@ async function loadMessages(options = {}) {
         syncCurrentOffsetWithLoadedMessages();
         totalMessages = result.total || 0;
         hasMoreMessages = result.has_more || false;
-        renderMessages(lastMessages, { scrollToBottom: shouldScroll });
+        renderCurrentMessageView({ scrollToBottom: shouldScroll });
         return;
       }
       
@@ -5486,7 +5569,7 @@ async function loadMessages(options = {}) {
         
         // 如果当前在底部，自动滚动到底��显示新消息
         // 如果当前在底部，或者由于状态更新触发，自动滚动/重新渲染
-        renderMessages(lastMessages, { scrollToBottom: false });
+        renderCurrentMessageView({ scrollToBottom: false });
       } else {
         // 没有新消息，但可能总数变化了（比如有消息被删除）
         if (totalMessages !== result.total) {
@@ -5507,10 +5590,11 @@ async function loadMessages(options = {}) {
       syncCurrentOffsetWithLoadedMessages();
       totalMessages = result.total || 0;
       hasMoreMessages = result.has_more || false;
-      renderMessages(lastMessages, { scrollToBottom: shouldScroll });
+      renderCurrentMessageView({ scrollToBottom: shouldScroll });
     }
   } catch (error) {
     isLoadingMore = false;
+    updateLoadMoreHintForCurrentView();
     setErrorStatus(`加载消息失败：${error}`);
   } finally {
     isLoadMessagesRunning = false;
@@ -6600,7 +6684,7 @@ async function sendText() {
         textInput.value = '';
       }
       
-      renderMessages(lastMessages);
+      renderCurrentMessageView();
       scrollMessageListToBottom();
 
       try {
@@ -6626,7 +6710,7 @@ async function sendText() {
           sendStatus: SEND_STATUS.FAILED,
           sendError: String(error),
         });
-        renderMessages(lastMessages);
+        renderCurrentMessageView();
         setErrorStatus(`发送失败：${error}`);
       }
   }
@@ -6653,7 +6737,7 @@ async function sendText() {
               total: 0,
               status: 'progress',
             });
-            renderMessages(lastMessages, { scrollToBottom: true });
+            renderCurrentMessageView({ scrollToBottom: true });
             renderUploadTasks();
             const result = await invoke('send_file', {
               path,
@@ -6662,7 +6746,7 @@ async function sendText() {
             });
             if (clientId) {
               pendingUploads.delete(clientId);
-              renderMessages(lastMessages);
+              renderCurrentMessageView();
               renderUploadTasks();
             }
             await loadMessages({ scrollToBottom: true });
@@ -6674,7 +6758,7 @@ async function sendText() {
             hadSendFailure = true;
             if (clientId) {
               pendingUploads.delete(clientId);
-              renderMessages(lastMessages);
+              renderCurrentMessageView();
               renderUploadTasks();
             }
             setErrorStatus(`发送文件失败：${error}`);
@@ -7137,7 +7221,7 @@ if (listen) {
     if (payload.status === 'complete') {
       pendingUploads.delete(clientId);
       uploadSpeed.delete(clientId);
-      renderMessages(lastMessages);
+      renderCurrentMessageView();
       renderUploadTasks();
       loadPersistedUploadHistory({ silent: true });
       // 上传完成后使用增量更新，避免打断用户浏览
@@ -7147,7 +7231,7 @@ if (listen) {
     if (payload.status === 'error') {
       pendingUploads.delete(clientId);
       uploadSpeed.delete(clientId);
-      renderMessages(lastMessages);
+      renderCurrentMessageView();
       renderUploadTasks();
       if (payload.error) {
         setErrorStatus(`上传失败：${payload.error}`);
@@ -7483,14 +7567,7 @@ if (composerFullscreenToggle) {
 }
 
 if (messageList) {
-  messageList.addEventListener('scroll', updateScrollToBottomButton);
-  
-  // 向上滚动加载更多
-  messageList.addEventListener('scroll', () => {
-    if (messageList.scrollTop < 50 && hasMoreMessages && !isLoadingMore) {
-      loadMessages({ loadMore: true });
-    }
-  });
+  messageList.addEventListener('scroll', handleMessageListScroll);
 }
 
 syncComposerOffset();
@@ -7609,7 +7686,7 @@ async function sendFileByPath(path) {
       total: 0,
       status: 'progress',
     });
-    renderMessages(lastMessages, { scrollToBottom: true });
+    renderCurrentMessageView({ scrollToBottom: true });
     renderUploadTasks();
     const result = await invoke('send_file', {
       path,
@@ -7618,7 +7695,7 @@ async function sendFileByPath(path) {
     });
     if (clientId) {
       pendingUploads.delete(clientId);
-      renderMessages(lastMessages);
+      renderCurrentMessageView();
       renderUploadTasks();
     }
     await loadMessages({ scrollToBottom: true });
@@ -7630,7 +7707,7 @@ async function sendFileByPath(path) {
   } catch (error) {
     if (clientId) {
       pendingUploads.delete(clientId);
-      renderMessages(lastMessages);
+      renderCurrentMessageView();
       renderUploadTasks();
     }
     setErrorStatus(`发送文件失败：${error}`);
@@ -7701,7 +7778,7 @@ async function sendFileData(data, originalName) {
       total: data.length,
       status: 'progress',
     });
-    renderMessages(lastMessages, { scrollToBottom: true });
+    renderCurrentMessageView({ scrollToBottom: true });
     renderUploadTasks();
     const result = await invoke('send_file_data', {
       data: Array.from(data),
@@ -7711,7 +7788,7 @@ async function sendFileData(data, originalName) {
     });
     if (clientId) {
       pendingUploads.delete(clientId);
-      renderMessages(lastMessages);
+      renderCurrentMessageView();
       renderUploadTasks();
     }
     await loadMessages({ scrollToBottom: true });
@@ -7723,7 +7800,7 @@ async function sendFileData(data, originalName) {
   } catch (error) {
     if (clientId) {
       pendingUploads.delete(clientId);
-      renderMessages(lastMessages);
+      renderCurrentMessageView();
       renderUploadTasks();
     }
     setErrorStatus(`发送文件失败：${error}`);
@@ -8665,28 +8742,59 @@ document.addEventListener('pointerdown', (event) => {
   }
 });
 
-function updateAndRender(options = {}) {
-  const query = searchInput.value.trim().toLowerCase();
-  
-  const messagesToRender = !query 
+function getCurrentMessageSearchState() {
+  const rawQuery = searchInput ? searchInput.value.trim() : '';
+  const normalizedQuery = rawQuery.toLowerCase();
+  return {
+    rawQuery,
+    normalizedQuery,
+    hasQuery: normalizedQuery.length > 0,
+  };
+}
+
+function updateLoadMoreHintForCurrentView() {
+  if (!messageList) return;
+  const { hasQuery } = getCurrentMessageSearchState();
+  const shouldShow = hasMoreMessages || isLoadingMore;
+  let loadMoreItem = document.getElementById('load-more-hint');
+  if (!shouldShow) {
+    if (loadMoreItem) {
+      loadMoreItem.remove();
+    }
+    return;
+  }
+  if (!loadMoreItem) {
+    loadMoreItem = document.createElement('li');
+    loadMoreItem.className = 'load-more-hint';
+    loadMoreItem.id = 'load-more-hint';
+    messageList.insertBefore(loadMoreItem, messageList.firstChild || null);
+  }
+  loadMoreItem.textContent = getLoadMoreHintText({ isSearchResult: hasQuery });
+}
+
+function renderCurrentMessageView(options = {}) {
+  const { rawQuery, normalizedQuery, hasQuery } = getCurrentMessageSearchState();
+  const messagesToRender = !hasQuery
     ? lastMessages
-    : lastMessages.filter(message => {
+    : lastMessages.filter((message) => {
         if (message.kind === 'text') {
-            return (message.content || '').toLowerCase().includes(query);
+          return (message.content || '').toLowerCase().includes(normalizedQuery);
         }
         if (message.kind === 'file') {
-            return (message.original_name || '').toLowerCase().includes(query);
+          return (message.original_name || '').toLowerCase().includes(normalizedQuery);
         }
         return false;
-    });
-  
-  const renderOptions = {
-    ...options,
-    isSearchResult: !!query,
-    query
-  };
+      });
 
-  renderMessages(messagesToRender, renderOptions);
+  renderMessages(messagesToRender, {
+    ...options,
+    isSearchResult: hasQuery,
+    query: rawQuery,
+  });
+}
+
+function updateAndRender(options = {}) {
+  renderCurrentMessageView(options);
 }
 
 if (searchInput) {
