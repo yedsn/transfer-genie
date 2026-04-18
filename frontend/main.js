@@ -7233,6 +7233,7 @@ if (listen) {
       uploadSpeed.delete(clientId);
       renderCurrentMessageView();
       renderUploadTasks();
+      loadPersistedUploadHistory({ silent: true });
       if (payload.error) {
         setErrorStatus(`上传失败：${payload.error}`);
       }

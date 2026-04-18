@@ -197,6 +197,14 @@ async function createSampleFile() {
   return samplePath;
 }
 
+async function openFileAsRequestBlob(filePath) {
+  if (typeof fs.openAsBlob === 'function') {
+    return fs.openAsBlob(filePath, { type: 'application/octet-stream' });
+  }
+  const fileBuffer = await fsp.readFile(filePath);
+  return new Blob([fileBuffer], { type: 'application/octet-stream' });
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) {
@@ -283,10 +291,9 @@ async function main() {
     try {
       let response;
       if (options.mode === 'file') {
-        const fileBuffer = await fsp.readFile(filePath);
         const fileName = path.basename(filePath);
         const form = new FormData();
-        const blob = new Blob([fileBuffer], { type: 'application/octet-stream' });
+        const blob = await openFileAsRequestBlob(filePath);
         form.append('file', blob, fileName);
         if (markedOptions) {
           form.append('markedOptions', JSON.stringify(markedOptions));

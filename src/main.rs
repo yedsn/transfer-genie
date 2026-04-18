@@ -1416,9 +1416,40 @@ fn generate_thumbnail(data: &[u8]) -> Result<Vec<u8>, String> {
 
 fn cache_uploaded_bytes(target_path: &Path, data: &[u8]) -> Result<(), String> {
     if let Some(parent) = target_path.parent() {
-        fs::create_dir_all(parent).map_err(|err| format!("创建目录失败: {err}"))?;
+        fs::create_dir_all(parent).map_err(|err| format!("??????: {err}"))?;
     }
-    fs::write(target_path, data).map_err(|err| format!("保存本地文件失败: {err}"))
+    fs::write(target_path, data).map_err(|err| format!("????????: {err}"))
+}
+
+fn cache_uploaded_file(source_path: &Path, target_path: &Path) -> Result<(), String> {
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent).map_err(|err| format!("??????: {err}"))?;
+    }
+    fs::copy(source_path, target_path).map_err(|err| format!("????????: {err}"))?;
+    Ok(())
+}
+
+fn create_upload_temp_path(original_name: &str) -> Result<PathBuf, String> {
+    let mut rng = rand::thread_rng();
+    let temp_dir = std::env::temp_dir().join(format!(
+        "transfer-genie-upload-{}-{:016x}",
+        now_ms(),
+        rng.gen::<u64>()
+    ));
+    fs::create_dir_all(&temp_dir).map_err(|err| format!("????????: {err}"))?;
+    Ok(temp_dir.join(sanitize_filename(original_name)))
+}
+
+fn cleanup_upload_temp_path(path: &Path) {
+    let _ = fs::remove_file(path);
+    if let Some(parent) = path.parent() {
+        let _ = fs::remove_dir(parent);
+    }
+}
+
+fn generate_thumbnail_from_path(path: &Path) -> Result<Vec<u8>, String> {
+    let data = fs::read(path).map_err(|err| format!("????????: {err}"))?;
+    generate_thumbnail(&data)
 }
 
 fn spawn_thumbnail_upload(
@@ -1429,17 +1460,19 @@ fn spawn_thumbnail_upload(
     filename: String,
     timestamp_ms: i64,
     original_name: String,
-    data: Vec<u8>,
+    source_path: PathBuf,
 ) {
     if !is_image_file(&original_name) {
         return;
     }
     tokio::spawn(async move {
-        let thumb_data = match tokio::task::spawn_blocking(move || generate_thumbnail(&data)).await
-        {
-            Ok(Ok(bytes)) => bytes,
-            _ => return,
-        };
+        let thumb_data =
+            match tokio::task::spawn_blocking(move || generate_thumbnail_from_path(&source_path))
+                .await
+            {
+                Ok(Ok(bytes)) => bytes,
+                _ => return,
+            };
         let thumb_remote_path =
             resolved_thumbnail_remote_path(Some(&remote_path), &filename, Some(timestamp_ms));
         let _ = webdav::ensure_parent_directories(&http, &endpoint, &thumb_remote_path).await;
@@ -1459,15 +1492,40 @@ async fn send_file_data_impl(
     client_id: Option<String>,
     marked_options: Option<SendMarkedOptionsInput>,
 ) -> Result<SendMessageResult, String> {
+    let temp_path = create_upload_temp_path(&original_name)?;
+    cache_uploaded_bytes(&temp_path, &data)?;
+    let result = send_file_path_impl(
+        state,
+        window,
+        &temp_path,
+        original_name,
+        client_id,
+        marked_options,
+    )
+    .await;
+    cleanup_upload_temp_path(&temp_path);
+    result
+}
+
+async fn send_file_path_impl(
+    state: &AppState,
+    window: Option<&Window>,
+    source_path: &Path,
+    original_name: String,
+    client_id: Option<String>,
+    marked_options: Option<SendMarkedOptionsInput>,
+) -> Result<SendMessageResult, String> {
     let settings = current_settings(state)?;
     let endpoint = resolve_active_endpoint(&settings)?;
     let original_name = original_name.trim().to_string();
     if original_name.is_empty() {
-        return Err("文件名不能为空".to_string());
+        return Err("???????".to_string());
     }
 
-    let total_bytes = data.len() as u64;
-    let file_hash = compute_file_hash(&data);
+    let source_path = source_path.to_path_buf();
+    let total_bytes = fs::metadata(&source_path)
+        .map_err(|err| format!("????????: {err}"))?
+        .len();
     let timestamp_ms = now_ms();
     let filename = build_message_filename(&settings.sender_name, &original_name, timestamp_ms);
     let remote_path = message_remote_path(&filename, timestamp_ms);
@@ -1500,11 +1558,11 @@ async fn send_file_data_impl(
     let progress_client_id = client_id.clone();
     let progress_filename = filename.clone();
     let progress_original_name = original_name.clone();
-    let upload_result = webdav::upload_file_with_progress(
+    let upload_result = webdav::upload_file_path_with_progress(
         &state.http,
         &endpoint,
         &remote_path,
-        data.clone(),
+        &source_path,
         move |sent, total| {
             if let Some(progress_window) = progress_window.as_ref() {
                 emit_upload_progress(
@@ -1523,6 +1581,16 @@ async fn send_file_data_impl(
     .await;
 
     if let Err(err) = upload_result {
+        let _ = persist_upload_history(
+            state,
+            &endpoint.id,
+            &filename,
+            &original_name,
+            None,
+            "error",
+            Some(err.clone()),
+            total_bytes as i64,
+        );
         if let Some(window) = window {
             emit_upload_progress(
                 window,
@@ -1538,22 +1606,13 @@ async fn send_file_data_impl(
         return Err(err);
     }
 
-    if let Some(window) = window {
-        emit_upload_progress(
-            window,
-            &client_id,
-            Some(&filename),
-            Some(&original_name),
-            total_bytes,
-            total_bytes,
-            "complete",
-            None,
-        );
-    }
-
     let endpoint_dir = endpoint_files_dir(state, &endpoint.id);
     let local_path = endpoint_dir.join(&filename);
-    cache_uploaded_bytes(&local_path, &data)?;
+    cache_uploaded_file(&source_path, &local_path)?;
+    let hash_path = source_path.clone();
+    let file_hash = tokio::task::spawn_blocking(move || compute_file_hash_from_path(&hash_path))
+        .await
+        .map_err(|err| format!("????????: {err}"))??;
 
     let mut message = DbMessage {
         endpoint_id: endpoint.id.clone(),
@@ -1596,8 +1655,20 @@ async fn send_file_data_impl(
         filename,
         timestamp_ms,
         message.original_name.clone(),
-        data,
+        source_path,
     );
+    if let Some(window) = window {
+        emit_upload_progress(
+            window,
+            &client_id,
+            Some(&message.filename),
+            Some(&message.original_name),
+            total_bytes,
+            total_bytes,
+            "complete",
+            None,
+        );
+    }
     Ok(result)
 }
 
@@ -1613,13 +1684,12 @@ async fn send_file(
     let original_name = file_path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| "无法读取文件名".to_string())?
+        .ok_or_else(|| "???????".to_string())?
         .to_string();
-    let data = fs::read(&file_path).map_err(|err| format!("读取文件失败: {err}"))?;
-    send_file_data_impl(
+    send_file_path_impl(
         state.inner(),
         Some(&window),
-        data,
+        &file_path,
         original_name,
         client_id,
         marked_options,
@@ -4439,14 +4509,16 @@ async fn local_http_api_send_file(
     AxumState(context): AxumState<LocalHttpApiContext>,
     mut multipart: Multipart,
 ) -> Result<Json<LocalHttpApiSendResponse>, LocalHttpApiError> {
+    use std::io::Write;
+
     let mut uploaded_name = None;
-    let mut uploaded_bytes = None;
+    let mut uploaded_path = None;
     let mut marked_options = None;
 
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|err| LocalHttpApiError::bad_request(format!("解析上传请求失败: {err}")))?
+        .map_err(|err| LocalHttpApiError::bad_request(format!("????????: {err}")))?
     {
         let field_name = field.name().map(str::to_owned);
         let file_name = field
@@ -4457,7 +4529,7 @@ async fn local_http_api_send_file(
 
         if field_name.as_deref() == Some("markedOptions") {
             let raw = field.text().await.map_err(|err| {
-                LocalHttpApiError::bad_request(format!("读取 markedOptions 失败: {err}"))
+                LocalHttpApiError::bad_request(format!("?? markedOptions ??: {err}"))
             })?;
             marked_options = Some(
                 parse_local_http_marked_options_json(&raw)
@@ -4467,27 +4539,46 @@ async fn local_http_api_send_file(
         }
 
         if let Some(file_name) = file_name {
-            let bytes = field.bytes().await.map_err(|err| {
-                LocalHttpApiError::bad_request(format!("读取上传文件失败: {err}"))
-            })?;
-            if uploaded_name.is_none() {
-                uploaded_name = Some(file_name);
-                uploaded_bytes = Some(bytes.to_vec());
+            if uploaded_name.is_some() {
+                continue;
             }
+            let temp_path =
+                create_upload_temp_path(&file_name).map_err(LocalHttpApiError::internal)?;
+            let mut temp_file = std::fs::File::create(&temp_path)
+                .map_err(|err| LocalHttpApiError::internal(format!("??????????: {err}")))?;
+            let mut field = field;
+            while let Some(chunk) = field
+                .chunk()
+                .await
+                .map_err(|err| LocalHttpApiError::bad_request(format!("????????: {err}")))?
+            {
+                temp_file
+                    .write_all(&chunk)
+                    .map_err(|err| LocalHttpApiError::internal(format!("??????????: {err}")))?;
+            }
+            uploaded_name = Some(file_name);
+            uploaded_path = Some(temp_path);
         }
     }
 
-    let original_name =
-        uploaded_name.ok_or_else(|| LocalHttpApiError::bad_request("请求缺少文件部分"))?;
-    let data = uploaded_bytes.ok_or_else(|| LocalHttpApiError::bad_request("请求缺少文件内容"))?;
+    let original_name = uploaded_name.ok_or_else(|| LocalHttpApiError::bad_request("????????"))?;
+    let temp_path = uploaded_path.ok_or_else(|| LocalHttpApiError::bad_request("????????"))?;
 
     let state = context.app_handle.state::<AppState>();
     let marked_options = resolve_local_http_marked_options(&state, marked_options)
         .await
         .map_err(LocalHttpApiError::bad_request)?;
-    let result = send_file_data_impl(&state, None, data, original_name, None, marked_options)
-        .await
-        .map_err(|err| LocalHttpApiError::internal(err))?;
+    let result = send_file_path_impl(
+        &state,
+        None,
+        &temp_path,
+        original_name,
+        None,
+        marked_options,
+    )
+    .await;
+    cleanup_upload_temp_path(&temp_path);
+    let result = result.map_err(LocalHttpApiError::internal)?;
 
     Ok(Json(LocalHttpApiSendResponse {
         status: "ok",
@@ -4665,13 +4756,6 @@ fn sanitize_filename(name: &str) -> String {
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("download.bin")
         .to_string()
-}
-
-fn compute_file_hash(data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    let result = hasher.finalize();
-    format!("{:x}", result)
 }
 
 fn compute_file_hash_from_path(path: &Path) -> Result<String, String> {

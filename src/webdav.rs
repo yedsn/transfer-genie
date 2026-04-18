@@ -4,11 +4,13 @@ use log::info;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use reqwest::header::{
-    CONTENT_LENGTH, CONTENT_RANGE, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, RANGE,
+    CONTENT_RANGE, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, RANGE,
 };
 use reqwest::{Body, Client, Method, RequestBuilder};
+use std::path::Path;
 use std::pin::Pin;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use url::Url;
 
 const DOWNLOAD_RESPONSE_TIMEOUT_SECS: u64 = 30;
@@ -43,6 +45,10 @@ fn apply_auth_without_timeout(
     endpoint: &WebDavEndpoint,
 ) -> RequestBuilder {
     apply_auth_with_timeout(request, endpoint, None)
+}
+
+fn apply_auth_for_upload(request: RequestBuilder, endpoint: &WebDavEndpoint) -> RequestBuilder {
+    apply_auth_without_timeout(request, endpoint)
 }
 
 fn apply_auth_with_timeout(
@@ -425,7 +431,7 @@ where
         .header("Content-Length", content_length.to_string())
         .body(body);
 
-    let response = apply_auth(request, endpoint)
+    let response = apply_auth_for_upload(request, endpoint)
         .send()
         .await
         .map_err(|err| format!("上传文件失败: {err}"))?;
@@ -545,7 +551,7 @@ pub async fn upload_file(
         .map_err(|err| format!("上传文件路径解析错误: {err}"))?;
 
     let request = client.put(url).body(data);
-    let response = apply_auth(request, endpoint)
+    let response = apply_auth_for_upload(request, endpoint)
         .send()
         .await
         .map_err(|err| format!("上传文件失败: {err}"))?;
@@ -557,53 +563,67 @@ pub async fn upload_file(
     Ok(())
 }
 
-pub async fn upload_file_with_progress<F>(
+pub async fn upload_file_path_with_progress<F>(
     client: &Client,
     endpoint: &WebDavEndpoint,
     remote_path: &str,
-    data: Vec<u8>,
+    local_path: &Path,
     mut on_progress: F,
-) -> Result<(), String>
+) -> Result<u64, String>
 where
     F: FnMut(u64, u64) + Send + 'static,
 {
-    let mut url = base_url(endpoint)?;
-    url = url
-        .join(remote_path)
-        .map_err(|err| format!("上传文件路径解析错误: {err}"))?;
-
-    let data = Bytes::from(data);
-    let total = data.len() as u64;
+    let file_size = std::fs::metadata(local_path)
+        .map_err(|err| format!("璇诲彇鏈湴鏂囦欢淇℃伅澶辫触: {err}"))?
+        .len();
+    let source_path = local_path.to_path_buf();
     let chunk_size = 512 * 1024;
-    on_progress(0, total);
 
-    let stream =
-        futures_util::stream::unfold((data, 0usize, on_progress), move |state| async move {
-            let (data, offset, mut on_progress) = state;
-            if offset >= data.len() {
-                return None;
+    on_progress(0, file_size);
+
+    let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(4);
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+
+        let mut file = match std::fs::File::open(&source_path) {
+            Ok(file) => file,
+            Err(err) => {
+                let _ = tx.blocking_send(Err(err));
+                return;
             }
-            let end = (offset + chunk_size).min(data.len());
-            let chunk = data.slice(offset..end);
-            on_progress(end as u64, total);
-            Some((Ok::<Bytes, std::io::Error>(chunk), (data, end, on_progress)))
-        });
+        };
+        let mut sent = 0u64;
+        let mut buffer = vec![0u8; chunk_size];
+        loop {
+            match file.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    sent += read as u64;
+                    on_progress(sent, file_size);
+                    if tx
+                        .blocking_send(Ok(Bytes::copy_from_slice(&buffer[..read])))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    let _ = tx.blocking_send(Err(err));
+                    break;
+                }
+            }
+        }
+    });
 
-    let body = Body::wrap_stream(stream);
-    let request = client
-        .put(url)
-        .header(CONTENT_LENGTH, total.to_string())
-        .body(body);
-    let response = apply_auth(request, endpoint)
-        .send()
-        .await
-        .map_err(|err| format!("上传文件失败: {err}"))?;
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        match rx.recv().await {
+            Some(item) => Some((item, rx)),
+            None => None,
+        }
+    });
 
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!("上传文件失败: HTTP {}", status));
-    }
-    Ok(())
+    upload_file_stream(client, endpoint, remote_path, stream, file_size).await?;
+    Ok(file_size)
 }
 
 pub async fn delete_file(
@@ -689,6 +709,13 @@ pub async fn ensure_parent_directories(
 mod tests {
     use super::*;
     use crate::types::WebDavEndpoint;
+    use reqwest::Client;
+    use std::fs::File;
+    use std::io::Write;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::time::{sleep, timeout};
 
     #[test]
     fn test_parse_propfind_response() {
@@ -724,5 +751,103 @@ mod tests {
         let e3 = &entries[2];
         assert_eq!(e3.filename, "files");
         assert!(e3.is_collection);
+    }
+
+    #[tokio::test]
+    async fn upload_file_path_with_progress_allows_long_running_uploads() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept connection");
+            let mut received = Vec::new();
+            let mut buffer = [0u8; 8192];
+            let header_end = loop {
+                let read = socket.read(&mut buffer).await.expect("read request");
+                assert!(read > 0, "request closed before headers");
+                received.extend_from_slice(&buffer[..read]);
+                if let Some(index) = received
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|value| value + 4)
+                {
+                    break index;
+                }
+            };
+
+            let headers = String::from_utf8_lossy(&received[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    if !name.eq_ignore_ascii_case("content-length") {
+                        return None;
+                    }
+                    value.trim().parse::<usize>().ok()
+                })
+                .expect("content length");
+            let mut body_received = received.len() - header_end;
+            let chunk_size = 256 * 1024;
+            while body_received < content_length {
+                sleep(Duration::from_millis(700)).await;
+                let next = chunk_size.min(content_length - body_received);
+                let mut chunk = vec![0u8; next];
+                let mut offset = 0usize;
+                while offset < next {
+                    let read = socket
+                        .read(&mut chunk[offset..])
+                        .await
+                        .expect("read request body");
+                    assert!(read > 0, "request body ended early");
+                    offset += read;
+                }
+                body_received += offset;
+            }
+
+            socket
+                .write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .expect("write response");
+        });
+
+        let file_path = std::env::temp_dir().join(format!(
+            "transfer-genie-webdav-upload-test-{}.bin",
+            std::process::id()
+        ));
+        let mut file = File::create(&file_path).expect("create temp file");
+        let chunk = vec![0u8; 256 * 1024];
+        for _ in 0..48 {
+            file.write_all(&chunk).expect("write temp file");
+        }
+        drop(file);
+
+        let endpoint = WebDavEndpoint {
+            id: "test".to_string(),
+            name: "test".to_string(),
+            url: format!("http://{addr}/"),
+            username: String::new(),
+            password: String::new(),
+            enabled: true,
+        };
+
+        let result = timeout(
+            Duration::from_secs(50),
+            upload_file_path_with_progress(
+                &Client::new(),
+                &endpoint,
+                "slow-upload.bin",
+                &file_path,
+                |_sent, _total| {},
+            ),
+        )
+        .await
+        .expect("upload timed out")
+        .expect("upload failed");
+
+        assert_eq!(result, 48 * 256 * 1024);
+
+        let _ = std::fs::remove_file(&file_path);
+        server.await.expect("server task");
     }
 }
