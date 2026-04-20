@@ -48,6 +48,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 use tauri_plugin_log::{Target, TargetKind};
 use tauri_plugin_opener::OpenerExt;
+#[cfg(desktop)]
+use tauri_plugin_updater::UpdaterExt;
 use tokio::sync::{oneshot, watch, Mutex as AsyncMutex};
 
 struct AppState {
@@ -64,6 +66,7 @@ struct AppState {
     registered_hotkey: Mutex<Option<Shortcut>>,
     telegram_bridge: Mutex<TelegramBridgeManager>,
     local_http_api: Mutex<LocalHttpApiManager>,
+    update_guard: AsyncMutex<()>,
 }
 
 const EXPORT_VERSION: u8 = 1;
@@ -79,9 +82,17 @@ const TELEGRAM_BRIDGE_ARG: &str = "--telegram-bridge";
 const DEFAULT_TELEGRAM_POLL_INTERVAL_SECS: u64 = 5;
 const LOCAL_HTTP_API_ROUTE: &str = "/api/send-file";
 const LOCAL_HTTP_TEXT_API_ROUTE: &str = "/api/send-text";
+const APP_UPDATE_EVENT: &str = "app-update-event";
+const DEFAULT_UPDATER_ENDPOINT: &str =
+    "https://github.com/OWNER/REPO/releases/latest/download/latest.json";
+const DEFAULT_UPDATER_PUBKEY: &str = "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY";
 
 fn default_export_global_hotkey_enabled() -> bool {
     true
+}
+
+fn default_export_auto_update_enabled() -> bool {
+    false
 }
 
 fn default_export_telegram_poll_interval_secs() -> u64 {
@@ -132,6 +143,8 @@ struct ExportSettings {
     global_hotkey: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     send_hotkey: Option<String>,
+    #[serde(default = "default_export_auto_update_enabled")]
+    auto_update_enabled: bool,
     #[serde(default)]
     local_http_api: LocalHttpApiSettings,
     #[serde(default)]
@@ -242,6 +255,44 @@ struct LocalHttpApiStatus {
     state: LocalHttpApiState,
     address: Option<String>,
     last_error: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppUpdateSummary {
+    version: String,
+    current_version: String,
+    notes: Option<String>,
+    pub_date: Option<String>,
+    target: String,
+    download_url: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppUpdateCheckResult {
+    available: bool,
+    current_version: String,
+    update: Option<AppUpdateSummary>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppUpdateEventPayload {
+    stage: String,
+    downloaded_bytes: Option<u64>,
+    chunk_length: Option<u64>,
+    content_length: Option<u64>,
+    message: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdaterPluginRuntimeConfig {
+    #[serde(default)]
+    endpoints: Vec<String>,
+    #[serde(default)]
+    pubkey: String,
 }
 
 struct LocalHttpApiManager {
@@ -539,6 +590,36 @@ fn get_local_http_api_status(state: State<'_, AppState>) -> Result<LocalHttpApiS
 }
 
 #[tauri::command]
+async fn check_app_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AppUpdateCheckResult, String> {
+    let _guard = state
+        .update_guard
+        .try_lock()
+        .map_err(|_| "已有更新检查正在进行，请稍后再试".to_string())?;
+    check_app_update_impl(&app).await
+}
+
+#[tauri::command]
+async fn download_and_install_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let _guard = state
+        .update_guard
+        .try_lock()
+        .map_err(|_| "已有更新任务正在进行，请稍后再试".to_string())?;
+    download_and_install_update_impl(&app).await
+}
+
+#[tauri::command]
+fn restart_app(app: AppHandle) -> Result<(), String> {
+    app.request_restart();
+    Ok(())
+}
+
+#[tauri::command]
 async fn discover_telegram_chats(
     bot_token: String,
     proxy_url: Option<String>,
@@ -639,6 +720,7 @@ fn export_settings(
         global_hotkey_enabled: settings.global_hotkey_enabled,
         global_hotkey: Some(settings.global_hotkey.clone()),
         send_hotkey: Some(settings.send_hotkey.clone()),
+        auto_update_enabled: settings.auto_update_enabled,
         local_http_api: settings.local_http_api.clone(),
         telegram: ExportTelegramSettings {
             enabled: settings.telegram.enabled,
@@ -706,6 +788,7 @@ async fn import_settings(
             .unwrap_or_else(|| existing.send_hotkey.clone()),
         download_dir: existing.download_dir,
         auto_start: existing.auto_start,
+        auto_update_enabled: bundle.settings.auto_update_enabled,
         local_http_api: bundle.settings.local_http_api,
         telegram: TelegramBridgeSettings {
             enabled: bundle.settings.telegram.enabled,
@@ -3937,6 +4020,7 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
                 global_hotkey: DEFAULT_GLOBAL_HOTKEY.to_string(),
                 send_hotkey: DEFAULT_SEND_HOTKEY.to_string(),
                 auto_start: false,
+                auto_update_enabled: false,
                 local_http_api: LocalHttpApiSettings::default(),
                 telegram: TelegramBridgeSettings::default(),
             }
@@ -3955,6 +4039,7 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
             global_hotkey: DEFAULT_GLOBAL_HOTKEY.to_string(),
             send_hotkey: DEFAULT_SEND_HOTKEY.to_string(),
             auto_start: false,
+            auto_update_enabled: false,
             local_http_api: LocalHttpApiSettings::default(),
             telegram: TelegramBridgeSettings::default(),
         };
@@ -3971,6 +4056,189 @@ fn write_settings(path: &Path, settings: &Settings) -> Result<(), String> {
         serde_json::to_string_pretty(settings).map_err(|err| format!("序列化设置失败: {err}"))?;
     fs::write(path, data).map_err(|err| format!("写入设置失败: {err}"))?;
     Ok(())
+}
+
+fn updater_runtime_config(app: &AppHandle) -> Result<UpdaterPluginRuntimeConfig, String> {
+    let value = app
+        .config()
+        .plugins
+        .0
+        .get("updater")
+        .cloned()
+        .ok_or_else(|| "未找到 updater 配置".to_string())?;
+    serde_json::from_value(value).map_err(|err| format!("解析 updater 配置失败: {err}"))
+}
+
+fn ensure_updater_is_configured(app: &AppHandle) -> Result<(), String> {
+    let config = updater_runtime_config(app)?;
+    let endpoints_ready = !config.endpoints.is_empty()
+        && config.endpoints.iter().all(|endpoint| {
+            let trimmed = endpoint.trim();
+            !trimmed.is_empty() && trimmed != DEFAULT_UPDATER_ENDPOINT
+        });
+    let pubkey_ready = {
+        let trimmed = config.pubkey.trim();
+        !trimmed.is_empty() && trimmed != DEFAULT_UPDATER_PUBKEY
+    };
+    if endpoints_ready && pubkey_ready {
+        Ok(())
+    } else {
+        Err(
+            "更新功能尚未完成发布配置，请先在 tauri.conf.json 中填写 GitHub Releases 地址和 updater 公钥。"
+                .to_string(),
+        )
+    }
+}
+
+#[cfg(desktop)]
+async fn check_app_update_impl(app: &AppHandle) -> Result<AppUpdateCheckResult, String> {
+    use time::format_description::well_known::Rfc3339;
+
+    ensure_updater_is_configured(app)?;
+
+    let current_version = app.package_info().version.to_string();
+    let updater = app
+        .updater_builder()
+        .build()
+        .map_err(|err| format!("初始化更新器失败: {err}"))?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|err| format!("检查更新失败: {err}"))?;
+
+    let update = match update {
+        Some(update) => {
+            let pub_date = update
+                .date
+                .map(|date| {
+                    date.format(&Rfc3339)
+                        .map_err(|err| format!("格式化更新时间失败: {err}"))
+                })
+                .transpose()?;
+            Some(AppUpdateSummary {
+                version: update.version,
+                current_version: update.current_version,
+                notes: update.body,
+                pub_date,
+                target: update.target,
+                download_url: update.download_url.to_string(),
+            })
+        }
+        None => None,
+    };
+
+    Ok(AppUpdateCheckResult {
+        available: update.is_some(),
+        current_version,
+        update,
+    })
+}
+
+#[cfg(not(desktop))]
+async fn check_app_update_impl(_app: &AppHandle) -> Result<AppUpdateCheckResult, String> {
+    Err("当前平台不支持应用内更新".to_string())
+}
+
+fn emit_app_update_event(app: &AppHandle, payload: AppUpdateEventPayload) {
+    if let Err(err) = app.emit(APP_UPDATE_EVENT, payload) {
+        eprintln!("emit updater event failed: {err}");
+    }
+}
+
+#[cfg(desktop)]
+async fn download_and_install_update_impl(app: &AppHandle) -> Result<(), String> {
+    ensure_updater_is_configured(app)?;
+
+    let updater = app
+        .updater_builder()
+        .build()
+        .map_err(|err| format!("初始化更新器失败: {err}"))?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|err| format!("检查更新失败: {err}"))?
+        .ok_or_else(|| "当前已是最新版本，无需更新".to_string())?;
+
+    let mut first_chunk = true;
+    let mut downloaded_bytes = 0_u64;
+    let app_handle = app.clone();
+
+    update
+        .download_and_install(
+            move |chunk_length, content_length| {
+                downloaded_bytes = downloaded_bytes.saturating_add(chunk_length as u64);
+                if first_chunk {
+                    first_chunk = false;
+                    emit_app_update_event(
+                        &app_handle,
+                        AppUpdateEventPayload {
+                            stage: "download_started".to_string(),
+                            downloaded_bytes: Some(0),
+                            chunk_length: None,
+                            content_length,
+                            message: Some("开始下载更新".to_string()),
+                        },
+                    );
+                }
+                emit_app_update_event(
+                    &app_handle,
+                    AppUpdateEventPayload {
+                        stage: "download_progress".to_string(),
+                        downloaded_bytes: Some(downloaded_bytes),
+                        chunk_length: Some(chunk_length as u64),
+                        content_length,
+                        message: None,
+                    },
+                );
+            },
+            {
+                let app_handle = app.clone();
+                move || {
+                    emit_app_update_event(
+                        &app_handle,
+                        AppUpdateEventPayload {
+                            stage: "download_finished".to_string(),
+                            downloaded_bytes: None,
+                            chunk_length: None,
+                            content_length: None,
+                            message: Some("下载完成，正在安装更新".to_string()),
+                        },
+                    );
+                }
+            },
+        )
+        .await
+        .map_err(|err| {
+            emit_app_update_event(
+                app,
+                AppUpdateEventPayload {
+                    stage: "failed".to_string(),
+                    downloaded_bytes: None,
+                    chunk_length: None,
+                    content_length: None,
+                    message: Some(format!("安装更新失败: {err}")),
+                },
+            );
+            format!("安装更新失败: {err}")
+        })?;
+
+    emit_app_update_event(
+        app,
+        AppUpdateEventPayload {
+            stage: "installed".to_string(),
+            downloaded_bytes: None,
+            chunk_length: None,
+            content_length: None,
+            message: Some("更新已安装完成".to_string()),
+        },
+    );
+
+    Ok(())
+}
+
+#[cfg(not(desktop))]
+async fn download_and_install_update_impl(_app: &AppHandle) -> Result<(), String> {
+    Err("当前平台不支持应用内更新".to_string())
 }
 
 fn telegram_api_url(token: &str, method: &str) -> String {
@@ -5606,6 +5874,7 @@ fn main() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main_window(app);
         }));
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
     }
 
     let app = builder
@@ -5647,6 +5916,7 @@ fn main() {
                 registered_hotkey: Mutex::new(None),
                 telegram_bridge: Mutex::new(TelegramBridgeManager::default()),
                 local_http_api: Mutex::new(LocalHttpApiManager::default()),
+                update_guard: AsyncMutex::new(()),
             });
 
             #[cfg(desktop)]
@@ -5846,6 +6116,9 @@ fn main() {
             get_settings,
             get_telegram_bridge_status,
             get_local_http_api_status,
+            check_app_update,
+            download_and_install_update,
+            restart_app,
             discover_telegram_chats,
             save_settings,
             save_send_hotkey,
@@ -5939,6 +6212,7 @@ mod tests {
             global_hotkey_enabled: false,
             global_hotkey: DEFAULT_GLOBAL_HOTKEY.to_string(),
             auto_start: false,
+            auto_update_enabled: false,
             local_http_api: LocalHttpApiSettings::default(),
             telegram: TelegramBridgeSettings::default(),
         }
@@ -6451,6 +6725,7 @@ mod tests {
         settings.local_http_api.enabled = true;
         settings.local_http_api.bind_address = "0.0.0.0".to_string();
         settings.local_http_api.bind_port = 6012;
+        settings.auto_update_enabled = true;
         let temp_dir = std::env::temp_dir().join(format!("transfer-genie-local-http-{}", now_ms()));
         let settings_path = temp_dir.join("settings.json");
 
@@ -6460,6 +6735,52 @@ mod tests {
         assert!(loaded.local_http_api.enabled);
         assert_eq!(loaded.local_http_api.bind_address, "0.0.0.0");
         assert_eq!(loaded.local_http_api.bind_port, 6012);
+        assert!(loaded.auto_update_enabled);
+
+        let _ = fs::remove_file(&settings_path);
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn load_settings_defaults_auto_update_flag_for_legacy_config() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-settings-legacy-{}", now_ms()));
+        let settings_path = temp_dir.join("settings.json");
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        fs::write(
+            &settings_path,
+            r#"{
+                "webdav_endpoints": [],
+                "active_webdav_id": null,
+                "sender_name": "legacy",
+                "refresh_interval_secs": 5,
+                "download_dir": "/tmp",
+                "send_hotkey": "enter",
+                "global_hotkey_enabled": true,
+                "global_hotkey": "alt+t",
+                "auto_start": false,
+                "local_http_api": {
+                    "enabled": false,
+                    "bind_address": "127.0.0.1",
+                    "bind_port": 6011
+                },
+                "telegram": {
+                    "enabled": false,
+                    "auto_start": false,
+                    "sender_name": "",
+                    "bot_token": "",
+                    "chat_id": "",
+                    "proxy_enabled": false,
+                    "proxy_url": "http://127.0.0.1:7890",
+                    "poll_interval_secs": 5
+                }
+            }"#,
+        )
+        .expect("write legacy settings");
+
+        let loaded = load_settings(&settings_path, &temp_dir).expect("load settings");
+
+        assert!(!loaded.auto_update_enabled);
 
         let _ = fs::remove_file(&settings_path);
         let _ = fs::remove_dir_all(&temp_dir);

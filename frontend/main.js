@@ -79,6 +79,8 @@ const downloadDirInput = document.getElementById('download-dir');
 const chooseDownloadDirButton = document.getElementById('choose-download-dir');
 const downloadDirHint = document.getElementById('download-dir-hint');
 const autoStartInput = document.getElementById('auto-start');
+const autoUpdateEnabledInput = document.getElementById('auto-update-enabled');
+const checkUpdateButton = document.getElementById('check-update');
 const localHttpApiEnabledInput = document.getElementById('local-http-api-enabled');
 const localHttpApiBindAddressInput = document.getElementById('local-http-api-bind-address');
 const localHttpApiBindPortInput = document.getElementById('local-http-api-bind-port');
@@ -151,6 +153,12 @@ const searchInput = document.getElementById('search-input');
 let settingsSections = [];
 let activeSettingsSectionId = '';
 let settingsNavUpdateQueued = false;
+let hasAutoUpdateCheckedThisSession = false;
+let isAutoUpdateChecking = false;
+let autoUpdateCheckTimer = null;
+let updateInstallDialogController = null;
+
+const APP_UPDATE_EVENT = 'app-update-event';
 
 function ensureInlineSelectionRows() {
   if (selectionBar && selectionCount && !selectionRow) {
@@ -546,6 +554,119 @@ function setSuccessStatus(text) {
 function setErrorStatus(text) {
   syncStatus.textContent = text;
   syncStatus.style.color = '#d6452d';
+}
+
+function formatPercent(value) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return '0%';
+  }
+  if (value >= 100) {
+    return '100%';
+  }
+  return `${value.toFixed(value >= 10 ? 0 : 1)}%`;
+}
+
+function formatUpdateDate(value) {
+  if (!value) {
+    return '未知';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString('zh-CN');
+}
+
+function buildUpdateMessage(updateResult) {
+  const update = updateResult?.update || {};
+  const lines = [
+    `当前版本：${update.currentVersion || updateResult?.currentVersion || '未知'}`,
+    `最新版本：${update.version || '未知'}`,
+    `发布时间：${formatUpdateDate(update.pubDate)}`,
+  ];
+  const notes = (update.notes || '').trim();
+  if (notes) {
+    lines.push('', `更新说明：\n${notes}`);
+  } else {
+    lines.push('', '更新说明：暂无');
+  }
+  return lines.join('\n');
+}
+
+function closeUpdateInstallProgressDialog() {
+  if (!updateInstallDialogController) {
+    return;
+  }
+  updateInstallDialogController.close();
+  updateInstallDialogController = null;
+}
+
+function showUpdateInstallProgressDialog() {
+  closeUpdateInstallProgressDialog();
+
+  const overlay = document.createElement('div');
+  overlay.className = 'dialog-overlay';
+
+  const dialog = document.createElement('div');
+  dialog.className = 'dialog';
+
+  const title = document.createElement('h3');
+  title.className = 'dialog-title';
+  title.textContent = '正在安装更新';
+
+  const message = document.createElement('p');
+  message.className = 'dialog-text';
+  message.style.whiteSpace = 'pre-wrap';
+  message.textContent = '准备更新...';
+
+  dialog.appendChild(title);
+  dialog.appendChild(message);
+  overlay.appendChild(dialog);
+  document.body.appendChild(overlay);
+
+  updateInstallDialogController = {
+    setMessage(text) {
+      message.textContent = text || '准备更新...';
+    },
+    close() {
+      overlay.remove();
+    },
+  };
+
+  return updateInstallDialogController;
+}
+
+function updateInstallProgressMessage(payload = {}) {
+  if (!updateInstallDialogController) {
+    return;
+  }
+  const stage = payload.stage || '';
+  if (stage === 'download_started') {
+    const total = payload.contentLength ? formatBytes(payload.contentLength) : '未知大小';
+    updateInstallDialogController.setMessage(`开始下载更新...\n总大小：${total}`);
+    return;
+  }
+  if (stage === 'download_progress') {
+    const downloaded = Number(payload.downloadedBytes || 0);
+    const total = Number(payload.contentLength || 0);
+    const progress = total > 0 ? formatPercent((downloaded / total) * 100) : '下载中';
+    const totalText = total > 0 ? formatBytes(total) : '未知大小';
+    updateInstallDialogController.setMessage(
+      `正在下载更新...\n已下载：${formatBytes(downloaded)} / ${totalText}\n进度：${progress}`,
+    );
+    return;
+  }
+  if (stage === 'download_finished') {
+    updateInstallDialogController.setMessage('下载完成，正在安装更新...');
+    return;
+  }
+  if (stage === 'installed') {
+    updateInstallDialogController.setMessage('更新已安装完成。');
+    return;
+  }
+  if (stage === 'failed') {
+    updateInstallDialogController.setMessage(payload.message || '安装更新失败');
+  }
 }
 
 function normalizeSendHotkey(value) {
@@ -3228,6 +3349,9 @@ function showInfoDialog(options = {}) {
     const message = document.createElement('p');
     message.className = 'dialog-text';
     message.textContent = messageText;
+    if (options.preserveWhitespace) {
+      message.style.whiteSpace = 'pre-wrap';
+    }
 
     const actions = document.createElement('div');
     actions.className = 'dialog-actions';
@@ -3284,6 +3408,9 @@ function showConfirmDialog(options = {}) {
     const message = document.createElement('p');
     message.className = 'dialog-text';
     message.textContent = messageText;
+    if (options.preserveWhitespace) {
+      message.style.whiteSpace = 'pre-wrap';
+    }
 
     const actions = document.createElement('div');
     actions.className = 'dialog-actions';
@@ -6132,6 +6259,145 @@ function startTelegramBridgeStatusPolling() {
   }, TELEGRAM_BRIDGE_STATUS_POLL_MS);
 }
 
+async function installAvailableAppUpdate(updateResult) {
+  if (!invoke) {
+    await showInfoDialog({
+      title: '安装更新失败',
+      message: '未检测到 Tauri API，请检查应用环境。',
+    });
+    return false;
+  }
+
+  const controller = showUpdateInstallProgressDialog();
+  controller.setMessage(`准备安装 ${updateResult?.update?.version || '新版本'}...`);
+
+  try {
+    await invoke('download_and_install_update');
+    closeUpdateInstallProgressDialog();
+
+    const shouldRestart = await showConfirmDialog({
+      title: '更新已安装',
+      message: '更新已安装完成，是否立即重启应用？',
+      confirmLabel: '立即重启',
+      cancelLabel: '稍后重启',
+    });
+
+    if (shouldRestart) {
+      await invoke('restart_app');
+    } else {
+      setSuccessStatus('更新已安装，将在下次重启后完成切换');
+    }
+
+    return true;
+  } catch (error) {
+    closeUpdateInstallProgressDialog();
+    await showInfoDialog({
+      title: '安装更新失败',
+      message: String(error),
+      preserveWhitespace: true,
+    });
+    setErrorStatus(`安装更新失败：${error}`);
+    return false;
+  }
+}
+
+async function checkForAppUpdate(options = {}) {
+  const silent = !!options.silent;
+  const source = options.source || 'manual';
+
+  if (!invoke) {
+    if (!silent) {
+      await showInfoDialog({
+        title: '检查更新失败',
+        message: '未检测到 Tauri API，请检查应用环境。',
+      });
+    }
+    return null;
+  }
+
+  if (isAutoUpdateChecking) {
+    return null;
+  }
+
+  isAutoUpdateChecking = true;
+  if (source === 'auto') {
+    hasAutoUpdateCheckedThisSession = true;
+  }
+
+  if (checkUpdateButton && source === 'manual') {
+    checkUpdateButton.disabled = true;
+    checkUpdateButton.textContent = '检查中...';
+  }
+
+  try {
+    const result = await invoke('check_app_update');
+    if (!result?.available) {
+      if (!silent) {
+        await showInfoDialog({
+          title: '检查更新',
+          message: `当前已是最新版本（${result?.currentVersion || '未知版本'}）。`,
+        });
+      }
+      return result;
+    }
+
+    const confirmed = await showConfirmDialog({
+      title: '发现新版本',
+      message: buildUpdateMessage(result),
+      confirmLabel: '立即更新',
+      cancelLabel: '稍后再说',
+      preserveWhitespace: true,
+    });
+
+    if (!confirmed) {
+      if (!silent) {
+        setSuccessStatus(`已跳过本次更新：${result.update?.version || ''}`.trim());
+      }
+      return result;
+    }
+
+    await installAvailableAppUpdate(result);
+    return result;
+  } catch (error) {
+    if (!silent) {
+      await showInfoDialog({
+        title: '检查更新失败',
+        message: String(error),
+        preserveWhitespace: true,
+      });
+      setErrorStatus(`检查更新失败：${error}`);
+    } else {
+      console.warn('自动检查更新失败：', error);
+    }
+    return null;
+  } finally {
+    isAutoUpdateChecking = false;
+    if (checkUpdateButton && source === 'manual') {
+      checkUpdateButton.disabled = false;
+      checkUpdateButton.textContent = '检查更新';
+    }
+  }
+}
+
+function scheduleAutoUpdateCheck() {
+  if (!autoUpdateEnabledInput || !autoUpdateEnabledInput.checked) {
+    return;
+  }
+  if (hasAutoUpdateCheckedThisSession || isAutoUpdateChecking) {
+    return;
+  }
+  if (autoUpdateCheckTimer) {
+    window.clearTimeout(autoUpdateCheckTimer);
+  }
+  autoUpdateCheckTimer = window.setTimeout(() => {
+    autoUpdateCheckTimer = null;
+    if (!autoUpdateEnabledInput || !autoUpdateEnabledInput.checked) {
+      return;
+    }
+    checkForAppUpdate({ silent: true, source: 'auto' });
+  }, 3000);
+}
+
 function applySettings(settings) {
   const previousActiveEndpointId = activeEndpointId;
   const endpoints = Array.isArray(settings.webdav_endpoints)
@@ -6168,6 +6434,9 @@ function applySettings(settings) {
   }
   if (autoStartInput) {
     autoStartInput.checked = settings.auto_start || false;
+  }
+  if (autoUpdateEnabledInput) {
+    autoUpdateEnabledInput.checked = !!settings.auto_update_enabled;
   }
   if (localHttpApiEnabledInput) {
     localHttpApiEnabledInput.checked = !!settings.local_http_api?.enabled;
@@ -6264,6 +6533,7 @@ async function loadSettings() {
         await refreshMessages();
       }
     }
+    scheduleAutoUpdateCheck();
   } catch (error) {
     setErrorStatus(`读取设置失败：${error}`);
   }
@@ -6342,6 +6612,7 @@ async function saveSettings(options = {}) {
     global_hotkey: normalizedGlobalHotkey || DEFAULT_GLOBAL_HOTKEY,
     send_hotkey: sendHotkey,
     auto_start: autoStartInput ? autoStartInput.checked : false,
+    auto_update_enabled: autoUpdateEnabledInput ? autoUpdateEnabledInput.checked : false,
     local_http_api: {
       enabled: localHttpApiEnabledInput ? localHttpApiEnabledInput.checked : false,
       bind_address: localHttpApiBindAddress,
@@ -7377,6 +7648,11 @@ if (composerMarkPanel) {
   composerMarkPanel.addEventListener('mouseleave', scheduleComposerMarkPanelHide);
 }
 saveSettingsButton.addEventListener('click', saveSettingsWithFeedback);
+if (checkUpdateButton) {
+  checkUpdateButton.addEventListener('click', () => {
+    checkForAppUpdate({ source: 'manual' });
+  });
+}
 if (chooseDownloadDirButton) {
   chooseDownloadDirButton.addEventListener('click', chooseDownloadDir);
 }
@@ -7645,6 +7921,7 @@ tabButtons.forEach((button) => {
 
 function handleWindowFocus() {
   focusHomeComposer();
+  scheduleAutoUpdateCheck();
 }
 
 syncTelegramProxyControlsState();
@@ -7726,6 +8003,9 @@ if (listen) {
 
   // 全局快捷键的特定监听器
   listen('trigger-show', handleWindowFocus);
+  listen(APP_UPDATE_EVENT, (event) => {
+    updateInstallProgressMessage(event.payload || {});
+  });
 
   // 用于非侵入性操作的通用焦点监听器
   listen('tauri://focus', () => {

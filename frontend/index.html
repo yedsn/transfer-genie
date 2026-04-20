@@ -332,6 +332,10 @@
                     <input id="auto-start" type="checkbox" />
                   </label>
                   <label class="toggle-left">
+                    <span class="toggle-label">自动更新</span>
+                    <input id="auto-update-enabled" type="checkbox" />
+                  </label>
+                  <label class="toggle-left">
                     <span class="toggle-label">启用全局快捷键</span>
                     <input id="global-hotkey-enabled" type="checkbox" />
                   </label>
@@ -340,6 +344,12 @@
                     <input id="global-hotkey" type="text" placeholder="Alt+T" />
                     <span class="field-hint">需包含修饰键，如 Ctrl+Alt+T；关闭开关可禁用</span>
                   </label>
+                  <div class="settings-actions">
+                    <div class="settings-actions-row">
+                      <button id="check-update" class="button ghost" type="button">检查更新</button>
+                    </div>
+                    <span class="field-hint">更新信息和更新包通过 GitHub Releases 提供</span>
+                  </div>
                 </div>
               </div>
 

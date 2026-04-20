@@ -19,6 +19,10 @@ fn default_global_hotkey() -> String {
     "alt+t".to_string()
 }
 
+fn default_auto_update_enabled() -> bool {
+    false
+}
+
 fn default_telegram_poll_interval_secs() -> u64 {
     5
 }
@@ -128,6 +132,8 @@ pub struct Settings {
     pub global_hotkey: String,
     #[serde(default)]
     pub auto_start: bool,
+    #[serde(default = "default_auto_update_enabled")]
+    pub auto_update_enabled: bool,
     #[serde(default)]
     pub local_http_api: LocalHttpApiSettings,
     #[serde(default)]
