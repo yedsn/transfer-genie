@@ -1,0 +1,123 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS Apple Silicon
+            os: macos-latest
+            rust_target: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin --bundles app,dmg
+          - name: macOS Intel
+            os: macos-latest
+            rust_target: x86_64-apple-darwin
+            args: --target x86_64-apple-darwin --bundles app,dmg
+          - name: Windows x64
+            os: windows-latest
+            rust_target: ''
+            args: --bundles nsis
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate updater configuration
+        shell: bash
+        run: |
+          python <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          data = json.loads(Path('tauri.conf.json').read_text(encoding='utf-8'))
+          updater = data.get('plugins', {}).get('updater', {})
+          pubkey = updater.get('pubkey', '')
+          endpoints = updater.get('endpoints', [])
+          errors = []
+
+          if not pubkey or 'REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY' in pubkey:
+              errors.append('tauri.conf.json 中的 plugins.updater.pubkey 仍是占位值。')
+          if not endpoints:
+              errors.append('tauri.conf.json 中缺少 plugins.updater.endpoints。')
+          elif any('github.com/OWNER/REPO' in endpoint for endpoint in endpoints):
+              errors.append('tauri.conf.json 中的 updater endpoint 仍包含 OWNER/REPO 占位值。')
+
+          if errors:
+              for item in errors:
+                  print(f'::error::{item}')
+              sys.exit(1)
+          PY
+
+      - name: Validate updater signing secrets
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo '::error::Missing repository secret TAURI_SIGNING_PRIVATE_KEY'
+            exit 1
+          fi
+
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]; then
+            echo '::error::Missing repository secret TAURI_SIGNING_PRIVATE_KEY_PASSWORD'
+            echo '::error::Use a password-protected updater key and save the password in GitHub Secrets.'
+            exit 1
+          fi
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install extra Rust target
+        if: matrix.rust_target != ''
+        run: rustup target add ${{ matrix.rust_target }}
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+
+      - name: Build bundles and publish release assets
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tauriScript: cargo tauri
+          tagName: v__VERSION__
+          releaseName: Transfer Genie v__VERSION__
+          releaseBody: |
+            Automated GitHub Release for Transfer Genie.
+
+            - Includes platform bundles and updater artifacts.
+            - `latest.json` is uploaded for the desktop auto-update flow.
+          releaseDraft: false
+          prerelease: false
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
+          includeDebug: false
+          args: ${{ matrix.args }}

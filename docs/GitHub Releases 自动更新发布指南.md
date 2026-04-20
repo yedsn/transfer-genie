@@ -132,9 +132,65 @@ cargo tauri signer generate -w ~/.tauri/transfer-genie-updater.key
 
 如果你当前只准备先做 macOS 自动更新，可以先沿用现在的配置。
 
+### 3.5 GitHub Actions 自动发布工作流
+
+仓库里已经补了一版初始工作流：
+
+- `.github/workflows/release.yml`
+
+当前工作流默认支持：
+
+- 推送 `v*` tag 时自动发布
+- 在 GitHub Actions 页面手动触发 `workflow_dispatch`
+- 自动创建或更新对应版本的 GitHub Release
+- 自动上传 updater 产物与 `latest.json`
+
+当前矩阵包含：
+
+- `macos-latest` + `aarch64-apple-darwin`
+- `macos-latest` + `x86_64-apple-darwin`
+- `windows-latest` + `nsis`
+
+说明：
+
+- macOS 两个目标用于覆盖 Apple Silicon 和 Intel Mac
+- Windows 当前使用 `nsis` installer，以匹配 updater 对安装包产物的要求
+- 工作流会在真正构建前检查 `tauri.conf.json` 是否仍保留占位公钥和占位仓库地址
+
+### 3.6 需要配置的 GitHub Secrets
+
+在仓库 `Settings -> Secrets and variables -> Actions` 中，至少配置：
+
+- `TAURI_SIGNING_PRIVATE_KEY`
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+
+说明：
+
+- `TAURI_SIGNING_PRIVATE_KEY` 可以直接保存私钥内容，Tauri 官方文档允许这里传“文件路径或私钥内容本身”
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 建议始终使用非空密码
+- 工作流使用内置的 `GITHUB_TOKEN` 创建 Release 并上传资产，不需要你额外配置
+
+推荐做法：
+
+- 本地用 `cargo tauri signer generate` 生成一把带密码的 updater 私钥
+- 公钥写入 `tauri.conf.json`
+- 私钥内容和密码分别写入 GitHub Secrets
+
 ## 4. 每次发版的操作流程
 
 下面是推荐的最小手工发布流程。
+
+如果你准备直接用仓库里的 GitHub Actions 工作流发版，推荐的触发方式是：
+
+```bash
+git add .
+git commit -m "release: v0.1.1"
+git tag v0.1.1
+git push origin main
+git push origin v0.1.1
+```
+
+这样会触发 `.github/workflows/release.yml`，由 GitHub 自动创建 Release 并上传资产。
 
 ### 4.1 更新应用版本号
 
