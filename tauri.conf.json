@@ -33,7 +33,8 @@
     "createUpdaterArtifacts": true,
     "targets": [
       "app",
-      "dmg"
+      "dmg",
+      "nsis"
     ],
     "icon": [
       "icons/icon.png",
@@ -51,8 +52,7 @@
     },
     "windows": {
       "nsis": {
-        "installMode": "perMachine",
-        "installPath": "$PROGRAMFILES64\\Transfer Genie"
+        "installMode": "perMachine"
       }
     }
   },
