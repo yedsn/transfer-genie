@@ -224,6 +224,9 @@ if [[ "$PUSH" == "true" ]]; then
   git -C "$ROOT_DIR" push "$REMOTE" "v$VERSION"
   echo "[release] Pushed $BRANCH and tag v$VERSION to $REMOTE"
   echo "[release] Next: open https://github.com/yedsn/transfer-genie/actions and verify the Release workflow"
+  echo "[release] After GitHub Release is ready, sync it to Gitee with:"
+  echo "  export GITEE_ACCESS_TOKEN=你的GiteeToken"
+  echo "  python3 scripts/sync_gitee_release.py --tag v$VERSION"
 else
   echo "[release] Push skipped"
   echo "[release] Next:"

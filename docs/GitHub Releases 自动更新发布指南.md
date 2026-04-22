@@ -20,7 +20,7 @@
 
 ## 2. 当前项目里已经预留的位置
 
-当前仓库已经在 `tauri.conf.json` 中接好了当前项目的 GitHub Releases 地址和 updater 公钥，结构如下：
+当前仓库已经在 `tauri.conf.json` 中接好了 updater 公钥，并预留了 `Gitee -> GitHub Releases` 双更新源，结构如下：
 
 ```json
 {
@@ -31,6 +31,7 @@
     "updater": {
       "pubkey": "当前项目的 minisign updater 公钥",
       "endpoints": [
+        "https://gitee.com/hongxiaojian/transfer-genie/releases/latest/download/latest.json",
         "https://github.com/yedsn/transfer-genie/releases/latest/download/latest.json"
       ],
       "windows": {
@@ -43,10 +44,18 @@
 
 这意味着应用内自动更新现在已经具备检查配置，后续真正发版时你只需要保证：
 
+- Gitee Release 中真的上传了 `latest.json`
 - GitHub Release 中真的上传了 `latest.json`
 - 发布产物由与当前公钥匹配的私钥签名
 
 如果私钥和这里的公钥不匹配，客户端会在下载后验签失败。
+
+说明：
+
+- 当前配置把 Gitee 放在第一个 endpoint，GitHub 放在第二个 endpoint
+- Tauri Updater 只有在前一个 endpoint 返回非 `2xx` 时才会尝试下一个
+- 所以只有当 Gitee 上的 `latest.json` 不存在、返回 `404` 或服务异常时，才会回退到 GitHub
+- 如果 Gitee 仓库尚未创建或未发布对应资产，客户端会自动继续尝试 GitHub
 
 ## 3. 一次性准备
 
@@ -56,8 +65,27 @@
 
 推荐结构：
 
-- 仓库：`https://github.com/yedsn/transfer-genie`
+- Gitee 仓库：`https://gitee.com/hongxiaojian/transfer-genie`
+- GitHub 仓库：`https://github.com/yedsn/transfer-genie`
 - 最新版本元数据地址：
+
+```text
+https://gitee.com/hongxiaojian/transfer-genie/releases/latest/download/latest.json
+https://github.com/yedsn/transfer-genie/releases/latest/download/latest.json
+```
+
+推荐实践：
+
+- 国内优先访问 Gitee
+- GitHub 作为备用源
+- 两边的 `latest.json`、安装包和 `.sig` 必须来自同一批构建产物
+
+注意：
+
+- Gitee 社区版 Release 附件有配额和大小限制，较大的安装包可能放不下
+- 如果后续 Windows / macOS 产物超出限制，更建议把主源切到对象存储或自有静态服务，再保留 GitHub 作为备用源
+
+当前第二个备用地址仍然是：
 
 ```text
 https://github.com/yedsn/transfer-genie/releases/latest/download/latest.json
@@ -102,6 +130,7 @@ cargo tauri signer generate -w ~/.tauri/transfer-genie-updater.key
     "updater": {
       "pubkey": "-----BEGIN PUBLIC KEY-----...-----END PUBLIC KEY-----",
       "endpoints": [
+        "https://gitee.com/hongxiaojian/transfer-genie/releases/latest/download/latest.json",
         "https://github.com/yedsn/transfer-genie/releases/latest/download/latest.json"
       ]
     }
@@ -113,7 +142,7 @@ cargo tauri signer generate -w ~/.tauri/transfer-genie-updater.key
 
 - `pubkey` 必须是公钥内容本身，不是文件路径
 - `endpoints` 必须使用 HTTPS
-- GitHub Release 中必须真的存在 `latest.json`
+- Gitee / GitHub Release 中必须真的存在 `latest.json`
 
 ### 3.4 平台产物补充说明
 
@@ -145,6 +174,7 @@ cargo tauri signer generate -w ~/.tauri/transfer-genie-updater.key
 - 在 GitHub Actions 页面手动触发 `workflow_dispatch`
 - 自动创建或更新对应版本的 GitHub Release
 - 自动上传 updater 产物与 `latest.json`
+- 可通过 `scripts/sync_gitee_release.py` 把同一版 Release 资产同步到 Gitee
 
 当前矩阵包含：
 
@@ -214,6 +244,26 @@ scripts/release_github.sh 0.1.1
 
 ```bash
 scripts/release_github.sh --help
+```
+
+如果 GitHub Release 已经成功发布，再执行下面这个同步脚本，就可以把同一版资产同步到 Gitee：
+
+```bash
+export GITEE_ACCESS_TOKEN="你的 Gitee Access Token"
+python3 scripts/sync_gitee_release.py --tag v0.1.1
+```
+
+这个脚本会：
+
+- 从 GitHub Release 拉取指定 tag 的元数据和附件
+- 在 Gitee 仓库里查找同 tag 的 Release，没有则自动创建
+- 删除 Gitee 上同名旧附件后重新上传
+- 把 `latest.json`、安装包和 `.sig` 一并同步过去
+
+查看帮助：
+
+```bash
+python3 scripts/sync_gitee_release.py --help
 ```
 
 ### 4.1 更新应用版本号

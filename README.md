@@ -115,6 +115,13 @@ scripts/release_github.sh 0.1.2 --push
 scripts/release_github.sh --help
 ```
 
+如果 GitHub Release 已经发好，还想同步一份到 Gitee Release，可执行：
+
+```bash
+export GITEE_ACCESS_TOKEN="你的 Gitee Access Token"
+python3 scripts/sync_gitee_release.py --tag v0.1.2
+```
+
 ## 目录结构
 
 ```
