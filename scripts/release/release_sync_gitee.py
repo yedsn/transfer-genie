@@ -320,6 +320,13 @@ def main() -> None:
 
     token = os.environ.get("GITEE_ACCESS_TOKEN", "").strip()
     if not token:
+        env_file = Path(__file__).parent.parent.parent / ".env"
+        if env_file.exists():
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                if line.startswith("GITEE_ACCESS_TOKEN="):
+                    token = line.split("=", 1)[1].strip()
+                    break
+    if not token:
         fail("Missing GITEE_ACCESS_TOKEN environment variable")
 
     if args.tag:
