@@ -162,3 +162,14 @@ transfer-genie/
 ## 常见代码位置
 ### 关闭窗口重置
 - frontend\main.js - prepareWindowForHide
+
+## 许可证
+
+本项目采用 **GNU Affero General Public License v3.0** (AGPL-3.0) 许可证。
+
+- ✅ 个人可自由使用、修改、分发
+- ✅ 修改后的版本必须开源
+- ✅ 即使是网络服务（SaaS）也要开源
+- ❌ 禁止闭源商用
+
+商业授权请联系作者。
