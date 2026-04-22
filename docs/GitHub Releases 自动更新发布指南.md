@@ -177,6 +177,7 @@ cargo tauri signer generate -w ~/.tauri/transfer-genie-updater.key
 - 自动上传 updater 产物与 `latest.json`
 - 如果配置了 `GITEE_ACCESS_TOKEN` Secret，会在发布成功后自动同步同一版 Release 到 Gitee
 - 也可手动执行 `scripts/release/release_sync_gitee.py` 把同一版 Release 资产同步到 Gitee
+- 也可单独运行 `.github/workflows/sync-gitee-release.yml`，只同步现有 GitHub Release 到 Gitee，不重新打包
 
 当前矩阵包含：
 
@@ -270,6 +271,16 @@ python3 scripts/release/release_sync_gitee.py --tag v0.1.1
 ```bash
 python3 scripts/release/release_sync_gitee.py --help
 ```
+
+如果你只是想把“已经存在的 GitHub Release”补同步到 Gitee，而不重新触发打包，也可以直接运行独立 workflow：
+
+- `Sync Latest Release to Gitee`
+
+这个 workflow：
+
+- 默认同步 GitHub 当前 latest release
+- 支持在手动触发时填写一个指定 tag
+- 不会重新执行 Tauri 打包
 
 ### 4.1 更新应用版本号
 

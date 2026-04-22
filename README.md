@@ -129,6 +129,12 @@ Gitee 同步脚本会同时维护两套 Release：
 - 真实版本号 Release，例如 `v0.1.4`
 - 固定的 `latest` Release，供程序稳定访问 `latest.json`
 
+如果你只想把当前 GitHub 最新 Release 手动同步到 Gitee，不做打包，可以直接在 GitHub Actions 里运行：
+
+- `.github/workflows/sync-gitee-release.yml`
+
+这个 workflow 默认同步 GitHub 最新 Release，也支持在手动触发时额外填写一个指定 tag。
+
 ## 目录结构
 
 ```

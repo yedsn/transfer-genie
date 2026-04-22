@@ -1,0 +1,35 @@
+name: Sync Latest Release to Gitee
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Optional Git tag to sync, for example v0.1.4. Leave empty to use the latest GitHub release."
+        required: false
+        type: string
+
+jobs:
+  sync-gitee:
+    name: Sync release assets to Gitee
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: "1"
+      GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Validate Gitee token
+        if: ${{ env.GITEE_ACCESS_TOKEN == '' }}
+        run: |
+          echo "::error::Missing repository secret GITEE_ACCESS_TOKEN"
+          exit 1
+
+      - name: Sync latest GitHub release to Gitee
+        if: ${{ env.GITEE_ACCESS_TOKEN != '' && github.event.inputs.tag == '' }}
+        run: python3 scripts/release/release_sync_gitee.py
+
+      - name: Sync specified GitHub release tag to Gitee
+        if: ${{ env.GITEE_ACCESS_TOKEN != '' && github.event.inputs.tag != '' }}
+        run: python3 scripts/release/release_sync_gitee.py --tag "${{ github.event.inputs.tag }}"
