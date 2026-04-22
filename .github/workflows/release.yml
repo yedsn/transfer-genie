@@ -125,17 +125,17 @@ jobs:
     name: Sync release to Gitee
     runs-on: ubuntu-latest
     needs: publish
+    env:
+      GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
 
       - name: Skip when Gitee token is not configured
-        if: ${{ secrets.GITEE_ACCESS_TOKEN == '' }}
+        if: ${{ env.GITEE_ACCESS_TOKEN == '' }}
         run: echo "GITEE_ACCESS_TOKEN is not configured, skipping Gitee release sync."
 
       - name: Sync GitHub release assets to Gitee
-        if: ${{ secrets.GITEE_ACCESS_TOKEN != '' }}
-        env:
-          GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
+        if: ${{ env.GITEE_ACCESS_TOKEN != '' }}
         run: python3 scripts/release/release_sync_gitee.py
