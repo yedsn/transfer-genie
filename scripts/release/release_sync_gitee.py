@@ -335,18 +335,15 @@ def main() -> None:
             target_path = tmp_root / name
             log(f"[sync-gitee] Downloading {name}")
             download_file(download_url, target_path)
-            latest_target = tmp_root / f"latest-{name}"
             if name == "latest.json":
                 rewrite_latest_json_urls(
                     target_path,
-                    latest_target,
+                    target_path,
                     gitee_owner=args.gitee_owner,
                     gitee_repo=args.gitee_repo,
                     download_tag=LATEST_RELEASE_TAG,
                 )
-            else:
-                copyfile(target_path, latest_target)
-            latest_files.append(latest_target)
+            latest_files.append(target_path)
 
         latest_release = ensure_release(
             token=token,
