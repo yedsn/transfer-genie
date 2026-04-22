@@ -20,7 +20,7 @@
 
 ## 2. 当前项目里已经预留的位置
 
-当前仓库已经在 `tauri.conf.json` 中预留了 updater 配置，但仍是占位值：
+当前仓库已经在 `tauri.conf.json` 中接好了当前项目的 GitHub Releases 地址和 updater 公钥，结构如下：
 
 ```json
 {
@@ -29,9 +29,9 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY",
+      "pubkey": "当前项目的 minisign updater 公钥",
       "endpoints": [
-        "https://github.com/OWNER/REPO/releases/latest/download/latest.json"
+        "https://github.com/yedsn/transfer-genie/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"
@@ -41,12 +41,12 @@
 }
 ```
 
-你正式发布前，至少要把下面两项替换掉：
+这意味着应用内自动更新现在已经具备检查配置，后续真正发版时你只需要保证：
 
-- `REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY`
-- `OWNER/REPO`
+- GitHub Release 中真的上传了 `latest.json`
+- 发布产物由与当前公钥匹配的私钥签名
 
-如果不替换，应用内更新检查会直接报配置未完成。
+如果私钥和这里的公钥不匹配，客户端会在下载后验签失败。
 
 ## 3. 一次性准备
 
@@ -56,11 +56,11 @@
 
 推荐结构：
 
-- 仓库：`https://github.com/<owner>/<repo>`
+- 仓库：`https://github.com/yedsn/transfer-genie`
 - 最新版本元数据地址：
 
 ```text
-https://github.com/<owner>/<repo>/releases/latest/download/latest.json
+https://github.com/yedsn/transfer-genie/releases/latest/download/latest.json
 ```
 
 第一版不建议使用私有仓库，因为自动更新下载会涉及鉴权，客户端处理会更复杂。
@@ -102,7 +102,7 @@ cargo tauri signer generate -w ~/.tauri/transfer-genie-updater.key
     "updater": {
       "pubkey": "-----BEGIN PUBLIC KEY-----...-----END PUBLIC KEY-----",
       "endpoints": [
-        "https://github.com/<owner>/<repo>/releases/latest/download/latest.json"
+        "https://github.com/yedsn/transfer-genie/releases/latest/download/latest.json"
       ]
     }
   }
@@ -265,7 +265,7 @@ Tauri 官方文档说明，`createUpdaterArtifacts: true` 时会自动生成 upd
   "platforms": {
     "darwin-aarch64": {
       "signature": "这里填写 .sig 文件内容本身，不是链接",
-      "url": "https://github.com/<owner>/<repo>/releases/download/v0.1.1/Transfer%20Genie.app.tar.gz"
+      "url": "https://github.com/yedsn/transfer-genie/releases/download/v0.1.1/Transfer%20Genie.app.tar.gz"
     }
   }
 }
@@ -313,7 +313,7 @@ Transfer Genie v0.1.1
 上传完成后，理论上这条地址应能直接访问：
 
 ```text
-https://github.com/<owner>/<repo>/releases/latest/download/latest.json
+https://github.com/yedsn/transfer-genie/releases/latest/download/latest.json
 ```
 
 如果这条地址打不开，应用内自动更新就不会成功。

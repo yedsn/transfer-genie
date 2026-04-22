@@ -34,9 +34,9 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVFOTM2NEFBQjlBNkU4MzAKUldRdzZLYTVxbVNUWG1uOEhxanJXZTI3QXVsQkJ5Ukh0TGdFY3B2UWdpOW1oMEVFU0poMFNKUnMK",
       "endpoints": [
-        "https://github.com/OWNER/REPO/releases/latest/download/latest.json"
+        "https://github.com/yedsn/transfer-genie/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"
