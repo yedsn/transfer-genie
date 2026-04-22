@@ -54,13 +54,13 @@ exit
 cd /home/github-runner/transfer-genie
 
 # 安装服务
-sudo ./svc.sh install github-runner
+sudo ./svc.sh install github-runner-transfer-genie
 
 # 启动服务
-sudo ./svc.sh start github-runner
+sudo ./svc.sh start github-runner-transfer-genie
 
 # 查看状态
-sudo ./svc.sh status github-runner
+sudo ./svc.sh status github-runner-transfer-genie
 
 # 设置开机自启
 sudo systemctl enable actions.runner.yedsn-transfer-genie.transfer-genie.service
