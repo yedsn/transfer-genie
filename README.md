@@ -124,10 +124,9 @@ python3 scripts/release/release_sync_gitee.py --tag v0.1.2
 
 如果你在 GitHub 仓库 Secrets 中配置了 `GITEE_ACCESS_TOKEN`，`.github/workflows/release.yml` 也会在 GitHub Release 发布成功后自动执行一次 Gitee 同步。
 
-Gitee 同步脚本会同时维护两套 Release：
+Gitee 同步脚本只维护一套固定的 `latest` Release，供程序稳定访问：
 
-- 真实版本号 Release，例如 `v0.1.4`
-- 固定的 `latest` Release，供程序稳定访问 `latest.json`
+- `https://gitee.com/hongxiaojian/transfer-genie/releases/download/latest/latest.json`
 
 如果你只想把当前 GitHub 最新 Release 手动同步到 Gitee，不做打包，可以直接在 GitHub Actions 里运行：
 

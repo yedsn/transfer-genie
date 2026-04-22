@@ -261,7 +261,7 @@ python3 scripts/release/release_sync_gitee.py --tag v0.1.1
 这个脚本会：
 
 - 从 GitHub Release 拉取指定 tag 的元数据和附件
-- 在 Gitee 仓库里维护两套 Release：真实版本号和固定 `latest`
+- 在 Gitee 仓库里只维护一个固定的 `latest` Release
 - 删除 Gitee 上同名旧附件后重新上传
 - 把 `latest.json`、安装包和 `.sig` 一并同步过去
 - 自动把 Gitee 版本的 `latest.json` 中下载地址改写成 Gitee 自己的 Release 下载地址

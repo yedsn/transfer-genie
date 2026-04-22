@@ -325,7 +325,6 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory(prefix="transfer-genie-gitee-sync-") as tmp_dir:
         tmp_root = Path(tmp_dir)
-        versioned_files = []
         latest_files = []
         for asset in assets:
             name = asset.get("name")
@@ -336,16 +335,8 @@ def main() -> None:
             target_path = tmp_root / name
             log(f"[sync-gitee] Downloading {name}")
             download_file(download_url, target_path)
-            versioned_target = tmp_root / f"versioned-{name}"
             latest_target = tmp_root / f"latest-{name}"
             if name == "latest.json":
-                rewrite_latest_json_urls(
-                    target_path,
-                    versioned_target,
-                    gitee_owner=args.gitee_owner,
-                    gitee_repo=args.gitee_repo,
-                    download_tag=tag_name,
-                )
                 rewrite_latest_json_urls(
                     target_path,
                     latest_target,
@@ -354,32 +345,8 @@ def main() -> None:
                     download_tag=LATEST_RELEASE_TAG,
                 )
             else:
-                copyfile(target_path, versioned_target)
                 copyfile(target_path, latest_target)
-            versioned_files.append(versioned_target)
             latest_files.append(latest_target)
-
-        versioned_release = ensure_release(
-            token=token,
-            gitee_owner=args.gitee_owner,
-            gitee_repo=args.gitee_repo,
-            releases=gitee_releases,
-            tag_name=tag_name,
-            release_name=release_name,
-            release_body=release_body,
-            target_commitish=args.target_commitish,
-        )
-        versioned_release_id = versioned_release.get("id")
-        if not versioned_release_id:
-            fail(f"Gitee release {tag_name} response does not include id")
-        sync_release_assets(
-            token=token,
-            gitee_owner=args.gitee_owner,
-            gitee_repo=args.gitee_repo,
-            release_id=versioned_release_id,
-            files=versioned_files,
-            keep_existing_assets=args.keep_existing_assets,
-        )
 
         latest_release = ensure_release(
             token=token,
@@ -387,8 +354,8 @@ def main() -> None:
             gitee_repo=args.gitee_repo,
             releases=gitee_releases,
             tag_name=LATEST_RELEASE_TAG,
-            release_name=f"Transfer Genie Latest ({tag_name})",
-            release_body=f"Auto-maintained latest release for {tag_name}.\n\n{release_body}",
+            release_name="latest",
+            release_body=f"Auto-maintained latest release. Source release: {tag_name}.\n\n{release_body}",
             target_commitish=args.target_commitish,
         )
         latest_release_id = latest_release.get("id")
