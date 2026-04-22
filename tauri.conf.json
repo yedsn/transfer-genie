@@ -48,6 +48,12 @@
       "signingIdentity": "-",
       "hardenedRuntime": true,
       "minimumSystemVersion": "10.13"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "installPath": "$PROGRAMFILES64\\Transfer Genie"
+      }
     }
   },
   "plugins": {
