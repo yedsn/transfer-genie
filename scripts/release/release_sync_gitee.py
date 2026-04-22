@@ -11,6 +11,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from shutil import copyfile
+from typing import Optional
 
 
 DEFAULT_GITHUB_OWNER = "yedsn"
@@ -91,15 +92,32 @@ def request_no_content(method: str, url: str) -> None:
         fail(f"{method} {url} failed: {exc}")
 
 
-def download_file(url: str, target_path: Path) -> None:
+def download_file(url: str, target_path: Path, proxy: Optional[str] = None) -> None:
+    handlers = []
+    if proxy:
+        handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+    opener = urllib.request.build_opener(*handlers)
     req = urllib.request.Request(url, headers={"User-Agent": "transfer-genie-release-sync"})
     try:
-        with urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT_SECS) as response, target_path.open("wb") as fh:
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                fh.write(chunk)
+        with opener.open(req, timeout=DOWNLOAD_TIMEOUT_SECS) as response:
+            total = int(response.getheader("Content-Length", 0))
+            downloaded = 0
+            start_time = __import__("time").time()
+            with target_path.open("wb") as fh:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    downloaded += len(chunk)
+                    elapsed = __import__("time").time() - start_time
+                    speed = downloaded / elapsed if elapsed > 0 else 0
+                    if total > 0:
+                        pct = downloaded / total * 100
+                        print(f"\r[sync-gitee] Downloading: {pct:.1f}% ({downloaded / 1024 / 1024:.1f}/{total / 1024 / 1024:.1f} MB) @ {speed / 1024 / 1024:.1f} MB/s", end="", flush=True)
+                    else:
+                        print(f"\r[sync-gitee] Downloading: {downloaded / 1024 / 1024:.1f} MB @ {speed / 1024 / 1024:.1f} MB/s", end="", flush=True)
+            print("", flush=True)
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", "ignore")
         fail(f"Download failed for {url} with HTTP {exc.code}: {body}")
@@ -108,10 +126,10 @@ def download_file(url: str, target_path: Path) -> None:
 
 
 def upload_attachment(file_path: Path, upload_url: str) -> None:
+    file_size = file_path.stat().st_size
     subprocess.run(
         [
             "curl",
-            "--fail",
             "--silent",
             "--show-error",
             "--location",
@@ -123,12 +141,15 @@ def upload_attachment(file_path: Path, upload_url: str) -> None:
             "2",
             "--request",
             "POST",
+            "-#",
             "--form",
             f"file=@{file_path}",
             upload_url,
         ],
         check=True,
+        stderr=__import__("sys").stderr,
     )
+    log(f"[sync-gitee] Upload complete: {file_size / 1024 / 1024:.1f} MB")
 
 
 def rewrite_latest_json_urls(
@@ -153,6 +174,14 @@ def rewrite_latest_json_urls(
         json.dumps(payload, ensure_ascii=False, indent=None, separators=(",", ":")),
         encoding="utf-8",
     )
+
+
+def strip_version_from_filename(name: str) -> str:
+    import re
+    match = re.match(r"^(.+?)-v?\d+\.\d+\.\d+(.*)$", name)
+    if match:
+        return match.group(1) + match.group(2)
+    return name
 
 
 def ensure_release(
@@ -278,6 +307,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not delete Gitee assets with the same filename before upload.",
     )
+    parser.add_argument(
+        "--proxy",
+        help="Proxy server for downloading from GitHub (e.g., localhost:7890).",
+    )
     return parser
 
 
@@ -334,16 +367,20 @@ def main() -> None:
 
             target_path = tmp_root / name
             log(f"[sync-gitee] Downloading {name}")
-            download_file(download_url, target_path)
-            if name == "latest.json":
+            download_file(download_url, target_path, proxy=args.proxy)
+            gitee_name = strip_version_from_filename(name)
+            gitee_path = tmp_root / gitee_name
+            if gitee_name != name:
+                copyfile(target_path, gitee_path)
+            if gitee_name == "latest.json":
                 rewrite_latest_json_urls(
-                    target_path,
-                    target_path,
+                    gitee_path,
+                    gitee_path,
                     gitee_owner=args.gitee_owner,
                     gitee_repo=args.gitee_repo,
                     download_tag=LATEST_RELEASE_TAG,
                 )
-            latest_files.append(target_path)
+            latest_files.append(gitee_path)
 
         latest_release = ensure_release(
             token=token,
