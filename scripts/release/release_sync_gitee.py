@@ -253,18 +253,18 @@ def sync_release_assets(
         item.get("name"): item for item in existing_attachments if item.get("name")
     }
 
-    for file_path in files:
-        existing = attachments_by_name.get(file_path.name)
-        if existing and not keep_existing_assets:
-            attachment_id = existing.get("id")
+    if not keep_existing_assets:
+        for name, attachment in attachments_by_name.items():
+            attachment_id = attachment.get("id")
             if attachment_id:
                 delete_url = (
                     f"https://gitee.com/api/v5/repos/{gitee_owner}/{gitee_repo}/releases/"
                     f"{release_id}/attach_files/{attachment_id}?access_token={urllib.parse.quote(token)}"
                 )
-                log(f"[sync-gitee] Deleting existing asset {file_path.name}")
+                log(f"[sync-gitee] Deleting existing asset {name}")
                 request_no_content("DELETE", delete_url)
 
+    for file_path in files:
         upload_url = (
             f"https://gitee.com/api/v5/repos/{gitee_owner}/{gitee_repo}/releases/"
             f"{release_id}/attach_files?access_token={urllib.parse.quote(token)}"
