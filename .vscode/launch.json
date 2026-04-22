@@ -4,6 +4,6 @@
     {"command":"codex-dsp","name":"codex","request":"launch","type":"node-terminal"},
     {"command":"cargo tauri dev","name":"dev","request":"launch","type":"node-terminal"},
     {"command":"cargo tauri build","name":"build","request":"launch","type":"node-terminal"},
-    {"command":"./scripts/release_github.sh --push","cwd":"${workspaceFolder}","name":"release_github","request":"launch","type":"node-terminal"}
+    {"command":"./scripts/release/release_github.sh --push","cwd":"${workspaceFolder}","name":"release_github","request":"launch","type":"node-terminal"}
   ]
 }

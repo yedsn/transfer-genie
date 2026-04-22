@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DEFAULT_REMOTE="github"
 CURRENT_BRANCH="$(git -C "$ROOT_DIR" branch --show-current 2>/dev/null || true)"
 DEFAULT_BRANCH="${CURRENT_BRANCH:-master}"
@@ -10,13 +10,13 @@ DEFAULT_BRANCH="${CURRENT_BRANCH:-master}"
 usage() {
   cat <<EOF
 Usage:
-  scripts/release_github.sh [version] [--remote <name>] [--branch <name>] [--push]
+  scripts/release/release_github.sh [version] [--remote <name>] [--branch <name>] [--push]
 
 Examples:
-  scripts/release_github.sh 0.1.2
-  scripts/release_github.sh
-  scripts/release_github.sh 0.1.2 --push
-  scripts/release_github.sh 0.1.2 --remote github --branch master --push
+  scripts/release/release_github.sh 0.1.2
+  scripts/release/release_github.sh
+  scripts/release/release_github.sh 0.1.2 --push
+  scripts/release/release_github.sh 0.1.2 --remote github --branch master --push
 
 Behavior:
   - Update Cargo.toml and tauri.conf.json to the target version
@@ -226,7 +226,7 @@ if [[ "$PUSH" == "true" ]]; then
   echo "[release] Next: open https://github.com/yedsn/transfer-genie/actions and verify the Release workflow"
   echo "[release] After GitHub Release is ready, sync it to Gitee with:"
   echo "  export GITEE_ACCESS_TOKEN=你的GiteeToken"
-  echo "  python3 scripts/sync_gitee_release.py --tag v$VERSION"
+  echo "  python3 scripts/release/release_sync_gitee.py --tag v$VERSION"
 else
   echo "[release] Push skipped"
   echo "[release] Next:"

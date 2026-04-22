@@ -166,7 +166,7 @@ cargo tauri signer generate -w ~/.tauri/transfer-genie-updater.key
 仓库里已经补了一版初始工作流：
 
 - `.github/workflows/release.yml`
-- `scripts/release_github.sh`
+- `scripts/release/release_github.sh`
 
 当前工作流默认支持：
 
@@ -174,7 +174,8 @@ cargo tauri signer generate -w ~/.tauri/transfer-genie-updater.key
 - 在 GitHub Actions 页面手动触发 `workflow_dispatch`
 - 自动创建或更新对应版本的 GitHub Release
 - 自动上传 updater 产物与 `latest.json`
-- 可通过 `scripts/sync_gitee_release.py` 把同一版 Release 资产同步到 Gitee
+- 如果配置了 `GITEE_ACCESS_TOKEN` Secret，会在发布成功后自动同步同一版 Release 到 Gitee
+- 也可手动执行 `scripts/release/release_sync_gitee.py` 把同一版 Release 资产同步到 Gitee
 
 当前矩阵包含：
 
@@ -195,12 +196,14 @@ cargo tauri signer generate -w ~/.tauri/transfer-genie-updater.key
 
 - `TAURI_SIGNING_PRIVATE_KEY`
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+- `GITEE_ACCESS_TOKEN`（如果要自动同步到 Gitee）
 
 说明：
 
 - `TAURI_SIGNING_PRIVATE_KEY` 可以直接保存私钥内容，Tauri 官方文档允许这里传“文件路径或私钥内容本身”
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 建议始终使用非空密码
 - 工作流使用内置的 `GITHUB_TOKEN` 创建 Release 并上传资产，不需要你额外配置
+- `GITEE_ACCESS_TOKEN` 用于在 GitHub Actions 中调用 Gitee API 创建 Release 并上传附件；未配置时会自动跳过 Gitee 同步步骤
 
 推荐做法：
 
@@ -215,7 +218,7 @@ cargo tauri signer generate -w ~/.tauri/transfer-genie-updater.key
 如果你准备直接用仓库里的 GitHub Actions 工作流发版，推荐优先使用发版脚本：
 
 ```bash
-scripts/release_github.sh 0.1.1 --push
+scripts/release/release_github.sh 0.1.1 --push
 ```
 
 脚本默认会：
@@ -237,20 +240,20 @@ scripts/release_github.sh 0.1.1 --push
 如果你只想先本地创建提交和 tag，不立刻推送，也可以：
 
 ```bash
-scripts/release_github.sh 0.1.1
+scripts/release/release_github.sh 0.1.1
 ```
 
 查看帮助：
 
 ```bash
-scripts/release_github.sh --help
+scripts/release/release_github.sh --help
 ```
 
 如果 GitHub Release 已经成功发布，再执行下面这个同步脚本，就可以把同一版资产同步到 Gitee：
 
 ```bash
 export GITEE_ACCESS_TOKEN="你的 Gitee Access Token"
-python3 scripts/sync_gitee_release.py --tag v0.1.1
+python3 scripts/release/release_sync_gitee.py --tag v0.1.1
 ```
 
 这个脚本会：
@@ -263,7 +266,7 @@ python3 scripts/sync_gitee_release.py --tag v0.1.1
 查看帮助：
 
 ```bash
-python3 scripts/sync_gitee_release.py --help
+python3 scripts/release/release_sync_gitee.py --help
 ```
 
 ### 4.1 更新应用版本号

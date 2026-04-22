@@ -92,7 +92,7 @@ cargo tauri build
 如果你已经接好了 GitHub Actions 自动发布工作流，推荐直接使用：
 
 ```bash
-scripts/release_github.sh 0.1.2 --push
+scripts/release/release_github.sh 0.1.2 --push
 ```
 
 如果不传版本号，脚本会先读取当前版本，再提示你选择版本类型：
@@ -112,15 +112,17 @@ scripts/release_github.sh 0.1.2 --push
 更多参数见：
 
 ```bash
-scripts/release_github.sh --help
+scripts/release/release_github.sh --help
 ```
 
 如果 GitHub Release 已经发好，还想同步一份到 Gitee Release，可执行：
 
 ```bash
 export GITEE_ACCESS_TOKEN="你的 Gitee Access Token"
-python3 scripts/sync_gitee_release.py --tag v0.1.2
+python3 scripts/release/release_sync_gitee.py --tag v0.1.2
 ```
+
+如果你在 GitHub 仓库 Secrets 中配置了 `GITEE_ACCESS_TOKEN`，`.github/workflows/release.yml` 也会在 GitHub Release 发布成功后自动执行一次 Gitee 同步。
 
 ## 目录结构
 
