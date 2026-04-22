@@ -100,7 +100,7 @@ jobs:
           workspaces: |
             . -> target
 
-      - name: Build bundles and publish release assets
+      - name: Build bundles
         uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -112,6 +112,19 @@ jobs:
           releaseBody: |
             Automated GitHub Release for Transfer Genie.
 
+            ## macOS 用户注意
+
+            如果打开应用提示"已损坏"，请打开 DMG 中的 `fix-quarantine.sh` 脚本修复。
+            详细说明请查看 DMG 中的 `README.md` 文件。
+
+            ### 快速修复命令
+            ```bash
+            cd /Volumes/Transfer\ Genie
+            ./fix-quarantine.sh
+            ```
+
+            ---
+
             - Includes platform bundles and updater artifacts.
             - `latest.json` is uploaded for the desktop auto-update flow.
           releaseDraft: false
@@ -120,6 +133,23 @@ jobs:
           updaterJsonPreferNsis: true
           includeDebug: false
           args: ${{ matrix.args }}
+
+      - name: Enhance macOS DMG (add fix script)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          chmod +x scripts/mac/enhance-dmg.sh
+          bash scripts/mac/enhance-dmg.sh
+
+      - name: Re-upload enhanced DMG
+        if: matrix.os == 'macos-latest'
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          files: target/release/bundle/dmg/*.dmg
+          tag_name: ${{ github.ref_name }}
+          overwrite: true
 
   sync-gitee:
     name: Sync release to Gitee
