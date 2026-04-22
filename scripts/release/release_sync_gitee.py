@@ -18,10 +18,18 @@ DEFAULT_GITHUB_REPO = "transfer-genie"
 DEFAULT_GITEE_OWNER = "hongxiaojian"
 DEFAULT_GITEE_REPO = "transfer-genie"
 LATEST_RELEASE_TAG = "latest"
+HTTP_TIMEOUT_SECS = 60
+DOWNLOAD_TIMEOUT_SECS = 600
+UPLOAD_CONNECT_TIMEOUT_SECS = 30
+UPLOAD_MAX_TIME_SECS = 1800
+
+
+def log(message: str) -> None:
+    print(message, flush=True)
 
 
 def fail(message: str) -> None:
-    print(f"[sync-gitee] Error: {message}", file=sys.stderr)
+    print(f"[sync-gitee] Error: {message}", file=sys.stderr, flush=True)
     raise SystemExit(1)
 
 
@@ -38,7 +46,7 @@ def request_json(method: str, url: str, *, data=None, headers=None):
 
     req = urllib.request.Request(url, data=request_data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECS) as response:
             return json.load(response)
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", "ignore")
@@ -60,17 +68,21 @@ def try_request_json(method: str, url: str, *, data=None, headers=None):
 
     req = urllib.request.Request(url, data=request_data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECS) as response:
             return json.load(response)
     except Exception as exc:
-        print(f"[sync-gitee] Warning: {method} {url} failed, continuing: {exc}", file=sys.stderr)
+        print(
+            f"[sync-gitee] Warning: {method} {url} failed, continuing: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
         return None
 
 
 def request_no_content(method: str, url: str) -> None:
     req = urllib.request.Request(url, method=method)
     try:
-        with urllib.request.urlopen(req):
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECS):
             return
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", "ignore")
@@ -82,7 +94,7 @@ def request_no_content(method: str, url: str) -> None:
 def download_file(url: str, target_path: Path) -> None:
     req = urllib.request.Request(url, headers={"User-Agent": "transfer-genie-release-sync"})
     try:
-        with urllib.request.urlopen(req) as response, target_path.open("wb") as fh:
+        with urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT_SECS) as response, target_path.open("wb") as fh:
             while True:
                 chunk = response.read(1024 * 1024)
                 if not chunk:
@@ -103,6 +115,12 @@ def upload_attachment(file_path: Path, upload_url: str) -> None:
             "--silent",
             "--show-error",
             "--location",
+            "--connect-timeout",
+            str(UPLOAD_CONNECT_TIMEOUT_SECS),
+            "--max-time",
+            str(UPLOAD_MAX_TIME_SECS),
+            "--retry",
+            "2",
             "--request",
             "POST",
             "--form",
@@ -158,7 +176,7 @@ def ensure_release(
         release_id = existing_release.get("id")
         if not release_id:
             fail(f"Gitee release {tag_name} exists but does not include id")
-        print(f"[sync-gitee] Updating existing Gitee release #{release_id} ({tag_name})")
+        log(f"[sync-gitee] Updating existing Gitee release #{release_id} ({tag_name})")
         updated_release = try_request_json(
             "PATCH",
             f"{release_url}/{release_id}",
@@ -173,7 +191,7 @@ def ensure_release(
         )
         return updated_release or existing_release
 
-    print(f"[sync-gitee] Creating Gitee release for tag {tag_name}")
+    log(f"[sync-gitee] Creating Gitee release for tag {tag_name}")
     return request_json(
         "POST",
         release_url,
@@ -215,14 +233,14 @@ def sync_release_assets(
                     f"https://gitee.com/api/v5/repos/{gitee_owner}/{gitee_repo}/releases/"
                     f"{release_id}/attach_files/{attachment_id}?access_token={urllib.parse.quote(token)}"
                 )
-                print(f"[sync-gitee] Deleting existing asset {file_path.name}")
+                log(f"[sync-gitee] Deleting existing asset {file_path.name}")
                 request_no_content("DELETE", delete_url)
 
         upload_url = (
             f"https://gitee.com/api/v5/repos/{gitee_owner}/{gitee_repo}/releases/"
             f"{release_id}/attach_files?access_token={urllib.parse.quote(token)}"
         )
-        print(f"[sync-gitee] Uploading {file_path.name}")
+        log(f"[sync-gitee] Uploading {file_path.name}")
         upload_attachment(file_path, upload_url)
 
 
@@ -296,8 +314,8 @@ def main() -> None:
     if not assets:
         fail(f"GitHub release {tag_name} has no assets to sync")
 
-    print(f"[sync-gitee] Syncing release {tag_name}")
-    print(f"[sync-gitee] GitHub assets: {len(assets)}")
+    log(f"[sync-gitee] Syncing release {tag_name}")
+    log(f"[sync-gitee] GitHub assets: {len(assets)}")
 
     releases_url = (
         f"https://gitee.com/api/v5/repos/{args.gitee_owner}/{args.gitee_repo}/releases"
@@ -316,7 +334,7 @@ def main() -> None:
                 fail(f"GitHub release asset is missing name or browser_download_url: {asset}")
 
             target_path = tmp_root / name
-            print(f"[sync-gitee] Downloading {name}")
+            log(f"[sync-gitee] Downloading {name}")
             download_file(download_url, target_path)
             versioned_target = tmp_root / f"versioned-{name}"
             latest_target = tmp_root / f"latest-{name}"
@@ -385,8 +403,8 @@ def main() -> None:
             keep_existing_assets=args.keep_existing_assets,
         )
 
-    print("[sync-gitee] Done")
-    print(
+    log("[sync-gitee] Done")
+    log(
         f"[sync-gitee] Verify fixed latest.json: "
         f"https://gitee.com/{args.gitee_owner}/{args.gitee_repo}/releases/download/latest/latest.json"
     )
