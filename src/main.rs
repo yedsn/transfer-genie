@@ -592,6 +592,11 @@ fn get_local_http_api_status(state: State<'_, AppState>) -> Result<LocalHttpApiS
 }
 
 #[tauri::command]
+fn get_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+#[tauri::command]
 async fn check_app_update(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -6133,6 +6138,7 @@ fn main() {
             get_settings,
             get_telegram_bridge_status,
             get_local_http_api_status,
+            get_app_version,
             check_app_update,
             download_and_install_update,
             restart_app,
@@ -6189,7 +6195,12 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    app.run(|app_handle, event| {
+    let version = env!("CARGO_PKG_VERSION");
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_title(&format!("Transfer Genie v{}", version));
+    }
+
+    app.run(move |app_handle, event| {
         if matches!(
             event,
             tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }
@@ -6197,6 +6208,12 @@ fn main() {
             let state = app_handle.state::<AppState>();
             let _ = stop_telegram_bridge_impl(&state);
             let _ = stop_local_http_api_impl(&state);
+        }
+
+        if let tauri::RunEvent::Ready = event {
+            if let Some(window) = app_handle.get_webview_window("main") {
+                let _ = window.set_title(&format!("Transfer Genie v{}", version));
+            }
         }
 
         #[cfg(target_os = "macos")]

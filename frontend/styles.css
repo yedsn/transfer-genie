@@ -2714,6 +2714,12 @@ input {
   font-size: 13px;
 }
 
+.settings-header .app-version {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
 .tabbar {
   position: fixed;
   left: 0;

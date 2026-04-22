@@ -9115,3 +9115,17 @@ if (markedSearchInput) {
     await executeMarkedSearch();
   });
 }
+
+async function loadAppVersion() {
+  const versionElement = document.getElementById('app-version');
+  if (!versionElement) return;
+  try {
+    const version = await invoke('get_app_version');
+    versionElement.textContent = version;
+  } catch (error) {
+    console.error('Failed to load app version:', error);
+    versionElement.textContent = '未知';
+  }
+}
+
+loadAppVersion();
