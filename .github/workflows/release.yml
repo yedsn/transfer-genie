@@ -131,7 +131,7 @@ jobs:
 
   sync-gitee:
     name: Sync release to Gitee
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: publish
     env:
       PYTHONUNBUFFERED: "1"
@@ -147,4 +147,4 @@ jobs:
 
       - name: Sync GitHub release assets to Gitee
         if: ${{ env.GITEE_ACCESS_TOKEN != '' }}
-        run: python3 scripts/release/release_sync_gitee.py
+        run: python3 scripts/release/release_sync_gitee.py --proxy 192.168.3.36:7890
