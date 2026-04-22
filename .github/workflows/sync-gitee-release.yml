@@ -11,7 +11,7 @@ on:
 jobs:
   sync-gitee:
     name: Sync release assets to Gitee
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     env:
       PYTHONUNBUFFERED: "1"
       GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
