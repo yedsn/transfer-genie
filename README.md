@@ -87,6 +87,34 @@ cargo tauri build
 - 需要在对应平台打包（Windows 产出 .exe，macOS 产出 .dmg）
 - Windows 编译后的文件位于 `target\release\` 目录
 
+### 方法三：GitHub Release 发版脚本
+
+如果你已经接好了 GitHub Actions 自动发布工作流，推荐直接使用：
+
+```bash
+scripts/release_github.sh 0.1.2 --push
+```
+
+如果不传版本号，脚本会先读取当前版本，再提示你选择版本类型：
+
+- `patch`：例如 `0.1.1 -> 0.1.2`
+- `minor`：例如 `0.1.1 -> 0.2.0`
+- `major`：例如 `0.1.1 -> 1.0.0`
+- `custom`：手动输入版本号
+
+脚本会自动：
+
+- 更新 `Cargo.toml` 和 `tauri.conf.json` 版本号
+- 创建 `release: v0.1.2` 提交
+- 创建 `v0.1.2` tag
+- 推送当前分支和 tag 到 `github` 远端
+
+更多参数见：
+
+```bash
+scripts/release_github.sh --help
+```
+
 ## 目录结构
 
 ```

@@ -137,6 +137,7 @@ cargo tauri signer generate -w ~/.tauri/transfer-genie-updater.key
 仓库里已经补了一版初始工作流：
 
 - `.github/workflows/release.yml`
+- `scripts/release_github.sh`
 
 当前工作流默认支持：
 
@@ -156,6 +157,7 @@ cargo tauri signer generate -w ~/.tauri/transfer-genie-updater.key
 - macOS 两个目标用于覆盖 Apple Silicon 和 Intel Mac
 - Windows 当前使用 `nsis` installer，以匹配 updater 对安装包产物的要求
 - 工作流会在真正构建前检查 `tauri.conf.json` 是否仍保留占位公钥和占位仓库地址
+- 发版脚本会先更新版本号、创建提交和 tag，再按需推送到 `github` 远端
 
 ### 3.6 需要配置的 GitHub Secrets
 
@@ -180,17 +182,39 @@ cargo tauri signer generate -w ~/.tauri/transfer-genie-updater.key
 
 下面是推荐的最小手工发布流程。
 
-如果你准备直接用仓库里的 GitHub Actions 工作流发版，推荐的触发方式是：
+如果你准备直接用仓库里的 GitHub Actions 工作流发版，推荐优先使用发版脚本：
 
 ```bash
-git add .
-git commit -m "release: v0.1.1"
-git tag v0.1.1
-git push origin main
-git push origin v0.1.1
+scripts/release_github.sh 0.1.1 --push
 ```
 
+脚本默认会：
+
+- 更新 `Cargo.toml` 和 `tauri.conf.json` 里的版本号
+- 创建 `release: v0.1.1` 提交
+- 创建 `v0.1.1` tag
+- 推送当前分支和 tag 到 `github` 远端
+
+如果你不传版本号，脚本会读取当前 `Cargo.toml` 里的版本，并提示你选择版本类型：
+
+- `patch`：补丁版本加一
+- `minor`：次版本加一并重置补丁号
+- `major`：主版本加一并重置次版本和补丁号
+- `custom`：手动输入版本号
+
 这样会触发 `.github/workflows/release.yml`，由 GitHub 自动创建 Release 并上传资产。
+
+如果你只想先本地创建提交和 tag，不立刻推送，也可以：
+
+```bash
+scripts/release_github.sh 0.1.1
+```
+
+查看帮助：
+
+```bash
+scripts/release_github.sh --help
+```
 
 ### 4.1 更新应用版本号
 
