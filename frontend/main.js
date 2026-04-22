@@ -159,6 +159,14 @@ let autoUpdateCheckTimer = null;
 let updateInstallDialogController = null;
 
 const APP_UPDATE_EVENT = 'app-update-event';
+const TRAY_CHECK_UPDATE_EVENT = 'tray-check-update';
+
+function cancelPendingAutoUpdateCheck() {
+  if (autoUpdateCheckTimer) {
+    window.clearTimeout(autoUpdateCheckTimer);
+    autoUpdateCheckTimer = null;
+  }
+}
 
 function ensureInlineSelectionRows() {
   if (selectionBar && selectionCount && !selectionRow) {
@@ -6316,13 +6324,22 @@ async function checkForAppUpdate(options = {}) {
   }
 
   if (isAutoUpdateChecking) {
+    if (!silent) {
+      await showInfoDialog({
+        title: '检查更新',
+        message: '当前正在检查更新，请稍候再试。',
+      });
+      setErrorStatus('检查更新失败：当前正在检查更新，请稍候再试');
+    }
     return null;
   }
 
-  isAutoUpdateChecking = true;
-  if (source === 'auto') {
-    hasAutoUpdateCheckedThisSession = true;
+  if (source !== 'auto') {
+    cancelPendingAutoUpdateCheck();
   }
+
+  isAutoUpdateChecking = true;
+  hasAutoUpdateCheckedThisSession = true;
 
   if (checkUpdateButton && source === 'manual') {
     checkUpdateButton.disabled = true;
@@ -6386,9 +6403,7 @@ function scheduleAutoUpdateCheck() {
   if (hasAutoUpdateCheckedThisSession || isAutoUpdateChecking) {
     return;
   }
-  if (autoUpdateCheckTimer) {
-    window.clearTimeout(autoUpdateCheckTimer);
-  }
+  cancelPendingAutoUpdateCheck();
   autoUpdateCheckTimer = window.setTimeout(() => {
     autoUpdateCheckTimer = null;
     if (!autoUpdateEnabledInput || !autoUpdateEnabledInput.checked) {
@@ -8005,6 +8020,9 @@ if (listen) {
   listen('trigger-show', handleWindowFocus);
   listen(APP_UPDATE_EVENT, (event) => {
     updateInstallProgressMessage(event.payload || {});
+  });
+  listen(TRAY_CHECK_UPDATE_EVENT, () => {
+    checkForAppUpdate({ source: 'tray' });
   });
 
   // 用于非侵入性操作的通用焦点监听器

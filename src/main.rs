@@ -73,6 +73,7 @@ const EXPORT_VERSION: u8 = 1;
 const EXPORT_KDF_ITERATIONS: u32 = 100_000;
 const DEFAULT_GLOBAL_HOTKEY: &str = "alt+t";
 const HOTKEY_MENU_ID: &str = "toggle-hotkey";
+const CHECK_UPDATE_MENU_ID: &str = "check-update";
 const DEFAULT_SEND_HOTKEY: &str = "enter";
 const SEND_HOTKEY_CTRL_ENTER: &str = "ctrl_enter";
 const SYNC_TIMEOUT_SECS: u64 = 45;
@@ -83,6 +84,7 @@ const DEFAULT_TELEGRAM_POLL_INTERVAL_SECS: u64 = 5;
 const LOCAL_HTTP_API_ROUTE: &str = "/api/send-file";
 const LOCAL_HTTP_TEXT_API_ROUTE: &str = "/api/send-text";
 const APP_UPDATE_EVENT: &str = "app-update-event";
+const TRAY_CHECK_UPDATE_EVENT: &str = "tray-check-update";
 const DEFAULT_UPDATER_ENDPOINT: &str =
     "https://github.com/OWNER/REPO/releases/latest/download/latest.json";
 const DEFAULT_UPDATER_PUBKEY: &str = "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY";
@@ -5633,11 +5635,18 @@ async fn remove_history_entries(
     save_history(state, endpoint, &history).await
 }
 fn show_main_window(app: &AppHandle) {
+    show_main_window_with_event(app, None);
+}
+
+fn show_main_window_with_event(app: &AppHandle, event_name: Option<&str>) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
         let _ = window.emit("trigger-show", ());
+        if let Some(event_name) = event_name {
+            let _ = window.emit(event_name, ());
+        }
         #[cfg(target_os = "macos")]
         sync_dock_visibility_webview(app, &window);
     }
@@ -5926,6 +5935,8 @@ fn main() {
                 use tauri_plugin_global_shortcut::ShortcutState;
 
                 let show_item = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
+                let check_update_item =
+                    MenuItem::with_id(app, CHECK_UPDATE_MENU_ID, "检查更新", true, None::<&str>)?;
                 let initial_hotkey_label = {
                     let state = app.state::<AppState>();
                     state
@@ -5948,7 +5959,10 @@ fn main() {
                     None::<&str>,
                 )?;
                 let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-                let tray_menu = Menu::with_items(app, &[&show_item, &hotkey_item, &quit_item])?;
+                let tray_menu = Menu::with_items(
+                    app,
+                    &[&show_item, &check_update_item, &hotkey_item, &quit_item],
+                )?;
                 let app_icon = load_app_icon().ok();
 
                 let mut tray_builder = TrayIconBuilder::new().menu(&tray_menu);
@@ -5963,6 +5977,9 @@ fn main() {
                     .on_menu_event(move |app, event: tauri::menu::MenuEvent| {
                         match event.id().as_ref() {
                             "show" => show_main_window(app),
+                            CHECK_UPDATE_MENU_ID => {
+                                show_main_window_with_event(app, Some(TRAY_CHECK_UPDATE_EVENT))
+                            }
                             "quit" => app.exit(0),
                             HOTKEY_MENU_ID => {
                                 let state = app.state::<AppState>();
