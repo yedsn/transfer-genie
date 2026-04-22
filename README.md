@@ -1,138 +1,30 @@
-﻿# Transfer Genie
 
-基于 WebDAV 的跨平台文件与文本传输助手（Tauri + Rust）。
 
-## 功能
-- WebDAV 目录作为共享消息存储
-- 聊天式消息列表（显示发送者、时间、大小）
-- 发送文本与文件（支持拖拽、粘贴上传）
-- 自动同步与刷新
-- 本地 SQLite 索引
-- 多 WebDAV 端点管理
-- 配置导入/导出
-- 可选的 Telegram 双向桥接服务
+# Transfer Genie
 
-## 开发环境
-请参考：`docs/setup.md`
+基于 WebDAV 的跨平台文件与文本传输助手。
 
-## 启动开发
+## 简介
 
-安装 Tauri CLI：
+Transfer Genie（传输小精灵）是一款使用 Tauri + Rust 技术构建的桌面应用程序，通过 WebDAV 协议实现跨平台的文件与文本传输。它提供聊天式消息界面，支持文本和文件发送、自动同步、本地索引管理等功能。
 
-```
-cargo install tauri-cli --locked
-```
+## 功能特性
 
-启动开发（在项目根目录）：
+- **WebDAV 存储**：以 WebDAV 目录作为共享消息存储中心
+- **消息列表**：聊天式消息列表，显示发送者、时间、文件大小等信息
+- **发送支持**：支持发送文本与文件，兼容拖拽上传和粘贴上传
+- **自动同步**：自动同步与刷新，保持数据最新
+- **本地索引**：本地 SQLite 数据库索引，加速消息检索
+- **多端点管理**：支持多个 WebDAV 端点配置与切换
+- **配置迁移**：配置导入/导出功能，方便备份与迁移
+- **Telegram 桥接**：可选的 Telegram 双向桥接服务，支持从 Telegram 收发消息
 
-```
-cargo tauri dev
-```
+## 技术栈
 
-如果出现 `no such command: tauri`：
-- 确认已安装 Tauri CLI：`cargo --list | rg tauri`
-- 重开终端后再运行命令
-
-## Telegram Bridge
-
-Telegram bridge 现在可以直接由主程序托管：
-
-- 在“设置 -> Telegram Bridge”中填写 `Bot Token`、`Chat ID` 和轮询间隔
-- 如 Telegram 访问需要代理，可勾选“启用 Telegram 代理”，默认地址预填 `http://127.0.0.1:7890`，也支持改成 `socks5://127.0.0.1:1080`
-- 可在“启动服务”旁勾选“自启动服务”
-- bridge 会始终跟随当前活动的 WebDAV 端点；切换活动端点时，运行中的 bridge 会自动重启
-- 可在设置页直接自动获取 `Chat ID`、启动/停止 bridge，并查看 bridge 运行状态和最近错误
-
-仍然保留独立运行方式，便于单独调试：
-
-- 启动：`cargo run --bin telegram_bridge -- .\telegram-bridge.json`
-- 配置示例：`examples/telegram-bridge.json`
-- 详细说明：`docs/telegram-bridge.md`
-
-## 打包发布
-
-### 方法一：使用打包脚本（推荐）
-
-Windows 用户可以直接运行打包脚本：
-
-```batch
-scripts\update_local_exe.bat
-```
-
-脚本功能：
-- 可选择是否重新编译
-- 自动查找生成的 exe 文件
-- 复制到指定目录（默认：`D:\Program Files\TransferGenie文件传输助手`）
-- 自动打开安装目录
-
-自定义安装目录：
-
-```batch
-scripts\update_local_exe.bat "C:\你的自定义路径"
-```
-
-### 方法二：手动打包
-
-打包前准备：
-- 已安装 Rust/Cargo
-- 已安装 Tauri CLI：`cargo install tauri-cli --locked`
-
-在项目根目录运行：
-
-```
-cargo tauri build
-```
-
-说明：
-- 需要在对应平台打包（Windows 产出 .exe，macOS 产出 .dmg）
-- Windows 编译后的文件位于 `target\release\` 目录
-
-### 方法三：GitHub Release 发版脚本
-
-如果你已经接好了 GitHub Actions 自动发布工作流，推荐直接使用：
-
-```bash
-scripts/release/release_github.sh 0.1.2 --push
-```
-
-如果不传版本号，脚本会先读取当前版本，再提示你选择版本类型：
-
-- `patch`：例如 `0.1.1 -> 0.1.2`
-- `minor`：例如 `0.1.1 -> 0.2.0`
-- `major`：例如 `0.1.1 -> 1.0.0`
-- `custom`：手动输入版本号
-
-脚本会自动：
-
-- 更新 `Cargo.toml` 和 `tauri.conf.json` 版本号
-- 创建 `release: v0.1.2` 提交
-- 创建 `v0.1.2` tag
-- 推送当前分支和 tag 到 `github` 远端
-
-更多参数见：
-
-```bash
-scripts/release/release_github.sh --help
-```
-
-如果 GitHub Release 已经发好，还想同步一份到 Gitee Release，可执行：
-
-```bash
-export GITEE_ACCESS_TOKEN="你的 Gitee Access Token"
-python3 scripts/release/release_sync_gitee.py --tag v0.1.2
-```
-
-如果你在 GitHub 仓库 Secrets 中配置了 `GITEE_ACCESS_TOKEN`，`.github/workflows/release.yml` 也会在 GitHub Release 发布成功后自动执行一次 Gitee 同步。
-
-Gitee 同步脚本只维护一套固定的 `latest` Release，供程序稳定访问：
-
-- `https://gitee.com/hongxiaojian/transfer-genie/releases/download/latest/latest.json`
-
-如果你只想把当前 GitHub 最新 Release 手动同步到 Gitee，不做打包，可以直接在 GitHub Actions 里运行：
-
-- `.github/workflows/sync-gitee-release.yml`
-
-这个 workflow 默认同步 GitHub 最新 Release，也支持在手动触发时额外填写一个指定 tag。
+- **后端**：Rust + Tauri
+- **前端**：HTML + JavaScript + CSS
+- **数据库**：SQLite
+- **协议**：WebDAV、HTTP
 
 ## 目录结构
 
@@ -143,8 +35,10 @@ transfer-genie/
 │   ├── db.rs            # SQLite 数据库操作
 │   ├── types.rs         # 数据类型定义
 │   ├── webdav.rs        # WebDAV 客户端
-│   └── filenames.rs     # 文件名解析
-├── frontend/            # 前端页面
+│   ├── filenames.rs     # 文件名解析
+│   ├── history.rs       # 历史记录管理
+│   └── telegram_bridge.rs # Telegram 桥接
+├── frontend/            # 前端页面资源
 │   ├── index.html
 │   ├── main.js
 │   └── styles.css
@@ -154,14 +48,111 @@ transfer-genie/
 ├── openspec/            # 规格与变更提案
 ├── Cargo.toml           # Rust 依赖配置
 ├── tauri.conf.json      # Tauri 配置
-└── build.rs             # 构建脚本
+└── build.rs            # 构建脚本
 ```
 
+## 开发环境配置
 
+请参考 `docs/setup.md` 中的详细说明。
 
-## 常见代码位置
-### 关闭窗口重置
-- frontend\main.js - prepareWindowForHide
+### 安装 Rust
+
+**Windows（推荐使用 winget）**：
+```powershell
+winget install Rustlang.Rust.MSVC
+```
+
+**macOS**：
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+### 安装 Tauri CLI
+
+```bash
+cargo install tauri-cli --locked
+```
+
+### 启动开发
+
+在项目根目录运行：
+
+```bash
+cargo tauri dev
+```
+
+如果出现 `no such command: tauri` 错误，请重开终端后再运行命令。
+
+## 功能使用
+
+### 主界面
+
+主界面包含以下标签页：
+- **首页**：消息列表，显示所有消息，支持发送文本和文件
+- **标记**：已标记消息的管理与筛选
+- **传输**：上传和下载任务的列表与状态
+- **设置**：应用配置，包括 WebDAV 端点、Telegram 桥接等
+
+### 发送消息
+
+1. 在首页的文本输入框中输入文字
+2. 支持纯文本和 Markdown 格式（点击格式切换按钮）
+3. 点击发送按钮或使用快捷键发送
+4. 支持拖拽或粘贴文件到输入区域进行文件传输
+
+### WebDAV 端点管理
+
+在设置页面可以：
+- 添加多个 WebDAV 端点
+- 切换当前活动的端点
+- 编辑端点名称和地址
+- 测试连接速度
+
+### Telegram 桥接
+
+在设置页面的"Telegram Bridge"区域：
+1. 填写 `Bot Token` 和 `Chat ID`
+2. 设置轮询间隔
+3. 如需要代理，勾选"启用 Telegram 代理"
+4. 可勾选"自启动服务"实现开机自启
+
+## 打包发布
+
+### Windows 打包脚本（推荐）
+
+运行 `scripts\update_local_exe.bat`：
+- 可选择是否重新编译
+- 自动复制到指定目录
+- 自动打开安装目录
+
+自定义安装目录：
+```batch
+scripts\update_local_exe.bat "C:\你的自定义路径"
+```
+
+### 手动打包
+
+1. 确保已安装 Rust 和 Tauri CLI
+2. 在项目根目录运行：
+```bash
+cargo tauri build
+```
+
+Windows 编译后的文件位于 `target\release\` 目录。
+
+### GitHub Release 发版
+
+使用发版脚本：
+```bash
+scripts/release/release_github.sh 0.1.2 --push
+```
+
+支持版本类型：patch、minor、major、custom。
+
+## 常见问题
+
+### 关闭窗口后重置
+- 相关代码：`frontend/main.js` 中的 `prepareWindowForHide` 函数
 
 ## 许可证
 
@@ -173,3 +164,8 @@ transfer-genie/
 - ❌ 禁止闭源商用
 
 商业授权请联系作者。
+
+## 相关链接
+
+- 项目地址：https://gitee.com/hongxiaojian/transfer-genie
+- 更新检查：https://gitee.com/hongxiaojian/transfer-genie/releases/download/latest/latest.json
