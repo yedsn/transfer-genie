@@ -136,6 +136,9 @@ jobs:
     env:
       PYTHONUNBUFFERED: "1"
       GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
+      https_proxy: http://192.168.3.36:7890
+      http_proxy: http://192.168.3.36:7890
+      no_proxy: gitee.com,localhost,127.0.0.1
 
     steps:
       - name: Checkout repository
