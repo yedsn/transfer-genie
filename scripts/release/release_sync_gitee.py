@@ -10,12 +10,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from shutil import copyfile
 
 
 DEFAULT_GITHUB_OWNER = "yedsn"
 DEFAULT_GITHUB_REPO = "transfer-genie"
 DEFAULT_GITEE_OWNER = "hongxiaojian"
 DEFAULT_GITEE_REPO = "transfer-genie"
+LATEST_RELEASE_TAG = "latest"
 
 
 def fail(message: str) -> None:
@@ -43,6 +45,26 @@ def request_json(method: str, url: str, *, data=None, headers=None):
         fail(f"{method} {url} failed with HTTP {exc.code}: {body}")
     except urllib.error.URLError as exc:
         fail(f"{method} {url} failed: {exc}")
+
+
+def try_request_json(method: str, url: str, *, data=None, headers=None):
+    headers = headers or {}
+    request_data = None
+    if data is not None:
+        encoded = urllib.parse.urlencode(data).encode("utf-8")
+        request_data = encoded
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            **headers,
+        }
+
+    req = urllib.request.Request(url, data=request_data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req) as response:
+            return json.load(response)
+    except Exception as exc:
+        print(f"[sync-gitee] Warning: {method} {url} failed, continuing: {exc}", file=sys.stderr)
+        return None
 
 
 def request_no_content(method: str, url: str) -> None:
@@ -89,6 +111,119 @@ def upload_attachment(file_path: Path, upload_url: str) -> None:
         ],
         check=True,
     )
+
+
+def rewrite_latest_json_urls(
+    source_path: Path,
+    target_path: Path,
+    *,
+    gitee_owner: str,
+    gitee_repo: str,
+    download_tag: str,
+) -> None:
+    payload = json.loads(source_path.read_text(encoding="utf-8"))
+    platforms = payload.get("platforms", {})
+    for item in platforms.values():
+        url = item.get("url")
+        if not url:
+            continue
+        filename = Path(urllib.parse.urlparse(url).path).name
+        item["url"] = (
+            f"https://gitee.com/{gitee_owner}/{gitee_repo}/releases/download/{download_tag}/{filename}"
+        )
+    target_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=None, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+
+def ensure_release(
+    *,
+    token: str,
+    gitee_owner: str,
+    gitee_repo: str,
+    releases: list,
+    tag_name: str,
+    release_name: str,
+    release_body: str,
+    target_commitish: str,
+):
+    existing_release = next(
+        (item for item in releases if item.get("tag_name") == tag_name),
+        None,
+    )
+    release_url = f"https://gitee.com/api/v5/repos/{gitee_owner}/{gitee_repo}/releases"
+
+    if existing_release:
+        release_id = existing_release.get("id")
+        if not release_id:
+            fail(f"Gitee release {tag_name} exists but does not include id")
+        print(f"[sync-gitee] Updating existing Gitee release #{release_id} ({tag_name})")
+        updated_release = try_request_json(
+            "PATCH",
+            f"{release_url}/{release_id}",
+            data={
+                "access_token": token,
+                "tag_name": tag_name,
+                "name": release_name,
+                "body": release_body,
+                "target_commitish": target_commitish,
+                "prerelease": "false",
+            },
+        )
+        return updated_release or existing_release
+
+    print(f"[sync-gitee] Creating Gitee release for tag {tag_name}")
+    return request_json(
+        "POST",
+        release_url,
+        data={
+            "access_token": token,
+            "tag_name": tag_name,
+            "name": release_name,
+            "body": release_body,
+            "target_commitish": target_commitish,
+            "prerelease": "false",
+        },
+    )
+
+
+def sync_release_assets(
+    *,
+    token: str,
+    gitee_owner: str,
+    gitee_repo: str,
+    release_id: int,
+    files: list,
+    keep_existing_assets: bool,
+) -> None:
+    attachments_url = (
+        f"https://gitee.com/api/v5/repos/{gitee_owner}/{gitee_repo}/releases/{release_id}/attach_files"
+        f"?access_token={urllib.parse.quote(token)}&per_page=100"
+    )
+    existing_attachments = request_json("GET", attachments_url)
+    attachments_by_name = {
+        item.get("name"): item for item in existing_attachments if item.get("name")
+    }
+
+    for file_path in files:
+        existing = attachments_by_name.get(file_path.name)
+        if existing and not keep_existing_assets:
+            attachment_id = existing.get("id")
+            if attachment_id:
+                delete_url = (
+                    f"https://gitee.com/api/v5/repos/{gitee_owner}/{gitee_repo}/releases/"
+                    f"{release_id}/attach_files/{attachment_id}?access_token={urllib.parse.quote(token)}"
+                )
+                print(f"[sync-gitee] Deleting existing asset {file_path.name}")
+                request_no_content("DELETE", delete_url)
+
+        upload_url = (
+            f"https://gitee.com/api/v5/repos/{gitee_owner}/{gitee_repo}/releases/"
+            f"{release_id}/attach_files?access_token={urllib.parse.quote(token)}"
+        )
+        print(f"[sync-gitee] Uploading {file_path.name}")
+        upload_attachment(file_path, upload_url)
 
 
 def get_current_branch() -> str:
@@ -169,45 +304,11 @@ def main() -> None:
         f"?access_token={urllib.parse.quote(token)}&per_page=100"
     )
     gitee_releases = request_json("GET", releases_url)
-    existing_release = next(
-        (item for item in gitee_releases if item.get("tag_name") == tag_name),
-        None,
-    )
-
-    if existing_release:
-        gitee_release = existing_release
-        print(f"[sync-gitee] Found existing Gitee release #{gitee_release.get('id')}")
-    else:
-        create_url = f"https://gitee.com/api/v5/repos/{args.gitee_owner}/{args.gitee_repo}/releases"
-        gitee_release = request_json(
-            "POST",
-            create_url,
-            data={
-                "access_token": token,
-                "tag_name": tag_name,
-                "name": release_name,
-                "body": release_body,
-                "target_commitish": args.target_commitish,
-                "prerelease": "false",
-            },
-        )
-        print(f"[sync-gitee] Created Gitee release #{gitee_release.get('id')}")
-
-    release_id = gitee_release.get("id")
-    if not release_id:
-        fail("Gitee release response does not include id")
-
-    attachments_url = (
-        f"https://gitee.com/api/v5/repos/{args.gitee_owner}/{args.gitee_repo}/releases/{release_id}/attach_files"
-        f"?access_token={urllib.parse.quote(token)}&per_page=100"
-    )
-    existing_attachments = request_json("GET", attachments_url)
-    attachments_by_name = {
-        item.get("name"): item for item in existing_attachments if item.get("name")
-    }
 
     with tempfile.TemporaryDirectory(prefix="transfer-genie-gitee-sync-") as tmp_dir:
         tmp_root = Path(tmp_dir)
+        versioned_files = []
+        latest_files = []
         for asset in assets:
             name = asset.get("name")
             download_url = asset.get("browser_download_url")
@@ -217,29 +318,77 @@ def main() -> None:
             target_path = tmp_root / name
             print(f"[sync-gitee] Downloading {name}")
             download_file(download_url, target_path)
+            versioned_target = tmp_root / f"versioned-{name}"
+            latest_target = tmp_root / f"latest-{name}"
+            if name == "latest.json":
+                rewrite_latest_json_urls(
+                    target_path,
+                    versioned_target,
+                    gitee_owner=args.gitee_owner,
+                    gitee_repo=args.gitee_repo,
+                    download_tag=tag_name,
+                )
+                rewrite_latest_json_urls(
+                    target_path,
+                    latest_target,
+                    gitee_owner=args.gitee_owner,
+                    gitee_repo=args.gitee_repo,
+                    download_tag=LATEST_RELEASE_TAG,
+                )
+            else:
+                copyfile(target_path, versioned_target)
+                copyfile(target_path, latest_target)
+            versioned_files.append(versioned_target)
+            latest_files.append(latest_target)
 
-            existing = attachments_by_name.get(name)
-            if existing and not args.keep_existing_assets:
-                attachment_id = existing.get("id")
-                if attachment_id:
-                    delete_url = (
-                        f"https://gitee.com/api/v5/repos/{args.gitee_owner}/{args.gitee_repo}/releases/"
-                        f"{release_id}/attach_files/{attachment_id}?access_token={urllib.parse.quote(token)}"
-                    )
-                    print(f"[sync-gitee] Deleting existing asset {name}")
-                    request_no_content("DELETE", delete_url)
+        versioned_release = ensure_release(
+            token=token,
+            gitee_owner=args.gitee_owner,
+            gitee_repo=args.gitee_repo,
+            releases=gitee_releases,
+            tag_name=tag_name,
+            release_name=release_name,
+            release_body=release_body,
+            target_commitish=args.target_commitish,
+        )
+        versioned_release_id = versioned_release.get("id")
+        if not versioned_release_id:
+            fail(f"Gitee release {tag_name} response does not include id")
+        sync_release_assets(
+            token=token,
+            gitee_owner=args.gitee_owner,
+            gitee_repo=args.gitee_repo,
+            release_id=versioned_release_id,
+            files=versioned_files,
+            keep_existing_assets=args.keep_existing_assets,
+        )
 
-            upload_url = (
-                f"https://gitee.com/api/v5/repos/{args.gitee_owner}/{args.gitee_repo}/releases/"
-                f"{release_id}/attach_files?access_token={urllib.parse.quote(token)}"
-            )
-            print(f"[sync-gitee] Uploading {name}")
-            upload_attachment(target_path, upload_url)
+        latest_release = ensure_release(
+            token=token,
+            gitee_owner=args.gitee_owner,
+            gitee_repo=args.gitee_repo,
+            releases=gitee_releases,
+            tag_name=LATEST_RELEASE_TAG,
+            release_name=f"Transfer Genie Latest ({tag_name})",
+            release_body=f"Auto-maintained latest release for {tag_name}.\n\n{release_body}",
+            target_commitish=args.target_commitish,
+        )
+        latest_release_id = latest_release.get("id")
+        if not latest_release_id:
+            fail(f"Gitee release {LATEST_RELEASE_TAG} response does not include id")
+        sync_release_assets(
+            token=token,
+            gitee_owner=args.gitee_owner,
+            gitee_repo=args.gitee_repo,
+            release_id=latest_release_id,
+            files=latest_files,
+            keep_existing_assets=args.keep_existing_assets,
+        )
 
     print("[sync-gitee] Done")
     print(
-        f"[sync-gitee] Verify latest.json: "
-        f"https://gitee.com/{args.gitee_owner}/{args.gitee_repo}/releases/latest/download/latest.json"
+        f"[sync-gitee] Verify fixed latest.json: "
+        f"https://gitee.com/{args.gitee_owner}/{args.gitee_repo}/releases/download/latest/latest.json"
     )
 
 

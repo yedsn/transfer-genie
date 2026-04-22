@@ -45,7 +45,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVFOTM2NEFBQjlBNkU4MzAKUldRdzZLYTVxbVNUWG1uOEhxanJXZTI3QXVsQkJ5Ukh0TGdFY3B2UWdpOW1oMEVFU0poMFNKUnMK",
       "endpoints": [
-        "https://gitee.com/hongxiaojian/transfer-genie/releases/latest/download/latest.json",
+        "https://gitee.com/hongxiaojian/transfer-genie/releases/download/latest/latest.json",
         "https://github.com/yedsn/transfer-genie/releases/latest/download/latest.json"
       ],
       "windows": {

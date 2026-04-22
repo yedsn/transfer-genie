@@ -31,7 +31,7 @@
     "updater": {
       "pubkey": "当前项目的 minisign updater 公钥",
       "endpoints": [
-        "https://gitee.com/hongxiaojian/transfer-genie/releases/latest/download/latest.json",
+        "https://gitee.com/hongxiaojian/transfer-genie/releases/download/latest/latest.json",
         "https://github.com/yedsn/transfer-genie/releases/latest/download/latest.json"
       ],
       "windows": {
@@ -53,9 +53,9 @@
 说明：
 
 - 当前配置把 Gitee 放在第一个 endpoint，GitHub 放在第二个 endpoint
+- Gitee 这里使用的是固定 `latest` Release 的下载地址，而不是页面型的 `/releases/latest`
 - Tauri Updater 只有在前一个 endpoint 返回非 `2xx` 时才会尝试下一个
-- 所以只有当 Gitee 上的 `latest.json` 不存在、返回 `404` 或服务异常时，才会回退到 GitHub
-- 如果 Gitee 仓库尚未创建或未发布对应资产，客户端会自动继续尝试 GitHub
+- 所以只有当 Gitee 上固定 `latest` Release 的 `latest.json` 不存在、返回 `404` 或服务异常时，才会回退到 GitHub
 
 ## 3. 一次性准备
 
@@ -70,7 +70,7 @@
 - 最新版本元数据地址：
 
 ```text
-https://gitee.com/hongxiaojian/transfer-genie/releases/latest/download/latest.json
+https://gitee.com/hongxiaojian/transfer-genie/releases/download/latest/latest.json
 https://github.com/yedsn/transfer-genie/releases/latest/download/latest.json
 ```
 
@@ -79,6 +79,7 @@ https://github.com/yedsn/transfer-genie/releases/latest/download/latest.json
 - 国内优先访问 Gitee
 - GitHub 作为备用源
 - 两边的 `latest.json`、安装包和 `.sig` 必须来自同一批构建产物
+- Gitee 侧建议固定维护一个 tag / Release 名为 `latest`，程序始终访问这一份元数据
 
 注意：
 
@@ -130,7 +131,7 @@ cargo tauri signer generate -w ~/.tauri/transfer-genie-updater.key
     "updater": {
       "pubkey": "-----BEGIN PUBLIC KEY-----...-----END PUBLIC KEY-----",
       "endpoints": [
-        "https://gitee.com/hongxiaojian/transfer-genie/releases/latest/download/latest.json",
+        "https://gitee.com/hongxiaojian/transfer-genie/releases/download/latest/latest.json",
         "https://github.com/yedsn/transfer-genie/releases/latest/download/latest.json"
       ]
     }
@@ -259,9 +260,10 @@ python3 scripts/release/release_sync_gitee.py --tag v0.1.1
 这个脚本会：
 
 - 从 GitHub Release 拉取指定 tag 的元数据和附件
-- 在 Gitee 仓库里查找同 tag 的 Release，没有则自动创建
+- 在 Gitee 仓库里维护两套 Release：真实版本号和固定 `latest`
 - 删除 Gitee 上同名旧附件后重新上传
 - 把 `latest.json`、安装包和 `.sig` 一并同步过去
+- 自动把 Gitee 版本的 `latest.json` 中下载地址改写成 Gitee 自己的 Release 下载地址
 
 查看帮助：
 
