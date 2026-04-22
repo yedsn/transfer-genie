@@ -114,6 +114,14 @@ jobs:
 
             - Includes platform bundles and updater artifacts.
             - `latest.json` is uploaded for the desktop auto-update flow.
+
+            ### macOS 用户注意事项
+
+            如果在 macOS 上打开应用时提示异常，请尝试在终端执行以下命令：
+
+            ```bash
+            xattr -cr /Applications/Transfer\ Genie.app
+            ```
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
