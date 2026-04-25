@@ -24,7 +24,7 @@ This change introduces a new external dependency on Tauri's updater plugin and a
 ### 1. Use `tauri-plugin-updater` with GitHub Releases static JSON
 
 - Decision: Configure Tauri updater with a GitHub Releases `latest.json` endpoint and signed updater artifacts.
-- Rationale: This is the lowest-friction hosted solution for the project and aligns with the intended release model already documented in `docs/自动更新方案.md`.
+- Rationale: This is the lowest-friction hosted solution for the project and aligns with the intended release model already documented in `docs/Tauri自动更新实现流程.md`.
 - Alternatives considered:
   - Dynamic update API: more flexible later, but unnecessary complexity for the first version.
   - Manual in-app download links only: does not provide signed install flow or automatic version detection.

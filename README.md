@@ -26,8 +26,6 @@
   <a href="docs/HTTP API 说明.md">HTTP API</a>
   ·
   <a href="docs/Telegram Bridge 说明.md">Telegram Bridge</a>
-  ·
-  <a href="docs/GitHub Releases 自动更新发布指南.md">发布说明</a>
 </p>
 
 <p align="center">
@@ -59,11 +57,6 @@ Transfer Genie（传输小精灵）使用 **Tauri + Rust + WebDAV** 构建，目
 
 那么 Transfer Genie 就是为这个场景设计的。
 
-> 如果你是第一次了解这个项目，建议先从这 3 个入口开始：
->
-> - 想跑起来：[`docs/setup.md`](docs/setup.md)
-> - 想接脚本：[`docs/HTTP API 说明.md`](docs/HTTP API 说明.md)
-> - 想接 Telegram：[`docs/Telegram Bridge 说明.md`](docs/Telegram Bridge 说明.md)
 
 ## 为什么值得用
 
@@ -108,7 +101,6 @@ Transfer Genie（传输小精灵）使用 **Tauri + Rust + WebDAV** 构建，目
 
 - 基于 Tauri 构建，适合做轻量桌面应用分发
 - 支持配置导入/导出，便于迁移
-- 支持 GitHub Releases 自动更新方案
 - 项目结构清晰，适合二次开发与自定义部署
 
 ## 适合哪些场景
@@ -128,6 +120,44 @@ Transfer Genie（传输小精灵）使用 **Tauri + Rust + WebDAV** 构建，目
 ### 把 Telegram 接进工作流
 
 如果你希望在 Telegram 和本地传输体系之间做消息同步，Telegram Bridge 可以作为一个轻量桥接层。
+
+## 界面预览
+
+> 当前仓库还没有整理好的正式产品截图，这一节先作为 README 的截图占位区。后续可以直接把下列卡片替换成真实界面图。
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <strong>消息流首页</strong><br>
+      聊天式查看文本、文件、发送者与时间线<br><br>
+      <code>截图待补</code>
+    </td>
+    <td align="center" width="50%">
+      <strong>传输任务面板</strong><br>
+      统一查看上传、下载、断点续传与进度状态<br><br>
+      <code>截图待补</code>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <strong>标记与筛选</strong><br>
+      适合展示标签、已标记消息和批量处理流程<br><br>
+      <code>截图待补</code>
+    </td>
+    <td align="center" width="50%">
+      <strong>设置中心</strong><br>
+      适合展示 WebDAV、HTTP API、Telegram Bridge 等配置入口<br><br>
+      <code>截图待补</code>
+    </td>
+  </tr>
+</table>
+
+建议后续优先补这 4 类截图：
+
+- 首页消息流：体现“像聊天一样传文件/传文本”
+- 设置页：体现 WebDAV 端点、发送者名称和刷新周期
+- API/Bridge 配置：体现自动化和桥接能力
+- 传输管理或标记视图：体现工程化和日常使用细节
 
 ## 核心工作流
 
@@ -161,7 +191,7 @@ Transfer Genie（传输小精灵）使用 **Tauri + Rust + WebDAV** 构建，目
 ### 推荐阅读顺序
 
 - 只想先跑起来：看 `1` 和 `2`
-- 想打包发布：继续看 `3` 和“发布与版本管理”
+- 想自己构建程序：继续看 `3` 和 `4`
 - 想做自动化：跳到“HTTP API 速览”
 - 想做 Bot / IM 桥接：跳到“Telegram Bridge 速览”
 
@@ -203,30 +233,6 @@ cargo tauri build
 - Windows：`target/release/bundle/`
 - macOS：`target/release/bundle/`
 
-### 4. Windows 本地复制可执行文件
-
-如果你更习惯使用脚本复制构建产物，可以运行：
-
-```bat
-scripts\update_local_exe.bat
-```
-
-支持传入自定义安装目录，例如：
-
-```bat
-scripts\update_local_exe.bat "D:\Program Files\TransferGenie文件传输助手"
-```
-
-## 文档导航
-
-| 文档 | 说明 |
-|------|------|
-| [`docs/setup.md`](docs/setup.md) | 本地开发环境安装与构建说明 |
-| [`docs/HTTP API 说明.md`](docs/HTTP API 说明.md) | 本机 HTTP API 用法、请求格式、返回结构与示例 |
-| [`docs/Telegram Bridge 说明.md`](docs/Telegram Bridge 说明.md) | Telegram 与 WebDAV 双向桥接说明 |
-| [`docs/GitHub Releases 自动更新发布指南.md`](docs/GitHub Releases 自动更新发布指南.md) | 自动更新相关发布流程 |
-| [`docs/自动更新方案.md`](docs/自动更新方案.md) | 自动更新设计与思路说明 |
-| [`docs/Self-hosted Runner 配置指南.md`](docs/Self-hosted Runner 配置指南.md) | 自托管 Runner 配置参考 |
 
 ## HTTP API 速览
 
@@ -286,36 +292,6 @@ transfer-genie/
 └── tauri.conf.json      # Tauri 应用配置
 ```
 
-## 发布与版本管理
-
-### 发版脚本
-
-项目提供发版脚本：
-
-```bash
-scripts/release/release.sh 0.2.2 --push
-```
-
-该脚本会：
-
-- 更新 `Cargo.toml` 与 `tauri.conf.json` 中的版本号
-- 创建 `release: v<version>` 提交
-- 创建 `v<version>` 标签
-- 可选推送到所有已配置的 git remote
-
-### 自动更新相关
-
-如果你要配合 GitHub Releases 做桌面自动更新，请阅读：
-
-- [`docs/GitHub Releases 自动更新发布指南.md`](docs/GitHub Releases 自动更新发布指南.md)
-- [`docs/自动更新方案.md`](docs/自动更新方案.md)
-
-## 当前仓库状态
-
-- README 已进入升级阶段，目标是让仓库首页更像一个完整的产品入口
-- 单页官网首页正在规划中，后续会以独立静态站点目录接入
-- 当前最适合继续深入阅读的内容是开发环境、HTTP API 和 Telegram Bridge 文档
-
 ## License
 
 本项目采用 **GNU Affero General Public License v3.0** (`AGPL-3.0-or-later`) 许可证。
@@ -329,4 +305,3 @@ scripts/release/release.sh 0.2.2 --push
 
 - Gitee：<https://gitee.com/hongxiaojian/transfer-genie>
 - GitHub：<https://github.com/yedsn/transfer-genie>
-- 自动更新 `latest.json`：<https://gitee.com/hongxiaojian/transfer-genie/releases/download/latest/latest.json>
