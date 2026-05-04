@@ -67,61 +67,34 @@ Transfer Genie（传输小精灵）使用 **Tauri + Rust + WebDAV** 构建，目
 | 可自动化扩展 | 本机 HTTP API + Telegram Bridge，适合接脚本和机器人 |
 | 工程化友好 | Tauri + Rust + SQLite，便于继续开发、构建和发布 |
 
-## 适合哪些场景
-
-### 自己的多设备之间传文件
-
-例如：办公室电脑、家里电脑、笔记本之间共享资料、截图、文本片段、临时文件。
-
-### 用自己的存储做“消息总线”
-
-如果你已经有 WebDAV 服务，可以直接把它作为 Transfer Genie 的底层存储，而不必再接入额外的中心服务。
-
-### 给脚本和自动化工具一个发送入口
-
-通过本机 HTTP API，你可以把其他自动化脚本、剪贴板工具、下载器、AI 工作流接入到 Transfer Genie。
-
-### 把 Telegram 接进工作流
-
-如果你希望在 Telegram 和本地传输体系之间做消息同步，Telegram Bridge 可以作为一个轻量桥接层。
-
 ## 界面预览
-
-> 当前仓库还没有整理好的正式产品截图，这一节先作为 README 的截图占位区。后续可以直接把下列卡片替换成真实界面图。
 
 <table>
   <tr>
     <td align="center" width="50%">
       <strong>消息流首页</strong><br>
       聊天式查看文本、文件、发送者与时间线<br><br>
-      <code>截图待补</code>
+      <img src="https://picbed.hxj.life/images/2026/05/04/PixPin_2026-05-04_13-25-44.png"/>
     </td>
     <td align="center" width="50%">
       <strong>传输任务面板</strong><br>
       统一查看上传、下载、断点续传与进度状态<br><br>
-      <code>截图待补</code>
+      <img src="https://picbed.hxj.life/images/2026/05/04/PixPin_2026-05-04_13-33-21.png" />
     </td>
   </tr>
   <tr>
     <td align="center" width="50%">
       <strong>标记与筛选</strong><br>
       适合展示标签、已标记消息和批量处理流程<br><br>
-      <code>截图待补</code>
+      <img src="https://picbed.hxj.life/images/2026/05/04/PixPin_2026-05-04_13-33-04.png"/>
     </td>
     <td align="center" width="50%">
       <strong>设置中心</strong><br>
       适合展示 WebDAV、HTTP API、Telegram Bridge 等配置入口<br><br>
-      <code>截图待补</code>
+      <img src="https://picbed.hxj.life/images/2026/05/04/PixPin_2026-05-04_13-33-56.png" />
     </td>
   </tr>
 </table>
-
-建议后续优先补这 4 类截图：
-
-- 首页消息流：体现“像聊天一样传文件/传文本”
-- 设置页：体现 WebDAV 端点、发送者名称和刷新周期
-- API/Bridge 配置：体现自动化和桥接能力
-- 传输管理或标记视图：体现工程化和日常使用细节
 
 ## 核心工作流
 
