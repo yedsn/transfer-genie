@@ -40,25 +40,6 @@ features:
 
 <div class="tg-home-section">
 
-## 快速下载与安装
-
-<div class="tg-home-grid">
-  <div class="tg-home-card">
-    <h3>下载最新版本</h3>
-    <p>直接前往 GitHub Releases 获取最新的 macOS 与 Windows 安装包。</p>
-    <p><a href="https://github.com/yedsn/transfer-genie/releases/latest"><strong>打开下载页</strong></a></p>
-  </div>
-  <div class="tg-home-card">
-    <h3>看安装步骤</h3>
-    <p>如果你只是要把应用装起来并开始传输，先看安装说明和第一次传输指南；开发相关文档已经单独拆到开发说明。</p>
-    <p><a href="/guide/installation"><strong>查看安装指南</strong></a></p>
-  </div>
-</div>
-
-</div>
-
-<div class="tg-home-section">
-
 ## 界面预览
 
 <div class="tg-preview-grid">

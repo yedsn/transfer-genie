@@ -16,11 +16,12 @@
 .VPHomeHero .image-bg,
 .VPHomeHero .image-container {
   border-radius: 28px;
+  background: none;
 }
 
 .VPHomeHero .image-container {
   padding: 1rem;
-  box-shadow: 0 24px 80px rgba(15, 23, 42, 0.22);
+  /* box-shadow: 0 24px 80px rgba(15, 23, 42, 0.22); */
 }
 
 .VPFeatures {
