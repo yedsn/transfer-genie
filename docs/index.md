@@ -9,11 +9,11 @@ hero:
     alt: Transfer Genie
   actions:
     - theme: brand
-      text: 快速开始
-      link: /guide/quick-start
+      text: 立即下载
+      link: https://github.com/yedsn/transfer-genie/releases/latest
     - theme: alt
-      text: 阅读文档
-      link: /integrations/http-api
+      text: 安装指南
+      link: /guide/installation
     - theme: alt
       text: GitHub 仓库
       link: https://github.com/yedsn/transfer-genie
@@ -30,28 +30,55 @@ features:
   - icon: "🏷️"
     title: 标记与历史
     details: 消息流支持标签、筛选、下载和历史索引，适合做长期可检索的传输工作台。
+  - icon: "✍️"
+    title: 面向日常使用优化
+    details: 支持 Markdown 输入、长消息高度控制、文件预览与更顺手的传输细节，而不是只有“能传就行”。
   - icon: "🖥️"
     title: 桌面端原生体验
     details: 基于 Tauri 2 + Rust 构建，面向 macOS 与 Windows 的桌面工作流而不是网页聊天框。
-  - icon: "🚀"
-    title: GitHub Pages 文档站
-    details: 官网与文档统一由 Markdown 驱动，便于发布、维护和持续更新。
 ---
 
 <div class="tg-home-section">
 
-## 为什么不是再做一个聊天工具？
+## 快速下载与安装
 
-Transfer Genie 不是新的社交平台，而是把你已经掌控的 **WebDAV 存储** 变成一个低心智负担的传输中枢：
+<div class="tg-home-grid">
+  <div class="tg-home-card">
+    <h3>下载最新版本</h3>
+    <p>直接前往 GitHub Releases 获取最新的 macOS 与 Windows 安装包。</p>
+    <p><a href="https://github.com/yedsn/transfer-genie/releases/latest"><strong>打开下载页</strong></a></p>
+  </div>
+  <div class="tg-home-card">
+    <h3>看安装步骤</h3>
+    <p>如果你只是要把应用装起来并开始传输，先看安装说明和第一次传输指南；开发相关文档已经单独拆到开发说明。</p>
+    <p><a href="/guide/installation"><strong>查看安装指南</strong></a></p>
+  </div>
+</div>
 
-<ul class="tg-inline-list">
-  <li>传文本</li>
-  <li>传文件</li>
-  <li>接脚本</li>
-  <li>接 Bot</li>
-  <li>保留历史</li>
-  <li>自托管数据</li>
-</ul>
+</div>
+
+<div class="tg-home-section">
+
+## 不只是能传，还更顺手
+
+<div class="tg-home-grid">
+  <div class="tg-home-card">
+    <h3>Markdown 输入</h3>
+    <p>除了普通文本，还可以直接输入 Markdown，把结构化说明、命令片段、待办清单一起发出去，阅读体验比纯文本更清晰。</p>
+  </div>
+  <div class="tg-home-card">
+    <h3>长消息不撑爆界面</h3>
+    <p>针对长文本消息做了高度限制和展开式阅读体验，消息流更干净，日常浏览不会被超长内容打断节奏。</p>
+  </div>
+  <div class="tg-home-card">
+    <h3>传输列表单独管理</h3>
+    <p>上传、下载、重试、断点续传和进度状态集中放在传输列表里，不需要在聊天流里翻找每一次文件动作。</p>
+  </div>
+  <div class="tg-home-card">
+    <h3>更像桌面工具而不是 demo</h3>
+    <p>消息标记、筛选、历史恢复、文件下载和多入口配置都围绕真实使用场景优化，适合长期挂在桌面上使用。</p>
+  </div>
+</div>
 
 </div>
 
@@ -109,9 +136,10 @@ Transfer Genie 不是新的社交平台，而是把你已经掌控的 **WebDAV �
 
 ## 从这里开始
 
-- 想先跑起来：去 [`/guide/quick-start`](/guide/quick-start)
+- 想安装并开始使用：去 [`/guide/installation`](/guide/installation)
+- 想完成第一次真实传输：看 [`/guide/first-sync`](/guide/first-sync)
 - 想接脚本：看 [`/integrations/http-api`](/integrations/http-api)
 - 想接 Telegram：看 [`/integrations/telegram-bridge`](/integrations/telegram-bridge)
-- 想了解站点如何部署到 GitHub Pages：看 [`/reference/site-deployment`](/reference/site-deployment)
+- 想参与开发或自己构建：看 [`/develop/setup`](/develop/setup)
 
 </div>

@@ -26,7 +26,7 @@
   ·
   <a href="https://github.com/yedsn/transfer-genie">GitHub</a>
   ·
-  <a href="docs/guide/setup.md">开发环境</a>
+  <a href="docs/guide/installation.md">安装使用</a>
   ·
   <a href="docs/integrations/http-api.md">HTTP API</a>
   ·
@@ -139,7 +139,7 @@ Transfer Genie（传输小精灵）使用 **Tauri + Rust + WebDAV** 构建，目
 
 ### 1. 准备环境
 
-请先阅读：[`docs/guide/setup.md`](docs/guide/setup.md)
+请先阅读：[`docs/guide/quick-start.md`](docs/guide/quick-start.md)
 
 快速摘要：
 

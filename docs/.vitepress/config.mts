@@ -23,19 +23,29 @@ export default defineConfig({
     logo: '/logo.png',
     nav: [
       { text: '首页', link: '/' },
-      { text: '快速开始', link: '/guide/quick-start' },
+      { text: '安装使用', link: '/guide/quick-start' },
       { text: '本机 HTTP API', link: '/integrations/http-api' },
       { text: 'Telegram Bridge', link: '/integrations/telegram-bridge' },
+      { text: '开发文档', link: '/develop/setup' },
       { text: 'GitHub', link: githubRepo }
     ],
     sidebar: {
       '/guide/': [
         {
-          text: '开始使用',
+          text: '使用说明',
           items: [
             { text: '快速开始', link: '/guide/quick-start' },
-            { text: '开发环境', link: '/guide/setup' },
-            { text: '构建与发布', link: '/guide/build-and-release' }
+            { text: '下载安装', link: '/guide/installation' },
+            { text: '第一次传输', link: '/guide/first-sync' }
+          ]
+        }
+      ],
+      '/develop/': [
+        {
+          text: '开发说明',
+          items: [
+            { text: '开发环境', link: '/develop/setup' },
+            { text: '构建与发布', link: '/develop/build-and-release' }
           ]
         }
       ],
