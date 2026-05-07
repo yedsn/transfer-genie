@@ -59,56 +59,6 @@ features:
 
 <div class="tg-home-section">
 
-## 不只是能传，还更顺手
-
-<div class="tg-home-grid">
-  <div class="tg-home-card">
-    <h3>Markdown 输入</h3>
-    <p>除了普通文本，还可以直接输入 Markdown，把结构化说明、命令片段、待办清单一起发出去，阅读体验比纯文本更清晰。</p>
-  </div>
-  <div class="tg-home-card">
-    <h3>长消息不撑爆界面</h3>
-    <p>针对长文本消息做了高度限制和展开式阅读体验，消息流更干净，日常浏览不会被超长内容打断节奏。</p>
-  </div>
-  <div class="tg-home-card">
-    <h3>传输列表单独管理</h3>
-    <p>上传、下载、重试、断点续传和进度状态集中放在传输列表里，不需要在聊天流里翻找每一次文件动作。</p>
-  </div>
-  <div class="tg-home-card">
-    <h3>更像桌面工具而不是 demo</h3>
-    <p>消息标记、筛选、历史恢复、文件下载和多入口配置都围绕真实使用场景优化，适合长期挂在桌面上使用。</p>
-  </div>
-</div>
-
-</div>
-
-<div class="tg-home-section">
-
-## 三类典型用法
-
-<div class="tg-home-grid">
-  <div class="tg-home-card">
-    <h3>个人跨设备收件箱</h3>
-    <p>把手机、桌面机、工作机之间临时传输的文本和文件都收束到同一条消息流里。</p>
-  </div>
-  <div class="tg-home-card">
-    <h3>自动化投递入口</h3>
-    <p>脚本通过本机 HTTP API 推送文本或文件，最终仍然进入统一的 WebDAV 消息流。</p>
-  </div>
-  <div class="tg-home-card">
-    <h3>IM 桥接工作台</h3>
-    <p>用 Telegram Bridge 把外部聊天会话拉进桌面端，不必手写独立同步守护进程。</p>
-  </div>
-  <div class="tg-home-card">
-    <h3>可回溯的传输记录</h3>
-    <p>标签、已标记消息、历史索引和下载记录，让传输过程不再只是一闪而过的临时动作。</p>
-  </div>
-</div>
-
-</div>
-
-<div class="tg-home-section">
-
 ## 界面预览
 
 <div class="tg-preview-grid">
