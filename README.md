@@ -26,11 +26,7 @@
   ·
   <a href="https://github.com/yedsn/transfer-genie">GitHub</a>
   ·
-  <a href="docs/guide/installation.md">安装使用</a>
-  ·
-  <a href="docs/integrations/http-api.md">HTTP API</a>
-  ·
-  <a href="docs/integrations/telegram-bridge.md">Telegram Bridge</a>
+  <a href="docs/guide/quick-start.md">使用说明</a>
 </p>
 
 <p align="center">

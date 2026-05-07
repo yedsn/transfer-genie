@@ -23,9 +23,7 @@ export default defineConfig({
     logo: '/logo.png',
     nav: [
       { text: '首页', link: '/' },
-      { text: '安装使用', link: '/guide/quick-start' },
-      { text: '本机 HTTP API', link: '/integrations/http-api' },
-      { text: 'Telegram Bridge', link: '/integrations/telegram-bridge' },
+      { text: '使用说明', link: '/guide/quick-start' },
       { text: '开发文档', link: '/develop/setup' },
       { text: 'GitHub', link: githubRepo }
     ],
@@ -38,6 +36,30 @@ export default defineConfig({
             { text: '下载安装', link: '/guide/installation' },
             { text: '第一次传输', link: '/guide/first-sync' }
           ]
+        },
+        {
+          text: '扩展接入',
+          items: [
+            { text: '本机 HTTP API', link: '/integrations/http-api' },
+            { text: 'Telegram Bridge', link: '/integrations/telegram-bridge' }
+          ]
+        }
+      ],
+      '/integrations/': [
+        {
+          text: '使用说明',
+          items: [
+            { text: '快速开始', link: '/guide/quick-start' },
+            { text: '下载安装', link: '/guide/installation' },
+            { text: '第一次传输', link: '/guide/first-sync' }
+          ]
+        },
+        {
+          text: '扩展接入',
+          items: [
+            { text: '本机 HTTP API', link: '/integrations/http-api' },
+            { text: 'Telegram Bridge', link: '/integrations/telegram-bridge' }
+          ]
         }
       ],
       '/develop/': [
@@ -46,15 +68,6 @@ export default defineConfig({
           items: [
             { text: '开发环境', link: '/develop/setup' },
             { text: '构建与发布', link: '/develop/build-and-release' }
-          ]
-        }
-      ],
-      '/integrations/': [
-        {
-          text: '集成能力',
-          items: [
-            { text: '本机 HTTP API', link: '/integrations/http-api' },
-            { text: 'Telegram Bridge', link: '/integrations/telegram-bridge' }
           ]
         }
       ],
