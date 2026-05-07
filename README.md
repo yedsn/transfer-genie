@@ -13,25 +13,30 @@
   <img src="https://img.shields.io/badge/Storage-WebDAV-2F6FED" alt="WebDAV">
   <img src="https://img.shields.io/badge/API-Local_HTTP-0A7B83" alt="Local HTTP API">
   <img src="https://img.shields.io/badge/Bridge-Telegram-26A5E4?logo=telegram" alt="Telegram Bridge">
+  <a href="https://github.com/yedsn/transfer-genie/actions/workflows/pages.yml">
+    <img src="https://github.com/yedsn/transfer-genie/actions/workflows/pages.yml/badge.svg?branch=master" alt="Docs Site">
+  </a>
   <img src="https://img.shields.io/badge/License-AGPL--3.0-8A2BE2" alt="AGPL-3.0">
 </p>
 
 <p align="center">
+  <a href="https://yedsn.github.io/transfer-genie/">官网</a>
+  ·
   <a href="https://gitee.com/hongxiaojian/transfer-genie">Gitee</a>
   ·
   <a href="https://github.com/yedsn/transfer-genie">GitHub</a>
   ·
-  <a href="docs/setup.md">开发环境</a>
+  <a href="docs/guide/setup.md">开发环境</a>
   ·
-  <a href="docs/HTTP API 说明.md">HTTP API</a>
+  <a href="docs/integrations/http-api.md">HTTP API</a>
   ·
-  <a href="docs/Telegram Bridge 说明.md">Telegram Bridge</a>
+  <a href="docs/integrations/telegram-bridge.md">Telegram Bridge</a>
 </p>
 
 <p align="center">
-  <a href="#快速开始">立即开始</a>
+  <a href="https://yedsn.github.io/transfer-genie/">官网</a>
   ·
-  <a href="#文档导航">看文档</a>
+  <a href="https://yedsn.github.io/transfer-genie/guide/quick-start">文档站</a>
   ·
   <a href="#http-api-速览">做自动化</a>
   ·
@@ -134,7 +139,7 @@ Transfer Genie（传输小精灵）使用 **Tauri + Rust + WebDAV** 构建，目
 
 ### 1. 准备环境
 
-请先阅读：[`docs/setup.md`](docs/setup.md)
+请先阅读：[`docs/guide/setup.md`](docs/guide/setup.md)
 
 快速摘要：
 
@@ -196,7 +201,7 @@ curl -X POST "http://127.0.0.1:6011/api/send-text" \
   }'
 ```
 
-完整说明见：[`docs/HTTP API 说明.md`](docs/HTTP API 说明.md)
+完整说明见：[`docs/integrations/http-api.md`](docs/integrations/http-api.md)
 
 ## Telegram Bridge 速览
 
@@ -212,7 +217,7 @@ Telegram Bridge 用于在一个 Telegram 会话与一个 WebDAV 端点之间做�
 
 推荐优先使用桌面端内置的桥接管理，而不是手工单独运行 `telegram_bridge`。
 
-完整说明见：[`docs/Telegram Bridge 说明.md`](docs/Telegram Bridge 说明.md)
+完整说明见：[`docs/integrations/telegram-bridge.md`](docs/integrations/telegram-bridge.md)
 
 ## 项目结构
 
