@@ -2,9 +2,13 @@
 mod db;
 mod filenames;
 mod history;
+mod integration_runtime;
 mod telegram_bridge;
+mod telegram_bridge_runtime;
 mod types;
 mod webdav;
+mod webdav_sync_runtime;
+mod workspace;
 
 use crate::db::{DbDownloadHistory, DbMessage, DbPartialDownload, DbUploadHistory};
 use crate::filenames::{
@@ -12,9 +16,18 @@ use crate::filenames::{
     MessageKind,
 };
 use crate::history::{HistoryEntry, HistoryLayout};
+use crate::integration_runtime::{
+    builtin_module_statuses, persist_module_statuses, IntegrationModuleStatus,
+    ModuleRuntimeStateSnapshot,
+};
+use crate::telegram_bridge_runtime::{
+    TelegramBridgeManager, TelegramBridgeStatus,
+};
+use crate::webdav_sync_runtime::WebDavSyncRuntimeAdapter;
+use crate::workspace::WorkspaceLayout;
 use crate::types::{
-    DownloadHistoryRecord, LocalHttpApiSettings, MarkedTag, Message, Settings, SyncStatus,
-    TelegramBridgeSettings, UploadHistoryRecord, WebDavEndpoint,
+    BackupSettings, DownloadHistoryRecord, LocalHttpApiSettings, MarkedTag, Message, Settings,
+    SyncStatus, TelegramBridgeSettings, UploadHistoryRecord, WebDavEndpoint,
     DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS, DEFAULT_LOCAL_HTTP_API_BIND_PORT,
 };
 use aes_gcm::aead::Aead;
@@ -39,7 +52,12 @@ use std::env;
 use std::fs;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+#[cfg(test)]
+use crate::telegram_bridge_runtime::ManagedTelegramBridgeProcess;
+#[cfg(test)]
+use std::process::Command;
+#[cfg(test)]
+use std::process::Child;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::Window;
@@ -67,6 +85,61 @@ struct AppState {
     telegram_bridge: Mutex<TelegramBridgeManager>,
     local_http_api: Mutex<LocalHttpApiManager>,
     update_guard: AsyncMutex<()>,
+    auto_backup_guard: AsyncMutex<()>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalBackupRecord {
+    endpoint_id: String,
+    backup_path: String,
+    created_at_ms: i64,
+    source: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalSnapshotRecord {
+    path: String,
+    category: String,
+    target_path: String,
+    file_name: String,
+    size_bytes: u64,
+    created_at_ms: Option<i64>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalBackupArchiveRecord {
+    endpoint_id: String,
+    backup_path: String,
+    created_at_ms: i64,
+    source: String,
+    file_name: String,
+    size_bytes: u64,
+    exists: bool,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AutoBackupStateRecord {
+    last_run_ms: Option<i64>,
+    last_success_ms: Option<i64>,
+    last_error: Option<String>,
+    last_backup_path: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AutoBackupStatus {
+    enabled: bool,
+    interval_minutes: u64,
+    retain_count: u32,
+    has_active_endpoint: bool,
+    last_run_ms: Option<i64>,
+    last_success_ms: Option<i64>,
+    last_error: Option<String>,
+    last_backup_path: Option<String>,
 }
 
 const EXPORT_VERSION: u8 = 1;
@@ -199,15 +272,6 @@ struct ExportTelegramSecret {
     chat_id: String,
 }
 
-#[derive(Clone, Serialize)]
-struct TelegramBridgeStatus {
-    running: bool,
-    pid: Option<u32>,
-    last_started_ms: Option<i64>,
-    last_stopped_ms: Option<i64>,
-    last_error: Option<String>,
-}
-
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 struct TelegramChatCandidate {
     id: String,
@@ -227,20 +291,6 @@ struct TelegramBridgeRuntimeConfig {
     poll_interval_secs: u64,
     state_path: String,
     temp_dir: String,
-}
-
-struct ManagedTelegramBridgeProcess {
-    child: Child,
-    runtime_config_path: PathBuf,
-}
-
-#[derive(Default)]
-struct TelegramBridgeManager {
-    process: Option<ManagedTelegramBridgeProcess>,
-    last_started_ms: Option<i64>,
-    last_stopped_ms: Option<i64>,
-    last_error: Option<String>,
-    last_pid: Option<u32>,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -583,7 +633,206 @@ fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
 
 #[tauri::command]
 fn get_telegram_bridge_status(state: State<'_, AppState>) -> Result<TelegramBridgeStatus, String> {
-    telegram_bridge_status(&state)
+    TelegramBridgeRuntimeAdapter::new(&state).status()
+}
+
+/*
+#[allow(dead_code)]
+impl<'a> TelegramBridgeRuntimeAdapter<'a> {
+    fn new(state: &'a AppState) -> Self {
+        Self { state }
+    }
+
+    fn status(&self) -> Result<SyncStatus, String> {
+        let status = self
+            .state
+            .sync_status
+            .lock()
+            .map_err(|_| "读取同步状态失败".to_string())?;
+        Ok(status.clone())
+    }
+
+    fn status_snapshot(&self, settings: &Settings) -> Result<ModuleRuntimeStateSnapshot, String> {
+        let sync_status = self
+            .state
+            .sync_status
+            .lock()
+            .map_err(|_| "读取同步状态失败".to_string())?;
+        Ok(ModuleRuntimeStateSnapshot {
+            enabled: settings.webdav_endpoints.iter().any(|endpoint| endpoint.enabled),
+            running: sync_status.running,
+            last_error: sync_status.last_error.clone(),
+            last_started_ms: None,
+            last_stopped_ms: sync_status.last_run_ms,
+        })
+    }
+
+    fn cancel(&self) -> Result<(), String> {
+        cancel_active_sync(self.state)
+    }
+
+    async fn refresh(&self) -> Result<SyncStatus, String> {
+        if is_sync_running_from(self.state, AUTO_SYNC_SOURCE)? {
+            self.cancel()?;
+        }
+
+        let result = run_sync(self.state, REFRESH_SYNC_SOURCE, true).await;
+        signal_sync_loop_reset(self.state);
+        result
+    }
+}
+*/
+
+struct TelegramBridgeRuntimeAdapter<'a> {
+    state: &'a AppState,
+}
+
+impl<'a> TelegramBridgeRuntimeAdapter<'a> {
+    fn new(state: &'a AppState) -> Self {
+        Self { state }
+    }
+
+    fn status_snapshot(&self, settings: &Settings) -> Result<ModuleRuntimeStateSnapshot, String> {
+        let telegram_manager = self
+            .state
+            .telegram_bridge
+            .lock()
+            .map_err(|_| "读取 Telegram Bridge 状态失败".to_string())?;
+        Ok(crate::telegram_bridge_runtime::telegram_bridge_runtime_snapshot(
+            &telegram_manager,
+            settings.telegram.enabled,
+        ))
+    }
+
+    fn status(&self) -> Result<TelegramBridgeStatus, String> {
+        telegram_bridge_status(self.state)
+    }
+
+    async fn start(&self) -> Result<TelegramBridgeStatus, String> {
+        start_telegram_bridge_impl(self.state).await
+    }
+
+    fn stop(&self) -> Result<TelegramBridgeStatus, String> {
+        stop_telegram_bridge_impl(self.state)
+    }
+
+    async fn restart_after_settings_change(&self, reason: &str) {
+        restart_telegram_bridge_after_settings_change(self.state, reason).await;
+    }
+}
+
+fn current_integration_module_statuses(
+    state: &AppState,
+) -> Result<Vec<IntegrationModuleStatus>, String> {
+    let settings = current_settings(state)?;
+    let webdav_runtime = WebDavSyncRuntimeAdapter::new(state);
+    let telegram_runtime = TelegramBridgeRuntimeAdapter::new(state);
+
+    Ok(builtin_module_statuses(
+        webdav_runtime.status_snapshot(&settings)?,
+        telegram_runtime.status_snapshot(&settings)?,
+    ))
+}
+
+fn parse_snapshot_created_at_ms(path: &Path) -> Option<i64> {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .and_then(|name| name.split_once('-').map(|(prefix, _)| prefix))
+        .and_then(|prefix| prefix.parse::<i64>().ok())
+}
+
+fn list_settings_snapshots_for_state(state: &AppState) -> Result<Vec<LocalSnapshotRecord>, String> {
+    let workspace_root = workspace_root_for_state(state);
+    let snapshots = workspace::list_snapshots_for_target(&workspace_root, &state.settings_path, "settings")?;
+    Ok(snapshots
+        .into_iter()
+        .filter_map(|path| {
+            let metadata = fs::metadata(&path).ok()?;
+            Some(LocalSnapshotRecord {
+                path: path.to_string_lossy().to_string(),
+                category: "settings".to_string(),
+                target_path: state.settings_path.to_string_lossy().to_string(),
+                file_name: path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("snapshot.json")
+                    .to_string(),
+                size_bytes: metadata.len(),
+                created_at_ms: parse_snapshot_created_at_ms(&path),
+            })
+        })
+        .collect())
+}
+
+fn list_local_backup_archives_for_state(
+    state: &AppState,
+) -> Result<Vec<LocalBackupArchiveRecord>, String> {
+    let backups_dir = workspace_root_for_state(state).join("backups");
+    if !backups_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut records = fs::read_dir(&backups_dir)
+        .map_err(|err| format!("读取本地备份记录失败 {}: {err}", backups_dir.display()))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_file())
+        .filter(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("json"))
+        .filter(|entry| entry.file_name().to_string_lossy() != "auto-backup-state.json")
+        .filter_map(|entry| {
+            let content = fs::read_to_string(entry.path()).ok()?;
+            let record = serde_json::from_str::<LocalBackupRecord>(&content).ok()?;
+            let archive_path = PathBuf::from(&record.backup_path);
+            let metadata = fs::metadata(&archive_path).ok();
+            Some(LocalBackupArchiveRecord {
+                endpoint_id: record.endpoint_id,
+                backup_path: record.backup_path,
+                created_at_ms: record.created_at_ms,
+                source: record.source,
+                file_name: archive_path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("backup.zip")
+                    .to_string(),
+                size_bytes: metadata.as_ref().map(|value| value.len()).unwrap_or(0),
+                exists: metadata.is_some(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    records.sort_by(|left, right| right.created_at_ms.cmp(&left.created_at_ms));
+    Ok(records)
+}
+
+fn persist_integration_module_statuses(state: &AppState) -> Result<(), String> {
+    let workspace_root = workspace_root_for_state(state);
+    let statuses = current_integration_module_statuses(state)?;
+    persist_module_statuses(&workspace_root, &statuses)
+}
+
+#[tauri::command]
+fn list_integration_modules(
+    state: State<'_, AppState>,
+) -> Result<Vec<IntegrationModuleStatus>, String> {
+    let statuses = current_integration_module_statuses(&state)?;
+    persist_integration_module_statuses(&state)?;
+    Ok(statuses)
+}
+
+#[tauri::command]
+fn list_settings_snapshots(state: State<'_, AppState>) -> Result<Vec<LocalSnapshotRecord>, String> {
+    list_settings_snapshots_for_state(&state)
+}
+
+#[tauri::command]
+fn list_local_backup_archives(
+    state: State<'_, AppState>,
+) -> Result<Vec<LocalBackupArchiveRecord>, String> {
+    list_local_backup_archives_for_state(&state)
+}
+
+#[tauri::command]
+fn get_auto_backup_status(state: State<'_, AppState>) -> Result<AutoBackupStatus, String> {
+    auto_backup_status_for_state(&state)
 }
 
 #[tauri::command]
@@ -636,12 +885,12 @@ async fn discover_telegram_chats(
 
 #[tauri::command]
 async fn start_telegram_bridge(state: State<'_, AppState>) -> Result<TelegramBridgeStatus, String> {
-    start_telegram_bridge_impl(&state).await
+    TelegramBridgeRuntimeAdapter::new(&state).start().await
 }
 
 #[tauri::command]
 fn stop_telegram_bridge(state: State<'_, AppState>) -> Result<TelegramBridgeStatus, String> {
-    stop_telegram_bridge_impl(&state)
+    TelegramBridgeRuntimeAdapter::new(&state).stop()
 }
 
 #[tauri::command]
@@ -656,7 +905,7 @@ async fn save_settings(
     #[cfg(desktop)]
     update_global_hotkey_registration(&app, &state, &normalized)?;
 
-    write_settings(&state.settings_path, &normalized)?;
+    write_settings_audited(&state.settings_path, &normalized)?;
 
     {
         // 设置开机自启动
@@ -676,15 +925,79 @@ async fn save_settings(
     }
 
     if should_restart_telegram_bridge(&previous, &normalized) {
-        restart_telegram_bridge_after_settings_change(&state, "settings update").await;
+        TelegramBridgeRuntimeAdapter::new(&state)
+            .restart_after_settings_change("settings update")
+            .await;
     }
     if let Err(err) = ensure_local_http_api_state(&app, &state).await {
         eprintln!("Local HTTP API apply settings failed: {err}");
     }
 
     signal_sync_loop_reset(&state);
+    let _ = persist_integration_module_statuses(&state);
 
     Ok(normalized)
+}
+
+#[tauri::command]
+async fn restore_settings_snapshot(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    snapshot_path: String,
+) -> Result<Settings, String> {
+    if snapshot_path.trim().is_empty() {
+        return Err("未选择设置快照".to_string());
+    }
+
+    let snapshot = PathBuf::from(snapshot_path.trim());
+    let workspace_root = workspace_root_for_state(&state);
+    let snapshots_root = workspace_root.join("snapshots");
+    if !is_within_dir(&snapshot, &snapshots_root) {
+        return Err("设置快照路径无效".to_string());
+    }
+    if !snapshot.is_file() {
+        return Err("设置快照不存在".to_string());
+    }
+
+    let previous = current_settings(&state)?;
+    workspace::restore_snapshot_to_target(
+        &snapshot,
+        &state.settings_path,
+        Some(&workspace_root),
+        "settings",
+        "restore-settings-snapshot",
+    )?;
+
+    let restored = load_settings(&state.settings_path, &state.default_download_dir)?;
+
+    #[cfg(desktop)]
+    update_global_hotkey_registration(&app, &state, &restored)?;
+
+    #[cfg(desktop)]
+    if let Err(err) = set_autostart(&app, restored.auto_start) {
+        return Err(format!("恢复设置快照后设置开机自启动失败: {err}"));
+    }
+
+    {
+        let mut guard = state
+            .settings
+            .lock()
+            .map_err(|_| "写入设置失败".to_string())?;
+        *guard = restored.clone();
+    }
+
+    if should_restart_telegram_bridge(&previous, &restored) {
+        TelegramBridgeRuntimeAdapter::new(&state)
+            .restart_after_settings_change("settings snapshot restore")
+            .await;
+    }
+    if let Err(err) = ensure_local_http_api_state(&app, &state).await {
+        eprintln!("Local HTTP API apply restored settings failed: {err}");
+    }
+
+    signal_sync_loop_reset(&state);
+    let _ = persist_integration_module_statuses(&state);
+    Ok(restored)
 }
 
 #[tauri::command]
@@ -692,7 +1005,7 @@ fn save_send_hotkey(state: State<'_, AppState>, send_hotkey: String) -> Result<S
     let mut settings = current_settings(&state)?;
     settings.send_hotkey = send_hotkey;
     let normalized = normalize_settings(settings, &state.default_download_dir)?;
-    write_settings(&state.settings_path, &normalized)?;
+    write_settings_audited(&state.settings_path, &normalized)?;
     let persisted = normalized.send_hotkey.clone();
     let mut guard = state
         .settings
@@ -797,6 +1110,7 @@ async fn import_settings(
         auto_start: existing.auto_start,
         auto_update_enabled: bundle.settings.auto_update_enabled,
         local_http_api: bundle.settings.local_http_api,
+        backup: existing.backup.clone(),
         telegram: TelegramBridgeSettings {
             enabled: bundle.settings.telegram.enabled,
             auto_start: bundle.settings.telegram.auto_start,
@@ -814,7 +1128,7 @@ async fn import_settings(
     #[cfg(desktop)]
     update_global_hotkey_registration(&app, &state, &normalized)?;
 
-    write_settings(&state.settings_path, &normalized)?;
+    write_settings_audited(&state.settings_path, &normalized)?;
     {
         let mut guard = state
             .settings
@@ -834,6 +1148,32 @@ struct MessagesResult {
     messages: Vec<Message>,
     total: i64,
     has_more: bool,
+    marked_count: i64,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListMessagesWindowInput {
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    before_timestamp_ms: Option<i64>,
+    #[serde(default)]
+    before_filename: Option<String>,
+    #[serde(default)]
+    after_timestamp_ms: Option<i64>,
+    #[serde(default)]
+    after_filename: Option<String>,
+    #[serde(default)]
+    only_marked: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct MessagesWindowResult {
+    messages: Vec<Message>,
+    total: i64,
+    #[serde(rename = "hasMoreBefore")]
+    has_more_before: bool,
     marked_count: i64,
 }
 
@@ -1301,6 +1641,75 @@ fn list_messages(
         messages,
         total,
         has_more,
+        marked_count,
+    })
+}
+
+#[tauri::command]
+fn list_messages_window(
+    state: State<'_, AppState>,
+    input: Option<ListMessagesWindowInput>,
+) -> Result<MessagesWindowResult, String> {
+    let settings = current_settings(&state)?;
+    let endpoint = resolve_active_endpoint(&settings)?;
+    let input = input.unwrap_or_default();
+    let marked_filter = input.only_marked.unwrap_or(false);
+    let limit = input.limit.unwrap_or(50).clamp(1, 200);
+
+    let total = db::count_messages(&state.db_path, &endpoint.id, marked_filter)
+        .map_err(|err| err.to_string())?;
+    let marked_count = if marked_filter {
+        total
+    } else {
+        db::count_messages(&state.db_path, &endpoint.id, true).map_err(|err| err.to_string())?
+    };
+
+    let messages = if let (Some(after_timestamp_ms), Some(after_filename)) =
+        (input.after_timestamp_ms, input.after_filename.as_deref())
+    {
+        db::list_messages_after(
+            &state.db_path,
+            &endpoint.id,
+            after_timestamp_ms,
+            after_filename,
+            marked_filter,
+        )
+        .map_err(|err| err.to_string())?
+    } else if let (Some(before_timestamp_ms), Some(before_filename)) =
+        (input.before_timestamp_ms, input.before_filename.as_deref())
+    {
+        db::list_messages_before(
+            &state.db_path,
+            &endpoint.id,
+            before_timestamp_ms,
+            before_filename,
+            limit,
+            marked_filter,
+        )
+        .map_err(|err| err.to_string())?
+    } else {
+        db::list_latest_messages_window(&state.db_path, &endpoint.id, limit, marked_filter)
+            .map_err(|err| err.to_string())?
+    };
+
+    let has_more_before = if let Some(first) = messages.first() {
+        db::count_messages_before(
+            &state.db_path,
+            &endpoint.id,
+            first.timestamp_ms,
+            &first.filename,
+            marked_filter,
+        )
+        .map_err(|err| err.to_string())?
+            > 0
+    } else {
+        false
+    };
+
+    Ok(MessagesWindowResult {
+        messages,
+        total,
+        has_more_before,
         marked_count,
     })
 }
@@ -3043,27 +3452,17 @@ async fn cleanup_messages(
 
 #[tauri::command]
 async fn refresh(state: State<'_, AppState>) -> Result<SyncStatus, String> {
-    if is_sync_running_from(&state, AUTO_SYNC_SOURCE)? {
-        cancel_active_sync(&state)?;
-    }
-
-    let result = run_sync(&state, REFRESH_SYNC_SOURCE, true).await;
-    signal_sync_loop_reset(&state);
-    result
+    WebDavSyncRuntimeAdapter::new(&state).refresh().await
 }
 
 #[tauri::command]
 fn cancel_refresh(state: State<'_, AppState>) -> Result<(), String> {
-    cancel_active_sync(&state)
+    WebDavSyncRuntimeAdapter::new(&state).cancel()
 }
 
 #[tauri::command]
 fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
-    let status = state
-        .sync_status
-        .lock()
-        .map_err(|_| "读取同步状态失败".to_string())?;
-    Ok(status.clone())
+    WebDavSyncRuntimeAdapter::new(&state).status()
 }
 
 #[derive(Serialize)]
@@ -3190,7 +3589,305 @@ async fn recursive_list_webdav(
     Ok(all_entries)
 }
 
+fn workspace_root_for_state(state: &AppState) -> PathBuf {
+    state
+        .files_base_dir
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf()
+}
+
+fn backup_runtime_dir(state: &AppState) -> PathBuf {
+    workspace_root_for_state(state).join("runtime")
+}
+
+fn record_local_backup_event(
+    state: &AppState,
+    endpoint: &WebDavEndpoint,
+    backup_path: &str,
+    source: &str,
+) -> Result<(), String> {
+    let workspace_root = workspace_root_for_state(state);
+    let filename = format!("{}-{}.json", endpoint.id, now_ms());
+    let target = workspace_root.join("backups").join(filename);
+    let record = LocalBackupRecord {
+        endpoint_id: endpoint.id.clone(),
+        backup_path: backup_path.to_string(),
+        created_at_ms: now_ms(),
+        source: source.to_string(),
+    };
+    workspace::write_json_with_audit_at(
+        &target,
+        &record,
+        Some(&workspace_root),
+        "backup-record",
+        source,
+    )
+}
+
+fn auto_backup_state_path(state: &AppState) -> PathBuf {
+    workspace_root_for_state(state)
+        .join("backups")
+        .join("auto-backup-state.json")
+}
+
+fn auto_backup_archives_dir(state: &AppState, endpoint_id: &str) -> PathBuf {
+    workspace_root_for_state(state)
+        .join("backups")
+        .join("archives")
+        .join(endpoint_id)
+}
+
+fn load_auto_backup_state(state: &AppState) -> AutoBackupStateRecord {
+    let path = auto_backup_state_path(state);
+    if !path.is_file() {
+        return AutoBackupStateRecord::default();
+    }
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<AutoBackupStateRecord>(&content).ok())
+        .unwrap_or_default()
+}
+
+fn auto_backup_status_for_state(state: &AppState) -> Result<AutoBackupStatus, String> {
+    let settings = current_settings(state)?;
+    let persisted = load_auto_backup_state(state);
+    Ok(AutoBackupStatus {
+        enabled: settings.backup.enabled,
+        interval_minutes: settings.backup.interval_minutes,
+        retain_count: settings.backup.retain_count,
+        has_active_endpoint: resolve_active_endpoint(&settings).is_ok(),
+        last_run_ms: persisted.last_run_ms,
+        last_success_ms: persisted.last_success_ms,
+        last_error: persisted.last_error,
+        last_backup_path: persisted.last_backup_path,
+    })
+}
+
+fn save_auto_backup_state(state: &AppState, record: &AutoBackupStateRecord) -> Result<(), String> {
+    let workspace_root = workspace_root_for_state(state);
+    workspace::write_json_with_audit_at(
+        &auto_backup_state_path(state),
+        record,
+        Some(&workspace_root),
+        "backup-schedule",
+        "save-state",
+    )
+}
+
+fn prune_auto_backup_archives(dir: &Path, retain_count: u32) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+
+    let mut entries = fs::read_dir(dir)
+        .map_err(|err| format!("读取备份目录失败 {}: {err}", dir.display()))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_file())
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
+
+    let keep = retain_count.max(1) as usize;
+    if entries.len() <= keep {
+        return Ok(());
+    }
+
+    let remove_count = entries.len() - keep;
+    for entry in entries.into_iter().take(remove_count) {
+        fs::remove_file(entry.path()).map_err(|err| {
+            format!("删除过期备份失败 {}: {err}", entry.path().display())
+        })?;
+    }
+
+    Ok(())
+}
+
+fn should_run_auto_backup(
+    settings: &Settings,
+    last_run_ms: Option<i64>,
+    now_ms_value: i64,
+) -> bool {
+    if !settings.backup.enabled || resolve_active_endpoint(settings).is_err() {
+        return false;
+    }
+
+    match last_run_ms {
+        Some(last_run_ms) => {
+            let interval_ms = (settings.backup.interval_minutes.max(5) as i64) * 60 * 1000;
+            now_ms_value.saturating_sub(last_run_ms) >= interval_ms
+        }
+        None => true,
+    }
+}
+
+async fn backup_webdav_to_path(
+    state: &AppState,
+    endpoint: &WebDavEndpoint,
+    path: &Path,
+    window: Option<&Window>,
+) -> Result<(), String> {
+    use futures_util::StreamExt;
+    use std::io::Write;
+    use zip::write::FileOptions;
+
+    info!("--- Starting WebDAV Backup ---");
+    if let Some(window) = window {
+        emit_backup_restore_progress(window, "webdav-backup-progress", "", 0, 0, "scanning");
+    }
+
+    let entries = recursive_list_webdav(&state.http, endpoint, "").await?;
+    let total_entries = entries.len() as u64;
+
+    if total_entries == 0 {
+        if let Some(window) = window {
+            emit_backup_restore_progress(window, "webdav-backup-progress", "", 0, 0, "finished");
+        }
+        return Ok(());
+    }
+
+    let file = std::fs::File::create(path).map_err(|e| format!("创建备份文件失败: {e}"))?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options: FileOptions<'_, ()> =
+        FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    let temp_dir = backup_runtime_dir(state).join(format!("temp_backup_{}", now_ms()));
+    fs::create_dir_all(&temp_dir).map_err(|e| format!("无法创建临时目录: {e}"))?;
+
+    for (index, entry) in entries.iter().enumerate() {
+        let current_progress = (index + 1) as u64;
+        if let Some(window) = window {
+            emit_backup_restore_progress(
+                window,
+                "webdav-backup-progress",
+                &entry.filename,
+                current_progress,
+                total_entries,
+                "downloading",
+            );
+        }
+
+        if entry.is_collection {
+            if !entry.remote_path.is_empty() {
+                let _ = zip.add_directory(&entry.remote_path, options);
+            }
+            continue;
+        }
+
+        if entry.remote_path.is_empty() {
+            continue;
+        }
+
+        let temp_file_path = temp_dir.join(format!("backup_{}.tmp", index));
+        match webdav::download_file_stream(&state.http, endpoint, &entry.remote_path).await {
+            Ok(response) => {
+                let mut stream = response.stream;
+                let mut temp_file =
+                    std::fs::File::create(&temp_file_path).map_err(|e| format!("操作失败: {e}"))?;
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.map_err(|e| format!("操作失败: {e}"))?;
+                    temp_file
+                        .write_all(&chunk)
+                        .map_err(|e| format!("操作失败: {e}"))?;
+                }
+                temp_file.flush().map_err(|e| format!("操作失败: {e}"))?;
+                drop(temp_file);
+
+                let mut input_file =
+                    std::fs::File::open(&temp_file_path).map_err(|e| format!("操作失败: {e}"))?;
+                if let Err(err) = zip.start_file(&entry.remote_path, options) {
+                    let _ = std::fs::remove_file(&temp_file_path);
+                    return Err(format!("Zip start_file failed: {err}"));
+                }
+                if let Err(err) = std::io::copy(&mut input_file, &mut zip) {
+                    let _ = std::fs::remove_file(&temp_file_path);
+                    return Err(format!("写入 Zip 失败: {err}"));
+                }
+                let _ = std::fs::remove_file(&temp_file_path);
+            }
+            Err(err) => {
+                log::warn!(
+                    "Skipping file '{}' due to download error: {}",
+                    entry.remote_path,
+                    err
+                );
+            }
+        }
+    }
+
+    zip.finish().map_err(|e| format!("完成 zip 文件失败: {e}"))?;
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    record_local_backup_event(state, endpoint, &path.to_string_lossy(), "backup-webdav")?;
+
+    if let Some(window) = window {
+        emit_backup_restore_progress(
+            window,
+            "webdav-backup-progress",
+            "",
+            total_entries,
+            total_entries,
+            "finished",
+        );
+    }
+
+    Ok(())
+}
+
+async fn maybe_run_scheduled_backup(app_handle: &AppHandle, state: &AppState) -> Result<(), String> {
+    let _guard = match state.auto_backup_guard.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => return Ok(()),
+    };
+
+    let settings = current_settings(state)?;
+    let now = now_ms();
+    let status = load_auto_backup_state(state);
+    if !should_run_auto_backup(&settings, status.last_run_ms, now) {
+        return Ok(());
+    }
+
+    let endpoint = resolve_active_endpoint(&settings)?;
+    let archive_dir = auto_backup_archives_dir(state, &endpoint.id);
+    fs::create_dir_all(&archive_dir)
+        .map_err(|err| format!("创建自动备份目录失败 {}: {err}", archive_dir.display()))?;
+    let backup_path = archive_dir.join(format!("{}-{}.zip", endpoint.id, now));
+
+    let result = backup_webdav_to_path(state, &endpoint, &backup_path, None).await;
+    let next_state = match result.as_ref() {
+        Ok(()) => {
+            prune_auto_backup_archives(&archive_dir, settings.backup.retain_count)?;
+            AutoBackupStateRecord {
+                last_run_ms: Some(now),
+                last_success_ms: Some(now),
+                last_error: None,
+                last_backup_path: Some(backup_path.to_string_lossy().to_string()),
+            }
+        }
+        Err(err) => AutoBackupStateRecord {
+            last_run_ms: Some(now),
+            last_success_ms: status.last_success_ms,
+            last_error: Some(err.clone()),
+            last_backup_path: status.last_backup_path,
+        },
+    };
+    save_auto_backup_state(state, &next_state)?;
+
+    if let Some(window) = app_handle.get_webview_window("main") {
+        let _ = window.emit(
+            "auto-backup-status",
+            serde_json::json!({
+                "lastRunMs": next_state.last_run_ms,
+                "lastSuccessMs": next_state.last_success_ms,
+                "lastError": next_state.last_error,
+                "lastBackupPath": next_state.last_backup_path,
+            }),
+        );
+    }
+
+    result
+}
+
 #[tauri::command]
+#[allow(unreachable_code)]
 async fn backup_webdav(
     window: Window,
     state: State<'_, AppState>,
@@ -3202,6 +3899,7 @@ async fn backup_webdav(
 
     let settings = current_settings(&state)?;
     let endpoint = resolve_active_endpoint(&settings)?;
+    return backup_webdav_to_path(&state, &endpoint, Path::new(&path), Some(&window)).await;
 
     info!("--- Starting WebDAV Backup ---");
     emit_backup_restore_progress(&window, "webdav-backup-progress", "", 0, 0, "scanning");
@@ -3312,6 +4010,51 @@ async fn backup_webdav(
     Ok(())
 }
 
+fn restore_archive_has_history_entries<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> bool {
+    let has_legacy_history = archive.by_name("history.json").is_ok();
+    let has_manifest_history = archive.by_name("history/index.json").is_ok();
+    has_legacy_history || has_manifest_history
+}
+
+fn validate_restore_archive_history_entries<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> Result<(), String> {
+    if restore_archive_has_history_entries(archive) {
+        Ok(())
+    } else {
+        Err("备份文件无效: 缺少 history.json 或 history/index.json".to_string())
+    }
+}
+
+fn restore_archive_target_path(filename: &str) -> Option<&str> {
+    let trimmed = filename.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+enum RestoreArchiveEntryKind<'a> {
+    Skip,
+    Directory(&'a str),
+    File(&'a str),
+}
+
+fn classify_restore_archive_entry(filename: &str, is_dir: bool) -> RestoreArchiveEntryKind<'_> {
+    match restore_archive_target_path(filename) {
+        Some(path) if is_dir => RestoreArchiveEntryKind::Directory(path),
+        Some(path) => RestoreArchiveEntryKind::File(path),
+        None => RestoreArchiveEntryKind::Skip,
+    }
+}
+
+fn should_skip_restore_cleanup_path(remote_path: &str, root_name: &str) -> bool {
+    remote_path == root_name || remote_path == format!("{root_name}/")
+}
+
 #[tauri::command]
 async fn restore_webdav(
     window: Window,
@@ -3333,8 +4076,7 @@ async fn restore_webdav(
     for entry in existing_files {
         // remote_path is relative to root, e.g. "files/foo.txt" or "files/subdir"
         let remote_path = entry.remote_path;
-        // Skip if it's "files" itself (though list_entries filters usually)
-        if remote_path == "files" || remote_path == "files/" {
+        if should_skip_restore_cleanup_path(&remote_path, "files") {
             continue;
         }
         let _ = webdav::delete_file(&state.http, &endpoint, &remote_path, true).await;
@@ -3343,7 +4085,7 @@ async fn restore_webdav(
         webdav::list_entries(&state.http, &endpoint, Some("history"), true).await?;
     for entry in existing_history {
         let remote_path = entry.remote_path;
-        if remote_path == "history" || remote_path == "history/" {
+        if should_skip_restore_cleanup_path(&remote_path, "history") {
             continue;
         }
         let _ = webdav::delete_file(&state.http, &endpoint, &remote_path, true).await;
@@ -3355,18 +4097,12 @@ async fn restore_webdav(
     let file = std::fs::File::open(&path).map_err(|e| format!("读取备份文件失败: {}", e))?;
     let mut archive = ZipArchive::new(file).map_err(|e| format!("解析备份文件失败: {}", e))?;
     let len = archive.len();
-
-    // 验证历史索引是否存在
-    let has_legacy_history = archive.by_name("history.json").is_ok();
-    let has_manifest_history = archive.by_name("history/index.json").is_ok();
-    if !has_legacy_history && !has_manifest_history {
-        return Err("备份文件无效: 缺少 history.json 或 history/index.json".to_string());
-    }
+    validate_restore_archive_history_entries(&mut archive)?;
 
     // 确保目录存在 (只做一次)
     webdav::ensure_directory(&state.http, &endpoint, "files").await?;
 
-    let temp_dir = state.files_base_dir.join("temp_restore");
+    let temp_dir = backup_runtime_dir(&state).join(format!("temp_restore_{}", now_ms()));
     if !temp_dir.exists() {
         fs::create_dir_all(&temp_dir).map_err(|e| format!("无法创建临时目录: {}", e))?;
     }
@@ -3390,14 +4126,16 @@ async fn restore_webdav(
             "uploading",
         );
 
-        if is_dir {
-            if !filename.is_empty() {
-                let _ = webdav::ensure_directory(&state.http, &endpoint, &filename).await;
+        let target_path = match classify_restore_archive_entry(&filename, is_dir) {
+            RestoreArchiveEntryKind::Skip => continue,
+            RestoreArchiveEntryKind::Directory(path) => {
+                let _ = webdav::ensure_directory(&state.http, &endpoint, path).await;
+                continue;
             }
-            continue;
-        }
+            RestoreArchiveEntryKind::File(path) => path,
+        };
 
-        webdav::ensure_parent_directories(&state.http, &endpoint, &filename).await?;
+        webdav::ensure_parent_directories(&state.http, &endpoint, target_path).await?;
 
         // Extract to temp file
         let temp_file_path = temp_dir.join(format!("restore_{}.tmp", i));
@@ -3448,7 +4186,7 @@ async fn restore_webdav(
 
         // Upload
         if let Err(e) =
-            webdav::upload_file_stream(&state.http, &endpoint, &filename, stream, size).await
+            webdav::upload_file_stream(&state.http, &endpoint, target_path, stream, size).await
         {
             let _ = std::fs::remove_file(&temp_file_path);
             return Err(format!("上传失败 {}: {}", filename, e));
@@ -3457,6 +4195,7 @@ async fn restore_webdav(
     }
 
     let _ = std::fs::remove_dir_all(&temp_dir);
+    record_local_backup_event(&state, &endpoint, &path, "restore-webdav")?;
 
     emit_backup_restore_progress(
         &window,
@@ -3727,6 +4466,8 @@ fn normalize_settings(
         .telegram
         .poll_interval_secs
         .max(DEFAULT_TELEGRAM_POLL_INTERVAL_SECS);
+    settings.backup.interval_minutes = settings.backup.interval_minutes.max(5);
+    settings.backup.retain_count = settings.backup.retain_count.max(1);
 
     Ok(settings)
 }
@@ -3906,7 +4647,8 @@ fn settings_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
         .path()
         .app_data_dir()
         .map_err(|err| format!("无法定位应用数据目录: {err}"))?;
-    Ok(base.join("settings.json"))
+    let layout = WorkspaceLayout::new(base.clone());
+    Ok(layout.settings_path(&base))
 }
 
 fn db_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
@@ -3914,7 +4656,8 @@ fn db_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
         .path()
         .app_data_dir()
         .map_err(|err| format!("无法定位应用数据目录: {err}"))?;
-    Ok(base.join("messages.sqlite"))
+    let layout = WorkspaceLayout::new(base.clone());
+    Ok(layout.db_path(&base))
 }
 
 fn files_base_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
@@ -3922,7 +4665,8 @@ fn files_base_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
         .path()
         .app_data_dir()
         .map_err(|err| format!("无法定位应用数据目录: {err}"))?;
-    Ok(base.join("files"))
+    let layout = WorkspaceLayout::new(base);
+    Ok(layout.endpoints_dir())
 }
 
 fn default_download_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
@@ -4029,11 +4773,12 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
                 auto_start: false,
                 auto_update_enabled: false,
                 local_http_api: LocalHttpApiSettings::default(),
+                backup: BackupSettings::default(),
                 telegram: TelegramBridgeSettings::default(),
             }
         };
         let normalized = normalize_settings(settings, fallback_download_dir)?;
-        write_settings(path, &normalized)?;
+        write_settings_audited(path, &normalized)?;
         Ok(normalized)
     } else {
         let settings = Settings {
@@ -4048,13 +4793,30 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
             auto_start: false,
             auto_update_enabled: false,
             local_http_api: LocalHttpApiSettings::default(),
+            backup: BackupSettings::default(),
             telegram: TelegramBridgeSettings::default(),
         };
-        write_settings(path, &settings)?;
+        write_settings_audited(path, &settings)?;
         Ok(settings)
     }
 }
 
+fn write_settings_audited(path: &Path, settings: &Settings) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| format!("创建配置目录失败: {err}"))?;
+    }
+    let app_data_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let audit_root = app_data_dir.join(workspace::WORKSPACE_DIR_NAME);
+    workspace::write_json_with_audit_at(
+        path,
+        settings,
+        Some(&audit_root),
+        "settings",
+        "write-settings",
+    )
+}
+
+#[allow(dead_code)]
 fn write_settings(path: &Path, settings: &Settings) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|err| format!("创建配置目录失败: {err}"))?;
@@ -4418,7 +5180,8 @@ async fn discover_telegram_chats_impl(
 }
 
 fn should_auto_start_telegram_bridge(settings: &Settings) -> bool {
-    settings.telegram.auto_start && resolve_telegram_bridge_launch_config(settings).is_ok()
+    settings.telegram.auto_start
+        && crate::telegram_bridge_runtime::telegram_bridge_launch_config_is_valid(settings)
 }
 
 fn is_telegram_bridge_running(state: &AppState) -> Result<bool, String> {
@@ -4426,14 +5189,13 @@ fn is_telegram_bridge_running(state: &AppState) -> Result<bool, String> {
         .telegram_bridge
         .lock()
         .map_err(|_| "读取 Telegram bridge 状态失败".to_string())?;
-    refresh_telegram_bridge_manager(&mut manager);
-    Ok(manager.process.is_some())
+    crate::telegram_bridge_runtime::refresh_telegram_bridge_manager(&mut manager);
+    Ok(crate::telegram_bridge_runtime::telegram_bridge_is_running(&manager))
 }
 
 fn record_telegram_bridge_restart_failure(state: &AppState, err: String) {
     if let Ok(mut manager) = state.telegram_bridge.lock() {
-        manager.last_error = Some(err);
-        manager.last_stopped_ms = Some(now_ms());
+        crate::telegram_bridge_runtime::mark_start_failure(&mut manager, err);
     }
 }
 
@@ -4472,28 +5234,17 @@ async fn restart_telegram_bridge_after_settings_change(state: &AppState, reason:
     }
 }
 
+/*
 fn telegram_bridge_dir(state: &AppState) -> PathBuf {
-    state
+    let app_data_dir = state
         .settings_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
-        .join("telegram-bridge")
+        .to_path_buf();
+    WorkspaceLayout::new(app_data_dir).plugin_dir(MODULE_ID_TELEGRAM_BRIDGE)
 }
 
-fn telegram_bridge_status_from_manager(manager: &TelegramBridgeManager) -> TelegramBridgeStatus {
-    TelegramBridgeStatus {
-        running: manager.process.is_some(),
-        pid: manager
-            .process
-            .as_ref()
-            .map(|process| process.child.id())
-            .or(manager.last_pid),
-        last_started_ms: manager.last_started_ms,
-        last_stopped_ms: manager.last_stopped_ms,
-        last_error: manager.last_error.clone(),
-    }
-}
-
+#[allow(dead_code)]
 fn telegram_bridge_exit_message(status: ExitStatus) -> Option<String> {
     if status.success() {
         None
@@ -4504,22 +5255,21 @@ fn telegram_bridge_exit_message(status: ExitStatus) -> Option<String> {
     }
 }
 
+#[allow(unused_mut)]
+#[allow(dead_code)]
 fn finish_telegram_bridge_process(
     manager: &mut TelegramBridgeManager,
     mut process: ManagedTelegramBridgeProcess,
     last_error: Option<String>,
 ) {
-    let pid = process.child.id();
-    let _ = process.child.wait();
-    let _ = fs::remove_file(&process.runtime_config_path);
-    manager.last_pid = Some(pid);
-    manager.last_stopped_ms = Some(now_ms());
-    if let Some(error) = last_error {
-        manager.last_error = Some(error);
-    }
+    crate::telegram_bridge_runtime::finish_telegram_bridge_process(manager, process, last_error);
 }
 
+#[allow(unreachable_code)]
+#[allow(dead_code)]
 fn refresh_telegram_bridge_manager(manager: &mut TelegramBridgeManager) {
+    crate::telegram_bridge_runtime::refresh_telegram_bridge_manager(manager);
+    return;
     let outcome = match manager.process.as_mut() {
         Some(process) => match process.child.try_wait() {
             Ok(Some(status)) => Some(Ok(status)),
@@ -4542,15 +5292,33 @@ fn refresh_telegram_bridge_manager(manager: &mut TelegramBridgeManager) {
     }
 }
 
+*/
+#[allow(unreachable_code)]
 fn telegram_bridge_status(state: &AppState) -> Result<TelegramBridgeStatus, String> {
+    return crate::telegram_bridge_runtime::telegram_bridge_status_for_state(state);
+    /*
     let mut manager = state
         .telegram_bridge
         .lock()
         .map_err(|_| "读取 Telegram bridge 状态失败".to_string())?;
-    refresh_telegram_bridge_manager(&mut manager);
-    Ok(telegram_bridge_status_from_manager(&manager))
+    crate::telegram_bridge_runtime::refresh_telegram_bridge_manager(&mut manager);
+    let status = telegram_bridge_status_from_manager(&manager);
+    drop(manager);
+    let _ = persist_integration_module_statuses(state);
+    Ok(status)
+    */
 }
 
+async fn start_telegram_bridge_impl(state: &AppState) -> Result<TelegramBridgeStatus, String> {
+    crate::telegram_bridge_runtime::start_telegram_bridge_for_state(state, TELEGRAM_BRIDGE_ARG)
+        .await
+}
+
+fn stop_telegram_bridge_impl(state: &AppState) -> Result<TelegramBridgeStatus, String> {
+    crate::telegram_bridge_runtime::stop_telegram_bridge_for_state(state)
+}
+
+/*
 #[allow(dead_code)]
 fn resolve_telegram_bridge_endpoint(
     settings: &Settings,
@@ -4639,6 +5407,20 @@ async fn prepare_telegram_bridge_launch(
     })
 }
 
+fn write_telegram_bridge_runtime_config_audited(
+    launch: &PreparedTelegramBridgeLaunch,
+) -> Result<(), String> {
+    ensure_parent_dir(&launch.runtime_config_path)?;
+    workspace::write_bytes_with_audit_at(
+        &launch.runtime_config_path,
+        launch.runtime_config_data.as_bytes(),
+        None,
+        "telegram-bridge-runtime",
+        "write-runtime-config",
+    )
+}
+
+#[allow(dead_code)]
 fn write_telegram_bridge_runtime_config(
     launch: &PreparedTelegramBridgeLaunch,
 ) -> Result<(), String> {
@@ -4647,9 +5429,14 @@ fn write_telegram_bridge_runtime_config(
         .map_err(|err| format!("写入 Telegram bridge 运行配置失败: {err}"))
 }
 
+#[allow(dead_code, unreachable_code)]
 fn spawn_telegram_bridge_process(
     runtime_config_path: &Path,
 ) -> Result<ManagedTelegramBridgeProcess, String> {
+    return crate::telegram_bridge_runtime::spawn_telegram_bridge_process(
+        TELEGRAM_BRIDGE_ARG,
+        runtime_config_path,
+    );
     let current_exe =
         env::current_exe().map_err(|err| format!("定位主程序可执行文件失败: {err}"))?;
     let child = Command::new(&current_exe)
@@ -4667,57 +5454,68 @@ fn spawn_telegram_bridge_process(
     })
 }
 
+#[allow(unreachable_code)]
 async fn start_telegram_bridge_impl(state: &AppState) -> Result<TelegramBridgeStatus, String> {
+    return crate::telegram_bridge_runtime::start_telegram_bridge_for_state(
+        state,
+        TELEGRAM_BRIDGE_ARG,
+    )
+    .await;
     let launch = prepare_telegram_bridge_launch(state).await?;
     let mut manager = state
         .telegram_bridge
         .lock()
         .map_err(|_| "更新 Telegram bridge 状态失败".to_string())?;
-    refresh_telegram_bridge_manager(&mut manager);
-    if manager.process.is_some() {
+    crate::telegram_bridge_runtime::refresh_telegram_bridge_manager(&mut manager);
+    if crate::telegram_bridge_runtime::telegram_bridge_is_running(&manager) {
         return Ok(telegram_bridge_status_from_manager(&manager));
     }
 
-    write_telegram_bridge_runtime_config(&launch)?;
-    let process = match spawn_telegram_bridge_process(&launch.runtime_config_path) {
+    write_telegram_bridge_runtime_config_audited(&launch)?;
+    let process = match crate::telegram_bridge_runtime::spawn_telegram_bridge_process(
+        TELEGRAM_BRIDGE_ARG,
+        &launch.runtime_config_path,
+    ) {
         Ok(process) => process,
         Err(err) => {
             let _ = fs::remove_file(&launch.runtime_config_path);
-            manager.last_error = Some(err.clone());
-            manager.last_stopped_ms = Some(now_ms());
+            crate::telegram_bridge_runtime::mark_start_failure(&mut manager, err.clone());
             return Err(err);
         }
     };
 
-    manager.last_started_ms = Some(now_ms());
-    manager.last_error = None;
-    manager.last_pid = Some(process.child.id());
-    manager.process = Some(process);
+    crate::telegram_bridge_runtime::attach_started_process(&mut manager, process);
     std::thread::sleep(Duration::from_millis(350));
-    refresh_telegram_bridge_manager(&mut manager);
-    if manager.process.is_none() {
+    crate::telegram_bridge_runtime::refresh_telegram_bridge_manager(&mut manager);
+    if !crate::telegram_bridge_runtime::telegram_bridge_is_running(&manager) {
         let err = manager
             .last_error
             .clone()
             .unwrap_or_else(|| "Telegram bridge 启动失败".to_string());
         return Err(err);
     }
-    Ok(telegram_bridge_status_from_manager(&manager))
+    let status = telegram_bridge_status_from_manager(&manager);
+    drop(manager);
+    let _ = persist_integration_module_statuses(state);
+    Ok(status)
 }
 
+#[allow(unreachable_code)]
 fn stop_telegram_bridge_impl(state: &AppState) -> Result<TelegramBridgeStatus, String> {
+    return crate::telegram_bridge_runtime::stop_telegram_bridge_for_state(state);
     let mut manager = state
         .telegram_bridge
         .lock()
         .map_err(|_| "更新 Telegram bridge 状态失败".to_string())?;
-    refresh_telegram_bridge_manager(&mut manager);
-    if let Some(mut process) = manager.process.take() {
-        let _ = process.child.kill();
-        finish_telegram_bridge_process(&mut manager, process, None);
-    }
-    Ok(telegram_bridge_status_from_manager(&manager))
+    crate::telegram_bridge_runtime::refresh_telegram_bridge_manager(&mut manager);
+    crate::telegram_bridge_runtime::stop_active_process(&mut manager);
+    let status = telegram_bridge_status_from_manager(&manager);
+    drop(manager);
+    let _ = persist_integration_module_statuses(state);
+    Ok(status)
 }
 
+*/
 fn local_http_api_socket_addr(settings: &LocalHttpApiSettings) -> Result<SocketAddr, String> {
     let bind_address = normalize_local_http_api_bind_address(&settings.bind_address)?;
     let bind_port = normalize_local_http_api_bind_port(settings.bind_port);
@@ -5262,6 +6060,7 @@ async fn run_sync(
 ) -> Result<SyncStatus, String> {
     const SYNC_CANCELLED_SENTINEL: &str = "__sync_cancelled__";
     const SYNC_CANCELLED_MESSAGE: &str = "\u{5DF2}\u{53D6}\u{6D88}\u{5237}\u{65B0}";
+    let mut started_sync = false;
 
     loop {
         let running_status = {
@@ -5271,6 +6070,7 @@ async fn run_sync(
             if status.running {
                 Some(status.clone())
             } else {
+                started_sync = true;
                 status.running = true;
                 status.last_error = None;
                 status.last_result = Some(format!("\u{540C}\u{6B65}\u{4E2D}\u{FF1A}{source}..."));
@@ -5288,6 +6088,10 @@ async fn run_sync(
         }
 
         break;
+    }
+
+    if started_sync {
+        let _ = persist_integration_module_statuses(state);
     }
 
     let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
@@ -5318,7 +6122,7 @@ async fn run_sync(
     status.running = false;
     status.last_run_ms = Some(now_ms());
     status.current_source = None;
-    match result {
+    let final_result = match result {
         Ok(count) => {
             status.last_error = None;
             status.last_result = Some(format!(
@@ -5337,7 +6141,10 @@ async fn run_sync(
                 Err(err)
             }
         }
-    }
+    };
+    drop(status);
+    let _ = persist_integration_module_statuses(state);
+    final_result
 }
 
 async fn sync_once(state: &AppState) -> Result<usize, String> {
@@ -5906,6 +6713,16 @@ fn main() {
                     .map(|endpoint| endpoint.id.as_str())
             });
 
+            let app_data_dir = settings_path
+                .parent()
+                .ok_or_else(|| "鏃犳硶瀹氫綅搴旂敤鏁版嵁鐩綍".to_string())?
+                .to_path_buf();
+            let workspace_layout = WorkspaceLayout::new(app_data_dir);
+            workspace::ensure_workspace_dirs(&workspace_layout)?;
+            workspace::migrate_legacy_layout(
+                settings_path.parent().unwrap_or_else(|| Path::new(".")),
+                &workspace_layout,
+            )?;
             db::init_db(&db_path, migration_endpoint_id)?;
             fs::create_dir_all(&files_base_dir)
                 .map_err(|err| format!("创建文件目录失败: {err}"))?;
@@ -5931,6 +6748,7 @@ fn main() {
                 telegram_bridge: Mutex::new(TelegramBridgeManager::default()),
                 local_http_api: Mutex::new(LocalHttpApiManager::default()),
                 update_guard: AsyncMutex::new(()),
+                auto_backup_guard: AsyncMutex::new(()),
             });
 
             #[cfg(desktop)]
@@ -6004,7 +6822,7 @@ fn main() {
                                     return;
                                 };
 
-                                if let Err(err) = write_settings(&settings_path, &settings_copy) {
+                                if let Err(err) = write_settings_audited(&settings_path, &settings_copy) {
                                     eprintln!("写入快捷键设置失败: {err}");
                                 } else if let Ok(mut guard) = state.settings.lock() {
                                     *guard = settings_copy.clone();
@@ -6096,11 +6914,12 @@ fn main() {
                         .map(|settings| should_auto_start_telegram_bridge(&settings))
                         .unwrap_or(false);
                     if should_start {
-                        if let Err(err) = start_telegram_bridge_impl(&state).await {
+                        if let Err(err) = TelegramBridgeRuntimeAdapter::new(&state).start().await {
                             if let Ok(mut manager) = state.telegram_bridge.lock() {
                                 manager.last_error = Some(err.clone());
                                 manager.last_stopped_ms = Some(now_ms());
                             }
+                            let _ = persist_integration_module_statuses(&state);
                             eprintln!("Telegram bridge auto start failed: {err}");
                         }
                     }
@@ -6113,6 +6932,19 @@ fn main() {
                     let state = app_handle.state::<AppState>();
                     if let Err(err) = ensure_local_http_api_state(&app_handle, &state).await {
                         eprintln!("Local HTTP API auto start failed: {err}");
+                    }
+                });
+            }
+
+            {
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        let state = app_handle.state::<AppState>();
+                        if let Err(err) = maybe_run_scheduled_backup(&app_handle, &state).await {
+                            eprintln!("Scheduled backup run failed: {err}");
+                        }
+                        tokio::time::sleep(Duration::from_secs(60)).await;
                     }
                 });
             }
@@ -6137,6 +6969,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             get_telegram_bridge_status,
+            list_integration_modules,
+            get_auto_backup_status,
             get_local_http_api_status,
             get_app_version,
             check_app_update,
@@ -6144,11 +6978,15 @@ fn main() {
             restart_app,
             discover_telegram_chats,
             save_settings,
+            list_settings_snapshots,
+            list_local_backup_archives,
+            restore_settings_snapshot,
             save_send_hotkey,
             get_device_name,
             export_settings,
             import_settings,
             list_messages,
+            list_messages_window,
             list_marked_messages,
             list_marked_tags,
             send_text,
@@ -6213,7 +7051,7 @@ fn main() {
             tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }
         ) {
             let state = app_handle.state::<AppState>();
-            let _ = stop_telegram_bridge_impl(&state);
+            let _ = TelegramBridgeRuntimeAdapter::new(&state).stop();
             let _ = stop_local_http_api_impl(&state);
         }
 
@@ -6228,6 +7066,7 @@ fn main() {
 mod tests {
     use super::*;
     use std::fs;
+    use tokio::sync::watch;
 
     fn test_settings() -> Settings {
         Settings {
@@ -6249,7 +7088,34 @@ mod tests {
             auto_start: false,
             auto_update_enabled: false,
             local_http_api: LocalHttpApiSettings::default(),
+            backup: BackupSettings::default(),
             telegram: TelegramBridgeSettings::default(),
+        }
+    }
+
+    fn test_app_state(temp_dir: &Path, settings: Settings) -> AppState {
+        let settings_path = temp_dir.join("settings.json");
+        let db_path = temp_dir.join("messages.sqlite");
+        let workspace_layout = WorkspaceLayout::new(temp_dir.to_path_buf());
+        fs::create_dir_all(workspace_layout.endpoints_dir()).expect("create endpoints dir");
+        let (sync_loop_signal, _) = watch::channel(0_u64);
+
+        AppState {
+            settings_path,
+            db_path,
+            files_base_dir: workspace_layout.endpoints_dir(),
+            default_download_dir: temp_dir.join("downloads"),
+            settings: Mutex::new(settings),
+            sync_status: Mutex::new(SyncStatus::idle()),
+            sync_guard: AsyncMutex::new(()),
+            sync_cancel: Mutex::new(None),
+            sync_loop_signal,
+            http: Client::builder().build().expect("create http client"),
+            registered_hotkey: Mutex::new(None),
+            telegram_bridge: Mutex::new(TelegramBridgeManager::default()),
+            local_http_api: Mutex::new(LocalHttpApiManager::default()),
+            update_guard: AsyncMutex::new(()),
+            auto_backup_guard: AsyncMutex::new(()),
         }
     }
 
@@ -6725,6 +7591,49 @@ mod tests {
     }
 
     #[test]
+    fn webdav_sync_runtime_snapshot_reflects_sync_state_and_endpoint_enablement() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-webdav-runtime-{}", now_ms()));
+        let mut settings = test_settings();
+        settings.webdav_endpoints[0].enabled = true;
+        let state = test_app_state(&temp_dir, settings.clone());
+        {
+            let mut status = state.sync_status.lock().expect("lock sync status");
+            status.running = true;
+            status.last_error = Some("sync failed".to_string());
+            status.last_run_ms = Some(123);
+        }
+
+        let snapshot = WebDavSyncRuntimeAdapter::new(&state)
+            .status_snapshot(&settings)
+            .expect("webdav runtime snapshot");
+
+        assert!(snapshot.enabled);
+        assert!(snapshot.running);
+        assert_eq!(snapshot.last_error.as_deref(), Some("sync failed"));
+        assert_eq!(snapshot.last_stopped_ms, Some(123));
+    }
+
+    #[test]
+    fn webdav_sync_runtime_snapshot_reports_disabled_when_no_enabled_endpoint_exists() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-webdav-runtime-disabled-{}",
+            now_ms()
+        ));
+        let mut settings = test_settings();
+        settings.webdav_endpoints[0].enabled = false;
+        let state = test_app_state(&temp_dir, settings.clone());
+
+        let snapshot = WebDavSyncRuntimeAdapter::new(&state)
+            .status_snapshot(&settings)
+            .expect("webdav runtime snapshot");
+
+        assert!(!snapshot.enabled);
+        assert!(!snapshot.running);
+        assert!(snapshot.last_error.is_none());
+    }
+
+    #[test]
     fn should_auto_start_local_http_api_requires_enabled() {
         let mut settings = test_settings();
         assert!(!should_auto_start_local_http_api(&settings));
@@ -6764,7 +7673,7 @@ mod tests {
         let temp_dir = std::env::temp_dir().join(format!("transfer-genie-local-http-{}", now_ms()));
         let settings_path = temp_dir.join("settings.json");
 
-        write_settings(&settings_path, &settings).expect("write settings");
+        write_settings_audited(&settings_path, &settings).expect("write settings");
         let loaded = load_settings(&settings_path, &temp_dir).expect("load settings");
 
         assert!(loaded.local_http_api.enabled);
@@ -6774,6 +7683,424 @@ mod tests {
 
         let _ = fs::remove_file(&settings_path);
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn persist_integration_module_statuses_writes_bundle_and_module_files() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-module-status-{}", now_ms()));
+        let workspace_layout = WorkspaceLayout::new(temp_dir.clone());
+        workspace::ensure_workspace_dirs(&workspace_layout).expect("ensure workspace dirs");
+
+        let mut settings = test_settings();
+        settings.telegram.enabled = true;
+        let state = test_app_state(&temp_dir, settings);
+        {
+            let mut status = state.sync_status.lock().expect("lock sync status");
+            status.running = true;
+            status.last_run_ms = Some(100);
+        }
+        {
+            let mut manager = state.telegram_bridge.lock().expect("lock telegram manager");
+            manager.last_started_ms = Some(200);
+            manager.last_stopped_ms = Some(150);
+            manager.last_error = Some("bridge error".to_string());
+        }
+
+        persist_integration_module_statuses(&state).expect("persist integration module statuses");
+
+        let workspace_root = workspace_root_for_state(&state);
+        assert!(workspace_root.join("plugins").join("module-status.json").is_file());
+        assert!(workspace_root
+            .join("plugins")
+            .join("webdav-sync")
+            .join("status.json")
+            .is_file());
+        assert!(workspace_root
+            .join("plugins")
+            .join("telegram-bridge")
+            .join("status.json")
+            .is_file());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn write_settings_audited_creates_change_log() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-settings-audit-{}", now_ms()));
+        let settings_path = temp_dir.join("settings.json");
+        let workspace_root = temp_dir.join(workspace::WORKSPACE_DIR_NAME);
+
+        let settings = test_settings();
+        write_settings_audited(&settings_path, &settings).expect("write settings");
+
+        assert!(settings_path.is_file());
+        assert!(workspace_root.join("change-log").join("events.jsonl").is_file());
+
+        let _ = fs::remove_file(&settings_path);
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn list_settings_snapshots_for_state_returns_latest_snapshots() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-settings-snapshots-{}", now_ms()));
+        let workspace_layout = WorkspaceLayout::new(temp_dir.clone());
+        workspace::ensure_workspace_dirs(&workspace_layout).expect("ensure workspace dirs");
+        let settings_path = temp_dir.join("settings.json");
+
+        let mut settings = test_settings();
+        settings.sender_name = "first".to_string();
+        write_settings_audited(&settings_path, &settings).expect("write first settings");
+        settings.sender_name = "second".to_string();
+        write_settings_audited(&settings_path, &settings).expect("write second settings");
+
+        let state = test_app_state(&temp_dir, settings);
+        let snapshots = list_settings_snapshots_for_state(&state).expect("list settings snapshots");
+
+        assert!(!snapshots.is_empty());
+        assert_eq!(snapshots[0].category, "settings");
+        assert_eq!(snapshots[0].target_path, settings_path.to_string_lossy().to_string());
+
+        let _ = fs::remove_file(&settings_path);
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn restore_settings_snapshot_updates_in_memory_settings() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-restore-settings-snapshot-{}", now_ms()));
+        let workspace_layout = WorkspaceLayout::new(temp_dir.clone());
+        workspace::ensure_workspace_dirs(&workspace_layout).expect("ensure workspace dirs");
+        let settings_path = temp_dir.join("settings.json");
+
+        let mut settings = test_settings();
+        settings.sender_name = "before".to_string();
+        write_settings_audited(&settings_path, &settings).expect("write first settings");
+        settings.sender_name = "after".to_string();
+        write_settings_audited(&settings_path, &settings).expect("write second settings");
+
+        let state = test_app_state(&temp_dir, settings.clone());
+        let snapshots = list_settings_snapshots_for_state(&state).expect("list settings snapshots");
+        let restore_source = snapshots.last().expect("oldest snapshot");
+
+        workspace::restore_snapshot_to_target(
+            Path::new(&restore_source.path),
+            &state.settings_path,
+            Some(&workspace_root_for_state(&state)),
+            "settings",
+            "restore-settings-snapshot-test",
+        )
+        .expect("restore settings snapshot");
+
+        let restored =
+            load_settings(&state.settings_path, &state.default_download_dir).expect("load restored settings");
+        {
+            let mut guard = state.settings.lock().expect("lock settings");
+            *guard = restored.clone();
+        }
+
+        assert_eq!(restored.sender_name, "before");
+        assert_eq!(
+            state.settings.lock().expect("lock updated settings").sender_name,
+            "before"
+        );
+
+        let _ = fs::remove_file(&settings_path);
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn normalize_settings_applies_backup_defaults() {
+        let mut settings = test_settings();
+        let download_dir = std::env::temp_dir().join("transfer-genie-normalize-backup");
+        settings.backup.enabled = true;
+        settings.backup.interval_minutes = 0;
+        settings.backup.retain_count = 0;
+
+        let normalized = normalize_settings(settings, &download_dir).expect("normalize settings");
+
+        assert_eq!(normalized.backup.interval_minutes, 5);
+        assert_eq!(normalized.backup.retain_count, 1);
+    }
+
+    #[test]
+    fn prune_auto_backup_archives_keeps_latest_files() {
+        let archive_dir =
+            std::env::temp_dir().join(format!("transfer-genie-backup-prune-{}", now_ms()));
+        fs::create_dir_all(&archive_dir).expect("create archive dir");
+        for name in ["001.zip", "002.zip", "003.zip"] {
+            fs::write(archive_dir.join(name), name.as_bytes()).expect("write archive");
+        }
+
+        prune_auto_backup_archives(&archive_dir, 2).expect("prune backups");
+
+        assert!(!archive_dir.join("001.zip").exists());
+        assert!(archive_dir.join("002.zip").exists());
+        assert!(archive_dir.join("003.zip").exists());
+
+        let _ = fs::remove_dir_all(&archive_dir);
+    }
+
+    #[test]
+    fn save_and_load_auto_backup_state_round_trip() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-backup-state-{}", now_ms()));
+        let workspace_layout = WorkspaceLayout::new(temp_dir.clone());
+        workspace::ensure_workspace_dirs(&workspace_layout).expect("ensure workspace dirs");
+        let state = test_app_state(&temp_dir, test_settings());
+        let record = AutoBackupStateRecord {
+            last_run_ms: Some(100),
+            last_success_ms: Some(90),
+            last_error: Some("backup failed".to_string()),
+            last_backup_path: Some("E:/backup.zip".to_string()),
+        };
+
+        save_auto_backup_state(&state, &record).expect("save auto backup state");
+        let loaded = load_auto_backup_state(&state);
+
+        assert_eq!(loaded.last_run_ms, Some(100));
+        assert_eq!(loaded.last_success_ms, Some(90));
+        assert_eq!(loaded.last_error.as_deref(), Some("backup failed"));
+        assert_eq!(loaded.last_backup_path.as_deref(), Some("E:/backup.zip"));
+        assert!(auto_backup_state_path(&state).is_file());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn auto_backup_status_for_state_combines_settings_and_persisted_state() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-auto-backup-status-{}", now_ms()));
+        let workspace_layout = WorkspaceLayout::new(temp_dir.clone());
+        workspace::ensure_workspace_dirs(&workspace_layout).expect("ensure workspace dirs");
+        let mut settings = test_settings();
+        settings.backup.enabled = true;
+        settings.backup.interval_minutes = 15;
+        settings.backup.retain_count = 3;
+        let state = test_app_state(&temp_dir, settings);
+        let persisted = AutoBackupStateRecord {
+            last_run_ms: Some(100),
+            last_success_ms: Some(90),
+            last_error: Some("backup failed".to_string()),
+            last_backup_path: Some("E:/archives/auto.zip".to_string()),
+        };
+        save_auto_backup_state(&state, &persisted).expect("save auto backup state");
+
+        let status = auto_backup_status_for_state(&state).expect("auto backup status");
+
+        assert!(status.enabled);
+        assert_eq!(status.interval_minutes, 15);
+        assert_eq!(status.retain_count, 3);
+        assert!(status.has_active_endpoint);
+        assert_eq!(status.last_run_ms, Some(100));
+        assert_eq!(status.last_success_ms, Some(90));
+        assert_eq!(status.last_error.as_deref(), Some("backup failed"));
+        assert_eq!(status.last_backup_path.as_deref(), Some("E:/archives/auto.zip"));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn should_run_auto_backup_respects_enablement_endpoint_and_interval() {
+        let mut settings = test_settings();
+        settings.backup.enabled = true;
+        settings.backup.interval_minutes = 10;
+
+        assert!(should_run_auto_backup(&settings, None, 1_000));
+        assert!(!should_run_auto_backup(&settings, Some(1_000), 1_000 + 5 * 60 * 1000));
+        assert!(should_run_auto_backup(&settings, Some(1_000), 1_000 + 10 * 60 * 1000));
+
+        settings.backup.enabled = false;
+        assert!(!should_run_auto_backup(&settings, None, 1_000));
+
+        settings.backup.enabled = true;
+        settings.active_webdav_id = None;
+        assert!(!should_run_auto_backup(&settings, None, 1_000));
+    }
+
+    #[test]
+    fn record_local_backup_event_writes_backup_record_and_change_log() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-backup-record-{}", now_ms()));
+        let workspace_layout = WorkspaceLayout::new(temp_dir.clone());
+        workspace::ensure_workspace_dirs(&workspace_layout).expect("ensure workspace dirs");
+        let settings = test_settings();
+        let endpoint = settings
+            .webdav_endpoints
+            .first()
+            .cloned()
+            .expect("test endpoint");
+        let state = test_app_state(&temp_dir, settings);
+
+        record_local_backup_event(&state, &endpoint, "E:/archives/backup.zip", "backup-webdav")
+            .expect("record backup event");
+
+        let backups_dir = workspace_root_for_state(&state).join("backups");
+        let backup_records = fs::read_dir(&backups_dir)
+            .expect("read backups dir")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("json"))
+            .collect::<Vec<_>>();
+        assert_eq!(backup_records.len(), 1);
+
+        let record_content =
+            fs::read_to_string(backup_records[0].path()).expect("read backup record content");
+        let record_json: serde_json::Value =
+            serde_json::from_str(&record_content).expect("parse backup record json");
+        assert_eq!(record_json.get("endpointId").and_then(|value| value.as_str()), Some("endpoint-1"));
+        assert_eq!(
+            record_json.get("backupPath").and_then(|value| value.as_str()),
+            Some("E:/archives/backup.zip")
+        );
+        assert_eq!(
+            record_json.get("source").and_then(|value| value.as_str()),
+            Some("backup-webdav")
+        );
+
+        let change_log_path = workspace_root_for_state(&state)
+            .join("change-log")
+            .join("events.jsonl");
+        let change_log = fs::read_to_string(&change_log_path).expect("read change log");
+        assert!(change_log.contains("\"category\":\"backup-record\""));
+        assert!(change_log.contains("\"operation\":\"backup-webdav\""));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn list_local_backup_archives_for_state_returns_sorted_records() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-list-backup-records-{}", now_ms()));
+        let workspace_layout = WorkspaceLayout::new(temp_dir.clone());
+        workspace::ensure_workspace_dirs(&workspace_layout).expect("ensure workspace dirs");
+        let settings = test_settings();
+        let endpoint = settings
+            .webdav_endpoints
+            .first()
+            .cloned()
+            .expect("test endpoint");
+        let state = test_app_state(&temp_dir, settings);
+
+        let archive_a = temp_dir.join("archive-a.zip");
+        let archive_b = temp_dir.join("archive-b.zip");
+        fs::write(&archive_a, b"a").expect("write archive a");
+        fs::write(&archive_b, b"bb").expect("write archive b");
+
+        record_local_backup_event(&state, &endpoint, &archive_a.to_string_lossy(), "backup-webdav")
+            .expect("record backup event a");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        record_local_backup_event(&state, &endpoint, &archive_b.to_string_lossy(), "restore-webdav")
+            .expect("record backup event b");
+
+        let records =
+            list_local_backup_archives_for_state(&state).expect("list local backup archive records");
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].backup_path, archive_b.to_string_lossy().to_string());
+        assert_eq!(records[0].source, "restore-webdav");
+        assert!(records[0].exists);
+        assert_eq!(records[0].size_bytes, 2);
+        assert_eq!(records[1].backup_path, archive_a.to_string_lossy().to_string());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    fn build_test_restore_archive(entry_names: &[&str]) -> zip::ZipArchive<std::io::Cursor<Vec<u8>>> {
+        use std::io::{Cursor, Write};
+        use zip::write::FileOptions;
+
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options: FileOptions<'_, ()> =
+            FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+        for entry_name in entry_names {
+            writer
+                .start_file(entry_name, options)
+                .expect("start archive entry");
+            writer.write_all(b"{}").expect("write archive entry");
+        }
+
+        let cursor = writer.finish().expect("finish archive");
+        zip::ZipArchive::new(Cursor::new(cursor.into_inner())).expect("open archive")
+    }
+
+    #[test]
+    fn validate_restore_archive_history_entries_accepts_legacy_history_file() {
+        let mut archive = build_test_restore_archive(&["history.json", "files/example.txt"]);
+
+        assert!(restore_archive_has_history_entries(&mut archive));
+        let result = validate_restore_archive_history_entries(&mut archive);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_restore_archive_history_entries_accepts_manifest_history_file() {
+        let mut archive =
+            build_test_restore_archive(&["history/index.json", "files/example.txt"]);
+
+        assert!(restore_archive_has_history_entries(&mut archive));
+        let result = validate_restore_archive_history_entries(&mut archive);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_restore_archive_history_entries_rejects_archive_without_history_index() {
+        let mut archive = build_test_restore_archive(&["files/example.txt"]);
+
+        assert!(!restore_archive_has_history_entries(&mut archive));
+        let error = validate_restore_archive_history_entries(&mut archive)
+            .expect_err("archive without history entry should fail");
+
+        assert!(error.contains("history.json"));
+    }
+
+    #[test]
+    fn restore_archive_target_path_rejects_empty_names() {
+        assert_eq!(restore_archive_target_path(""), None);
+        assert_eq!(restore_archive_target_path("   "), None);
+    }
+
+    #[test]
+    fn restore_archive_target_path_keeps_non_empty_names() {
+        assert_eq!(restore_archive_target_path("files/example.txt"), Some("files/example.txt"));
+        assert_eq!(restore_archive_target_path(" history/index.json "), Some("history/index.json"));
+    }
+
+    #[test]
+    fn classify_restore_archive_entry_skips_empty_names() {
+        assert!(matches!(
+            classify_restore_archive_entry("   ", false),
+            RestoreArchiveEntryKind::Skip
+        ));
+    }
+
+    #[test]
+    fn classify_restore_archive_entry_marks_directory_entries() {
+        match classify_restore_archive_entry(" files/subdir ", true) {
+            RestoreArchiveEntryKind::Directory(path) => assert_eq!(path, "files/subdir"),
+            _ => panic!("expected directory entry"),
+        }
+    }
+
+    #[test]
+    fn classify_restore_archive_entry_marks_file_entries() {
+        match classify_restore_archive_entry(" files/example.txt ", false) {
+            RestoreArchiveEntryKind::File(path) => assert_eq!(path, "files/example.txt"),
+            _ => panic!("expected file entry"),
+        }
+    }
+
+    #[test]
+    fn should_skip_restore_cleanup_path_matches_root_and_root_slash_only() {
+        assert!(should_skip_restore_cleanup_path("files", "files"));
+        assert!(should_skip_restore_cleanup_path("files/", "files"));
+        assert!(!should_skip_restore_cleanup_path("files/example.txt", "files"));
+        assert!(!should_skip_restore_cleanup_path("history/index.json", "history"));
     }
 
     #[test]
@@ -6853,7 +8180,7 @@ mod tests {
         };
         let mut manager = TelegramBridgeManager::default();
 
-        finish_telegram_bridge_process(&mut manager, process, None);
+        crate::telegram_bridge_runtime::finish_telegram_bridge_process(&mut manager, process, None);
 
         assert!(!runtime_config_path.exists());
         assert!(manager.last_pid.is_some());
@@ -6880,7 +8207,7 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(150));
 
-        refresh_telegram_bridge_manager(&mut manager);
+        crate::telegram_bridge_runtime::refresh_telegram_bridge_manager(&mut manager);
 
         assert!(manager.process.is_none());
         assert!(!runtime_config_path.exists());

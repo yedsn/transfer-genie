@@ -4,6 +4,206 @@ const openDialog = tauri.dialog?.open;
 const saveDialog = tauri.dialog?.save;
 const listen = tauri.event?.listen;
 const convertFileSrc = tauri.path?.convertFileSrc;
+const vueBridge = window.transferGenieVue || null;
+const hasVueAppShell = !!(vueBridge && vueBridge.isEnabled);
+const feedState = window.transferGenieFeedState || null;
+const feedViewModel = window.transferGenieFeedViewModel || null;
+const settingsFormRuntime = window.transferGenieSettingsFormRuntime || null;
+const settingsOpsRuntime = window.transferGenieSettingsOpsRuntime || null;
+const settingsRuntimeStatus = window.transferGenieSettingsRuntimeStatus || null;
+
+function syncVueActiveTab(tab) {
+  vueBridge?.syncActiveTab?.(tab);
+}
+
+function syncVueSettings(settings) {
+  vueBridge?.syncSettings?.(settings);
+}
+
+function syncVueIntegrationModules(modules) {
+  vueBridge?.syncIntegrationModules?.(modules);
+}
+
+function syncVueTelegramBridgeStatus(status) {
+  vueBridge?.syncTelegramBridgeStatus?.(status);
+}
+
+function syncVueLocalHttpApiStatus(status) {
+  vueBridge?.syncLocalHttpApiStatus?.(status);
+}
+
+function syncVueHomeFeed(feedState) {
+  vueBridge?.syncHomeFeed?.(feedState);
+}
+
+function syncVueMarkedPage(markedState) {
+  vueBridge?.syncMarkedPage?.(markedState);
+}
+
+function syncVueTransferTasks(transferState) {
+  vueBridge?.syncTransferTasks?.(transferState);
+}
+
+function syncVueSettingsOps(settingsOpsState) {
+  vueBridge?.syncSettingsOps?.(settingsOpsState);
+}
+
+function syncVueSettingsWebdav(webdavState) {
+  vueBridge?.syncSettingsWebdav?.(webdavState);
+}
+
+function syncVueSettingsForm(formState) {
+  vueBridge?.syncSettingsForm?.(formState);
+}
+
+function syncVueSettingsSnapshots(snapshots) {
+  vueBridge?.syncSettingsSnapshots?.(snapshots);
+}
+
+function syncVueSettingsSnapshotsLoading(isLoading) {
+  vueBridge?.syncSettingsSnapshotsLoading?.(isLoading);
+}
+
+function syncVueSettingsBackupArchives(records) {
+  vueBridge?.syncSettingsBackupArchives?.(records);
+}
+
+function syncVueSettingsBackupArchivesLoading(isLoading) {
+  vueBridge?.syncSettingsBackupArchivesLoading?.(isLoading);
+}
+
+function syncVueSettingsAutoBackup(autoBackupState) {
+  vueBridge?.syncSettingsAutoBackup?.(autoBackupState);
+}
+
+function updateSettingsAutoBackupField(field, value) {
+  if (!field) {
+    return;
+  }
+  currentAutoBackupStatusState = {
+    ...currentAutoBackupStatusState,
+    [field]: value,
+  };
+  syncVueSettingsAutoBackup(currentAutoBackupStatusState);
+}
+
+function updateSettingsFormField(field, value) {
+  if (!field) {
+    return;
+  }
+  currentSettingsFormState = {
+    ...currentSettingsFormState,
+    [field]: value,
+  };
+  syncVueSettingsForm(currentSettingsFormState);
+}
+
+function getCurrentSenderName() {
+  if (settingsFormRuntime?.getCurrentSenderName) {
+    return settingsFormRuntime.getCurrentSenderName(
+      currentSettingsFormState,
+      senderNameInput?.value,
+    );
+  }
+  return senderNameInput?.value?.trim?.() || '';
+}
+
+function applyTelegramChatIdValue(chatId) {
+  const nextChatId = chatId || '';
+  if (telegramChatIdInput) {
+    telegramChatIdInput.value = nextChatId;
+  }
+  updateSettingsFormField('telegramChatId', nextChatId);
+}
+
+function buildMessageBoundary(message) {
+  if (feedState?.buildMessageBoundary) {
+    return feedState.buildMessageBoundary(message);
+  }
+  if (!message?.filename) {
+    return null;
+  }
+  return {
+    timestamp_ms: message.timestamp_ms || 0,
+    filename: message.filename,
+  };
+}
+
+function syncVueSettingsOpsState() {
+  if (!hasVueAppShell) {
+    return;
+  }
+  syncVueSettingsOps(currentSettingsOpsState);
+}
+
+function buildVueWebdavEndpointState() {
+  return {
+    useVueList: hasVueAppShell,
+    emptyMessage: '暂无 WebDAV 端点',
+    endpoints: webdavEndpoints.map((endpoint) => ({
+      id: endpoint.id,
+      title: getEndpointLabel(endpoint),
+      name: endpoint.name || '',
+      url: endpoint.url || '',
+      username: endpoint.username || '',
+      password: endpoint.password || '',
+      enabled: !!endpoint.enabled,
+      isActive: endpoint.id === activeEndpointId,
+      activeDisabled: !endpoint.enabled,
+      speedTestDisabled: !!endpoint.speedTestRunning || !(endpoint.url || '').trim(),
+      speedTestRunning: !!endpoint.speedTestRunning,
+      speedTestLabel: endpoint.speedTestRunning ? '测速中...' : '测速',
+      speedTestResult: endpoint.speedTestResult || null,
+    })),
+  };
+}
+
+function syncVueSettingsWebdavState() {
+  if (!hasVueAppShell) {
+    return;
+  }
+  syncVueSettingsWebdav(buildVueWebdavEndpointState());
+}
+
+function createMessageViewModel(message) {
+  if (feedViewModel?.createMessageViewModel) {
+    return feedViewModel.createMessageViewModel(message, {
+      senderName: currentSettingsFormState.senderName,
+      formatTime,
+      formatBytes,
+      isImagePath,
+      hasLocalMessageFile,
+      isDownloadTaskActive: (source) =>
+        isDownloadTaskActive(getDownloadTask(source?.filename, activeEndpointId)),
+    });
+  }
+  return {
+    filename: message?.filename || '',
+    originalName: message?.original_name || message?.filename || '',
+    kind: message?.kind || 'text',
+    format: message?.format || 'text',
+    isFile: message?.kind === 'file',
+    isText: message?.kind !== 'file',
+    isMarkdown: message?.kind !== 'file' && message?.format === 'markdown',
+    isImage: message?.kind === 'file' && isImagePath(message?.original_name || message?.filename),
+    isSelf:
+      message?.sender === '我' ||
+      (!!currentSettingsFormState.senderName?.trim() &&
+        message?.sender === currentSettingsFormState.senderName.trim()),
+    isMarked: !!message?.marked,
+    isUploading: !!message?.uploading,
+    isSending: !!message?.sending,
+    sendStatus: message?.sendStatus || '',
+    sendError: message?.sendError || '',
+    headerText: `${message?.sender || ''} · ${formatTime(message?.timestamp_ms || 0)}`,
+    bodyText:
+      message?.kind === 'file'
+        ? (message?.original_name || message?.filename || '')
+        : (message?.content || ''),
+    metaText: `大小 ${formatBytes(message?.size || 0)}`,
+    message,
+  };
+}
 
 const messageList = document.getElementById('message-list');
 const syncStatus = document.getElementById('sync-status');
@@ -318,6 +518,45 @@ let refreshTimer = null;
 let activeRefreshIntervalSecs = 5;
 let refreshCountdownSecs = 5;
 let didInitialSync = false;
+let settingsSnapshots = [];
+let settingsBackupArchives = [];
+let currentSettingsFormState = {
+  senderName: '',
+  refreshIntervalSecs: 5,
+  downloadDir: '',
+  autoStart: false,
+  autoUpdateEnabled: false,
+  globalHotkeyEnabled: true,
+  globalHotkey: 'alt+t',
+  localHttpApiEnabled: false,
+  localHttpApiBindAddress: '127.0.0.1',
+  localHttpApiBindPort: 6011,
+  telegramAutoStart: false,
+  telegramBotToken: '',
+  telegramProxyEnabled: false,
+  telegramProxyUrl: 'http://127.0.0.1:7890',
+  telegramChatId: '',
+  telegramSenderName: '',
+  telegramPollIntervalSecs: 10,
+};
+let currentAutoBackupStatusState = {
+  enabled: false,
+  intervalMinutes: 5,
+  retainCount: 1,
+  hasActiveEndpoint: false,
+  lastRunMs: null,
+  lastSuccessMs: null,
+  lastError: null,
+  lastBackupPath: '',
+};
+let currentSettingsOpsState = settingsOpsRuntime?.createDefaultSettingsOpsState
+  ? settingsOpsRuntime.createDefaultSettingsOpsState()
+  : {
+      backupLabel: '备份 WebDAV',
+      backupRunning: false,
+      restoreLabel: '恢复 WebDAV',
+      restoreRunning: false,
+    };
 let webdavEndpoints = [];
 let activeEndpointId = null;
 const downloadProgress = new Map();
@@ -363,10 +602,31 @@ let composerMarkPanelRefreshPromise = null;
 let markedMessagesPage = 1;
 const MARKED_MESSAGES_PER_PAGE = 10;
 const UNTAGGED_MARKED_TAG_FILTER_ID = '__untagged__';
+let currentMarkedPageState = {
+  useVueList: false,
+  emptyMessage: '',
+  currentPage: 1,
+  totalPages: 1,
+  selectionMode: false,
+  selectionCount: 0,
+  messages: [],
+};
 let telegramBridgeStatusPollTimer = null;
 let currentTransferListView = 'downloads';
 let downloadTasksPage = 1;
 let uploadTasksPage = 1;
+let currentDownloadTaskPageState = {
+  summary: '',
+  currentPage: 1,
+  totalPages: 1,
+  tasks: [],
+};
+let currentUploadTaskPageState = {
+  summary: '',
+  currentPage: 1,
+  totalPages: 1,
+  tasks: [],
+};
 const transferTaskCounts = {
   downloads: 0,
   uploads: 0,
@@ -515,21 +775,108 @@ if (formatInputs) {
 const PAGE_SIZE = 10;
 const LOAD_MORE_TRIGGER_TOP = 50;
 const LOAD_MORE_DEBOUNCE_MS = 120;
-let currentOffset = 0;
 let totalMessages = 0;
 let hasMoreMessages = false;
 let isLoadingMore = false;
 let loadMoreDebounceTimer = null;
 let lastMessageListScrollTop = 0;
+let oldestLoadedMessageRef = null;
+let newestLoadedMessageRef = null;
 
-function syncCurrentOffsetWithLoadedMessages() {
-  currentOffset = Math.max(0, lastMessages.length - PAGE_SIZE);
+function syncLoadedMessageBoundaries() {
+  if (feedState?.syncLoadedMessageBoundaries) {
+    const boundaries = feedState.syncLoadedMessageBoundaries(lastMessages);
+    oldestLoadedMessageRef = boundaries.oldestLoadedMessageRef;
+    newestLoadedMessageRef = boundaries.newestLoadedMessageRef;
+    return;
+  }
+  oldestLoadedMessageRef = lastMessages.length > 0 ? buildMessageBoundary(lastMessages[0]) : null;
+  newestLoadedMessageRef =
+    lastMessages.length > 0 ? buildMessageBoundary(lastMessages[lastMessages.length - 1]) : null;
 }
 
 function resetLoadedMessagesState() {
-  currentOffset = 0;
+  if (feedState?.resetLoadedMessagesState) {
+    const nextState = feedState.resetLoadedMessagesState();
+    lastMessages = nextState.lastMessages;
+    totalMessages = nextState.totalMessages;
+    hasMoreMessages = nextState.hasMoreMessages;
+    oldestLoadedMessageRef = nextState.oldestLoadedMessageRef;
+    newestLoadedMessageRef = nextState.newestLoadedMessageRef;
+    return;
+  }
   lastMessages = [];
+  totalMessages = 0;
   hasMoreMessages = false;
+  oldestLoadedMessageRef = null;
+  newestLoadedMessageRef = null;
+}
+
+function pruneLoadedMessagesByFilenames(filenames, options = {}) {
+  const result = feedState?.pruneLoadedMessagesState
+    ? feedState.pruneLoadedMessagesState(
+        {
+          lastMessages,
+          totalMessages,
+          hasMoreMessages,
+          oldestLoadedMessageRef,
+          newestLoadedMessageRef,
+        },
+        filenames,
+      )
+    : null;
+  const removedCount = result ? result.removedCount : 0;
+  if (removedCount <= 0) {
+    return 0;
+  }
+  if (result) {
+    lastMessages = result.state.lastMessages;
+    totalMessages = result.state.totalMessages;
+    hasMoreMessages = result.state.hasMoreMessages;
+    oldestLoadedMessageRef = result.state.oldestLoadedMessageRef;
+    newestLoadedMessageRef = result.state.newestLoadedMessageRef;
+  } else {
+    totalMessages = Math.max(0, totalMessages - removedCount);
+    syncLoadedMessageBoundaries();
+    hasMoreMessages = totalMessages > lastMessages.length;
+  }
+  if (options.render !== false) {
+    renderCurrentMessageView({ preserveScroll: true, scrollToBottom: false });
+  }
+  return removedCount;
+}
+
+function resolveDeletedFilenames(requestedFilenames, failedFilenames) {
+  if (feedState?.resolveDeletedFilenames) {
+    return feedState.resolveDeletedFilenames(requestedFilenames, failedFilenames);
+  }
+  const failed = new Set(
+    (Array.isArray(failedFilenames) ? failedFilenames : [])
+      .map((filename) => String(filename || '').trim())
+      .filter(Boolean),
+  );
+  return (Array.isArray(requestedFilenames) ? requestedFilenames : [])
+    .map((filename) => String(filename || '').trim())
+    .filter((filename) => filename && !failed.has(filename));
+}
+
+async function refreshMessageListsAfterDelete(filenames, options = {}) {
+  const deletedFilenames = (Array.isArray(filenames) ? filenames : [])
+    .map((filename) => String(filename || '').trim())
+    .filter(Boolean);
+  if (deletedFilenames.length > 0) {
+    deletedFilenames.forEach((filename) => selectedMessages.delete(filename));
+    deletedFilenames.forEach((filename) => selectedMarkedMessages.delete(filename));
+    pruneLoadedMessagesByFilenames(deletedFilenames, {
+      render: options.render !== false,
+    });
+    updateSelectionBar();
+    updateMarkedSelectionBar();
+  }
+  await Promise.all([
+    loadMessages({ checkNew: true, scrollToBottom: false }),
+    loadMarkedMessages(),
+  ]);
 }
 
 function formatBytes(bytes) {
@@ -978,7 +1325,7 @@ function isValidGlobalHotkey(value) {
 
 function syncGlobalHotkeyInputState() {
   if (!globalHotkeyInput || !globalHotkeyEnabledInput) return;
-  globalHotkeyInput.disabled = !globalHotkeyEnabledInput.checked;
+  globalHotkeyInput.disabled = !currentSettingsFormState.globalHotkeyEnabled;
 }
 
 async function minimizeAppWindow() {
@@ -1158,9 +1505,70 @@ function renderEndpointSelect() {
   });
 }
 
+function findWebdavEndpoint(endpointId) {
+  if (!endpointId) {
+    return null;
+  }
+  return webdavEndpoints.find((endpoint) => endpoint.id === endpointId) || null;
+}
+
+function refreshWebdavEndpointViews() {
+  if (hasVueAppShell) {
+    syncVueSettingsWebdavState();
+    syncTelegramControlsState();
+    return;
+  }
+  renderWebdavEndpoints();
+}
+
+async function runVueWebdavSpeedTest(endpointId) {
+  const endpoint = findWebdavEndpoint(endpointId);
+  if (!endpoint) {
+    return null;
+  }
+  if (!(endpoint.url || '').trim()) {
+    setErrorStatus('请先填写 WebDAV URL');
+    return null;
+  }
+  endpoint.speedTestRunning = true;
+  endpoint.speedTestResult = null;
+  refreshWebdavEndpointViews();
+  try {
+    const result = await invoke('test_webdav_speed', {
+      endpoint: {
+        id: endpoint.id,
+        name: endpoint.name,
+        url: endpoint.url,
+        username: endpoint.username,
+        password: endpoint.password,
+        enabled: endpoint.enabled,
+      },
+    });
+    const uploadSpeed = Number(result?.upload_speed_mbps || 0);
+    const downloadSpeed = Number(result?.download_speed_mbps || 0);
+    endpoint.speedTestResult = {
+      uploadText: `${uploadSpeed.toFixed(2)} MB/s`,
+      downloadText: `${downloadSpeed.toFixed(2)} MB/s`,
+    };
+    setSuccessStatus('测速完成');
+    return endpoint.speedTestResult;
+  } catch (error) {
+    endpoint.speedTestResult = null;
+    setErrorStatus(`测速失败：${error}`);
+    throw error;
+  } finally {
+    endpoint.speedTestRunning = false;
+    refreshWebdavEndpointViews();
+  }
+}
 
 function renderWebdavEndpoints() {
   if (!webdavList) return;
+  if (hasVueAppShell) {
+    syncVueSettingsWebdavState();
+    syncTelegramControlsState();
+    return;
+  }
   webdavList.innerHTML = '';
   if (webdavEndpoints.length === 0) {
     const empty = document.createElement('div');
@@ -1883,6 +2291,7 @@ function setTransferListView(view) {
   }
   updateTransferClearButton();
   updateDownloadSelectionBar();
+  syncVueTransferTaskState();
 }
 
 function paginateTransferTasks(tasks, page) {
@@ -1950,6 +2359,95 @@ function renderTransferPagination(listElement, options = {}) {
   listElement.appendChild(paginationContainer);
 }
 
+function buildTransferTaskViewModel(task, options = {}) {
+  const kind = options.kind === 'upload' ? 'upload' : 'download';
+  const isDownload = kind === 'download';
+  const isActive = isDownload ? isDownloadTaskActive(task) : task?.status === 'progress';
+  const isComplete = task?.status === 'complete';
+  const isError = task?.status === 'error';
+  const progressPercent = task?.total
+    ? Math.min(100, Math.round(((task.received || 0) / task.total) * 100))
+    : (isActive ? 30 : 0);
+  let detailText = '';
+  if (isActive) {
+    detailText = isDownload
+      ? formatDownloadProgressText(task, getSpeed(downloadSpeed, task.key), true)
+      : formatProgress(
+          task.received || 0,
+          task.total || 0,
+          uploadStatusLabel(task),
+          getSpeed(uploadSpeed, task.speedKey || task.key)
+        );
+  } else if (isError) {
+    detailText = task?.error || (isDownload ? '下载失败' : '上传失败');
+  } else if (task?.path) {
+    detailText = task.localExists === false ? `${task.path}（文件不存在）` : task.path;
+  } else if (isDownload) {
+    detailText = isComplete ? '文件已保存' : '等待下载';
+  } else {
+    detailText = '上传已完成';
+  }
+
+  return {
+    key: task?.key || '',
+    kind,
+    historyId: task?.historyId || null,
+    title: task?.originalName || task?.filename || '',
+    stateLabel: isDownload ? getDownloadTaskDisplayStateLabel(task) : getUploadTaskStateLabel(task),
+    metaText: `${task?.endpointLabel || '未选择端点'} · ${formatBytes(task?.total || 0)}`,
+    detailText,
+    updatedText: formatTime(task?.updatedAt || task?.createdAt || Date.now()),
+    isActive,
+    isComplete,
+    isError,
+    selectionMode: !!options.selectionMode,
+    isSelected: !!options.isSelected,
+    selectable: !!options.selectable,
+    showProgress: isActive,
+    progressPercent,
+    showHistoryActions: isDownload && !!task?.historyId && !isActive,
+    canOpenFile: task?.localExists !== false,
+  };
+}
+
+function syncVueTransferTaskState() {
+  if (!hasVueAppShell) {
+    return;
+  }
+  const downloadTasksForVue = (currentDownloadTaskPageState.tasks || []).map((task) =>
+    buildTransferTaskViewModel(task, {
+      kind: 'download',
+      selectionMode: downloadSelectionMode,
+      isSelected: selectedDownloadTasks.has(task?.key),
+      selectable: !!(task?.historyId && !isDownloadTaskActive(task)),
+    })
+  );
+  const uploadTasksForVue = (currentUploadTaskPageState.tasks || []).map((task) =>
+    buildTransferTaskViewModel(task, {
+      kind: 'upload',
+      selectionMode: downloadSelectionMode,
+      isSelected: selectedUploadTasks.has(task?.key),
+      selectable: !!(task?.historyId && task?.status !== 'progress'),
+    })
+  );
+  syncVueTransferTasks({
+    useVuePanels: true,
+    currentView: currentTransferListView,
+    selectionMode: downloadSelectionMode,
+    selectionCount: getCurrentTransferSelectionSet().size,
+    downloadsCount: Math.max(0, Number(transferTaskCounts.downloads) || 0),
+    uploadsCount: Math.max(0, Number(transferTaskCounts.uploads) || 0),
+    downloadSummary: currentDownloadTaskPageState.summary || '',
+    uploadSummary: currentUploadTaskPageState.summary || '',
+    downloadPage: currentDownloadTaskPageState.currentPage || 1,
+    downloadTotalPages: currentDownloadTaskPageState.totalPages || 1,
+    uploadPage: currentUploadTaskPageState.currentPage || 1,
+    uploadTotalPages: currentUploadTaskPageState.totalPages || 1,
+    downloadTasks: downloadTasksForVue,
+    uploadTasks: uploadTasksForVue,
+  });
+}
+
 function renderDownloadTasks() {
   if (!downloadTaskPanel || !downloadTaskList) {
     return;
@@ -1980,6 +2478,13 @@ function renderDownloadTasks() {
           : '暂无进行中的下载任务。';
   }
 
+  currentDownloadTaskPageState = {
+    summary: downloadTaskSummary ? downloadTaskSummary.textContent : '',
+    currentPage,
+    totalPages,
+    tasks: pageTasks,
+  };
+  syncVueTransferTaskState();
   if (tasks.length === 0) {
     const empty = document.createElement('li');
     empty.className = 'download-task-empty';
@@ -2319,8 +2824,23 @@ function renderUploadTasks() {
     empty.className = 'download-task-empty';
     empty.textContent = '暂无上传任务，发送文件后会显示在这里。';
     uploadTaskList.appendChild(empty);
+    currentUploadTaskPageState = {
+      summary: uploadTaskSummary ? uploadTaskSummary.textContent : '',
+      currentPage,
+      totalPages,
+      tasks: pageTasks,
+    };
+    syncVueTransferTaskState();
     return;
   }
+
+  currentUploadTaskPageState = {
+    summary: uploadTaskSummary ? uploadTaskSummary.textContent : '',
+    currentPage,
+    totalPages,
+    tasks: pageTasks,
+  };
+  syncVueTransferTaskState();
 
   pageTasks.forEach((task) => {
     const item = document.createElement('li');
@@ -2604,6 +3124,9 @@ function toggleSelectedMessage(filename, checked) {
 }
 
 function isMessageSelectionRefreshPaused() {
+  if (feedState?.isMessageSelectionRefreshPaused) {
+    return feedState.isMessageSelectionRefreshPaused(selectionMode);
+  }
   return selectionMode;
 }
 
@@ -2691,6 +3214,13 @@ function toggleSelectedMarkedMessage(filename, checked) {
     selectedMarkedMessages.delete(filename);
   }
   updateMarkedSelectionBar();
+  currentMarkedPageState.selectionCount = selectedMarkedMessages.size;
+  currentMarkedPageState.messages = (currentMarkedPageState.messages || []).map((message) =>
+    message.filename === filename
+      ? { ...message, isSelected: checked }
+      : message
+  );
+  syncVueMarkedPageState();
 }
 
 function selectAllMarkedMessages() {
@@ -2703,6 +3233,48 @@ function selectAllMarkedMessages() {
   renderMarkedMessages(markedMessages, {
     query: getAppliedMarkedSearchQuery(),
   });
+}
+
+function buildMarkedMessageViewModel(message) {
+  const resolvedTags = (message?.marked_tag_ids || [])
+    .map((tagId) => markedTags.find((tag) => tag.id === tagId))
+    .filter(Boolean)
+    .map((tag) => tag.name);
+  const bodyText = message?.kind === 'text'
+    ? (message?.content || '')
+    : (message?.original_name || message?.filename || '');
+  const estimatedCollapsible = message?.kind === 'text'
+    && (
+      bodyText.length > 240
+      || (bodyText.match(/\n/g) || []).length >= 5
+    );
+  const isCollapsed = estimatedCollapsible && !expandedTextMessages.has(message?.filename);
+
+  return {
+    key: message?.filename || '',
+    filename: message?.filename || '',
+    headerText: `${message?.sender || ''} · ${formatTime(message?.timestamp_ms || 0)}`,
+    bodyText,
+    metaText: `大小 ${formatBytes(message?.size || 0)}`,
+    isFile: message?.kind === 'file',
+    isText: message?.kind !== 'file',
+    isPinned: !!message?.marked_pinned,
+    tags: resolvedTags,
+    isSelected: selectedMarkedMessages.has(message?.filename),
+    selectionMode: markedSelectionMode,
+    isCollapsible: !!estimatedCollapsible,
+    isCollapsed,
+    collapseHeight: MARKED_MESSAGE_BODY_COLLAPSE_HEIGHT,
+    expandLabel: isCollapsed ? '展开全文' : '收起',
+    message,
+  };
+}
+
+function syncVueMarkedPageState() {
+  if (!hasVueAppShell) {
+    return;
+  }
+  syncVueMarkedPage(currentMarkedPageState);
 }
 
 function getSelectableDownloadTasks() {
@@ -2769,6 +3341,7 @@ function toggleSelectedDownloadTask(key, checked) {
     selectedTasks.delete(key);
   }
   updateDownloadSelectionBar();
+  syncVueTransferTaskState();
 }
 
 function selectAllDownloadTasks() {
@@ -2997,6 +3570,7 @@ function initializeSettingsNavigation() {
 function setActiveTab(name, options = {}) {
   const target = name || 'home';
   const { scrollToBottom = false, focusInput = false } = options;
+  syncVueActiveTab(target);
   if (target !== 'marked' && markedSelectionMode) {
     setMarkedSelectionMode(false);
   }
@@ -3467,6 +4041,188 @@ function showConfirmDialog(options = {}) {
 
 async function showSettingsResultDialog(title, message) {
   await showInfoDialog({ title, message });
+}
+
+async function loadSettingsSnapshots(options = {}) {
+  const silent = !!options.silent;
+  syncVueSettingsSnapshotsLoading(true);
+  try {
+    if (!invoke) {
+      if (!silent) {
+        setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
+      }
+      return;
+    }
+    const snapshots = await invoke('list_settings_snapshots');
+    settingsSnapshots = Array.isArray(snapshots) ? snapshots : [];
+    syncVueSettingsSnapshots(settingsSnapshots);
+  } catch (error) {
+    settingsSnapshots = [];
+    syncVueSettingsSnapshots(settingsSnapshots);
+    if (!silent) {
+      setErrorStatus(`读取设置快照失败：${error}`);
+      await showInfoDialog({
+        title: '读取设置快照失败',
+        message: String(error),
+      });
+    }
+  } finally {
+    syncVueSettingsSnapshotsLoading(false);
+  }
+}
+
+async function loadSettingsBackupArchives(options = {}) {
+  const silent = !!options.silent;
+  syncVueSettingsBackupArchivesLoading(true);
+  try {
+    if (!invoke) {
+      if (!silent) {
+        setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 配置');
+      }
+      return;
+    }
+    const records = await invoke('list_local_backup_archives');
+    settingsBackupArchives = Array.isArray(records) ? records : [];
+    syncVueSettingsBackupArchives(settingsBackupArchives);
+  } catch (error) {
+    settingsBackupArchives = [];
+    syncVueSettingsBackupArchives(settingsBackupArchives);
+    if (!silent) {
+      setErrorStatus(`读取本地备份记录失败：${error}`);
+      await showInfoDialog({
+        title: '读取本地备份记录失败',
+        message: String(error),
+      });
+    }
+  } finally {
+    syncVueSettingsBackupArchivesLoading(false);
+  }
+}
+
+async function loadAutoBackupStatus(options = {}) {
+  const silent = !!options.silent;
+  try {
+    if (!invoke) {
+      if (!silent) {
+        setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 配置');
+      }
+      return;
+    }
+    const status = await invoke('get_auto_backup_status');
+    currentAutoBackupStatusState = {
+      enabled: !!status?.enabled,
+      intervalMinutes: Number(status?.intervalMinutes || status?.interval_minutes || 5),
+      retainCount: Number(status?.retainCount || status?.retain_count || 1),
+      hasActiveEndpoint: !!(status?.hasActiveEndpoint ?? status?.has_active_endpoint),
+      lastRunMs: status?.lastRunMs ?? status?.last_run_ms ?? null,
+      lastSuccessMs: status?.lastSuccessMs ?? status?.last_success_ms ?? null,
+      lastError: status?.lastError ?? status?.last_error ?? null,
+      lastBackupPath: status?.lastBackupPath ?? status?.last_backup_path ?? '',
+    };
+    syncVueSettingsAutoBackup(currentAutoBackupStatusState);
+  } catch (error) {
+    if (!silent) {
+      setErrorStatus(`读取自动备份状态失败：${error}`);
+    }
+  }
+}
+
+async function restoreSettingsSnapshotRecord(snapshot) {
+  if (!snapshot?.path) {
+    return;
+  }
+  const confirmed = await showConfirmationDialog({
+    title: '恢复设置快照',
+    message: '恢复后将使用该历史设置覆盖当前配置，并立即重新应用相关运行状态。确定继续吗？',
+    confirmLabel: '恢复',
+  });
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    if (!invoke) {
+      await showSettingsResultDialog('恢复设置快照失败', '未检测到 Tauri API，请检查应用环境。');
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
+      return;
+    }
+    const restored = await invoke('restore_settings_snapshot', { snapshotPath: snapshot.path });
+    applySettings(restored);
+    syncVueSettings(restored);
+    await loadLocalHttpApiStatus({ silent: true });
+    await loadAutoBackupStatus({ silent: true });
+    await loadTelegramBridgeStatus({ silent: true });
+    await loadIntegrationModules({ silent: true });
+    await loadSettingsSnapshots({ silent: true });
+    await showSettingsResultDialog('恢复设置快照成功', '历史设置快照已恢复并重新应用。');
+    setSuccessStatus('设置快照已恢复');
+  } catch (error) {
+    await showSettingsResultDialog('恢复设置快照失败', String(error));
+    setErrorStatus(`恢复设置快照失败：${error}`);
+  }
+}
+
+async function restoreSettingsBackupArchiveRecord(record) {
+  if (!record?.backupPath || !record.exists) {
+    return;
+  }
+  const confirmed = await showConfirmationDialog({
+    title: '恢复本地备份归档',
+    message: '恢复后将使用该本地备份归档覆盖当前 WebDAV 数据，并重新加载相关列表。确定继续吗？',
+    confirmLabel: '恢复',
+  });
+  if (!confirmed) {
+    return;
+  }
+
+  const originalText = restoreWebdavButton ? restoreWebdavButton.textContent : '恢复';
+  try {
+    if (!invoke) {
+      await showSettingsResultDialog('恢复本地备份归档失败', '未检测到 Tauri API，请检查应用环境。');
+      setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 配置');
+      return;
+    }
+    currentSettingsOpsState = settingsOpsRuntime?.withRestoreRunning
+      ? settingsOpsRuntime.withRestoreRunning(currentSettingsOpsState)
+      : {
+          ...currentSettingsOpsState,
+          restoreRunning: true,
+          restoreLabel: '恢复中...',
+        };
+    syncVueSettingsOpsState();
+    if (restoreWebdavButton) {
+      restoreWebdavButton.classList.add('is-loading');
+      restoreWebdavButton.disabled = true;
+      restoreWebdavButton.textContent = '恢复中...';
+    }
+    await invoke('restore_webdav', { path: record.backupPath });
+    pendingUploads.clear();
+    uploadSpeed.clear();
+    renderUploadTasks();
+    await refreshMessages();
+    await loadMarkedTags();
+    await loadMarkedMessages();
+    await loadSettingsBackupArchives({ silent: true });
+    await showSettingsResultDialog('恢复本地备份归档成功', '已从本地归档恢复 WebDAV 数据。');
+    setSuccessStatus('本地备份归档已恢复');
+  } catch (error) {
+    await showSettingsResultDialog('恢复本地备份归档失败', String(error));
+    setErrorStatus(`恢复本地备份归档失败：${error}`);
+  } finally {
+    currentSettingsOpsState = settingsOpsRuntime?.withRestoreIdle
+      ? settingsOpsRuntime.withRestoreIdle(currentSettingsOpsState)
+      : {
+          ...currentSettingsOpsState,
+          restoreRunning: false,
+          restoreLabel: '恢复 WebDAV',
+        };
+    syncVueSettingsOpsState();
+    if (restoreWebdavButton) {
+      restoreWebdavButton.classList.remove('is-loading');
+      restoreWebdavButton.disabled = false;
+      restoreWebdavButton.textContent = originalText;
+    }
+  }
 }
 
 function showPasswordDialog(options = {}) {
@@ -4442,12 +5198,14 @@ async function deleteSingleMessage(message) {
     return false;
   }
   let deleted = false;
+  let deletedFilenames = [];
   try {
     const result = await invoke('delete_messages', {
       filenames: [message.filename],
       deleteRemote: choice === 'remote',
     });
     const failed = result.failed || [];
+    deletedFilenames = resolveDeletedFilenames([message.filename], failed);
     if (failed.length > 0) {
       await showInfoDialog({
         title: '删除失败',
@@ -4467,10 +5225,7 @@ async function deleteSingleMessage(message) {
       }
       deleted = true;
     }
-    await Promise.all([
-      loadMessages(),
-      loadMarkedMessages(),
-    ]);
+    await refreshMessageListsAfterDelete(deletedFilenames);
     return deleted;
   } catch (error) {
     await showInfoDialog({
@@ -4500,12 +5255,14 @@ async function deleteSelectedMessages() {
   if (choice === 'cancel') {
     return;
   }
+  let deletedFilenames = [];
   try {
     const result = await invoke('delete_messages', {
       filenames,
       deleteRemote: choice === 'remote',
     });
     const failed = result.failed || [];
+    deletedFilenames = resolveDeletedFilenames(filenames, failed);
     if (failed.length > 0) {
       await showInfoDialog({
         title: '删除完成',
@@ -4531,12 +5288,18 @@ async function deleteSelectedMessages() {
     });
   } finally {
     setSelectionMode(false);
-    await Promise.all([
-      loadMessages(),
-      loadMarkedMessages(),
-    ]);
+    if (deletedFilenames.length > 0) {
+      await refreshMessageListsAfterDelete(deletedFilenames, { render: false });
+    } else {
+      await Promise.all([
+        loadMessages({ checkNew: true, scrollToBottom: false }),
+        loadMarkedMessages(),
+      ]);
+    }
   }
 }
+
+window.setActiveTab = setActiveTab;
 async function cleanupMessages() {
   if (!invoke) {
     setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
@@ -4841,7 +5604,7 @@ function renderPreviewContent(message) {
 
     const meta = document.createElement('div');
     meta.className = 'message-preview-file-meta';
-    meta.textContent = `大小 ${formatBytes(message.size || 0)}`;
+    meta.textContent = viewModel.metaText;
 
     const actions = document.createElement('div');
     actions.className = 'message-preview-actions';
@@ -4937,6 +5700,43 @@ function getLoadMoreHintText(options = {}) {
   return isSearchResult ? '向上滚动加载更多并保持搜索结果' : '向上滚动加载更多';
 }
 
+function buildHomeFeedViewState(options = {}) {
+  const query =
+    typeof options.query === 'string' ? options.query : (searchInput ? searchInput.value.trim() : '');
+  const visibleCount = Array.isArray(options.messages) ? options.messages.length : 0;
+  const messageCards = Array.isArray(options.messages)
+    ? options.messages.map((message) => createMessageViewModel(message))
+    : [];
+  const useVueList =
+    hasVueAppShell &&
+    visibleCount > 0 &&
+    !selectionMode &&
+    messageCards.length === visibleCount &&
+    messageCards.every((card) => card.canRenderInVue);
+  const hasQuery = query.length > 0;
+  let emptyMessage = '';
+  if (visibleCount === 0) {
+    emptyMessage = hasQuery ? `没有找到与 "${query}" 匹配的消息` : '暂无消息';
+  }
+  return {
+    searchQuery: query,
+    visibleCount,
+    hasMoreMessages: !!hasMoreMessages,
+    isLoadingMore: !!isLoadingMore,
+    loadMoreHintText:
+      hasMoreMessages || isLoadingMore
+        ? getLoadMoreHintText({ isSearchResult: hasQuery })
+        : '',
+    emptyMessage,
+    messageCards,
+    useVueList,
+  };
+}
+
+function syncVueHomeFeedView(options = {}) {
+  syncVueHomeFeed(buildHomeFeedViewState(options));
+}
+
 function renderMessages(messages, options = {}) {
   const { scrollToBottom = false, preserveScroll = false, isSearchResult = false, query = '' } = options;
   // The `messages` parameter is now the single source of truth for this render pass.
@@ -4968,42 +5768,29 @@ function renderMessages(messages, options = {}) {
     restoreMessageListAnchor(scrollAnchor, previousScrollTop, previousScrollHeight);
   };
 
-  // 添加顶部加载提示
-  if (hasMoreMessages || isLoadingMore) {
-    const loadMoreItem = document.createElement('li');
-    loadMoreItem.className = 'load-more-hint';
-    loadMoreItem.id = 'load-more-hint';
-    loadMoreItem.textContent = getLoadMoreHintText({ isSearchResult });
-    messageList.appendChild(loadMoreItem);
-  }
-  
   if (!merged || merged.length === 0) {
-    const empty = document.createElement('li');
-    empty.className = 'message-card';
-    if (isSearchResult) {
-      empty.textContent = `没有找到与 "${query}" 匹配的消息`;
-    } else {
-      empty.textContent = '暂无消息';
-    }
-    messageList.appendChild(empty);
+    syncVueHomeFeedView({
+      query,
+      messages: [],
+    });
     updateScrollToBottomButton();
     return;
   }
 
   merged.forEach((message) => {
+    const viewModel = createMessageViewModel(message);
     const item = document.createElement('li');
     item.className = 'message-card';
-    const isFile = message.kind === 'file';
-    const selfName = senderNameInput?.value.trim();
+    const selfName = (currentSettingsFormState.senderName || '').trim();
     const isSelf = message.sender === '我' || (selfName && message.sender === selfName);
     let fileBodyClickTimer = null;
-    item.classList.toggle('is-file', isFile);
-    item.classList.toggle('is-text', !isFile);
-    item.classList.toggle('is-self', isSelf);
-    item.classList.toggle('is-marked', !!message.marked);
+    item.classList.toggle('is-file', viewModel.isFile);
+    item.classList.toggle('is-text', viewModel.isText);
+    item.classList.toggle('is-self', viewModel.isSelf);
+    item.classList.toggle('is-marked', viewModel.isMarked);
     item.classList.toggle('with-selection', selectionMode);
-    item.dataset.filename = message.filename;
-    item.classList.toggle('is-selected', selectedMessages.has(message.filename));
+    item.dataset.filename = viewModel.filename;
+    item.classList.toggle('is-selected', selectedMessages.has(viewModel.filename));
 
     const header = document.createElement('div');
     header.className = 'message-header';
@@ -5012,23 +5799,23 @@ function renderMessages(messages, options = {}) {
       const checkbox = document.createElement('input');
       checkbox.type = 'checkbox';
       checkbox.className = 'message-select';
-      checkbox.checked = selectedMessages.has(message.filename);
+      checkbox.checked = selectedMessages.has(viewModel.filename);
       checkbox.disabled = !!message.uploading;
       checkbox.addEventListener('change', () => {
-        toggleSelectedMessage(message.filename, checkbox.checked);
+        toggleSelectedMessage(viewModel.filename, checkbox.checked);
         item.classList.toggle('is-selected', checkbox.checked);
       });
       selectionCheckbox = checkbox;
       item.appendChild(checkbox);
     }
     const headerText = document.createElement('span');
-    headerText.textContent = `${message.sender} · ${formatTime(message.timestamp_ms)}`;
+    headerText.textContent = viewModel.headerText;
     header.appendChild(headerText);
 
     const body = document.createElement('div');
     body.className = 'message-body';
     if (message.kind === 'text') {
-      if (message.format === 'markdown') {
+      if (viewModel.isMarkdown) {
         body.classList.add('markdown-body', 'editormd-html-preview', 'is-markdown');
         // Generate a safe unique ID
         const uniqueId = `md-msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -5036,15 +5823,14 @@ function renderMessages(messages, options = {}) {
         
         markdownRenderQueue.push({
           id: uniqueId,
-          content: message.content || '',
+          content: viewModel.bodyText,
         });
       } else {
-        body.textContent = message.content || '';
+        body.textContent = viewModel.bodyText;
       }
       collapseQueue.push({ item, body, message });
     } else {
-      const isImage = isImagePath(message.original_name || message.filename);
-      if (isImage) {
+      if (viewModel.isImage) {
         body.classList.add('is-image-message');
         body.innerHTML = ''; // Clear existing content
 
@@ -5053,7 +5839,7 @@ function renderMessages(messages, options = {}) {
         thumbImg.alt = '缩略图';
 
         const fileNameSpan = document.createElement('span');
-        fileNameSpan.textContent = message.original_name || message.filename || '';
+        fileNameSpan.textContent = viewModel.originalName;
 
         body.appendChild(thumbImg);
         body.appendChild(fileNameSpan);
@@ -5075,7 +5861,7 @@ function renderMessages(messages, options = {}) {
           openMessagePreview(message);
         });
       } else {
-        body.textContent = message.original_name || message.filename || '';
+        body.textContent = viewModel.bodyText;
       }
       
     }
@@ -5096,15 +5882,15 @@ function renderMessages(messages, options = {}) {
           clearTimeout(fileBodyClickTimer);
           fileBodyClickTimer = null;
         }
-        const nextChecked = !selectedMessages.has(message.filename);
-        toggleSelectedMessage(message.filename, nextChecked);
+        const nextChecked = !selectedMessages.has(viewModel.filename);
+        toggleSelectedMessage(viewModel.filename, nextChecked);
         item.classList.toggle('is-selected', nextChecked);
         if (selectionCheckbox) {
           selectionCheckbox.checked = nextChecked;
         }
         return;
       }
-      if (message.kind !== 'file' || message.uploading) {
+      if (!viewModel.isFile || message.uploading) {
         return;
       }
       if (fileBodyClickTimer) {
@@ -5399,7 +6185,7 @@ function renderMessages(messages, options = {}) {
         return;
       }
       selectionCheckbox.checked = !selectionCheckbox.checked;
-      toggleSelectedMessage(message.filename, selectionCheckbox.checked);
+      toggleSelectedMessage(viewModel.filename, selectionCheckbox.checked);
       item.classList.toggle('is-selected', selectionCheckbox.checked);
     });
 
@@ -5538,6 +6324,10 @@ function renderMessages(messages, options = {}) {
     }
     updateScrollToBottomButton();
   }
+  syncVueHomeFeedView({
+    query,
+    messages: merged,
+  });
 }
 function mergeMessages(messages, options = {}) {
   const { isSearchResult = false } = options;
@@ -5567,7 +6357,7 @@ function mergeMessages(messages, options = {}) {
     pendingUploads.forEach((upload) => {
       merged.push({
         filename: upload.clientId,
-        sender: senderNameInput.value.trim() || '我',
+        sender: getCurrentSenderName() || '我',
         timestamp_ms: upload.timestamp_ms,
         size: upload.total || 0,
         kind: 'file',
@@ -5621,13 +6411,16 @@ async function loadMessages(options = {}) {
     
     if (loadMore) {
       // 加载更多历史消息
-      if (isLoadingMore || !hasMoreMessages) return;
+      if (isLoadingMore || !hasMoreMessages || !oldestLoadedMessageRef) return;
       isLoadingMore = true;
       updateLoadMoreHintForCurrentView();
-      const newOffset = currentOffset + PAGE_SIZE;
-      const result = await invoke('list_messages', { limit: PAGE_SIZE, offset: newOffset });
+      const result = await invoke('list_messages_window', {
+        limit: PAGE_SIZE,
+        beforeTimestampMs: oldestLoadedMessageRef.timestamp_ms,
+        beforeFilename: oldestLoadedMessageRef.filename,
+      });
       isLoadingMore = false;
-      hasMoreMessages = result.has_more || false;
+      hasMoreMessages = result.hasMoreBefore || false;
       totalMessages = result.total || totalMessages;
       updateLoadMoreHintForCurrentView();
       
@@ -5638,35 +6431,89 @@ async function loadMessages(options = {}) {
       if (result.messages && result.messages.length > 0) {
         // 将新加载的消息添加到开头
         lastMessages = [...result.messages, ...lastMessages];
-        syncCurrentOffsetWithLoadedMessages();
+        syncLoadedMessageBoundaries();
         renderCurrentMessageView({ scrollToBottom: false, preserveScroll: true });
       }
     } else if (checkNew) {
       // 定时刷新模式：只检查新消息
-      const result = await invoke('list_messages', { limit: PAGE_SIZE, offset: 0 });
+      const latestResult = await invoke('list_messages_window', { limit: PAGE_SIZE });
       
-      if (result.marked_count !== undefined) {
-        updateMarkedBadge(result.marked_count);
+      if (latestResult.marked_count !== undefined) {
+        updateMarkedBadge(latestResult.marked_count);
       }
 
-      const newMessages = result.messages || [];
+      const newerResult = newestLoadedMessageRef
+        ? await invoke('list_messages_window', {
+            afterTimestampMs: newestLoadedMessageRef.timestamp_ms,
+            afterFilename: newestLoadedMessageRef.filename,
+          })
+        : latestResult;
+
+      const newMessages = newerResult.messages || [];
+
+      if (feedState?.reconcileCheckNewState) {
+        const reconciled = feedState.reconcileCheckNewState(
+          {
+            lastMessages,
+            totalMessages,
+            hasMoreMessages,
+            oldestLoadedMessageRef,
+            newestLoadedMessageRef,
+          },
+          latestResult.messages || [],
+          newMessages,
+          latestResult.total || 0,
+          latestResult.hasMoreBefore || false,
+        );
+        lastMessages = reconciled.state.lastMessages;
+        totalMessages = reconciled.state.totalMessages;
+        hasMoreMessages = reconciled.state.hasMoreMessages;
+        oldestLoadedMessageRef = reconciled.state.oldestLoadedMessageRef;
+        newestLoadedMessageRef = reconciled.state.newestLoadedMessageRef;
+        if (reconciled.shouldRender) {
+          renderCurrentMessageView({
+            scrollToBottom: lastMessages.length === reconciled.appendedCount ? shouldScroll : false,
+          });
+        }
+        return;
+      }
       
       if (newMessages.length === 0) {
-        // 没有任何消息
         if (lastMessages.length > 0) {
-          resetLoadedMessagesState();
-          totalMessages = 0;
-          renderCurrentMessageView({ scrollToBottom: shouldScroll });
+          const latestMessages = latestResult.messages || [];
+          const latestMessagesMap = new Map(latestMessages.map((msg) => [msg.filename, msg]));
+          let stateChanged = false;
+          lastMessages = lastMessages.map((oldMsg) => {
+            const next = latestMessagesMap.get(oldMsg.filename);
+            if (!next) {
+              return oldMsg;
+            }
+            if (
+              oldMsg.marked !== next.marked ||
+              oldMsg.local_path !== next.local_path ||
+              oldMsg.marked_pinned !== next.marked_pinned ||
+              JSON.stringify(oldMsg.marked_tag_ids || []) !== JSON.stringify(next.marked_tag_ids || [])
+            ) {
+              stateChanged = true;
+              return { ...oldMsg, ...next };
+            }
+            return oldMsg;
+          });
+          totalMessages = latestResult.total || totalMessages;
+          hasMoreMessages = latestResult.hasMoreBefore || false;
+          syncLoadedMessageBoundaries();
+          if (stateChanged) {
+            renderCurrentMessageView({ scrollToBottom: false });
+          }
         }
         return;
       }
       
       if (lastMessages.length === 0) {
-        // 本地没有消息，直接使用服务器返回的消息
         lastMessages = newMessages;
-        syncCurrentOffsetWithLoadedMessages();
-        totalMessages = result.total || 0;
-        hasMoreMessages = result.has_more || false;
+        syncLoadedMessageBoundaries();
+        totalMessages = latestResult.total || 0;
+        hasMoreMessages = latestResult.hasMoreBefore || false;
         renderCurrentMessageView({ scrollToBottom: shouldScroll });
         return;
       }
@@ -5694,37 +6541,36 @@ async function loadMessages(options = {}) {
       const actualNewMessages = newMessages.filter(msg => !existingFilenames.has(msg.filename));
       
       if (actualNewMessages.length > 0 || stateChanged) {
-        // 有新消息，添加到列表末尾（最新消息在后面）
         if (actualNewMessages.length > 0) {
           lastMessages = [...lastMessages, ...actualNewMessages];
         }
-        syncCurrentOffsetWithLoadedMessages();
-        totalMessages = result.total || 0;
-        hasMoreMessages = result.has_more || false;
+        syncLoadedMessageBoundaries();
+        totalMessages = latestResult.total || 0;
+        hasMoreMessages = latestResult.hasMoreBefore || false;
         
         // 如果当前在底部，自动滚动到底��显示新消息
         // 如果当前在底部，或者由于状态更新触发，自动滚动/重新渲染
         renderCurrentMessageView({ scrollToBottom: false });
       } else {
         // 没有新消息，但可能总数变化了（比如有消息被删除）
-        if (totalMessages !== result.total) {
-          totalMessages = result.total || 0;
-          hasMoreMessages = result.has_more || false;
-          syncCurrentOffsetWithLoadedMessages();
+        if (totalMessages !== latestResult.total) {
+          totalMessages = latestResult.total || 0;
+          hasMoreMessages = latestResult.hasMoreBefore || false;
+          syncLoadedMessageBoundaries();
         }
       }
     } else {
       // 初始加载或刷新：加载最新的消息
-      const result = await invoke('list_messages', { limit: PAGE_SIZE, offset: 0 });
+      const result = await invoke('list_messages_window', { limit: PAGE_SIZE });
       
       if (result.marked_count !== undefined) {
         updateMarkedBadge(result.marked_count);
       }
 
       lastMessages = result.messages || [];
-      syncCurrentOffsetWithLoadedMessages();
+      syncLoadedMessageBoundaries();
       totalMessages = result.total || 0;
-      hasMoreMessages = result.has_more || false;
+      hasMoreMessages = result.hasMoreBefore || false;
       renderCurrentMessageView({ scrollToBottom: shouldScroll });
     }
   } catch (error) {
@@ -5806,6 +6652,25 @@ function startRefreshTimer(intervalSecs) {
       return;
     }
 
+    if (feedState?.shouldAutoRefreshTick) {
+      const tickResult = feedState.shouldAutoRefreshTick({
+        isRefreshRunning,
+        hasActiveEndpoint: !!getActiveEndpoint(),
+        hasSearchQuery,
+        hasActiveTransfer: hasActiveContentTransfer(),
+        selectionPaused: isMessageSelectionRefreshPaused(),
+        activeTab: getActiveMainTab(),
+        refreshCountdownSecs,
+        intervalSecs: interval,
+      });
+      refreshCountdownSecs = tickResult.nextCountdownSecs;
+      updateRefreshCountdown();
+      if (tickResult.shouldRefresh) {
+        await refreshMessages({ manual: false });
+      }
+      return;
+    }
+
     refreshCountdownSecs = Math.max(0, refreshCountdownSecs - 1);
     updateRefreshCountdown();
 
@@ -5866,12 +6731,24 @@ async function waitForSyncToFinish(maxWaitMs = MANUAL_REFRESH_TIMEOUT_MS) {
 }
 
 function normalizeTelegramPollInterval(value) {
+  if (settingsFormRuntime?.normalizeTelegramPollInterval) {
+    return settingsFormRuntime.normalizeTelegramPollInterval(
+      value,
+      DEFAULT_TELEGRAM_POLL_INTERVAL_SECS,
+    );
+  }
   return Math.max(DEFAULT_TELEGRAM_POLL_INTERVAL_SECS, Number(value) || DEFAULT_TELEGRAM_POLL_INTERVAL_SECS);
 }
 
 function getTelegramBridgeFormState() {
-  const botToken = telegramBotTokenInput ? telegramBotTokenInput.value.trim() : '';
-  const chatId = telegramChatIdInput ? telegramChatIdInput.value.trim() : '';
+  if (settingsFormRuntime?.getTelegramBridgeFormState) {
+    return settingsFormRuntime.getTelegramBridgeFormState(
+      currentSettingsFormState,
+      !!getActiveEndpoint(),
+    );
+  }
+  const botToken = (currentSettingsFormState.telegramBotToken || '').trim();
+  const chatId = (currentSettingsFormState.telegramChatId || '').trim();
   const hasActiveEndpoint = !!getActiveEndpoint();
   return {
     botToken,
@@ -5905,6 +6782,7 @@ async function loadLocalHttpApiStatus(options = {}) {
     if (!invoke) return;
     const status = await invoke('get_local_http_api_status');
     renderLocalHttpApiStatus(status);
+    syncVueLocalHttpApiStatus(status);
   } catch (error) {
     if (!options.silent) {
       setErrorStatus(`读取本机 HTTP 接口状态失败：${error}`);
@@ -5932,6 +6810,9 @@ function setLocalHttpApiStatusLegacyText(status) {
 
 
 function normalizeLocalHttpApiBindPort(value) {
+  if (settingsFormRuntime?.normalizeLocalHttpApiBindPort) {
+    return settingsFormRuntime.normalizeLocalHttpApiBindPort(value);
+  }
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
     return null;
@@ -5940,9 +6821,17 @@ function normalizeLocalHttpApiBindPort(value) {
 }
 
 function getLocalHttpApiConfiguredUrl() {
-  const bindAddress = localHttpApiBindAddressInput?.value?.trim() || DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS;
+  if (settingsFormRuntime?.getLocalHttpApiConfiguredUrl) {
+    return settingsFormRuntime.getLocalHttpApiConfiguredUrl(currentSettingsFormState, {
+      defaultBindAddress: DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS,
+      defaultBindPort: DEFAULT_LOCAL_HTTP_API_BIND_PORT,
+    });
+  }
+  const bindAddress =
+    (currentSettingsFormState.localHttpApiBindAddress || DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS).trim();
   const bindPort =
-    normalizeLocalHttpApiBindPort(localHttpApiBindPortInput?.value) || DEFAULT_LOCAL_HTTP_API_BIND_PORT;
+    normalizeLocalHttpApiBindPort(currentSettingsFormState.localHttpApiBindPort) ||
+    DEFAULT_LOCAL_HTTP_API_BIND_PORT;
   const wrappedAddress =
     bindAddress.includes(':') && !bindAddress.startsWith('[') ? `[${bindAddress}]` : bindAddress;
   return `http://${wrappedAddress}:${bindPort}/api/send-file`;
@@ -5950,28 +6839,31 @@ function getLocalHttpApiConfiguredUrl() {
 
 function renderLocalHttpApiStatus(status) {
   if (!localHttpApiStatusLabel || !localHttpApiAddressLabel || !localHttpApiLastErrorLabel) return;
-  const state = status?.state || 'disabled';
-  const running = state === 'running';
-  const failed = state === 'start_failed';
-  const pending = state === 'pending';
-  const address = status?.address || getLocalHttpApiConfiguredUrl();
-  const lastError = status?.lastError || status?.last_error || '';
+  const visualState = settingsRuntimeStatus?.getLocalHttpApiVisualState
+    ? settingsRuntimeStatus.getLocalHttpApiVisualState(status, getLocalHttpApiConfiguredUrl())
+    : null;
+  const state = visualState?.state || status?.state || 'disabled';
+  const running = !!visualState?.running || state === 'running';
+  const failed = !!visualState?.failed || state === 'start_failed';
+  const pending = !!visualState?.pending || state === 'pending';
+  const address = visualState?.address || status?.address || getLocalHttpApiConfiguredUrl();
+  const lastError = visualState?.lastError || status?.lastError || status?.last_error || '';
 
   localHttpApiStatusLabel.classList.toggle('is-running', running);
   localHttpApiStatusLabel.classList.toggle('is-stopped', !running && !pending);
-  localHttpApiStatusLabel.textContent = running
+  localHttpApiStatusLabel.textContent = visualState?.stateLabel || (running
     ? '运行中'
     : failed
       ? '启动失败'
       : pending
         ? '状态获取中'
-        : '已关闭';
-  localHttpApiAddressLabel.textContent = address || '未配置';
-  localHttpApiLastErrorLabel.textContent = lastError || '无';
+        : '已关闭');
+  localHttpApiAddressLabel.textContent = visualState?.addressText || address || '未配置';
+  localHttpApiLastErrorLabel.textContent = visualState?.lastErrorText || lastError || '无';
 }
 
 function syncTelegramProxyControlsState() {
-  const proxyEnabled = telegramProxyEnabledInput ? telegramProxyEnabledInput.checked : false;
+  const proxyEnabled = !!currentSettingsFormState.telegramProxyEnabled;
   if (telegramProxyUrlInput) {
     telegramProxyUrlInput.disabled = !proxyEnabled;
   }
@@ -5980,33 +6872,33 @@ function syncTelegramProxyControlsState() {
 function syncTelegramControlsState() {
   const { isConfigured } = getTelegramBridgeFormState();
   const running = telegramBridgeStatusLabel?.dataset.running === 'true';
+  const controls = settingsRuntimeStatus?.getTelegramControlState
+    ? settingsRuntimeStatus.getTelegramControlState({ isConfigured, running })
+    : null;
   if (telegramStartServiceButton) {
-    telegramStartServiceButton.disabled = running || !isConfigured;
-    telegramStartServiceButton.hidden = running;
+    telegramStartServiceButton.disabled = controls
+      ? controls.startDisabled
+      : running || !isConfigured;
+    telegramStartServiceButton.hidden = controls ? controls.startHidden : running;
   }
   if (telegramStopServiceButton) {
-    telegramStopServiceButton.disabled = !running;
-    telegramStopServiceButton.hidden = !running;
+    telegramStopServiceButton.disabled = controls ? controls.stopDisabled : !running;
+    telegramStopServiceButton.hidden = controls ? controls.stopHidden : !running;
   }
 }
 
 function setTelegramBridgeStatus(status) {
   if (!telegramBridgeStatusLabel || !telegramBridgeLastErrorLabel) return;
-  const running = !!status?.running;
+  const visualState = settingsRuntimeStatus?.getTelegramBridgeVisualState
+    ? settingsRuntimeStatus.getTelegramBridgeVisualState(status, formatTime)
+    : null;
+  const running = visualState ? !!visualState.running : !!status?.running;
   telegramBridgeStatusLabel.dataset.running = running ? 'true' : 'false';
   telegramBridgeStatusLabel.classList.toggle('is-running', running);
   telegramBridgeStatusLabel.classList.toggle('is-stopped', !running);
-  if (running) {
-    const startedAt = status?.last_started_ms ? formatTime(status.last_started_ms) : '';
-    telegramBridgeStatusLabel.textContent = startedAt
-      ? `运行中 · ${startedAt}`
-      : '运行中';
-  } else if (status?.last_stopped_ms) {
-    telegramBridgeStatusLabel.textContent = `已停止 · ${formatTime(status.last_stopped_ms)}`;
-  } else {
-    telegramBridgeStatusLabel.textContent = '未运行';
-  }
-  telegramBridgeLastErrorLabel.textContent = status?.last_error || '无';
+  telegramBridgeStatusLabel.textContent = visualState?.stateLabel || '未运行';
+  telegramBridgeLastErrorLabel.textContent =
+    visualState?.lastErrorText || status?.last_error || '无';
   syncTelegramControlsState();
 }
 
@@ -6015,25 +6907,22 @@ async function loadTelegramBridgeStatus(options = {}) {
     if (!invoke) return;
     const status = await invoke('get_telegram_bridge_status');
     setTelegramBridgeStatus(status);
+    syncVueTelegramBridgeStatus(status);
   } catch (error) {
-    await showInfoDialog({
-      title: '获取 Chat ID 失败',
-      message: `获取 Chat ID 失败：${error}`,
-    });
     if (!options.silent) {
       setErrorStatus(`读取 Telegram bridge 状态失败：${error}`);
     }
   }
 }
 
-async function loadTelegramBridgeStatus(options = {}) {
+async function loadIntegrationModules(options = {}) {
   try {
     if (!invoke) return;
-    const status = await invoke('get_telegram_bridge_status');
-    setTelegramBridgeStatus(status);
+    const modules = await invoke('list_integration_modules');
+    syncVueIntegrationModules(modules);
   } catch (error) {
     if (!options.silent) {
-      setErrorStatus(`读取 Telegram bridge 状态失败：${error}`);
+      setErrorStatus(`读取集成模块状态失败：${error}`);
     }
   }
 }
@@ -6045,10 +6934,13 @@ function clearTelegramChatCandidates() {
 }
 
 function maybeApplyTelegramSenderName(candidate) {
-  if (!telegramSenderNameInput || telegramSenderNameInput.value.trim()) return false;
+  if ((currentSettingsFormState.telegramSenderName || '').trim()) return false;
   const nextSenderName = candidate?.sender_name ? String(candidate.sender_name).trim() : '';
   if (!nextSenderName) return false;
-  telegramSenderNameInput.value = nextSenderName;
+  if (telegramSenderNameInput) {
+    telegramSenderNameInput.value = nextSenderName;
+  }
+  updateSettingsFormField('telegramSenderName', nextSenderName);
   return true;
 }
 
@@ -6081,9 +6973,7 @@ function renderTelegramChatCandidates(candidates) {
     applyButton.className = 'button ghost small';
     applyButton.textContent = '使用';
     applyButton.addEventListener('click', () => {
-      if (telegramChatIdInput) {
-        telegramChatIdInput.value = candidate.id || '';
-      }
+      applyTelegramChatIdValue(candidate.id || '');
       maybeApplyTelegramSenderName(candidate);
       syncTelegramControlsState();
       setSuccessStatus(`已填入 Chat ID：${candidate.id}`);
@@ -6105,9 +6995,9 @@ async function discoverTelegramChats() {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
-    const botToken = telegramBotTokenInput ? telegramBotTokenInput.value.trim() : '';
-    const proxyEnabled = telegramProxyEnabledInput ? telegramProxyEnabledInput.checked : false;
-    const proxyUrl = proxyEnabled && telegramProxyUrlInput ? telegramProxyUrlInput.value.trim() : '';
+    const botToken = (currentSettingsFormState.telegramBotToken || '').trim();
+    const proxyEnabled = !!currentSettingsFormState.telegramProxyEnabled;
+    const proxyUrl = proxyEnabled ? (currentSettingsFormState.telegramProxyUrl || '').trim() : '';
     if (!botToken) {
       setErrorStatus('请先填写 Telegram Bot Token');
       return;
@@ -6118,9 +7008,7 @@ async function discoverTelegramChats() {
     }
     const candidates = await invoke('discover_telegram_chats', { botToken, proxyUrl });
     if (candidates.length === 1) {
-      if (telegramChatIdInput) {
-        telegramChatIdInput.value = candidates[0].id || '';
-      }
+      applyTelegramChatIdValue(candidates[0].id || '');
       maybeApplyTelegramSenderName(candidates[0]);
       clearTelegramChatCandidates();
       syncTelegramControlsState();
@@ -6158,9 +7046,9 @@ async function discoverTelegramChatsWithFeedback() {
       });
       return;
     }
-    const botToken = telegramBotTokenInput ? telegramBotTokenInput.value.trim() : '';
-    const proxyEnabled = telegramProxyEnabledInput ? telegramProxyEnabledInput.checked : false;
-    const proxyUrl = proxyEnabled && telegramProxyUrlInput ? telegramProxyUrlInput.value.trim() : '';
+    const botToken = (currentSettingsFormState.telegramBotToken || '').trim();
+    const proxyEnabled = !!currentSettingsFormState.telegramProxyEnabled;
+    const proxyUrl = proxyEnabled ? (currentSettingsFormState.telegramProxyUrl || '').trim() : '';
     if (!botToken) {
       setErrorStatus('请先填写 Telegram Bot Token');
       await showInfoDialog({
@@ -6176,9 +7064,7 @@ async function discoverTelegramChatsWithFeedback() {
 
     const candidates = await invoke('discover_telegram_chats', { botToken, proxyUrl });
     if (candidates.length === 1) {
-      if (telegramChatIdInput) {
-        telegramChatIdInput.value = candidates[0].id || '';
-      }
+      applyTelegramChatIdValue(candidates[0].id || '');
       maybeApplyTelegramSenderName(candidates[0]);
       clearTelegramChatCandidates();
       syncTelegramControlsState();
@@ -6231,10 +7117,13 @@ async function startTelegramBridge() {
     }
     const status = await invoke('start_telegram_bridge');
     setTelegramBridgeStatus(status);
+    syncVueTelegramBridgeStatus(status);
+    await loadIntegrationModules({ silent: true });
     await showSettingsResultDialog('启动 Telegram Bridge 成功', 'Telegram bridge 已启动。');
     setSuccessStatus('Telegram bridge 已启动');
   } catch (error) {
     await loadTelegramBridgeStatus({ silent: true });
+    await loadIntegrationModules({ silent: true });
     await showSettingsResultDialog('启动 Telegram Bridge 失败', String(error));
     setErrorStatus(`启动 Telegram bridge 失败：${error}`);
   }
@@ -6249,10 +7138,13 @@ async function stopTelegramBridge() {
     }
     const status = await invoke('stop_telegram_bridge');
     setTelegramBridgeStatus(status);
+    syncVueTelegramBridgeStatus(status);
+    await loadIntegrationModules({ silent: true });
     await showSettingsResultDialog('停止 Telegram Bridge 成功', 'Telegram bridge 已停止。');
     setSuccessStatus('Telegram bridge 已停止');
   } catch (error) {
     await loadTelegramBridgeStatus({ silent: true });
+    await loadIntegrationModules({ silent: true });
     await showSettingsResultDialog('停止 Telegram Bridge 失败', String(error));
     setErrorStatus(`停止 Telegram bridge 失败：${error}`);
   }
@@ -6397,7 +7289,7 @@ async function checkForAppUpdate(options = {}) {
 }
 
 function scheduleAutoUpdateCheck() {
-  if (!autoUpdateEnabledInput || !autoUpdateEnabledInput.checked) {
+  if (!currentSettingsFormState.autoUpdateEnabled) {
     return;
   }
   if (hasAutoUpdateCheckedThisSession || isAutoUpdateChecking) {
@@ -6406,7 +7298,7 @@ function scheduleAutoUpdateCheck() {
   cancelPendingAutoUpdateCheck();
   autoUpdateCheckTimer = window.setTimeout(() => {
     autoUpdateCheckTimer = null;
-    if (!autoUpdateEnabledInput || !autoUpdateEnabledInput.checked) {
+    if (!currentSettingsFormState.autoUpdateEnabled) {
       return;
     }
     checkForAppUpdate({ silent: true, source: 'auto' });
@@ -6414,6 +7306,7 @@ function scheduleAutoUpdateCheck() {
 }
 
 function applySettings(settings) {
+  syncVueSettings(settings);
   const previousActiveEndpointId = activeEndpointId;
   const endpoints = Array.isArray(settings.webdav_endpoints)
     ? settings.webdav_endpoints
@@ -6425,6 +7318,8 @@ function applySettings(settings) {
     username: endpoint.username || '',
     password: endpoint.password || '',
     enabled: endpoint.enabled !== false,
+    speedTestRunning: false,
+    speedTestResult: null,
   }));
   activeEndpointId = settings.active_webdav_id || null;
   if (
@@ -6436,6 +7331,7 @@ function applySettings(settings) {
   ) {
     activeEndpointId = null;
   }
+  const telegram = settings.telegram || {};
   if (senderNameInput) {
     senderNameInput.value = settings.sender_name || '';
   }
@@ -6479,7 +7375,28 @@ function applySettings(settings) {
   if (globalHotkeyEnabledInput) {
     globalHotkeyEnabledInput.checked = settings.global_hotkey_enabled !== false;
   }
-  const telegram = settings.telegram || {};
+  currentSettingsFormState = {
+    senderName: settings.sender_name || '',
+    refreshIntervalSecs: Number(settings.refresh_interval_secs || 5),
+    downloadDir: settings.download_dir || '',
+    autoStart: !!settings.auto_start,
+    autoUpdateEnabled: !!settings.auto_update_enabled,
+    globalHotkeyEnabled: settings.global_hotkey_enabled !== false,
+    globalHotkey: (settings.global_hotkey || DEFAULT_GLOBAL_HOTKEY).toLowerCase(),
+    localHttpApiEnabled: !!settings.local_http_api?.enabled,
+    localHttpApiBindAddress:
+      settings.local_http_api?.bind_address || DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS,
+    localHttpApiBindPort:
+      settings.local_http_api?.bind_port || DEFAULT_LOCAL_HTTP_API_BIND_PORT,
+    telegramAutoStart: !!telegram.auto_start,
+    telegramBotToken: telegram.bot_token || '',
+    telegramProxyEnabled: !!telegram.proxy_enabled,
+    telegramProxyUrl: telegram.proxy_url || 'http://127.0.0.1:7890',
+    telegramChatId: telegram.chat_id || '',
+    telegramSenderName: telegram.sender_name || '',
+    telegramPollIntervalSecs: normalizeTelegramPollInterval(telegram.poll_interval_secs),
+  };
+  syncVueSettingsForm(currentSettingsFormState);
   if (telegramAutoStartInput) {
     telegramAutoStartInput.checked = telegram.auto_start || false;
   }
@@ -6501,6 +7418,14 @@ function applySettings(settings) {
   if (telegramPollIntervalInput) {
     telegramPollIntervalInput.value = normalizeTelegramPollInterval(telegram.poll_interval_secs);
   }
+  currentAutoBackupStatusState = {
+    ...currentAutoBackupStatusState,
+    enabled: !!settings.backup?.enabled,
+    intervalMinutes: Number(settings.backup?.interval_minutes || 5),
+    retainCount: Number(settings.backup?.retain_count || 1),
+    hasActiveEndpoint: !!getActiveEndpoint(),
+  };
+  syncVueSettingsAutoBackup(currentAutoBackupStatusState);
   syncGlobalHotkeyInputState();
   setSendHotkey(settings.send_hotkey || SEND_HOTKEY.ENTER);
   applyTransferTabLabels();
@@ -6530,6 +7455,10 @@ async function loadSettings() {
     const settings = await invoke('get_settings');
     applySettings(settings);
     await loadLocalHttpApiStatus({ silent: true });
+    await loadAutoBackupStatus({ silent: true });
+    await loadIntegrationModules({ silent: true });
+    await loadSettingsSnapshots({ silent: true });
+    await loadSettingsBackupArchives({ silent: true });
     await loadPersistedUploadHistory({ silent: true });
     await loadPersistedDownloadHistory({ silent: true });
     await loadTelegramBridgeStatus({ silent: true });
@@ -6564,28 +7493,34 @@ async function saveSettings(options = {}) {
       return;
     }
   }
-  const globalHotkeyEnabled = globalHotkeyEnabledInput ? globalHotkeyEnabledInput.checked : true;
+  const globalHotkeyEnabled = !!currentSettingsFormState.globalHotkeyEnabled;
   const normalizedGlobalHotkey = normalizeGlobalHotkey(
-    (globalHotkeyInput ? globalHotkeyInput.value : DEFAULT_GLOBAL_HOTKEY) || '',
+    (currentSettingsFormState.globalHotkey || DEFAULT_GLOBAL_HOTKEY) || '',
   );
   if (globalHotkeyEnabled && !normalizedGlobalHotkey) {
     setErrorStatus('全局快捷键需包含修饰键，例如 Ctrl+Alt+T');
     return;
   }
-  const telegramFormState = getTelegramBridgeFormState();
-  const telegramBotToken = telegramBotTokenInput ? telegramBotTokenInput.value.trim() : '';
-  const telegramProxyEnabled = telegramProxyEnabledInput ? telegramProxyEnabledInput.checked : false;
-  const telegramProxyUrl = telegramProxyUrlInput ? telegramProxyUrlInput.value.trim() : '';
-  const telegramChatId = telegramChatIdInput ? telegramChatIdInput.value.trim() : '';
+  const telegramBotToken = (currentSettingsFormState.telegramBotToken || '').trim();
+  const telegramProxyEnabled = !!currentSettingsFormState.telegramProxyEnabled;
+  const telegramProxyUrl = (currentSettingsFormState.telegramProxyUrl || '').trim();
+  const telegramChatId = (currentSettingsFormState.telegramChatId || '').trim();
   const telegramPollInterval = normalizeTelegramPollInterval(
-    telegramPollIntervalInput ? telegramPollIntervalInput.value : DEFAULT_TELEGRAM_POLL_INTERVAL_SECS,
+    currentSettingsFormState.telegramPollIntervalSecs || DEFAULT_TELEGRAM_POLL_INTERVAL_SECS,
   );
-  const localHttpApiBindAddress = localHttpApiBindAddressInput
-    ? localHttpApiBindAddressInput.value.trim()
-    : DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS;
+  const localHttpApiBindAddress =
+    (currentSettingsFormState.localHttpApiBindAddress || DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS).trim();
   const localHttpApiBindPort = normalizeLocalHttpApiBindPort(
-    localHttpApiBindPortInput ? localHttpApiBindPortInput.value : DEFAULT_LOCAL_HTTP_API_BIND_PORT,
+    currentSettingsFormState.localHttpApiBindPort || DEFAULT_LOCAL_HTTP_API_BIND_PORT,
   );
+  const telegramFormState = {
+    botToken: telegramBotToken,
+    chatId: telegramChatId,
+    isConfigured: !!telegramBotToken && /^-?\d+$/.test(telegramChatId) && hasUsableActiveEndpoint(),
+  };
+  const backupEnabled = !!currentAutoBackupStatusState.enabled;
+  const backupIntervalMinutes = Math.max(5, Number(currentAutoBackupStatusState.intervalMinutes) || 5);
+  const backupRetainCount = Math.max(1, Number(currentAutoBackupStatusState.retainCount) || 1);
   if (!localHttpApiBindAddress) {
     setErrorStatus('HTTP API 监听地址不能为空');
     return;
@@ -6595,7 +7530,7 @@ async function saveSettings(options = {}) {
     return;
   }
   const telegramEnabled =
-    requireTelegramBridgeConfig || (telegramAutoStartInput ? telegramAutoStartInput.checked : false);
+    requireTelegramBridgeConfig || !!currentSettingsFormState.telegramAutoStart;
   if (telegramEnabled) {
     if (!telegramBotToken) {
       setErrorStatus('启用 Telegram bridge 前请先填写 Bot Token');
@@ -6620,23 +7555,28 @@ async function saveSettings(options = {}) {
   const payload = {
     webdav_endpoints: endpoints,
     active_webdav_id: activeCandidate ? activeEndpointId : null,
-    sender_name: senderNameInput.value.trim(),
-    refresh_interval_secs: Number(refreshIntervalInput.value) || 5,
-    download_dir: downloadDirInput ? downloadDirInput.value.trim() : '',
+    sender_name: (currentSettingsFormState.senderName || '').trim(),
+    refresh_interval_secs: Number(currentSettingsFormState.refreshIntervalSecs) || 5,
+    download_dir: (currentSettingsFormState.downloadDir || '').trim(),
     global_hotkey_enabled: globalHotkeyEnabled,
     global_hotkey: normalizedGlobalHotkey || DEFAULT_GLOBAL_HOTKEY,
     send_hotkey: sendHotkey,
-    auto_start: autoStartInput ? autoStartInput.checked : false,
-    auto_update_enabled: autoUpdateEnabledInput ? autoUpdateEnabledInput.checked : false,
+    auto_start: !!currentSettingsFormState.autoStart,
+    auto_update_enabled: !!currentSettingsFormState.autoUpdateEnabled,
+    backup: {
+      enabled: backupEnabled,
+      interval_minutes: backupIntervalMinutes,
+      retain_count: backupRetainCount,
+    },
     local_http_api: {
-      enabled: localHttpApiEnabledInput ? localHttpApiEnabledInput.checked : false,
+      enabled: !!currentSettingsFormState.localHttpApiEnabled,
       bind_address: localHttpApiBindAddress,
       bind_port: localHttpApiBindPort,
     },
     telegram: {
       enabled: telegramFormState.isConfigured,
-      auto_start: telegramAutoStartInput ? telegramAutoStartInput.checked : false,
-      sender_name: telegramSenderNameInput ? telegramSenderNameInput.value.trim() : '',
+      auto_start: !!currentSettingsFormState.telegramAutoStart,
+      sender_name: (currentSettingsFormState.telegramSenderName || '').trim(),
       bot_token: telegramBotToken,
       proxy_enabled: telegramProxyEnabled,
       proxy_url: telegramProxyUrl,
@@ -6655,6 +7595,9 @@ async function saveSettings(options = {}) {
     setSuccessStatus('设置已保存');
     applySettings(updated);
     await loadLocalHttpApiStatus({ silent: true });
+    await loadAutoBackupStatus({ silent: true });
+    await loadIntegrationModules({ silent: true });
+    await loadSettingsSnapshots({ silent: true });
     await loadTelegramBridgeStatus({ silent: true });
     setHint(downloadDirHint, '下载目录已保存');
     if (previousActive !== activeEndpointId && getActiveEndpoint()) {
@@ -6759,7 +7702,10 @@ async function importSettings() {
     const previousActive = activeEndpointId;
     const updated = await invoke('import_settings', { path, password });
     applySettings(updated);
+    syncVueSettings(updated);
     await loadLocalHttpApiStatus({ silent: true });
+    await loadAutoBackupStatus({ silent: true });
+    await loadSettingsSnapshots({ silent: true });
     await loadTelegramBridgeStatus({ silent: true });
     setSuccessStatus('配置已导入并生效');
     if (previousActive !== activeEndpointId && getActiveEndpoint()) {
@@ -6806,6 +7752,14 @@ async function backupWebdav() {
       return;
     }
 
+    currentSettingsOpsState = settingsOpsRuntime?.withBackupRunning
+      ? settingsOpsRuntime.withBackupRunning(currentSettingsOpsState)
+      : {
+          ...currentSettingsOpsState,
+          backupRunning: true,
+          backupLabel: '备份中...',
+        };
+    syncVueSettingsOpsState();
     if (backupWebdavButton) {
       backupWebdavButton.classList.add('is-loading');
       backupWebdavButton.disabled = true;
@@ -6814,6 +7768,7 @@ async function backupWebdav() {
     setStatus('正在备份 WebDAV 数据...');
 
     await invoke('backup_webdav', { path: target });
+    await loadSettingsBackupArchives({ silent: true });
     
     setSuccessStatus('备份成功');
     // showToast(`WebDAV 数据已备份到 ${target}`, 'success');
@@ -6829,6 +7784,14 @@ async function backupWebdav() {
       message: String(error),
     });
   } finally {
+    currentSettingsOpsState = settingsOpsRuntime?.withBackupIdle
+      ? settingsOpsRuntime.withBackupIdle(currentSettingsOpsState)
+      : {
+          ...currentSettingsOpsState,
+          backupRunning: false,
+          backupLabel: '备份 WebDAV',
+        };
+    syncVueSettingsOpsState();
     if (backupWebdavButton) {
       backupWebdavButton.classList.remove('is-loading');
       backupWebdavButton.disabled = false;
@@ -6876,6 +7839,14 @@ async function restoreWebdav() {
       return;
     }
 
+    currentSettingsOpsState = settingsOpsRuntime?.withRestoreRunning
+      ? settingsOpsRuntime.withRestoreRunning(currentSettingsOpsState)
+      : {
+          ...currentSettingsOpsState,
+          restoreRunning: true,
+          restoreLabel: '恢复中...',
+        };
+    syncVueSettingsOpsState();
     if (restoreWebdavButton) {
       restoreWebdavButton.classList.add('is-loading');
       restoreWebdavButton.disabled = true;
@@ -6884,6 +7855,7 @@ async function restoreWebdav() {
     setStatus('正在从备份恢复 WebDAV 数据...');
 
     await invoke('restore_webdav', { path });
+    await loadSettingsBackupArchives({ silent: true });
     
     setSuccessStatus('恢复成功');
     await showInfoDialog({
@@ -6899,6 +7871,14 @@ async function restoreWebdav() {
       message: String(error),
     });
   } finally {
+    currentSettingsOpsState = settingsOpsRuntime?.withRestoreIdle
+      ? settingsOpsRuntime.withRestoreIdle(currentSettingsOpsState)
+      : {
+          ...currentSettingsOpsState,
+          restoreRunning: false,
+          restoreLabel: '恢复 WebDAV',
+        };
+    syncVueSettingsOpsState();
     if (restoreWebdavButton) {
       restoreWebdavButton.classList.remove('is-loading');
       restoreWebdavButton.disabled = false;
@@ -7181,6 +8161,7 @@ async function chooseDownloadDir() {
       return;
     }
     downloadDirInput.value = path;
+    updateSettingsFormField('downloadDir', path);
     setHint(downloadDirHint, '已选择下载目录，保存后生效');
   } catch (error) {
     setErrorStatus(`选择下载目录失败：${error}`);
@@ -7231,8 +8212,64 @@ function addWebdavEndpoint() {
     username: '',
     password: '',
     enabled: false,
+    speedTestRunning: false,
+    speedTestResult: null,
   });
   renderWebdavEndpoints();
+}
+
+function updateVueWebdavEndpointField(endpointMeta, field, value) {
+  const endpoint = findWebdavEndpoint(endpointMeta?.id);
+  if (!endpoint || !field) {
+    return;
+  }
+  endpoint[field] = value;
+  if (field === 'url') {
+    endpoint.speedTestResult = null;
+    if (!(endpoint.url || '').trim() && activeEndpointId === endpoint.id) {
+      activeEndpointId = null;
+    }
+  }
+  renderEndpointSelect();
+  refreshWebdavEndpointViews();
+}
+
+function toggleVueWebdavEndpointEnabled(endpointMeta, checked) {
+  const endpoint = findWebdavEndpoint(endpointMeta?.id);
+  if (!endpoint) {
+    return;
+  }
+  endpoint.enabled = !!checked;
+  if (!endpoint.enabled && activeEndpointId === endpoint.id) {
+    activeEndpointId = null;
+  }
+  renderEndpointSelect();
+  refreshWebdavEndpointViews();
+}
+
+function activateVueWebdavEndpoint(endpointMeta, checked) {
+  if (!checked) {
+    return;
+  }
+  const endpoint = findWebdavEndpoint(endpointMeta?.id);
+  if (!endpoint || !endpoint.enabled) {
+    return;
+  }
+  activeEndpointId = endpoint.id;
+  renderEndpointSelect();
+  refreshWebdavEndpointViews();
+}
+
+function removeVueWebdavEndpoint(endpointMeta) {
+  if (!endpointMeta?.id) {
+    return;
+  }
+  webdavEndpoints = webdavEndpoints.filter((item) => item.id !== endpointMeta.id);
+  if (activeEndpointId === endpointMeta.id) {
+    activeEndpointId = null;
+  }
+  renderEndpointSelect();
+  refreshWebdavEndpointViews();
 }
 
 async function batchSpeedTest() {
@@ -7242,6 +8279,28 @@ async function batchSpeedTest() {
   const validEndpoints = webdavEndpoints.filter(
     (endpoint) => endpoint.url && endpoint.url.trim(),
   );
+
+  if (hasVueAppShell) {
+    if (validEndpoints.length === 0) {
+      setErrorStatus('没有可测速的端点，请至少填写一个端点的 URL');
+      await showSettingsResultDialog('批量测速失败', '没有可测速的端点，请至少填写一个端点的 URL。');
+      return;
+    }
+    batchSpeedTestButton.disabled = true;
+    batchSpeedTestButton.textContent = `批量测速中（${validEndpoints.length}）...`;
+    try {
+      await Promise.all(validEndpoints.map((endpoint) => runVueWebdavSpeedTest(endpoint.id).catch(() => null)));
+      setSuccessStatus(`批量测速完成（${validEndpoints.length} 个端点）`);
+      await showSettingsResultDialog('批量测速成功', `已完成 ${validEndpoints.length} 个端点的测速。`);
+    } catch (error) {
+      setErrorStatus(`批量测速失败：${error}`);
+      await showSettingsResultDialog('批量测速失败', String(error));
+    } finally {
+      batchSpeedTestButton.disabled = false;
+      batchSpeedTestButton.textContent = '批量测速';
+    }
+    return;
+  }
 
   if (validEndpoints.length === 0) {
     setErrorStatus('没有可测试的端点（请至少填写一个端点的 URL）');
@@ -7528,38 +8587,58 @@ if (listen) {
 
   listen('webdav-backup-progress', (event) => {
     const payload = event.payload || {};
-    const { current, total, state } = payload;
-    
-    if (state === 'finished') {
-       return;
+    const text = settingsOpsRuntime?.getBackupProgressLabel
+      ? settingsOpsRuntime.getBackupProgressLabel(payload)
+      : null;
+    if (!text) {
+      return;
     }
-    
-    const percent = total > 0 ? Math.round((current / total) * 100) : 0;
-    const text = state === 'scanning' ? '扫描中...' : 
-                 state === 'downloading' ? `备份中 ${percent}%` :
-                 state;
-                 
+
+    currentSettingsOpsState = settingsOpsRuntime?.withBackupRunning
+      ? settingsOpsRuntime.withBackupRunning(currentSettingsOpsState, text)
+      : {
+          ...currentSettingsOpsState,
+          backupRunning: true,
+          backupLabel: text,
+        };
+    syncVueSettingsOpsState();
     if (backupWebdavButton) {
-        backupWebdavButton.textContent = text;
+      backupWebdavButton.textContent = text;
     }
   });
 
   listen('webdav-restore-progress', (event) => {
     const payload = event.payload || {};
-    const { current, total, state } = payload;
-    
-    if (state === 'finished') {
-       return;
+    const text = settingsOpsRuntime?.getRestoreProgressLabel
+      ? settingsOpsRuntime.getRestoreProgressLabel(payload)
+      : null;
+    if (!text) {
+      return;
     }
-    
-    const percent = total > 0 ? Math.round((current / total) * 100) : 0;
-    const text = state === 'scanning' ? '清理旧数据...' : 
-                 state === 'uploading' ? `恢复中 ${percent}%` :
-                 state;
-                 
+
+    currentSettingsOpsState = settingsOpsRuntime?.withRestoreRunning
+      ? settingsOpsRuntime.withRestoreRunning(currentSettingsOpsState, text)
+      : {
+          ...currentSettingsOpsState,
+          restoreRunning: true,
+          restoreLabel: text,
+        };
+    syncVueSettingsOpsState();
     if (restoreWebdavButton) {
-        restoreWebdavButton.textContent = text;
+      restoreWebdavButton.textContent = text;
     }
+  });
+
+  listen('auto-backup-status', (event) => {
+    const payload = event.payload || {};
+    currentAutoBackupStatusState = {
+      ...currentAutoBackupStatusState,
+      lastRunMs: payload.lastRunMs ?? payload.last_run_ms ?? currentAutoBackupStatusState.lastRunMs,
+      lastSuccessMs: payload.lastSuccessMs ?? payload.last_success_ms ?? currentAutoBackupStatusState.lastSuccessMs,
+      lastError: payload.lastError ?? payload.last_error ?? null,
+      lastBackupPath: payload.lastBackupPath ?? payload.last_backup_path ?? '',
+    };
+    syncVueSettingsAutoBackup(currentAutoBackupStatusState);
   });
 }
 
@@ -7735,8 +8814,8 @@ if (sendHotkeyInputs && sendHotkeyInputs.length > 0) {
   });
 }
 if (senderNameInput) {
-  senderNameInput.addEventListener('input', () => {
-    setSenderNameDisplay(senderNameInput.value);
+  senderNameInput.addEventListener('input', (event) => {
+    setSenderNameDisplay(event.target?.value || '');
   });
 }
 if (endpointSelect) {
@@ -7924,15 +9003,17 @@ document.addEventListener('keydown', (event) => {
   minimizeAppWindow();
 });
 
-tabButtons.forEach((button) => {
-  button.addEventListener('click', () => {
-    const target = button.dataset.tabTarget;
-    setActiveTab(target, {
-      scrollToBottom: target === 'home',
-      focusInput: target === 'home',
+if (!hasVueAppShell) {
+  tabButtons.forEach((button) => {
+    button.addEventListener('click', () => {
+      const target = button.dataset.tabTarget;
+      setActiveTab(target, {
+        scrollToBottom: target === 'home',
+        focusInput: target === 'home',
+      });
     });
   });
-});
+}
 
 function handleWindowFocus() {
   focusHomeComposer();
@@ -7944,6 +9025,122 @@ syncTelegramControlsState();
 startTelegramBridgeStatusPolling();
 renderComposerMarkTagList();
 initializeSettingsNavigation();
+syncVueSettingsOpsState();
+vueBridge?.setActions?.({
+  refreshSettingsSnapshots: () => {
+    loadSettingsSnapshots();
+  },
+  refreshSettingsBackupArchives: () => {
+    loadSettingsBackupArchives();
+  },
+  restoreSettingsSnapshot: (snapshot) => {
+    restoreSettingsSnapshotRecord(snapshot);
+  },
+  restoreSettingsBackupArchive: (record) => {
+    restoreSettingsBackupArchiveRecord(record);
+  },
+  updateSettingsAutoBackupField: (field, value) => {
+    updateSettingsAutoBackupField(field, value);
+  },
+  updateSettingsFormField: (field, value) => {
+    updateSettingsFormField(field, value);
+  },
+  openMessagePreview: (message) => {
+    openMessagePreview(message);
+  },
+  toggleMessageMarked: (message) => {
+    toggleMessageMarked(message);
+  },
+  copyText: (message) => {
+    copyTextToClipboard(message?.content || '');
+  },
+  downloadTextMessageAsFile: (message) => {
+    downloadTextMessageAsFile(message);
+  },
+  openMessageFile: (message) => {
+    openMessageFile(message);
+  },
+  downloadMessageFile: (message) => {
+    downloadMessageFile(message);
+  },
+  saveMessageFileAs: (message) => {
+    saveMessageFileAs(message);
+  },
+  deleteSingleMessage: (message) => {
+    deleteSingleMessage(message);
+  },
+  changeMarkedPage: (nextPage) => {
+    markedMessagesPage = Math.max(1, Number(nextPage) || 1);
+    renderMarkedMessages(markedMessages, {
+      query: getAppliedMarkedSearchQuery(),
+    });
+  },
+  toggleMarkedMessageSelection: (message, checked) => {
+    toggleSelectedMarkedMessage(message?.filename, checked);
+  },
+  openMarkMessageModal: (message) => {
+    openMarkMessageModal(message?.message || message);
+  },
+  toggleMarkedMessagePin: (message) => {
+    toggleMarkedMessagePin(message?.message || message);
+  },
+  toggleMarkedMessageExpanded: (message) => {
+    const filename = message?.filename;
+    if (!filename) {
+      return;
+    }
+    if (expandedTextMessages.has(filename)) {
+      expandedTextMessages.delete(filename);
+    } else {
+      expandedTextMessages.add(filename);
+    }
+    renderMarkedMessages(markedMessages, {
+      query: getAppliedMarkedSearchQuery(),
+    });
+  },
+  changeTransferTaskPage: (view, nextPage) => {
+    if (view === 'uploads') {
+      uploadTasksPage = nextPage;
+      renderUploadTasks();
+      return;
+    }
+    downloadTasksPage = nextPage;
+    renderDownloadTasks();
+  },
+  toggleTransferTaskSelection: (task, checked) => {
+    toggleSelectedDownloadTask(task?.key, checked);
+  },
+  saveDownloadHistoryAs: (task) => {
+    saveDownloadHistoryAs(task);
+  },
+  redownloadDownloadHistory: (task) => {
+    redownloadDownloadHistory(task);
+  },
+  openDownloadHistoryFile: (task) => {
+    openDownloadHistoryFile(task);
+  },
+  openDownloadHistoryDir: (task) => {
+    openDownloadHistoryDir(task);
+  },
+  deleteDownloadHistoryRecord: (task) => {
+    deleteDownloadHistoryRecord(task);
+  },
+  updateSettingsWebdavField: (endpoint, field, value) => {
+    updateVueWebdavEndpointField(endpoint, field, value);
+  },
+  toggleSettingsWebdavEnabled: (endpoint, checked) => {
+    toggleVueWebdavEndpointEnabled(endpoint, checked);
+  },
+  activateSettingsWebdavEndpoint: (endpoint, checked) => {
+    activateVueWebdavEndpoint(endpoint, checked);
+  },
+  removeSettingsWebdavEndpoint: (endpoint) => {
+    removeVueWebdavEndpoint(endpoint);
+  },
+  testSettingsWebdavEndpoint: (endpoint) => {
+    runVueWebdavSpeedTest(endpoint?.id);
+  },
+});
 loadSettings();
 loadMessages({ scrollToBottom: true });
 loadMarkedTags();
@@ -8450,46 +9647,6 @@ async function openMarkMessageModal(messageOrMessages, options = {}) {
     ? messageOrMessages.filter(Boolean)
     : [messageOrMessages].filter(Boolean);
   if (!messages.length) return;
-  currentMarkingMessage = messages[0];
-  currentMarkingMessages = messages;
-  currentMarkingMode = options.mode || (messages.length > 1 ? 'batch' : 'single');
-  selectedMarkTagIds.clear();
-  if (currentMarkingMode !== 'batch') {
-    (messages[0].marked_tag_ids || []).forEach((tagId) => selectedMarkTagIds.add(tagId));
-  }
-  await loadMarkedTags();
-  if (markMessageSubtitle) {
-    markMessageSubtitle.textContent = `${message.sender || '消息'}：选择标签后确认，也可以直接确认为无标签标记。`;
-  }
-  renderMarkMessageTagList();
-  markMessageModal.classList.add('is-active');
-  markMessageModal.setAttribute('aria-hidden', 'false');
-  document.body.classList.add('preview-open');
-}
-
-async function confirmMarkMessage() {
-  if (!invoke || !currentMarkingMessage?.filename) return;
-  try {
-    await invoke('mark_message', {
-      filename: currentMarkingMessage.filename,
-      tagIds: Array.from(selectedMarkTagIds),
-    });
-    closeMarkMessageModal();
-    await Promise.all([
-      loadMessages(),
-      loadMarkedMessages(),
-    ]);
-  } catch (error) {
-    showToast(`标记失败: ${error}`, 'error');
-  }
-}
-
-async function openMarkMessageModal(messageOrMessages, options = {}) {
-  if (!markMessageModal) return;
-  const messages = Array.isArray(messageOrMessages)
-    ? messageOrMessages.filter(Boolean)
-    : [messageOrMessages].filter(Boolean);
-  if (!messages.length) return;
   currentMarkingMessages = messages;
   currentMarkingMode = options.mode || (messages.length > 1 ? 'batch' : 'single');
   selectedMarkTagIds.clear();
@@ -8579,12 +9736,14 @@ async function deleteSelectedMarkedMessages() {
     return;
   }
 
+  let deletedFilenames = [];
   try {
     const result = await invoke('delete_messages', {
       filenames,
       deleteRemote: choice === 'remote',
     });
     const failed = result.failed || [];
+    deletedFilenames = resolveDeletedFilenames(filenames, failed);
     if (failed.length > 0) {
       await showInfoDialog({
         title: '删除完成',
@@ -8608,10 +9767,14 @@ async function deleteSelectedMarkedMessages() {
     });
   } finally {
     setMarkedSelectionMode(false);
-    await Promise.all([
-      loadMessages(),
-      loadMarkedMessages(),
-    ]);
+    if (deletedFilenames.length > 0) {
+      await refreshMessageListsAfterDelete(deletedFilenames, { render: false });
+    } else {
+      await Promise.all([
+        loadMessages({ checkNew: true, scrollToBottom: false }),
+        loadMarkedMessages(),
+      ]);
+    }
   }
 }
 
@@ -8680,6 +9843,18 @@ function renderMarkedMessages(messages = [], options = {}) {
   if (!messages.length) {
     pruneSelectedMarkedMessages();
     updateMarkedSelectionBar();
+    currentMarkedPageState = {
+      useVueList: true,
+      emptyMessage: query
+        ? `没有找到与 "${query}" 匹配的标记消息`
+        : (activeMarkedTagId ? '当前标签下暂无标记消息' : '暂无标记消息'),
+      currentPage: 1,
+      totalPages: 1,
+      selectionMode: markedSelectionMode,
+      selectionCount: selectedMarkedMessages.size,
+      messages: [],
+    };
+    syncVueMarkedPageState();
     const empty = document.createElement('li');
     empty.className = 'message-card';
     empty.textContent = query
@@ -8701,6 +9876,16 @@ function renderMarkedMessages(messages = [], options = {}) {
   visibleMarkedMessages = pageMessages;
   pruneSelectedMarkedMessages();
   updateMarkedSelectionBar();
+  currentMarkedPageState = {
+    useVueList: true,
+    emptyMessage: '',
+    currentPage: markedMessagesPage,
+    totalPages,
+    selectionMode: markedSelectionMode,
+    selectionCount: selectedMarkedMessages.size,
+    messages: pageMessages.map(buildMarkedMessageViewModel),
+  };
+  syncVueMarkedPageState();
 
   pageMessages.forEach((message) => {
     const item = document.createElement('li');
@@ -9042,6 +10227,9 @@ document.addEventListener('pointerdown', (event) => {
 });
 
 function getCurrentMessageSearchState() {
+  if (feedState?.getCurrentMessageSearchState) {
+    return feedState.getCurrentMessageSearchState(searchInput ? searchInput.value : '');
+  }
   const rawQuery = searchInput ? searchInput.value.trim() : '';
   const normalizedQuery = rawQuery.toLowerCase();
   return {
@@ -9052,38 +10240,51 @@ function getCurrentMessageSearchState() {
 }
 
 function updateLoadMoreHintForCurrentView() {
-  if (!messageList) return;
-  const { hasQuery } = getCurrentMessageSearchState();
-  const shouldShow = hasMoreMessages || isLoadingMore;
-  let loadMoreItem = document.getElementById('load-more-hint');
-  if (!shouldShow) {
-    if (loadMoreItem) {
-      loadMoreItem.remove();
-    }
-    return;
-  }
-  if (!loadMoreItem) {
-    loadMoreItem = document.createElement('li');
-    loadMoreItem.className = 'load-more-hint';
-    loadMoreItem.id = 'load-more-hint';
-    messageList.insertBefore(loadMoreItem, messageList.firstChild || null);
-  }
-  loadMoreItem.textContent = getLoadMoreHintText({ isSearchResult: hasQuery });
+  const filtered = feedState?.filterMessagesForSearch
+    ? feedState.filterMessagesForSearch(lastMessages, searchInput ? searchInput.value : '')
+    : null;
+  const { rawQuery, normalizedQuery, hasQuery } = filtered
+    ? filtered.searchState
+    : getCurrentMessageSearchState();
+  const messagesToRender = filtered
+    ? filtered.messages
+    : !hasQuery
+      ? lastMessages
+      : lastMessages.filter((message) => {
+          if (message.kind === 'text') {
+            return (message.content || '').toLowerCase().includes(normalizedQuery);
+          }
+          if (message.kind === 'file') {
+            return (message.original_name || '').toLowerCase().includes(normalizedQuery);
+          }
+          return false;
+        });
+  syncVueHomeFeedView({
+    query: rawQuery,
+    messages: messagesToRender,
+  });
 }
 
 function renderCurrentMessageView(options = {}) {
-  const { rawQuery, normalizedQuery, hasQuery } = getCurrentMessageSearchState();
-  const messagesToRender = !hasQuery
-    ? lastMessages
-    : lastMessages.filter((message) => {
-        if (message.kind === 'text') {
-          return (message.content || '').toLowerCase().includes(normalizedQuery);
-        }
-        if (message.kind === 'file') {
-          return (message.original_name || '').toLowerCase().includes(normalizedQuery);
-        }
-        return false;
-      });
+  const filtered = feedState?.filterMessagesForSearch
+    ? feedState.filterMessagesForSearch(lastMessages, searchInput ? searchInput.value : '')
+    : null;
+  const { rawQuery, normalizedQuery, hasQuery } = filtered
+    ? filtered.searchState
+    : getCurrentMessageSearchState();
+  const messagesToRender = filtered
+    ? filtered.messages
+    : !hasQuery
+      ? lastMessages
+      : lastMessages.filter((message) => {
+          if (message.kind === 'text') {
+            return (message.content || '').toLowerCase().includes(normalizedQuery);
+          }
+          if (message.kind === 'file') {
+            return (message.original_name || '').toLowerCase().includes(normalizedQuery);
+          }
+          return false;
+        });
 
   renderMessages(messagesToRender, {
     ...options,
@@ -9122,6 +10323,7 @@ async function loadAppVersion() {
   try {
     const version = await invoke('get_app_version');
     versionElement.textContent = version;
+    vueBridge?.syncAppVersion?.(version);
   } catch (error) {
     console.error('Failed to load app version:', error);
     versionElement.textContent = '未知';

@@ -382,6 +382,45 @@ pub fn list_messages(path: &Path, endpoint_id: &str) -> rusqlite::Result<Vec<Mes
     list_messages_paged(path, endpoint_id, None, None, false)
 }
 
+fn message_row_select_sql() -> &'static str {
+    "filename, sender, timestamp_ms, size, kind, original_name, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, format"
+}
+
+fn map_message_row(row: &Row<'_>) -> rusqlite::Result<Message> {
+    let marked_tag_ids: String = row.get(11)?;
+    Ok(Message {
+        filename: row.get(0)?,
+        sender: row.get(1)?,
+        timestamp_ms: row.get(2)?,
+        size: row.get(3)?,
+        kind: row.get(4)?,
+        original_name: row.get(5)?,
+        content: row.get(6)?,
+        local_path: row.get(7)?,
+        remote_path: row.get(8)?,
+        file_hash: row.get(9)?,
+        download_exists: false,
+        marked: row.get(10)?,
+        marked_tag_ids: parse_tag_ids(marked_tag_ids),
+        marked_pinned: row.get(12)?,
+        format: row.get(13)?,
+    })
+}
+
+fn collect_messages(
+    conn: &Connection,
+    sql: &str,
+    params: &[&dyn ToSql],
+) -> rusqlite::Result<Vec<Message>> {
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params, map_message_row)?;
+    let mut messages = Vec::new();
+    for row in rows {
+        messages.push(row?);
+    }
+    Ok(messages)
+}
+
 pub fn list_messages_paged(
     path: &Path,
     endpoint_id: &str,
@@ -401,52 +440,102 @@ pub fn list_messages_paged(
     let sql = match (limit, offset) {
         (Some(lim), Some(off)) => format!(
             "SELECT * FROM (\
-              SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, format \
-              FROM messages {} ORDER BY timestamp_ms DESC LIMIT {} OFFSET {}\
-            ) ORDER BY timestamp_ms ASC",
-            where_clause, lim, off
+              SELECT {} \
+              FROM messages {} ORDER BY timestamp_ms DESC, filename DESC LIMIT {} OFFSET {}\
+            ) ORDER BY timestamp_ms ASC, filename ASC",
+            message_row_select_sql(), where_clause, lim, off
         ),
         (Some(lim), None) => format!(
             "SELECT * FROM (\
-              SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, format \
-              FROM messages {} ORDER BY timestamp_ms DESC LIMIT {}\
-            ) ORDER BY timestamp_ms ASC",
-            where_clause, lim
+              SELECT {} \
+              FROM messages {} ORDER BY timestamp_ms DESC, filename DESC LIMIT {}\
+            ) ORDER BY timestamp_ms ASC, filename ASC",
+            message_row_select_sql(), where_clause, lim
         ),
         _ => format!(
-            "SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, format \
-             FROM messages {} ORDER BY timestamp_ms ASC",
-            where_clause
+            "SELECT {} FROM messages {} ORDER BY timestamp_ms ASC, filename ASC",
+            message_row_select_sql(), where_clause
         ),
     };
 
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([endpoint_id], |row| {
-        let marked_tag_ids: String = row.get(11)?;
-        Ok(Message {
-            filename: row.get(0)?,
-            sender: row.get(1)?,
-            timestamp_ms: row.get(2)?,
-            size: row.get(3)?,
-            kind: row.get(4)?,
-            original_name: row.get(5)?,
-            content: row.get(6)?,
-            local_path: row.get(7)?,
-            remote_path: row.get(8)?,
-            file_hash: row.get(9)?,
-            download_exists: false,
-            marked: row.get(10)?,
-            marked_tag_ids: parse_tag_ids(marked_tag_ids),
-            marked_pinned: row.get(12)?,
-            format: row.get(13)?,
-        })
-    })?;
+    collect_messages(&conn, &sql, &[&endpoint_id])
+}
 
-    let mut messages = Vec::new();
-    for row in rows {
-        messages.push(row?);
-    }
-    Ok(messages)
+pub fn list_latest_messages_window(
+    path: &Path,
+    endpoint_id: &str,
+    limit: i64,
+    only_marked: bool,
+) -> rusqlite::Result<Vec<Message>> {
+    let conn = Connection::open(path)?;
+    let where_clause = if only_marked {
+        "WHERE endpoint_id = ?1 AND marked = 1"
+    } else {
+        "WHERE endpoint_id = ?1"
+    };
+    let sql = format!(
+        "SELECT * FROM (\
+           SELECT {} FROM messages {} \
+           ORDER BY timestamp_ms DESC, filename DESC LIMIT ?2\
+         ) ORDER BY timestamp_ms ASC, filename ASC",
+        message_row_select_sql(),
+        where_clause
+    );
+    collect_messages(&conn, &sql, &[&endpoint_id, &limit])
+}
+
+pub fn list_messages_before(
+    path: &Path,
+    endpoint_id: &str,
+    before_timestamp_ms: i64,
+    before_filename: &str,
+    limit: i64,
+    only_marked: bool,
+) -> rusqlite::Result<Vec<Message>> {
+    let conn = Connection::open(path)?;
+    let where_clause = if only_marked {
+        "WHERE endpoint_id = ?1 AND marked = 1 AND (timestamp_ms < ?2 OR (timestamp_ms = ?2 AND filename < ?3))"
+    } else {
+        "WHERE endpoint_id = ?1 AND (timestamp_ms < ?2 OR (timestamp_ms = ?2 AND filename < ?3))"
+    };
+    let sql = format!(
+        "SELECT * FROM (\
+           SELECT {} FROM messages {} \
+           ORDER BY timestamp_ms DESC, filename DESC LIMIT ?4\
+         ) ORDER BY timestamp_ms ASC, filename ASC",
+        message_row_select_sql(),
+        where_clause
+    );
+    collect_messages(
+        &conn,
+        &sql,
+        &[&endpoint_id, &before_timestamp_ms, &before_filename, &limit],
+    )
+}
+
+pub fn list_messages_after(
+    path: &Path,
+    endpoint_id: &str,
+    after_timestamp_ms: i64,
+    after_filename: &str,
+    only_marked: bool,
+) -> rusqlite::Result<Vec<Message>> {
+    let conn = Connection::open(path)?;
+    let where_clause = if only_marked {
+        "WHERE endpoint_id = ?1 AND marked = 1 AND (timestamp_ms > ?2 OR (timestamp_ms = ?2 AND filename > ?3))"
+    } else {
+        "WHERE endpoint_id = ?1 AND (timestamp_ms > ?2 OR (timestamp_ms = ?2 AND filename > ?3))"
+    };
+    let sql = format!(
+        "SELECT {} FROM messages {} ORDER BY timestamp_ms ASC, filename ASC",
+        message_row_select_sql(),
+        where_clause
+    );
+    collect_messages(
+        &conn,
+        &sql,
+        &[&endpoint_id, &after_timestamp_ms, &after_filename],
+    )
 }
 
 pub fn count_messages(path: &Path, endpoint_id: &str, only_marked: bool) -> rusqlite::Result<i64> {
@@ -457,6 +546,30 @@ pub fn count_messages(path: &Path, endpoint_id: &str, only_marked: bool) -> rusq
         "SELECT COUNT(*) FROM messages WHERE endpoint_id = ?1"
     };
     conn.query_row(&sql, params![endpoint_id], |row| row.get(0))
+}
+
+pub fn count_messages_before(
+    path: &Path,
+    endpoint_id: &str,
+    before_timestamp_ms: i64,
+    before_filename: &str,
+    only_marked: bool,
+) -> rusqlite::Result<i64> {
+    let conn = Connection::open(path)?;
+    let sql = if only_marked {
+        "SELECT COUNT(*) FROM messages \
+         WHERE endpoint_id = ?1 AND marked = 1 \
+         AND (timestamp_ms < ?2 OR (timestamp_ms = ?2 AND filename < ?3))"
+    } else {
+        "SELECT COUNT(*) FROM messages \
+         WHERE endpoint_id = ?1 \
+         AND (timestamp_ms < ?2 OR (timestamp_ms = ?2 AND filename < ?3))"
+    };
+    conn.query_row(
+        sql,
+        params![endpoint_id, before_timestamp_ms, before_filename],
+        |row| row.get(0),
+    )
 }
 
 pub fn list_marked_messages(
@@ -1191,6 +1304,255 @@ mod tests {
         assert_eq!(tags.len(), 1);
         assert_eq!(tags[0].id, "tag-c");
         assert_eq!(tags[0].name, "Gamma");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn stable_message_windows_support_before_and_after_boundaries() {
+        let path = temp_db_path("message-window-boundaries");
+        init_db(&path, None).expect("initialize database");
+
+        for (filename, timestamp_ms) in [
+            ("001.txt", 100_i64),
+            ("002.txt", 200_i64),
+            ("003.txt", 200_i64),
+            ("004.txt", 300_i64),
+            ("005.txt", 400_i64),
+        ] {
+            let mut message = sample_message(filename, timestamp_ms, &[], false);
+            message.marked = false;
+            upsert_message(&path, &message).expect("insert sample message");
+        }
+
+        let latest = list_latest_messages_window(&path, "endpoint-1", 2, false)
+            .expect("latest window");
+        let latest_filenames: Vec<_> = latest.iter().map(|message| message.filename.as_str()).collect();
+        assert_eq!(latest_filenames, vec!["004.txt", "005.txt"]);
+
+        let older = list_messages_before(&path, "endpoint-1", 300, "004.txt", 2, false)
+            .expect("older window");
+        let older_filenames: Vec<_> = older.iter().map(|message| message.filename.as_str()).collect();
+        assert_eq!(older_filenames, vec!["002.txt", "003.txt"]);
+
+        let newer = list_messages_after(&path, "endpoint-1", 200, "002.txt", false)
+            .expect("newer window");
+        let newer_filenames: Vec<_> = newer.iter().map(|message| message.filename.as_str()).collect();
+        assert_eq!(newer_filenames, vec!["003.txt", "004.txt", "005.txt"]);
+
+        let older_count =
+            count_messages_before(&path, "endpoint-1", 300, "004.txt", false).expect("older count");
+        assert_eq!(older_count, 3);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn stable_message_windows_stay_consistent_after_boundary_deletions() {
+        let path = temp_db_path("message-window-deletions");
+        init_db(&path, None).expect("initialize database");
+
+        for (filename, timestamp_ms) in [
+            ("001.txt", 100_i64),
+            ("002.txt", 200_i64),
+            ("003.txt", 200_i64),
+            ("004.txt", 300_i64),
+            ("005.txt", 300_i64),
+            ("006.txt", 400_i64),
+        ] {
+            let mut message = sample_message(filename, timestamp_ms, &[], false);
+            message.marked = false;
+            upsert_message(&path, &message).expect("insert sample message");
+        }
+
+        let deleted = delete_messages(
+            &path,
+            "endpoint-1",
+            &["003.txt".to_string(), "005.txt".to_string()],
+        )
+        .expect("delete boundary messages");
+        assert_eq!(deleted, 2);
+
+        let latest = list_latest_messages_window(&path, "endpoint-1", 3, false)
+            .expect("latest window after delete");
+        let latest_filenames: Vec<_> = latest
+            .iter()
+            .map(|message| message.filename.as_str())
+            .collect();
+        assert_eq!(latest_filenames, vec!["002.txt", "004.txt", "006.txt"]);
+
+        let older = list_messages_before(&path, "endpoint-1", 300, "004.txt", 3, false)
+            .expect("older window after delete");
+        let older_filenames: Vec<_> = older
+            .iter()
+            .map(|message| message.filename.as_str())
+            .collect();
+        assert_eq!(older_filenames, vec!["001.txt", "002.txt"]);
+
+        let newer = list_messages_after(&path, "endpoint-1", 200, "002.txt", false)
+            .expect("newer window after delete");
+        let newer_filenames: Vec<_> = newer
+            .iter()
+            .map(|message| message.filename.as_str())
+            .collect();
+        assert_eq!(newer_filenames, vec!["004.txt", "006.txt"]);
+
+        let older_count =
+            count_messages_before(&path, "endpoint-1", 300, "004.txt", false).expect("older count");
+        assert_eq!(older_count, 2);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn stable_message_windows_reconstruct_full_history_across_repeated_load_more() {
+        let path = temp_db_path("message-window-repeated-load-more");
+        init_db(&path, None).expect("initialize database");
+
+        for (filename, timestamp_ms) in [
+            ("001.txt", 100_i64),
+            ("002.txt", 200_i64),
+            ("003.txt", 200_i64),
+            ("004.txt", 300_i64),
+            ("005.txt", 300_i64),
+            ("006.txt", 400_i64),
+            ("007.txt", 500_i64),
+        ] {
+            let mut message = sample_message(filename, timestamp_ms, &[], false);
+            message.marked = false;
+            upsert_message(&path, &message).expect("insert sample message");
+        }
+
+        let expected = list_messages(&path, "endpoint-1").expect("list expected messages");
+        let expected_filenames: Vec<_> = expected
+            .iter()
+            .map(|message| message.filename.clone())
+            .collect();
+
+        let page_size = 2_i64;
+        let mut reconstructed = list_latest_messages_window(&path, "endpoint-1", page_size, false)
+            .expect("load latest window");
+        loop {
+            let first = reconstructed.first().cloned().expect("window should not be empty");
+            let older = list_messages_before(
+                &path,
+                "endpoint-1",
+                first.timestamp_ms,
+                &first.filename,
+                page_size,
+                false,
+            )
+            .expect("load older page");
+            if older.is_empty() {
+                break;
+            }
+            reconstructed.splice(0..0, older.into_iter());
+        }
+
+        let reconstructed_filenames: Vec<_> = reconstructed
+            .iter()
+            .map(|message| message.filename.clone())
+            .collect();
+        assert_eq!(reconstructed_filenames, expected_filenames);
+
+        let unique_filenames: std::collections::HashSet<_> =
+            reconstructed_filenames.iter().cloned().collect();
+        assert_eq!(unique_filenames.len(), reconstructed_filenames.len());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn stable_message_windows_are_isolated_per_endpoint() {
+        let path = temp_db_path("message-window-endpoint-isolation");
+        init_db(&path, None).expect("initialize database");
+
+        for (filename, timestamp_ms) in [
+            ("a-001.txt", 100_i64),
+            ("a-002.txt", 200_i64),
+            ("a-003.txt", 300_i64),
+        ] {
+            let mut message = sample_message(filename, timestamp_ms, &[], false);
+            message.marked = false;
+            upsert_message(&path, &message).expect("insert endpoint-1 message");
+        }
+
+        for (filename, timestamp_ms) in [
+            ("b-001.txt", 150_i64),
+            ("b-002.txt", 250_i64),
+            ("b-003.txt", 350_i64),
+        ] {
+            let mut message = sample_message(filename, timestamp_ms, &[], false);
+            message.endpoint_id = "endpoint-2".to_string();
+            message.marked = false;
+            upsert_message(&path, &message).expect("insert endpoint-2 message");
+        }
+
+        let latest_endpoint_1 = list_latest_messages_window(&path, "endpoint-1", 2, false)
+            .expect("latest endpoint-1 window");
+        let latest_endpoint_1_filenames: Vec<_> = latest_endpoint_1
+            .iter()
+            .map(|message| message.filename.as_str())
+            .collect();
+        assert_eq!(latest_endpoint_1_filenames, vec!["a-002.txt", "a-003.txt"]);
+
+        let older_endpoint_1 = list_messages_before(&path, "endpoint-1", 300, "a-003.txt", 5, false)
+            .expect("older endpoint-1 window");
+        let older_endpoint_1_filenames: Vec<_> = older_endpoint_1
+            .iter()
+            .map(|message| message.filename.as_str())
+            .collect();
+        assert_eq!(older_endpoint_1_filenames, vec!["a-001.txt", "a-002.txt"]);
+
+        let newer_endpoint_1 = list_messages_after(&path, "endpoint-1", 100, "a-001.txt", false)
+            .expect("newer endpoint-1 window");
+        let newer_endpoint_1_filenames: Vec<_> = newer_endpoint_1
+            .iter()
+            .map(|message| message.filename.as_str())
+            .collect();
+        assert_eq!(newer_endpoint_1_filenames, vec!["a-002.txt", "a-003.txt"]);
+
+        let endpoint_1_total = count_messages(&path, "endpoint-1", false).expect("count endpoint-1");
+        let endpoint_1_before_count = count_messages_before(&path, "endpoint-1", 300, "a-003.txt", false)
+            .expect("count older endpoint-1 messages");
+        assert_eq!(endpoint_1_total, 3);
+        assert_eq!(endpoint_1_before_count, 2);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn stable_message_windows_handle_empty_and_partial_results_near_boundaries() {
+        let path = temp_db_path("message-window-empty-partial");
+        init_db(&path, None).expect("initialize database");
+
+        for (filename, timestamp_ms) in [("001.txt", 100_i64), ("002.txt", 200_i64)] {
+            let mut message = sample_message(filename, timestamp_ms, &[], false);
+            message.marked = false;
+            upsert_message(&path, &message).expect("insert sample message");
+        }
+
+        let latest = list_latest_messages_window(&path, "endpoint-1", 10, false)
+            .expect("latest oversized window");
+        let latest_filenames: Vec<_> = latest.iter().map(|message| message.filename.as_str()).collect();
+        assert_eq!(latest_filenames, vec!["001.txt", "002.txt"]);
+
+        let older = list_messages_before(&path, "endpoint-1", 200, "002.txt", 10, false)
+            .expect("older partial window");
+        let older_filenames: Vec<_> = older.iter().map(|message| message.filename.as_str()).collect();
+        assert_eq!(older_filenames, vec!["001.txt"]);
+
+        let before_earliest = list_messages_before(&path, "endpoint-1", 100, "001.txt", 10, false)
+            .expect("before earliest window");
+        assert!(before_earliest.is_empty());
+
+        let after_newest = list_messages_after(&path, "endpoint-1", 200, "002.txt", false)
+            .expect("after newest window");
+        assert!(after_newest.is_empty());
+
+        let before_earliest_count =
+            count_messages_before(&path, "endpoint-1", 100, "001.txt", false).expect("count before earliest");
+        assert_eq!(before_earliest_count, 0);
 
         let _ = std::fs::remove_file(path);
     }

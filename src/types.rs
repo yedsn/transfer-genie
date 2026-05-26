@@ -39,6 +39,14 @@ fn default_local_http_api_bind_port() -> u16 {
     DEFAULT_LOCAL_HTTP_API_BIND_PORT
 }
 
+fn default_backup_interval_minutes() -> u64 {
+    60
+}
+
+fn default_backup_retain_count() -> u32 {
+    10
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LocalHttpApiSettings {
     #[serde(default)]
@@ -107,6 +115,26 @@ impl Default for TelegramBridgeSettings {
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackupSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_backup_interval_minutes")]
+    pub interval_minutes: u64,
+    #[serde(default = "default_backup_retain_count")]
+    pub retain_count: u32,
+}
+
+impl Default for BackupSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_minutes: default_backup_interval_minutes(),
+            retain_count: default_backup_retain_count(),
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MarkedTag {
     pub id: String,
     pub name: String,
@@ -138,6 +166,8 @@ pub struct Settings {
     pub local_http_api: LocalHttpApiSettings,
     #[serde(default)]
     pub telegram: TelegramBridgeSettings,
+    #[serde(default)]
+    pub backup: BackupSettings,
 }
 
 #[derive(Clone, Serialize)]

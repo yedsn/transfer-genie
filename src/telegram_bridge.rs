@@ -6,6 +6,7 @@ use crate::history::{
 };
 use crate::types::WebDavEndpoint;
 use crate::webdav;
+use crate::workspace;
 use log::{error, info, warn};
 use reqwest::multipart::{Form, Part};
 use reqwest::{Client, Proxy};
@@ -116,17 +117,7 @@ impl BridgeState {
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|err| format!("创建桥接状态目录失败 {}: {err}", parent.display()))?;
-        }
-        let temp = path.with_extension("tmp");
-        let data =
-            serde_json::to_vec_pretty(self).map_err(|err| format!("序列化桥接状态失败: {err}"))?;
-        fs::write(&temp, data)
-            .map_err(|err| format!("写入桥接状态临时文件失败 {}: {err}", temp.display()))?;
-        fs::rename(&temp, path)
-            .map_err(|err| format!("更新桥接状态文件失败 {}: {err}", path.display()))
+        workspace::write_json_with_audit_at(path, self, None, "telegram-bridge", "save-state")
     }
 }
 

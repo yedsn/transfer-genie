@@ -1,6 +1,7 @@
 use crate::filenames::{message_remote_path, timestamp_bucket_key};
 use crate::types::{MarkedTag, WebDavEndpoint};
 use crate::webdav::{self, ConditionalFileStatus};
+use crate::workspace;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -397,10 +398,13 @@ fn read_cache_metadata(cache_dir: &Path) -> Result<CacheMetadata, String> {
 }
 
 fn write_cache_metadata(cache_dir: &Path, metadata: &CacheMetadata) -> Result<(), String> {
-    let data = serde_json::to_vec_pretty(metadata)
-        .map_err(|err| format!("序列化历史缓存元数据失败：{err}"))?;
-    fs::write(cache_dir.join(HISTORY_CACHE_METADATA), data)
-        .map_err(|err| format!("写入历史缓存元数据失败：{err}"))
+    workspace::write_json_with_audit_at(
+        &cache_dir.join(HISTORY_CACHE_METADATA),
+        metadata,
+        None,
+        "history-cache",
+        "write-metadata",
+    )
 }
 
 async fn refresh_cached_file(

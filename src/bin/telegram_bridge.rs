@@ -12,6 +12,9 @@ mod types;
 #[allow(dead_code)]
 #[path = "../webdav.rs"]
 mod webdav;
+#[allow(dead_code)]
+#[path = "../workspace.rs"]
+mod workspace;
 
 use log::{Level, LevelFilter, Metadata, Record};
 
