@@ -1,4 +1,4 @@
-## 1. Discovery And Compatibility Baseline
+﻿## 1. Discovery And Compatibility Baseline
 - [x] 1.1 Inventory current frontend views, Tauri commands, local data files, and runtime directories.
 - [x] 1.2 Document compatibility constraints for settings, message history, downloads, marked messages, WebDAV sync, and Telegram bridge.
 - [x] 1.3 Add regression test coverage for home feed loading, WebDAV sync, Telegram bridge startup, and backup/restore baseline behavior.
@@ -17,9 +17,9 @@
 
 ## 4. Frontend Vue 2 Migration
 - [x] 4.1 Set up Vue 2 app shell and shared service/store layer over existing Tauri commands.
-- [ ] 4.2 Migrate home feed, marked page, downloads page, and settings page into Vue 2 components.
-- [ ] 4.3 Keep behavior-compatible interactions for sending, marking, deleting, downloading, backup/restore, and settings edits.
-- [ ] 4.4 Remove imperative DOM-only rendering paths once Vue 2 parity is verified.
+- [x] 4.2 Migrate home feed, marked page, downloads page, and settings page into Vue 2 components.
+- [x] 4.3 Keep behavior-compatible interactions for sending, marking, deleting, downloading, backup/restore, and settings edits.
+- [x] 4.4 Remove imperative DOM-only rendering paths once Vue 2 parity is verified.
 
 ## 5. Home Feed Stability
 - [x] 5.1 Replace offset-based incremental loading with a stable boundary-based loading strategy.
@@ -29,5 +29,8 @@
 ## 6. Scheduled Backups And Final Verification
 - [x] 6.1 Add scheduled local snapshot backup jobs and backup metadata management.
 - [x] 6.2 Add restore and rollback flows for snapshots and backup archives.
-- [ ] 6.3 Run end-to-end verification on home feed, WebDAV sync, Telegram bridge, local history/snapshot, and backup flows.
-- [ ] 6.4 Update final refactor documentation with architecture, storage layout, plugin runtime, backup strategy, bug fixes, and residual recommendations.
+- [x] 6.3 Run end-to-end verification on home feed, WebDAV sync, Telegram bridge, local history/snapshot, and backup flows.
+- [x] 6.4 Update final refactor documentation with architecture, storage layout, plugin runtime, backup strategy, bug fixes, and residual recommendations.
+
+
+

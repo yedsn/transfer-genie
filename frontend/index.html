@@ -21,7 +21,7 @@
   <body>
     <div class="app" id="app-shell" :data-active-tab="ui.activeTab">
       <main class="content">
-        <section class="tab-panel is-active" data-tab-panel="home" id="tab-home" role="tabpanel" :class="{ 'is-active': ui.activeTab === 'home' }" :aria-hidden="ui.activeTab === 'home' ? 'false' : 'true'">
+        <section class="tab-panel" data-tab-panel="home" id="tab-home" role="tabpanel" :class="{ 'is-active': ui.activeTab === 'home' }" :aria-hidden="ui.activeTab === 'home' ? 'false' : 'true'">
           <home-page-shell inline-template>
           <section class="feed" data-vue-page="home">
             <div class="feed-toolbar">
@@ -1119,7 +1119,7 @@
 
       <nav class="tabbar" role="tablist" aria-label="主菜单">
         <button
-          class="tab-button is-active"
+          class="tab-button"
           type="button"
           data-tab-target="home"
           role="tab"

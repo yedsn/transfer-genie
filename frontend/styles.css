@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600&display=swap');
+﻿@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600&display=swap');
 
 :root {
   color-scheme: light;
@@ -116,6 +116,7 @@ body {
   display: none;
   flex: 1;
   min-height: 0;
+  overflow: hidden;
 }
 
 .tab-panel.is-active {
@@ -137,6 +138,7 @@ body {
   width: 100%;
   margin: 0;
   position: relative;
+  overflow: hidden;
 }
 
 .feed-toolbar {
@@ -719,7 +721,7 @@ body {
 }
 
 .message-card.is-file .message-body::before {
-  content: "文件";
+  content: "鏂囦欢";
   display: flex;
   align-items: center;
   justify-content: center;
@@ -806,6 +808,8 @@ body {
   flex: 1;
   padding: 20px;
   background: #fff;
+  position: relative;
+  overflow: hidden;
 }
 
 .marked-page-header {
@@ -1089,7 +1093,7 @@ body {
   align-self: flex-start;
 }
 
-/* 标记列表分页 */
+/* 鏍囪鍒楄〃鍒嗛〉 */
 .marked-pagination {
   display: flex;
   align-items: center;
@@ -3604,3 +3608,6 @@ settings-page-shell {
   gap: 8px;
   flex-shrink: 0;
 }
+
+
+
