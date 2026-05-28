@@ -1672,6 +1672,7 @@ fn list_messages_window(
             &endpoint.id,
             after_timestamp_ms,
             after_filename,
+            limit,
             marked_filter,
         )
         .map_err(|err| err.to_string())?

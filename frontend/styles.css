@@ -548,8 +548,6 @@ body {
 
 .feed-content {
   position: relative;
-  background: var(--panel-soft);
-  border: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -557,33 +555,24 @@ body {
 }
 
 .feed-search {
-  padding: 10px;
-  position: absolute;
-  width: 100%;
-  z-index: 10;
-  background: linear-gradient(to bottom, rgba(255, 255, 255, 0.6), transparent);
-  backdrop-filter: blur(4px);
-  opacity: 0.8;
-  transition: all 0.2s ease-in-out;
-  padding-right: 24px;
-}
-
-.feed-search:hover,
-.feed-search:focus-within {
-  opacity: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
 }
 
 #search-input {
-  width: 100%;
-  border-radius: 10px;
-  border: 1px solid transparent;
+  width: min(100%, 420px);
+  flex: 1 1 420px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
   padding: 10px 12px;
   font-family: inherit;
   font-size: 14px;
   color: var(--ink);
-  background: white;
-  height: 30px;
-  transition: all 0.2s ease-in-out;
+  background: #fff;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
 }
 
 #search-input:focus {
@@ -594,10 +583,11 @@ body {
 }
 
 .message-list {
+  background: var(--panel-soft);
+  border: 1px solid var(--border);
   list-style: none;
   margin: 0;
   padding: 12px;
-  padding-top: 66px; /* Add space for search bar */
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -615,6 +605,32 @@ body {
   background: transparent;
   border-radius: 8px;
   margin-bottom: 4px;
+}
+
+.feed-load-more-card {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  padding: 12px 8px;
+  cursor: pointer;
+  color: var(--ink);
+  background: transparent;
+  border-radius: var(--message-radius, 8px);
+  transition: background 0.2s ease;
+  user-select: none;
+  font-size: 13px;
+  align-items: center !important;
+}
+
+.feed-load-more-card:hover {
+  background: var(--panel-soft);
+}
+
+.feed-load-more-card.is-disabled {
+  color: var(--muted);
+  cursor: default;
+  background: transparent;
 }
 
 .feed-empty-state {
@@ -3190,6 +3206,28 @@ body.preview-open {
   overflow: hidden;
 }
 
+.feed-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.feed-pagination .pagination-info {
+  font-size: 14px;
+  color: var(--muted);
+  min-width: 60px;
+  text-align: center;
+}
+
+.feed-pagination .button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 @media (max-width: 960px) {
   body {
     overflow: hidden;
@@ -3270,6 +3308,11 @@ body.preview-open {
 
   #marked-search-input {
     width: 100%;
+  }
+
+  #search-input {
+    width: 100%;
+    flex: 1 1 100%;
   }
 
   .downloads-page-actions {

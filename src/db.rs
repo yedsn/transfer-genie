@@ -518,6 +518,7 @@ pub fn list_messages_after(
     endpoint_id: &str,
     after_timestamp_ms: i64,
     after_filename: &str,
+    limit: i64,
     only_marked: bool,
 ) -> rusqlite::Result<Vec<Message>> {
     let conn = Connection::open(path)?;
@@ -527,14 +528,14 @@ pub fn list_messages_after(
         "WHERE endpoint_id = ?1 AND (timestamp_ms > ?2 OR (timestamp_ms = ?2 AND filename > ?3))"
     };
     let sql = format!(
-        "SELECT {} FROM messages {} ORDER BY timestamp_ms ASC, filename ASC",
+        "SELECT {} FROM messages {} ORDER BY timestamp_ms ASC, filename ASC LIMIT ?4",
         message_row_select_sql(),
         where_clause
     );
     collect_messages(
         &conn,
         &sql,
-        &[&endpoint_id, &after_timestamp_ms, &after_filename],
+        &[&endpoint_id, &after_timestamp_ms, &after_filename, &limit],
     )
 }
 
@@ -1335,7 +1336,7 @@ mod tests {
         let older_filenames: Vec<_> = older.iter().map(|message| message.filename.as_str()).collect();
         assert_eq!(older_filenames, vec!["002.txt", "003.txt"]);
 
-        let newer = list_messages_after(&path, "endpoint-1", 200, "002.txt", false)
+        let newer = list_messages_after(&path, "endpoint-1", 200, "002.txt", 10, false)
             .expect("newer window");
         let newer_filenames: Vec<_> = newer.iter().map(|message| message.filename.as_str()).collect();
         assert_eq!(newer_filenames, vec!["003.txt", "004.txt", "005.txt"]);
@@ -1389,7 +1390,7 @@ mod tests {
             .collect();
         assert_eq!(older_filenames, vec!["001.txt", "002.txt"]);
 
-        let newer = list_messages_after(&path, "endpoint-1", 200, "002.txt", false)
+        let newer = list_messages_after(&path, "endpoint-1", 200, "002.txt", 10, false)
             .expect("newer window after delete");
         let newer_filenames: Vec<_> = newer
             .iter()
@@ -1504,7 +1505,7 @@ mod tests {
             .collect();
         assert_eq!(older_endpoint_1_filenames, vec!["a-001.txt", "a-002.txt"]);
 
-        let newer_endpoint_1 = list_messages_after(&path, "endpoint-1", 100, "a-001.txt", false)
+        let newer_endpoint_1 = list_messages_after(&path, "endpoint-1", 100, "a-001.txt", 10, false)
             .expect("newer endpoint-1 window");
         let newer_endpoint_1_filenames: Vec<_> = newer_endpoint_1
             .iter()
@@ -1546,7 +1547,7 @@ mod tests {
             .expect("before earliest window");
         assert!(before_earliest.is_empty());
 
-        let after_newest = list_messages_after(&path, "endpoint-1", 200, "002.txt", false)
+        let after_newest = list_messages_after(&path, "endpoint-1", 200, "002.txt", 10, false)
             .expect("after newest window");
         assert!(after_newest.is_empty());
 

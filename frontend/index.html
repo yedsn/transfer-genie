@@ -68,22 +68,12 @@
               <ul id="download-task-list-legacy" class="download-task-list"></ul>
             </section>
             <div class="feed-content">
-              <div class="feed-search">
-                <input type="search" id="search-input" placeholder="搜索消息..." />
-              </div>
-              <div
-                v-if="ui.homeFeed.hasMoreMessages || ui.homeFeed.isLoadingMore"
-                class="load-more-hint"
-              >
-                {{ ui.homeFeed.loadMoreHintText }}
-              </div>
-              <div
-                v-if="!ui.homeFeed.visibleCount && ui.homeFeed.emptyMessage"
-                class="message-card feed-empty-state"
-              >
-                {{ ui.homeFeed.emptyMessage }}
-              </div>
-              <ul v-if="ui.homeFeed.useVueList" class="message-list">
+               <div class="feed-search">
+                 <label for="search-input" class="visually-hidden">搜索消息...</label>
+                 <input type="search" id="search-input" placeholder="搜索消息..." />
+                 <button id="feed-search-button" class="button ghost small" type="button">搜索</button>
+               </div>
+               <ul v-if="ui.homeFeed.useVueList" class="message-list">
                 <li
                   v-for="card in ui.homeFeed.messageCards"
                   :key="card.filename"
@@ -146,11 +136,11 @@
                   </div>
                 </li>
               </ul>
-              <ul id="message-list" class="message-list" v-show="!ui.homeFeed.useVueList"></ul>
-              <button id="scroll-to-bottom" class="scroll-to-bottom" type="button" hidden>
-                回到底部
-              </button>
-            </div>
+               <ul id="message-list" class="message-list" v-show="!ui.homeFeed.useVueList"></ul>
+               <button id="scroll-to-bottom" class="scroll-to-bottom" type="button" hidden>
+                 回到底部
+               </button>
+             </div>
             <section class="composer">
               <label for="text-input" class="visually-hidden">发送文本</label>
         <div class="composer-body">
@@ -345,10 +335,10 @@
                     </div>
                   </div>
                 </li>
-                <li v-if="hasMarkedPagination()" class="marked-pagination">
-                  <button class="button ghost small" type="button" :disabled="ui.markedPage.currentPage <= 1" @click="changeMarkedPage(ui.markedPage.currentPage - 1)">上一页</button>
-                  <span class="pagination-info">{{ markedPageLabel() }}</span>
-                  <button class="button ghost small" type="button" :disabled="ui.markedPage.currentPage >= ui.markedPage.totalPages" @click="changeMarkedPage(ui.markedPage.currentPage + 1)">下一页</button>
+                <li class="marked-pagination">
+                   <button class="button ghost small" type="button" :disabled="ui.markedPage.currentPage <= 1" @click="changeMarkedPage(ui.markedPage.currentPage - 1)">上一页</button>
+                   <span class="pagination-info">{{ markedPageLabel() }}</span>
+                   <button class="button ghost small" type="button" :disabled="ui.markedPage.currentPage >= ui.markedPage.totalPages" @click="changeMarkedPage(ui.markedPage.currentPage + 1)">下一页</button>
                 </li>
               </ul>
               <ul id="marked-message-list" class="message-list marked-message-list" v-show="!ui.markedPage.useVueList"></ul>

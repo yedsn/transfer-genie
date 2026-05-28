@@ -1,4 +1,4 @@
-const tauri = window.__TAURI__ || {};
+﻿const tauri = window.__TAURI__ || {};
 const invoke = tauri.core?.invoke || tauri.invoke;
 const openDialog = tauri.dialog?.open;
 const saveDialog = tauri.dialog?.save;
@@ -6272,6 +6272,24 @@ function renderMessages(messages, options = {}) {
     messageList.appendChild(item);
   });
   
+  // Render "Load More" item at the top if not searching
+  if (!isSearchResult && messageList) {
+    const loadMoreItem = document.createElement('li');
+    loadMoreItem.id = 'feed-load-more-item';
+    loadMoreItem.className = 'message-card feed-load-more-card';
+    
+    if (hasMoreMessages) {
+      loadMoreItem.textContent = '加载更多消息';
+      loadMoreItem.addEventListener('click', () => {
+        loadMessages({ loadMore: true });
+      });
+    } else {
+      loadMoreItem.textContent = '没有更多消息';
+      loadMoreItem.classList.add('is-disabled');
+    }
+    messageList.prepend(loadMoreItem);
+  }
+
   // Render pending markdown messages
   const runBodyCollapseCheck = () => {
     collapseQueue.forEach(({ item, body, message }) => {
@@ -6390,6 +6408,13 @@ async function loadMessages(options = {}) {
     return;
   }
   isLoadMessagesRunning = true;
+  
+  const loadMoreItem = document.getElementById('feed-load-more-item');
+  if (options.loadMore && loadMoreItem && !loadMoreItem.classList.contains('is-disabled')) {
+    loadMoreItem.textContent = '加载中...';
+    loadMoreItem.classList.add('is-disabled'); // prevent clicks during load
+  }
+
   const shouldScroll =
     typeof options.scrollToBottom === 'boolean'
       ? options.scrollToBottom
@@ -6415,9 +6440,11 @@ async function loadMessages(options = {}) {
       isLoadingMore = true;
       updateLoadMoreHintForCurrentView();
       const result = await invoke('list_messages_window', {
-        limit: PAGE_SIZE,
-        beforeTimestampMs: oldestLoadedMessageRef.timestamp_ms,
-        beforeFilename: oldestLoadedMessageRef.filename,
+        input: {
+          limit: PAGE_SIZE,
+          beforeTimestampMs: oldestLoadedMessageRef.timestamp_ms,
+          beforeFilename: oldestLoadedMessageRef.filename,
+        },
       });
       isLoadingMore = false;
       hasMoreMessages = result.hasMoreBefore || false;
@@ -6436,7 +6463,7 @@ async function loadMessages(options = {}) {
       }
     } else if (checkNew) {
       // 定时刷新模式：只检查新消息
-      const latestResult = await invoke('list_messages_window', { limit: PAGE_SIZE });
+      const latestResult = await invoke('list_messages_window', { input: { limit: PAGE_SIZE } });
       
       if (latestResult.marked_count !== undefined) {
         updateMarkedBadge(latestResult.marked_count);
@@ -6444,8 +6471,11 @@ async function loadMessages(options = {}) {
 
       const newerResult = newestLoadedMessageRef
         ? await invoke('list_messages_window', {
-            afterTimestampMs: newestLoadedMessageRef.timestamp_ms,
-            afterFilename: newestLoadedMessageRef.filename,
+            input: {
+              limit: PAGE_SIZE,
+              afterTimestampMs: newestLoadedMessageRef.timestamp_ms,
+              afterFilename: newestLoadedMessageRef.filename,
+            },
           })
         : latestResult;
 
@@ -6561,7 +6591,7 @@ async function loadMessages(options = {}) {
       }
     } else {
       // 初始加载或刷新：加载最新的消息
-      const result = await invoke('list_messages_window', { limit: PAGE_SIZE });
+      const result = await invoke('list_messages_window', { input: { limit: PAGE_SIZE } });
       
       if (result.marked_count !== undefined) {
         updateMarkedBadge(result.marked_count);
@@ -6577,6 +6607,10 @@ async function loadMessages(options = {}) {
     isLoadingMore = false;
     updateLoadMoreHintForCurrentView();
     setErrorStatus(`加载消息失败：${error}`);
+    if (loadMoreItem && hasMoreMessages) {
+       loadMoreItem.textContent = '加载更多消息';
+       loadMoreItem.classList.remove('is-disabled');
+    }
   } finally {
     isLoadMessagesRunning = false;
     if (!loadMore && getActiveMainTab() === 'marked') {
@@ -7462,9 +7496,6 @@ async function loadSettings() {
     await loadPersistedUploadHistory({ silent: true });
     await loadPersistedDownloadHistory({ silent: true });
     await loadTelegramBridgeStatus({ silent: true });
-    if (getActiveEndpoint()) {
-      await loadMessages({ scrollToBottom: true });
-    }
     if (!didInitialSync && getActiveEndpoint()) {
       didInitialSync = true;
       const syncStatus = await invoke('get_sync_status');
@@ -9142,7 +9173,7 @@ vueBridge?.setActions?.({
   },
 });
 loadSettings();
-loadMessages({ scrollToBottom: true });
+
 loadMarkedTags();
 loadMarkedMessages();
 loadSyncStatus();
