@@ -103,26 +103,12 @@
   }
 
   function filterMessagesForSearch(messages, rawQuery) {
+    // 后端已执行搜索过滤，前端只需透传
     var list = cloneMessages(messages);
     var searchState = getCurrentMessageSearchState(rawQuery);
-    if (!searchState.hasQuery) {
-      return {
-        searchState: searchState,
-        messages: list,
-      };
-    }
-
     return {
       searchState: searchState,
-      messages: list.filter(function (message) {
-        if (message.kind === 'text') {
-          return String(message.content || '').toLowerCase().includes(searchState.normalizedQuery);
-        }
-        if (message.kind === 'file') {
-          return String(message.original_name || '').toLowerCase().includes(searchState.normalizedQuery);
-        }
-        return false;
-      }),
+      messages: list,
     };
   }
 

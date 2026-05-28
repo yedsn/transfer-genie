@@ -1,4 +1,4 @@
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row, ToSql};
+﻿use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row, ToSql};
 use serde_json;
 use std::path::Path;
 
@@ -378,8 +378,8 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
     Ok(())
 }
 
-pub fn list_messages(path: &Path, endpoint_id: &str) -> rusqlite::Result<Vec<Message>> {
-    list_messages_paged(path, endpoint_id, None, None, false)
+pub fn list_messages(path: &Path, endpoint_id: &str, search_query: Option<&str>) -> rusqlite::Result<Vec<Message>> {
+    list_messages_paged(path, endpoint_id, None, None, false, search_query)
 }
 
 fn message_row_select_sql() -> &'static str {
@@ -427,29 +427,35 @@ pub fn list_messages_paged(
     limit: Option<i64>,
     offset: Option<i64>,
     only_marked: bool,
+    search_query: Option<&str>,
 ) -> rusqlite::Result<Vec<Message>> {
     let conn = Connection::open(path)?;
 
-    let where_clause = if only_marked {
-        "WHERE endpoint_id = ?1 AND marked = 1"
+    let normalized_search = search_query
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .map(|query| format!("%{}%", query.to_lowercase()));
+
+    let mut where_clause = if only_marked {
+        "WHERE endpoint_id = ?1 AND marked = 1".to_string()
     } else {
-        "WHERE endpoint_id = ?1"
+        "WHERE endpoint_id = ?1".to_string()
     };
+
+    if normalized_search.is_some() {
+        where_clause.push_str(
+            " AND (LOWER(COALESCE(content, '')) LIKE ?2 OR LOWER(COALESCE(original_name, '')) LIKE ?2 OR LOWER(filename) LIKE ?2)",
+        );
+    }
 
     // 使用子查询实现：先按时间倒序取最新的 N 条，再按时间正序返回
     let sql = match (limit, offset) {
         (Some(lim), Some(off)) => format!(
-            "SELECT * FROM (\
-              SELECT {} \
-              FROM messages {} ORDER BY timestamp_ms DESC, filename DESC LIMIT {} OFFSET {}\
-            ) ORDER BY timestamp_ms ASC, filename ASC",
+            "SELECT * FROM (              SELECT {}               FROM messages {} ORDER BY timestamp_ms DESC, filename DESC LIMIT {} OFFSET {}            ) ORDER BY timestamp_ms ASC, filename ASC",
             message_row_select_sql(), where_clause, lim, off
         ),
         (Some(lim), None) => format!(
-            "SELECT * FROM (\
-              SELECT {} \
-              FROM messages {} ORDER BY timestamp_ms DESC, filename DESC LIMIT {}\
-            ) ORDER BY timestamp_ms ASC, filename ASC",
+            "SELECT * FROM (              SELECT {}               FROM messages {} ORDER BY timestamp_ms DESC, filename DESC LIMIT {}            ) ORDER BY timestamp_ms ASC, filename ASC",
             message_row_select_sql(), where_clause, lim
         ),
         _ => format!(
@@ -458,7 +464,11 @@ pub fn list_messages_paged(
         ),
     };
 
-    collect_messages(&conn, &sql, &[&endpoint_id])
+    if let Some(search_term) = normalized_search.as_deref() {
+        collect_messages(&conn, &sql, &[&endpoint_id, &search_term])
+    } else {
+        collect_messages(&conn, &sql, &[&endpoint_id])
+    }
 }
 
 pub fn list_latest_messages_window(
@@ -1424,7 +1434,7 @@ mod tests {
             upsert_message(&path, &message).expect("insert sample message");
         }
 
-        let expected = list_messages(&path, "endpoint-1").expect("list expected messages");
+        let expected = list_messages(&path, "endpoint-1", None).expect("list expected messages");
         let expected_filenames: Vec<_> = expected
             .iter()
             .map(|message| message.filename.clone())

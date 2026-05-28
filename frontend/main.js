@@ -10328,9 +10328,53 @@ function updateAndRender(options = {}) {
   renderCurrentMessageView(options);
 }
 
+let searchDebounceTimer = null;
+const SEARCH_DEBOUNCE_MS = 300;
+
+async function executeSearch() {
+  const query = searchInput ? searchInput.value.trim() : '';
+  if (!invoke || !getActiveEndpoint()) {
+    renderCurrentMessageView({ preserveScroll: true });
+    return;
+  }
+  
+  if (!query) {
+    // 无搜索词时恢复正常加载
+    await loadMessages({ scrollToBottom: false });
+    return;
+  }
+  
+  try {
+    const result = await invoke('list_messages', {
+      limit: null,
+      offset: null,
+      onlyMarked: null,
+      searchQuery: query,
+    });
+    lastMessages = result.messages || [];
+    totalMessages = result.total || 0;
+    hasMoreMessages = false;
+    oldestLoadedMessageRef = null;
+    newestLoadedMessageRef = null;
+    syncLoadedMessageBoundaries();
+    renderCurrentMessageView({ preserveScroll: true, isSearchResult: true, query });
+    if (result.marked_count !== undefined) {
+      updateMarkedBadge(result.marked_count);
+    }
+    updateLoadMoreHintForCurrentView();
+  } catch (error) {
+    showToast('搜索失败: ' + error, 'error');
+  }
+}
+
 if (searchInput) {
   searchInput.addEventListener('input', () => {
-    updateAndRender({ preserveScroll: true });
+    if (searchDebounceTimer) {
+      clearTimeout(searchDebounceTimer);
+    }
+    searchDebounceTimer = setTimeout(() => {
+      executeSearch();
+    }, SEARCH_DEBOUNCE_MS);
   });
 }
 

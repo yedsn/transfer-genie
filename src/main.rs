@@ -1614,6 +1614,7 @@ fn list_messages(
     limit: Option<i64>,
     offset: Option<i64>,
     only_marked: Option<bool>,
+    search_query: Option<String>,
 ) -> Result<MessagesResult, String> {
     let settings = current_settings(&state)?;
     let endpoint = resolve_active_endpoint(&settings)?;
@@ -1630,7 +1631,7 @@ fn list_messages(
     };
 
     let messages =
-        db::list_messages_paged(&state.db_path, &endpoint.id, limit, offset, marked_filter)
+        db::list_messages_paged(&state.db_path, &endpoint.id, limit, offset, marked_filter, search_query.as_deref())
             .map_err(|err| err.to_string())?;
 
     let current_offset = offset.unwrap_or(0);
@@ -3377,7 +3378,7 @@ async fn cleanup_messages(
         CleanupRange::Before7Days => Some(now_ms() - 7_i64 * 24 * 60 * 60 * 1000),
     };
     let messages =
-        db::list_messages(&state.db_path, &endpoint.id).map_err(|err| err.to_string())?;
+        db::list_messages(&state.db_path, &endpoint.id, None).map_err(|err| err.to_string())?;
     let candidates = collect_cleanup_candidates(messages, cutoff_ms);
 
     if candidates.is_empty() {
