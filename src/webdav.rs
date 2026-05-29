@@ -353,7 +353,7 @@ pub async fn download_file_stream_with_range(
     let mut url = base_url(endpoint)?;
     url = url
         .join(remote_path)
-        .map_err(|err| format!("鏂囦欢鍦板潃鏃犳晥: {err}"))?;
+        .map_err(|err| format!("Failed to parse remote path: {err}"))?;
 
     let request = if let Some(range_start) = range_start {
         client
@@ -574,7 +574,7 @@ where
     F: FnMut(u64, u64) + Send + 'static,
 {
     let file_size = std::fs::metadata(local_path)
-        .map_err(|err| format!("璇诲彇鏈湴鏂囦欢淇℃伅澶辫触: {err}"))?
+        .map_err(|err| format!("Failed to read local file metadata: {}", err))?
         .len();
     let source_path = local_path.to_path_buf();
     let chunk_size = 512 * 1024;

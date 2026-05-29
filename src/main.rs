@@ -2568,7 +2568,7 @@ async fn write_download_stream_to_partial(
         .truncate(resume_from == 0)
         .append(resume_from > 0)
         .open(&partial.temp_path)
-        .map_err(|err| format!("鍒涘缓涓嬭浇涓存椂鏂囦欢澶辫触: {err}"))?;
+        .map_err(|err| format!("Failed to open file: {}", err))?;
     let mut received = resume_from;
     let total = response
         .total_size
@@ -2596,9 +2596,9 @@ async fn write_download_stream_to_partial(
 
     let mut last_persisted = received;
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|err| format!("璇诲彇涓嬭浇鍐呭澶辫触: {err}"))?;
+        let chunk = chunk.map_err(|err| format!("Failed to read download content: {}", err))?;
         file.write_all(&chunk)
-            .map_err(|err| format!("鍐欏叆涓嬭浇涓存椂鏂囦欢澶辫触: {err}"))?;
+            .map_err(|err| format!("Failed to write to temporary download file: {}", err))?;
         received += chunk.len() as u64;
         emit_download_progress(
             window,
@@ -2620,7 +2620,7 @@ async fn write_download_stream_to_partial(
         }
     }
     file.flush()
-        .map_err(|err| format!("鍒锋柊涓嬭浇涓存椂鏂囦欢澶辫触: {err}"))?;
+        .map_err(|err| format!("Failed to flush temporary download file: {}", err))?;
     partial.downloaded_bytes = received as i64;
     partial.total_bytes = total.unwrap_or(received) as i64;
     partial.updated_at_ms = now_ms();
@@ -2709,10 +2709,10 @@ async fn execute_streamed_download(
                     .await?;
                     if final_path.exists() {
                         fs::remove_file(final_path)
-                            .map_err(|err| format!("鏇挎崲宸叉湁涓嬭浇鏂囦欢澶辫触: {err}"))?;
+                            .map_err(|err| format!("Failed to replace existing download file: {}", err))?;
                     }
                     fs::rename(&temp_path, final_path)
-                        .map_err(|err| format!("瀹屾垚涓嬭浇鏂囦欢澶辫触: {err}"))?;
+                        .map_err(|err| format!("Failed to complete download file: {}", err))?;
                     clear_partial_download(state, &endpoint.id, filename)?;
                     let file_hash = compute_file_hash_from_path(final_path)?;
                     let _ = update_message_local_path(

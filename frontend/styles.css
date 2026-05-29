@@ -737,7 +737,7 @@ body {
 }
 
 .message-card.is-file .message-body::before {
-  content: "鏂囦欢";
+  content: "文件";
   display: flex;
   align-items: center;
   justify-content: center;
