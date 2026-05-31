@@ -76,6 +76,7 @@ export default defineConfig({
           text: '参考',
           items: [
             { text: '项目结构', link: '/reference/project-structure' },
+            { text: '代码架构与流程', link: '/reference/code-architecture-flow' },
             { text: '站点与发布说明', link: '/reference/site-deployment' }
           ]
         }
