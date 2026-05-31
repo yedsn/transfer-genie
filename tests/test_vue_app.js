@@ -328,6 +328,9 @@ function testSettingsAutoBackupHelpers() {
     enabled: true,
     intervalMinutes: 15,
     retainCount: 3,
+    directory: 'E:/TransferGenie/backup',
+    keepAllDays: 3,
+    keepDailyDays: 7,
     hasActiveEndpoint: true,
     lastRunMs: 100,
     lastSuccessMs: 90,
@@ -367,15 +370,27 @@ function testSettingsAutoBackupActionBridges() {
     updateSettingsAutoBackupField(field, value) {
       calls.push([field, value]);
     },
+    createLocalDataBackup() {
+      calls.push(['createLocalDataBackup']);
+    },
   });
   methods.updateSettingsAutoBackupField.call(ctx, 'enabled', true);
   methods.updateSettingsAutoBackupField.call(ctx, 'intervalMinutes', 15);
   methods.updateSettingsAutoBackupField.call(ctx, 'retainCount', 3);
+  methods.updateSettingsAutoBackupField.call(ctx, 'directory', 'E:/backup');
+  methods.updateSettingsAutoBackupField.call(ctx, 'keepAllDays', 3);
+  methods.updateSettingsAutoBackupField.call(ctx, 'keepDailyDays', 7);
   assert.deepEqual(calls, [
     ['enabled', true],
     ['intervalMinutes', 15],
     ['retainCount', 3],
+    ['directory', 'E:/backup'],
+    ['keepAllDays', 3],
+    ['keepDailyDays', 7],
   ]);
+  calls.length = 0;
+  methods.createLocalDataBackup.call(ctx);
+  assert.deepEqual(calls, [['createLocalDataBackup']]);
 }
 
 function testTransferTaskHelpers() {

@@ -1037,6 +1037,12 @@
                   </div>
                   <div class="settings-actions">
                     <div class="settings-actions-row">
+                      <input id="backup-directory" type="text" placeholder="Backup directory" />
+                      <input id="backup-keep-all-days" type="number" min="1" step="1" placeholder="Keep all days" />
+                      <input id="backup-keep-daily-days" type="number" min="1" step="1" placeholder="Keep daily days" />
+                      <button id="create-local-data-backup" class="button ghost" type="button">
+                        Local data backup
+                      </button>
                       <button id="backup-webdav" class="button ghost has-spinner" type="button" :disabled="ui.settingsOps.backupRunning">
                         <span v-if="ui.settingsOps.backupRunning">{{ backupWebdavLabel() }}</span>
                         <span v-else>备份 WebDAV</span>

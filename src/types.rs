@@ -47,6 +47,29 @@ fn default_backup_retain_count() -> u32 {
     10
 }
 
+fn default_backup_keep_all_days() -> u32 {
+    3
+}
+
+fn default_backup_keep_daily_days() -> u32 {
+    7
+}
+
+fn default_backup_dir() -> String {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_default();
+    if home.trim().is_empty() {
+        "TransferGenie/backup".to_string()
+    } else {
+        std::path::Path::new(&home)
+            .join("TransferGenie")
+            .join("backup")
+            .to_string_lossy()
+            .to_string()
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LocalHttpApiSettings {
     #[serde(default)]
@@ -122,6 +145,12 @@ pub struct BackupSettings {
     pub interval_minutes: u64,
     #[serde(default = "default_backup_retain_count")]
     pub retain_count: u32,
+    #[serde(default = "default_backup_dir")]
+    pub directory: String,
+    #[serde(default = "default_backup_keep_all_days")]
+    pub keep_all_days: u32,
+    #[serde(default = "default_backup_keep_daily_days")]
+    pub keep_daily_days: u32,
 }
 
 impl Default for BackupSettings {
@@ -130,6 +159,9 @@ impl Default for BackupSettings {
             enabled: false,
             interval_minutes: default_backup_interval_minutes(),
             retain_count: default_backup_retain_count(),
+            directory: default_backup_dir(),
+            keep_all_days: default_backup_keep_all_days(),
+            keep_daily_days: default_backup_keep_daily_days(),
         }
     }
 }
@@ -201,6 +233,21 @@ pub struct SyncStatus {
     pub last_error: Option<String>,
     pub last_result: Option<String>,
     pub current_source: Option<String>,
+    pub conflict: Option<WebDavConflict>,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct WebDavConflict {
+    pub endpoint_id: String,
+    pub filename: String,
+    pub remote_path: String,
+    pub local_etag: Option<String>,
+    pub remote_etag: Option<String>,
+    pub local_mtime: Option<String>,
+    pub remote_mtime: Option<String>,
+    pub local_size: i64,
+    pub remote_size: i64,
 }
 
 #[derive(Clone, Serialize)]
@@ -241,6 +288,7 @@ impl SyncStatus {
             last_error: None,
             last_result: Some("尚未同步".to_string()),
             current_source: None,
+            conflict: None,
         }
     }
 }

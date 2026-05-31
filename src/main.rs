@@ -27,7 +27,7 @@ use crate::webdav_sync_runtime::WebDavSyncRuntimeAdapter;
 use crate::workspace::WorkspaceLayout;
 use crate::types::{
     BackupSettings, DownloadHistoryRecord, LocalHttpApiSettings, MarkedTag, Message, Settings,
-    SyncStatus, TelegramBridgeSettings, UploadHistoryRecord, WebDavEndpoint,
+    SyncStatus, TelegramBridgeSettings, UploadHistoryRecord, WebDavConflict, WebDavEndpoint,
     DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS, DEFAULT_LOCAL_HTTP_API_BIND_PORT,
 };
 use aes_gcm::aead::Aead;
@@ -86,6 +86,7 @@ struct AppState {
     local_http_api: Mutex<LocalHttpApiManager>,
     update_guard: AsyncMutex<()>,
     auto_backup_guard: AsyncMutex<()>,
+    pending_webdav_conflict: Mutex<Option<WebDavConflict>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -120,6 +121,24 @@ struct LocalBackupArchiveRecord {
     exists: bool,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalDataBackupResult {
+    path: String,
+    file_name: String,
+    size_bytes: u64,
+    created_at_ms: i64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalDataBackupManifest {
+    version: u8,
+    created_at_ms: i64,
+    app_version: String,
+    includes: Vec<String>,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AutoBackupStateRecord {
@@ -135,6 +154,9 @@ struct AutoBackupStatus {
     enabled: bool,
     interval_minutes: u64,
     retain_count: u32,
+    directory: String,
+    keep_all_days: u32,
+    keep_daily_days: u32,
     has_active_endpoint: bool,
     last_run_ms: Option<i64>,
     last_success_ms: Option<i64>,
@@ -828,6 +850,88 @@ fn list_local_backup_archives(
     state: State<'_, AppState>,
 ) -> Result<Vec<LocalBackupArchiveRecord>, String> {
     list_local_backup_archives_for_state(&state)
+}
+
+#[tauri::command]
+fn list_local_data_backups(
+    state: State<'_, AppState>,
+) -> Result<Vec<LocalBackupArchiveRecord>, String> {
+    let settings = current_settings(&state)?;
+    let backup_dir = configured_backup_dir(&settings);
+    if !backup_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut records = fs::read_dir(&backup_dir)
+        .map_err(|err| format!("读取本地备份目录失败 {}: {err}", backup_dir.display()))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("zip"))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .map(|name| name.starts_with("transfer-genie-local-data-") || name.starts_with("transfer-genie-rollback-"))
+                .unwrap_or(false)
+        })
+        .map(|path| {
+            let metadata = fs::metadata(&path).ok();
+            LocalBackupArchiveRecord {
+                endpoint_id: "local".to_string(),
+                backup_path: path.to_string_lossy().to_string(),
+                created_at_ms: file_modified_ms(&path),
+                source: "local-data".to_string(),
+                file_name: path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("transfer-genie-local-data.zip")
+                    .to_string(),
+                size_bytes: metadata.as_ref().map(|value| value.len()).unwrap_or(0),
+                exists: metadata.is_some(),
+            }
+        })
+        .collect::<Vec<_>>();
+    records.sort_by(|left, right| right.created_at_ms.cmp(&left.created_at_ms));
+    Ok(records)
+}
+
+#[tauri::command]
+async fn create_local_data_backup(
+    state: State<'_, AppState>,
+) -> Result<LocalDataBackupResult, String> {
+    let _guard = state.sync_guard.lock().await;
+    let settings = current_settings(&state)?;
+    let path = local_data_backup_path(&settings, now_ms());
+    let result = create_local_data_backup_to_path(&state, &path)?;
+    cleanup_backup_snapshots_by_retention(
+        &configured_backup_dir(&settings),
+        settings.backup.keep_all_days,
+        settings.backup.keep_daily_days,
+        now_ms(),
+    )?;
+    Ok(result)
+}
+
+#[tauri::command]
+async fn restore_local_data_backup(
+    state: State<'_, AppState>,
+    path: String,
+    confirmed: bool,
+) -> Result<Settings, String> {
+    if !confirmed {
+        return Err("恢复本地数据需要二次确认".to_string());
+    }
+    cancel_active_sync(&state)?;
+    let _guard = state.sync_guard.lock().await;
+    restore_local_data_backup_from_path(&state, Path::new(&path))?;
+    let restored = load_settings(&state.settings_path, &state.default_download_dir)?;
+    {
+        let mut current = state
+            .settings
+            .lock()
+            .map_err(|_| "更新内存设置失败".to_string())?;
+        *current = restored.clone();
+    }
+    Ok(restored)
 }
 
 #[tauri::command]
@@ -3603,6 +3707,243 @@ fn backup_runtime_dir(state: &AppState) -> PathBuf {
     workspace_root_for_state(state).join("runtime")
 }
 
+fn configured_backup_dir(settings: &Settings) -> PathBuf {
+    let trimmed = settings.backup.directory.trim();
+    if trimmed.is_empty() {
+        PathBuf::from(BackupSettings::default().directory)
+    } else {
+        PathBuf::from(trimmed)
+    }
+}
+
+fn local_data_backup_path(settings: &Settings, now: i64) -> PathBuf {
+    configured_backup_dir(settings).join(format!("transfer-genie-local-data-{now}.zip"))
+}
+
+fn zip_add_file(
+    zip: &mut zip::ZipWriter<std::fs::File>,
+    source: &Path,
+    archive_name: &str,
+    options: zip::write::FileOptions<'_, ()>,
+) -> Result<(), String> {
+    let mut input =
+        std::fs::File::open(source).map_err(|err| format!("读取备份源文件失败 {}: {err}", source.display()))?;
+    zip.start_file(archive_name.replace('\\', "/"), options)
+        .map_err(|err| format!("写入备份条目失败 {archive_name}: {err}"))?;
+    std::io::copy(&mut input, zip)
+        .map_err(|err| format!("写入备份文件失败 {}: {err}", source.display()))?;
+    Ok(())
+}
+
+fn zip_add_dir_recursive(
+    zip: &mut zip::ZipWriter<std::fs::File>,
+    source_dir: &Path,
+    archive_root: &str,
+    options: zip::write::FileOptions<'_, ()>,
+) -> Result<(), String> {
+    if !source_dir.is_dir() {
+        return Ok(());
+    }
+    let mut stack = vec![source_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir)
+            .map_err(|err| format!("读取备份目录失败 {}: {err}", dir.display()))?
+        {
+            let entry = entry.map_err(|err| format!("读取备份目录项失败: {err}"))?;
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(source_dir)
+                .map_err(|err| format!("计算备份路径失败: {err}"))?;
+            let archive_name = Path::new(archive_root).join(relative);
+            let archive_name = archive_name.to_string_lossy().replace('\\', "/");
+            if path.is_dir() {
+                zip.add_directory(format!("{archive_name}/"), options)
+                    .map_err(|err| format!("写入备份目录失败 {archive_name}: {err}"))?;
+                stack.push(path);
+            } else if path.is_file() {
+                zip_add_file(zip, &path, &archive_name, options)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn create_local_data_backup_to_path(state: &AppState, path: &Path) -> Result<LocalDataBackupResult, String> {
+    use std::io::Write;
+    use zip::write::FileOptions;
+
+    ensure_parent_dir(path)?;
+    let created_at_ms = now_ms();
+    let file = std::fs::File::create(path)
+        .map_err(|err| format!("创建本地数据备份失败 {}: {err}", path.display()))?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options: FileOptions<'_, ()> =
+        FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let mut includes = Vec::new();
+
+    let manifest = LocalDataBackupManifest {
+        version: 1,
+        created_at_ms,
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        includes: vec![
+            "settings.json".to_string(),
+            "messages.sqlite".to_string(),
+            "workspace/endpoints".to_string(),
+            "workspace/mirrors".to_string(),
+            "workspace/plugins".to_string(),
+        ],
+    };
+    let manifest_data = serde_json::to_vec_pretty(&manifest)
+        .map_err(|err| format!("序列化本地备份清单失败: {err}"))?;
+    zip.start_file("manifest.json", options)
+        .map_err(|err| format!("写入本地备份清单失败: {err}"))?;
+    zip.write_all(&manifest_data)
+        .map_err(|err| format!("写入本地备份清单失败: {err}"))?;
+
+    if state.settings_path.is_file() {
+        zip_add_file(&mut zip, &state.settings_path, "settings.json", options)?;
+        includes.push("settings.json".to_string());
+    }
+    if state.db_path.is_file() {
+        zip_add_file(&mut zip, &state.db_path, "messages.sqlite", options)?;
+        includes.push("messages.sqlite".to_string());
+    }
+    let workspace_root = workspace_root_for_state(state);
+    for name in ["endpoints", "mirrors", "plugins"] {
+        let dir = workspace_root.join(name);
+        if dir.is_dir() {
+            zip_add_dir_recursive(&mut zip, &dir, &format!("workspace/{name}"), options)?;
+            includes.push(format!("workspace/{name}"));
+        }
+    }
+    zip.finish()
+        .map_err(|err| format!("完成本地数据备份失败: {err}"))?;
+
+    let metadata = fs::metadata(path)
+        .map_err(|err| format!("读取本地数据备份信息失败 {}: {err}", path.display()))?;
+    Ok(LocalDataBackupResult {
+        path: path.to_string_lossy().to_string(),
+        file_name: path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("transfer-genie-local-data.zip")
+            .to_string(),
+        size_bytes: metadata.len(),
+        created_at_ms,
+    })
+}
+
+fn safe_restore_archive_path(name: &str) -> Option<PathBuf> {
+    let path = Path::new(name);
+    if path.is_absolute() {
+        return None;
+    }
+    if path.components().any(|component| matches!(component, std::path::Component::ParentDir)) {
+        return None;
+    }
+    Some(path.to_path_buf())
+}
+
+fn restore_local_data_backup_from_path(state: &AppState, path: &Path) -> Result<(), String> {
+    use zip::ZipArchive;
+
+    let file = std::fs::File::open(path)
+        .map_err(|err| format!("读取本地数据备份失败 {}: {err}", path.display()))?;
+    let mut archive = ZipArchive::new(file)
+        .map_err(|err| format!("解析本地数据备份失败 {}: {err}", path.display()))?;
+    let manifest_data = {
+        let mut manifest_file = archive
+            .by_name("manifest.json")
+            .map_err(|_| "本地数据备份无效: 缺少 manifest.json".to_string())?;
+        let mut data = Vec::new();
+        std::io::copy(&mut manifest_file, &mut data)
+            .map_err(|err| format!("读取本地数据备份清单失败: {err}"))?;
+        data
+    };
+    let manifest: LocalDataBackupManifest = serde_json::from_slice(&manifest_data)
+        .map_err(|err| format!("解析本地数据备份清单失败: {err}"))?;
+    if manifest.version != 1 {
+        return Err(format!("不支持的本地数据备份版本: {}", manifest.version));
+    }
+
+    let rollback_settings = current_settings(state)?;
+    let rollback_path = local_data_backup_path(&rollback_settings, now_ms())
+        .with_file_name(format!("transfer-genie-rollback-{}.zip", now_ms()));
+    let _ = create_local_data_backup_to_path(state, &rollback_path)?;
+
+    let temp_dir = backup_runtime_dir(state).join(format!("local_restore_{}", now_ms()));
+    fs::create_dir_all(&temp_dir)
+        .map_err(|err| format!("创建本地恢复临时目录失败 {}: {err}", temp_dir.display()))?;
+    for index in 0..archive.len() {
+        let mut file = archive
+            .by_index(index)
+            .map_err(|err| format!("读取本地备份条目失败: {err}"))?;
+        if file.is_dir() {
+            continue;
+        }
+        let Some(relative) = safe_restore_archive_path(file.name()) else {
+            continue;
+        };
+        let target = temp_dir.join(relative);
+        ensure_parent_dir(&target)?;
+        let mut output = std::fs::File::create(&target)
+            .map_err(|err| format!("创建本地恢复临时文件失败 {}: {err}", target.display()))?;
+        std::io::copy(&mut file, &mut output)
+            .map_err(|err| format!("解压本地备份条目失败 {}: {err}", file.name()))?;
+    }
+
+    let workspace_root = workspace_root_for_state(state);
+    let replacements = [
+        (temp_dir.join("settings.json"), state.settings_path.clone()),
+        (temp_dir.join("messages.sqlite"), state.db_path.clone()),
+    ];
+    for (source, target) in replacements {
+        if source.is_file() {
+            ensure_parent_dir(&target)?;
+            fs::copy(&source, &target)
+                .map_err(|err| format!("恢复本地文件失败 {} -> {}: {err}", source.display(), target.display()))?;
+        }
+    }
+    for name in ["endpoints", "mirrors", "plugins"] {
+        let source = temp_dir.join("workspace").join(name);
+        let target = workspace_root.join(name);
+        if source.is_dir() {
+            if target.exists() {
+                fs::remove_dir_all(&target)
+                    .map_err(|err| format!("清理本地目录失败 {}: {err}", target.display()))?;
+            }
+            copy_dir_recursive(&source, &target)?;
+        }
+    }
+    let _ = fs::remove_dir_all(&temp_dir);
+    Ok(())
+}
+
+fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), String> {
+    fs::create_dir_all(target)
+        .map_err(|err| format!("创建目录失败 {}: {err}", target.display()))?;
+    for entry in fs::read_dir(source)
+        .map_err(|err| format!("读取目录失败 {}: {err}", source.display()))?
+    {
+        let entry = entry.map_err(|err| format!("读取目录项失败: {err}"))?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_dir_recursive(&source_path, &target_path)?;
+        } else if source_path.is_file() {
+            ensure_parent_dir(&target_path)?;
+            fs::copy(&source_path, &target_path).map_err(|err| {
+                format!(
+                    "复制文件失败 {} -> {}: {err}",
+                    source_path.display(),
+                    target_path.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
 fn record_local_backup_event(
     state: &AppState,
     endpoint: &WebDavEndpoint,
@@ -3633,13 +3974,6 @@ fn auto_backup_state_path(state: &AppState) -> PathBuf {
         .join("auto-backup-state.json")
 }
 
-fn auto_backup_archives_dir(state: &AppState, endpoint_id: &str) -> PathBuf {
-    workspace_root_for_state(state)
-        .join("backups")
-        .join("archives")
-        .join(endpoint_id)
-}
-
 fn load_auto_backup_state(state: &AppState) -> AutoBackupStateRecord {
     let path = auto_backup_state_path(state);
     if !path.is_file() {
@@ -3658,6 +3992,9 @@ fn auto_backup_status_for_state(state: &AppState) -> Result<AutoBackupStatus, St
         enabled: settings.backup.enabled,
         interval_minutes: settings.backup.interval_minutes,
         retain_count: settings.backup.retain_count,
+        directory: settings.backup.directory.clone(),
+        keep_all_days: settings.backup.keep_all_days,
+        keep_daily_days: settings.backup.keep_daily_days,
         has_active_endpoint: resolve_active_endpoint(&settings).is_ok(),
         last_run_ms: persisted.last_run_ms,
         last_success_ms: persisted.last_success_ms,
@@ -3701,6 +4038,83 @@ fn prune_auto_backup_archives(dir: &Path, retain_count: u32) -> Result<(), Strin
         })?;
     }
 
+    Ok(())
+}
+
+fn snapshot_day_bucket(timestamp_ms: i64) -> i64 {
+    timestamp_ms / (24 * 60 * 60 * 1000)
+}
+
+fn file_modified_ms(path: &Path) -> i64 {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or_else(now_ms)
+}
+
+fn select_retained_snapshot_paths(
+    mut entries: Vec<(PathBuf, i64)>,
+    now_ms_value: i64,
+    keep_all_days: u32,
+    keep_daily_days: u32,
+) -> HashSet<PathBuf> {
+    let day_ms = 24 * 60 * 60 * 1000_i64;
+    let keep_all_ms = keep_all_days.max(1) as i64 * day_ms;
+    let keep_daily_ms = keep_daily_days.max(keep_all_days.max(1)) as i64 * day_ms;
+    entries.sort_by(|left, right| right.1.cmp(&left.1));
+
+    let mut retained = HashSet::new();
+    let mut daily_seen = HashSet::new();
+    for (path, created_ms) in entries {
+        let age_ms = now_ms_value.saturating_sub(created_ms);
+        if age_ms <= keep_all_ms {
+            retained.insert(path);
+            continue;
+        }
+        if age_ms <= keep_daily_ms {
+            let bucket = snapshot_day_bucket(created_ms);
+            if daily_seen.insert(bucket) {
+                retained.insert(path);
+            }
+        }
+    }
+    retained
+}
+
+fn cleanup_backup_snapshots_by_retention(
+    dir: &Path,
+    keep_all_days: u32,
+    keep_daily_days: u32,
+    now_ms_value: i64,
+) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let entries = fs::read_dir(dir)
+        .map_err(|err| format!("读取备份目录失败 {}: {err}", dir.display()))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("zip"))
+        .map(|path| {
+            let modified = file_modified_ms(&path);
+            (path, modified)
+        })
+        .collect::<Vec<_>>();
+    let retained = select_retained_snapshot_paths(
+        entries.clone(),
+        now_ms_value,
+        keep_all_days,
+        keep_daily_days,
+    );
+    for (path, _) in entries {
+        if !retained.contains(&path) {
+            fs::remove_file(&path)
+                .map_err(|err| format!("删除过期备份失败 {}: {err}", path.display()))?;
+        }
+    }
     Ok(())
 }
 
@@ -3848,7 +4262,7 @@ async fn maybe_run_scheduled_backup(app_handle: &AppHandle, state: &AppState) ->
     }
 
     let endpoint = resolve_active_endpoint(&settings)?;
-    let archive_dir = auto_backup_archives_dir(state, &endpoint.id);
+    let archive_dir = configured_backup_dir(&settings).join("webdav").join(&endpoint.id);
     fs::create_dir_all(&archive_dir)
         .map_err(|err| format!("创建自动备份目录失败 {}: {err}", archive_dir.display()))?;
     let backup_path = archive_dir.join(format!("{}-{}.zip", endpoint.id, now));
@@ -3857,6 +4271,12 @@ async fn maybe_run_scheduled_backup(app_handle: &AppHandle, state: &AppState) ->
     let next_state = match result.as_ref() {
         Ok(()) => {
             prune_auto_backup_archives(&archive_dir, settings.backup.retain_count)?;
+            cleanup_backup_snapshots_by_retention(
+                &configured_backup_dir(&settings),
+                settings.backup.keep_all_days,
+                settings.backup.keep_daily_days,
+                now,
+            )?;
             AutoBackupStateRecord {
                 last_run_ms: Some(now),
                 last_success_ms: Some(now),
@@ -4470,6 +4890,16 @@ fn normalize_settings(
         .max(DEFAULT_TELEGRAM_POLL_INTERVAL_SECS);
     settings.backup.interval_minutes = settings.backup.interval_minutes.max(5);
     settings.backup.retain_count = settings.backup.retain_count.max(1);
+    if settings.backup.directory.trim().is_empty() {
+        settings.backup.directory = BackupSettings::default().directory;
+    } else {
+        settings.backup.directory = settings.backup.directory.trim().to_string();
+    }
+    settings.backup.keep_all_days = settings.backup.keep_all_days.max(1);
+    settings.backup.keep_daily_days = settings
+        .backup
+        .keep_daily_days
+        .max(settings.backup.keep_all_days);
 
     Ok(settings)
 }
@@ -6055,6 +6485,181 @@ fn emit_upload_progress(
     let _ = window.emit("upload-progress", payload);
 }
 
+fn build_webdav_conflict(
+    endpoint_id: &str,
+    filename: &str,
+    existing: &DbMessage,
+    remote: &crate::types::DavEntry,
+) -> Option<WebDavConflict> {
+    let has_local_remote_version = existing.etag.is_some() || existing.mtime.is_some();
+    if !has_local_remote_version {
+        return None;
+    }
+    let remote_size = remote.size.unwrap_or(0) as i64;
+    let etag_diff = existing.etag.is_some()
+        && remote.etag.is_some()
+        && existing.etag != remote.etag;
+    let mtime_diff = existing.mtime.is_some()
+        && remote.mtime.is_some()
+        && existing.mtime != remote.mtime;
+    let size_diff = existing.size > 0 && remote_size > 0 && existing.size != remote_size;
+    if !(etag_diff || mtime_diff || size_diff) {
+        return None;
+    }
+    Some(WebDavConflict {
+        endpoint_id: endpoint_id.to_string(),
+        filename: filename.to_string(),
+        remote_path: remote.remote_path.clone(),
+        local_etag: existing.etag.clone(),
+        remote_etag: remote.etag.clone(),
+        local_mtime: existing.mtime.clone(),
+        remote_mtime: remote.mtime.clone(),
+        local_size: existing.size,
+        remote_size,
+    })
+}
+
+fn set_pending_webdav_conflict(state: &AppState, conflict: WebDavConflict) -> Result<(), String> {
+    let mut pending = state
+        .pending_webdav_conflict
+        .lock()
+        .map_err(|_| "更新 WebDAV 冲突状态失败".to_string())?;
+    *pending = Some(conflict);
+    Ok(())
+}
+
+fn clear_pending_webdav_conflict(state: &AppState) -> Result<(), String> {
+    let mut pending = state
+        .pending_webdav_conflict
+        .lock()
+        .map_err(|_| "更新 WebDAV 冲突状态失败".to_string())?;
+    *pending = None;
+    Ok(())
+}
+
+fn pending_webdav_conflict(state: &AppState) -> Option<WebDavConflict> {
+    state
+        .pending_webdav_conflict
+        .lock()
+        .ok()
+        .and_then(|pending| pending.clone())
+}
+
+async fn apply_remote_conflict_to_local(
+    state: &AppState,
+    endpoint: &WebDavEndpoint,
+    conflict: &WebDavConflict,
+) -> Result<(), String> {
+    let entries = webdav::list_entries(&state.http, endpoint, Some("files"), true).await?;
+    let remote = entries
+        .into_iter()
+        .find(|entry| !entry.is_collection && entry.remote_path == conflict.remote_path)
+        .ok_or_else(|| "远端冲突文件不存在".to_string())?;
+    let mut message = db::get_message(&state.db_path, &endpoint.id, &conflict.filename)
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "本地冲突消息不存在".to_string())?;
+    message.etag = remote.etag.clone();
+    message.mtime = remote.mtime.clone();
+    message.size = remote.size.unwrap_or(0) as i64;
+    message.remote_path = Some(remote.remote_path.clone());
+    if message.kind == MessageKind::Text.as_str() {
+        let bytes = webdav::download_file(&state.http, endpoint, &remote.remote_path).await?;
+        message.content = Some(String::from_utf8_lossy(&bytes).to_string());
+        message.size = bytes.len() as i64;
+    } else {
+        message.local_path = None;
+        message.file_hash = None;
+    }
+    db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+async fn apply_local_conflict_to_remote(
+    state: &AppState,
+    endpoint: &WebDavEndpoint,
+    conflict: &WebDavConflict,
+) -> Result<(), String> {
+    let message = db::get_message(&state.db_path, &endpoint.id, &conflict.filename)
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "本地冲突消息不存在".to_string())?;
+    let remote_path = resolved_remote_path(
+        message.remote_path.as_deref(),
+        &message.filename,
+        Some(message.timestamp_ms),
+    );
+    if message.kind == MessageKind::Text.as_str() {
+        webdav::upload_file(
+            &state.http,
+            endpoint,
+            &remote_path,
+            message.content.clone().unwrap_or_default().into_bytes(),
+        )
+        .await?;
+    } else {
+        let local_path = message
+            .local_path
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "上传本地覆盖远端需要本地文件存在".to_string())?;
+        let source = PathBuf::from(local_path);
+        let size = webdav::upload_file_path_with_progress(
+            &state.http,
+            endpoint,
+            &remote_path,
+            &source,
+            |_sent, _total| {},
+        )
+        .await?;
+        if size == 0 {
+            return Err("上传本地文件失败".to_string());
+        }
+    }
+    let mut loaded = crate::history::load_history_with_layout(&state.http, endpoint).await?;
+    let mut replaced = false;
+    for entry in loaded.entries.iter_mut() {
+        if entry.filename == message.filename {
+            *entry = message_to_history(&message);
+            replaced = true;
+            break;
+        }
+    }
+    if !replaced {
+        loaded.entries.push(message_to_history(&message));
+    }
+    crate::history::save_history(&state.http, endpoint, &loaded.entries, &loaded.tags).await?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn resolve_webdav_conflict(
+    state: State<'_, AppState>,
+    action: String,
+) -> Result<SyncStatus, String> {
+    let conflict = pending_webdav_conflict(&state)
+        .ok_or_else(|| "没有待处理的 WebDAV 冲突".to_string())?;
+    let settings = current_settings(&state)?;
+    let endpoint = resolve_endpoint_by_id(&settings, &conflict.endpoint_id)?;
+    let _guard = state.sync_guard.lock().await;
+    match action.as_str() {
+        "remote-over-local" | "download-remote" => {
+            apply_remote_conflict_to_local(&state, &endpoint, &conflict).await?;
+        }
+        "local-over-remote" | "upload-local" => {
+            apply_local_conflict_to_remote(&state, &endpoint, &conflict).await?;
+        }
+        _ => return Err("未知的 WebDAV 冲突处理动作".to_string()),
+    }
+    clear_pending_webdav_conflict(&state)?;
+    let mut status = state
+        .sync_status
+        .lock()
+        .map_err(|_| "更新同步状态失败".to_string())?;
+    status.conflict = None;
+    status.last_error = None;
+    status.last_result = Some("WebDAV 冲突已处理".to_string());
+    Ok(status.clone())
+}
+
 async fn run_sync(
     state: &AppState,
     source: &str,
@@ -6070,11 +6675,12 @@ async fn run_sync(
                 "\u{66F4}\u{65B0}\u{540C}\u{6B65}\u{72B6}\u{6001}\u{5931}\u{8D25}".to_string()
             })?;
             if status.running {
-                Some(status.clone())
+        Some(status.clone())
             } else {
                 started_sync = true;
                 status.running = true;
                 status.last_error = None;
+                status.conflict = None;
                 status.last_result = Some(format!("\u{540C}\u{6B65}\u{4E2D}\u{FF1A}{source}..."));
                 status.current_source = Some(source.to_string());
                 None
@@ -6137,6 +6743,12 @@ async fn run_sync(
                 status.last_error = None;
                 status.last_result = Some(SYNC_CANCELLED_MESSAGE.to_string());
                 Err(SYNC_CANCELLED_MESSAGE.to_string())
+            } else if err == "WebDAV_SYNC_CONFLICT" {
+                let conflict = pending_webdav_conflict(state);
+                status.conflict = conflict.clone();
+                status.last_error = Some("WebDAV 同步冲突，需要选择覆盖方向".to_string());
+                status.last_result = Some("发现 WebDAV 同步冲突".to_string());
+                Err("WebDAV 同步冲突，需要选择覆盖方向".to_string())
             } else {
                 status.last_error = Some(err.clone());
                 status.last_result = Some("\u{540C}\u{6B65}\u{5931}\u{8D25}".to_string());
@@ -6256,6 +6868,14 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
 
         let existing = db::get_message(&state.db_path, &endpoint_id, &filename)
             .map_err(|err| err.to_string())?;
+        if let (Some(existing_message), Some(remote_entry)) = (existing.as_ref(), file_entry) {
+            if let Some(conflict) =
+                build_webdav_conflict(&endpoint_id, &filename, existing_message, remote_entry)
+            {
+                set_pending_webdav_conflict(state, conflict)?;
+                return Err("WebDAV_SYNC_CONFLICT".to_string());
+            }
+        }
         let mut message = existing.clone().unwrap_or(DbMessage {
             endpoint_id: endpoint_id.clone(),
             filename: filename.clone(),
@@ -6751,6 +7371,7 @@ fn main() {
                 local_http_api: Mutex::new(LocalHttpApiManager::default()),
                 update_guard: AsyncMutex::new(()),
                 auto_backup_guard: AsyncMutex::new(()),
+                pending_webdav_conflict: Mutex::new(None),
             });
 
             #[cfg(desktop)]
@@ -6973,6 +7594,9 @@ fn main() {
             get_telegram_bridge_status,
             list_integration_modules,
             get_auto_backup_status,
+            list_local_data_backups,
+            create_local_data_backup,
+            restore_local_data_backup,
             get_local_http_api_status,
             get_app_version,
             check_app_update,
@@ -7030,7 +7654,8 @@ fn main() {
             toggle_marked_message_pin,
             test_webdav_speed,
             backup_webdav,
-            restore_webdav
+            restore_webdav,
+            resolve_webdav_conflict
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -7118,6 +7743,7 @@ mod tests {
             local_http_api: Mutex::new(LocalHttpApiManager::default()),
             update_guard: AsyncMutex::new(()),
             auto_backup_guard: AsyncMutex::new(()),
+            pending_webdav_conflict: Mutex::new(None),
         }
     }
 
@@ -7920,6 +8546,85 @@ mod tests {
         settings.backup.enabled = true;
         settings.active_webdav_id = None;
         assert!(!should_run_auto_backup(&settings, None, 1_000));
+    }
+
+    #[test]
+    fn normalize_settings_defaults_backup_directory_and_retention_windows() {
+        let mut settings = test_settings();
+        settings.backup.directory = "  ".to_string();
+        settings.backup.keep_all_days = 0;
+        settings.backup.keep_daily_days = 1;
+
+        let normalized = normalize_settings(settings, Path::new("downloads"))
+            .expect("normalize settings");
+
+        assert!(normalized.backup.directory.contains("TransferGenie"));
+        assert_eq!(normalized.backup.keep_all_days, 1);
+        assert_eq!(normalized.backup.keep_daily_days, 1);
+    }
+
+    #[test]
+    fn retention_selection_keeps_all_recent_and_one_daily_snapshot() {
+        let day_ms = 24 * 60 * 60 * 1000_i64;
+        let now = 10 * day_ms;
+        let entries = vec![
+            (PathBuf::from("day-0-a.zip"), now),
+            (PathBuf::from("day-2-a.zip"), now - 2 * day_ms),
+            (PathBuf::from("day-4-a.zip"), now - 4 * day_ms),
+            (PathBuf::from("day-4-b.zip"), now - 4 * day_ms + 1),
+            (PathBuf::from("day-8-a.zip"), now - 8 * day_ms),
+        ];
+
+        let retained = select_retained_snapshot_paths(entries, now, 3, 7);
+
+        assert!(retained.contains(&PathBuf::from("day-0-a.zip")));
+        assert!(retained.contains(&PathBuf::from("day-2-a.zip")));
+        assert_eq!(
+            retained.contains(&PathBuf::from("day-4-a.zip")) as u8
+                + retained.contains(&PathBuf::from("day-4-b.zip")) as u8,
+            1
+        );
+        assert!(!retained.contains(&PathBuf::from("day-8-a.zip")));
+    }
+
+    #[test]
+    fn build_webdav_conflict_detects_remote_metadata_change() {
+        let existing = DbMessage {
+            endpoint_id: "endpoint-1".to_string(),
+            filename: "message.txt".to_string(),
+            sender: "sender".to_string(),
+            timestamp_ms: 1,
+            size: 10,
+            kind: "text".to_string(),
+            original_name: "message.txt".to_string(),
+            etag: Some("local".to_string()),
+            mtime: Some("old".to_string()),
+            content: Some("hello".to_string()),
+            local_path: None,
+            remote_path: Some("files/message.txt".to_string()),
+            file_hash: None,
+            marked: false,
+            marked_tag_ids: Vec::new(),
+            marked_pinned: false,
+            format: "text".to_string(),
+        };
+        let remote = crate::types::DavEntry {
+            filename: "message.txt".to_string(),
+            remote_path: "files/message.txt".to_string(),
+            href: String::new(),
+            etag: Some("remote".to_string()),
+            size: Some(12),
+            mtime: Some("new".to_string()),
+            is_collection: false,
+        };
+
+        let conflict = build_webdav_conflict("endpoint-1", "message.txt", &existing, &remote)
+            .expect("conflict");
+
+        assert_eq!(conflict.endpoint_id, "endpoint-1");
+        assert_eq!(conflict.remote_path, "files/message.txt");
+        assert_eq!(conflict.local_etag.as_deref(), Some("local"));
+        assert_eq!(conflict.remote_etag.as_deref(), Some("remote"));
     }
 
     #[test]

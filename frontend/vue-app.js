@@ -97,6 +97,9 @@
       enabled: false,
       intervalMinutes: 5,
       retainCount: 1,
+      directory: '',
+      keepAllDays: 3,
+      keepDailyDays: 7,
       hasActiveEndpoint: false,
       lastRunMs: null,
       lastSuccessMs: null,
@@ -136,6 +139,7 @@
     testSettingsWebdavEndpoint: null,
     refreshSettingsBackupArchives: null,
     restoreSettingsBackupArchive: null,
+    createLocalDataBackup: null,
     updateSettingsAutoBackupField: null,
     updateSettingsFormField: null,
   };
@@ -284,6 +288,9 @@
         enabled: false,
         intervalMinutes: 5,
         retainCount: 1,
+        directory: '',
+        keepAllDays: 3,
+        keepDailyDays: 7,
         hasActiveEndpoint: false,
         lastRunMs: null,
         lastSuccessMs: null,
@@ -462,6 +469,11 @@
         restoreSettingsBackupArchive: function (record) {
           if (typeof actions.restoreSettingsBackupArchive === 'function') {
             actions.restoreSettingsBackupArchive(record);
+          }
+        },
+        createLocalDataBackup: function () {
+          if (typeof actions.createLocalDataBackup === 'function') {
+            actions.createLocalDataBackup();
           }
         },
         updateSettingsFormField: function (field, value) {

@@ -314,6 +314,10 @@ const exportSettingsButton = document.getElementById('export-settings');
 const importSettingsButton = document.getElementById('import-settings');
 const backupWebdavButton = document.getElementById('backup-webdav');
 const restoreWebdavButton = document.getElementById('restore-webdav');
+const createLocalDataBackupButton = document.getElementById('create-local-data-backup');
+const backupDirectoryInput = document.getElementById('backup-directory');
+const backupKeepAllDaysInput = document.getElementById('backup-keep-all-days');
+const backupKeepDailyDaysInput = document.getElementById('backup-keep-daily-days');
 const openLogDirButton = document.getElementById('open-log-dir');
 const openDataDirButton = document.getElementById('open-data-dir');
 const filterMarkedButton = document.getElementById('filter-marked');
@@ -543,6 +547,9 @@ let currentAutoBackupStatusState = {
   enabled: false,
   intervalMinutes: 5,
   retainCount: 1,
+  directory: '',
+  keepAllDays: 3,
+  keepDailyDays: 7,
   hasActiveEndpoint: false,
   lastRunMs: null,
   lastSuccessMs: null,
@@ -4082,7 +4089,11 @@ async function loadSettingsBackupArchives(options = {}) {
       return;
     }
     const records = await invoke('list_local_backup_archives');
-    settingsBackupArchives = Array.isArray(records) ? records : [];
+    const localRecords = await invoke('list_local_data_backups');
+    settingsBackupArchives = [
+      ...(Array.isArray(localRecords) ? localRecords : []),
+      ...(Array.isArray(records) ? records : []),
+    ];
     syncVueSettingsBackupArchives(settingsBackupArchives);
   } catch (error) {
     settingsBackupArchives = [];
@@ -4113,6 +4124,9 @@ async function loadAutoBackupStatus(options = {}) {
       enabled: !!status?.enabled,
       intervalMinutes: Number(status?.intervalMinutes || status?.interval_minutes || 5),
       retainCount: Number(status?.retainCount || status?.retain_count || 1),
+      directory: status?.directory || '',
+      keepAllDays: Number(status?.keepAllDays || status?.keep_all_days || 3),
+      keepDailyDays: Number(status?.keepDailyDays || status?.keep_daily_days || 7),
       hasActiveEndpoint: !!(status?.hasActiveEndpoint ?? status?.has_active_endpoint),
       lastRunMs: status?.lastRunMs ?? status?.last_run_ms ?? null,
       lastSuccessMs: status?.lastSuccessMs ?? status?.last_success_ms ?? null,
@@ -4164,6 +4178,31 @@ async function restoreSettingsSnapshotRecord(snapshot) {
 
 async function restoreSettingsBackupArchiveRecord(record) {
   if (!record?.backupPath || !record.exists) {
+    return;
+  }
+  if ((record.source || '') === 'local-data') {
+    const confirmed = await showConfirmationDialog({
+      title: '恢复本地数据备份',
+      message: '恢复会覆盖当前设置、本地消息索引和本地工作区数据。系统会先创建 rollback 备份。确定继续吗？',
+      confirmLabel: '恢复',
+    });
+    if (!confirmed) {
+      return;
+    }
+    try {
+      const restored = await invoke('restore_local_data_backup', {
+        path: record.backupPath,
+        confirmed: true,
+      });
+      applySettings(restored);
+      syncVueSettings(restored);
+      await loadSettingsBackupArchives({ silent: true });
+      await showSettingsResultDialog('恢复本地数据备份成功', '本地数据备份已恢复。');
+      setSuccessStatus('本地数据已恢复');
+    } catch (error) {
+      await showSettingsResultDialog('恢复本地数据备份失败', String(error));
+      setErrorStatus(`恢复本地数据失败：${error}`);
+    }
     return;
   }
   const confirmed = await showConfirmationDialog({
@@ -6637,6 +6676,10 @@ async function loadSyncStatus() {
     if (!isRefreshRunning) {
       setRefreshLoading(!!status.running);
     }
+    if (status.conflict) {
+      await handleWebdavConflictStatus(status.conflict);
+      return;
+    }
     if (status.last_error) {
       setErrorStatus(`同步错误：${status.last_error}`);
       return;
@@ -7457,8 +7500,20 @@ function applySettings(settings) {
     enabled: !!settings.backup?.enabled,
     intervalMinutes: Number(settings.backup?.interval_minutes || 5),
     retainCount: Number(settings.backup?.retain_count || 1),
+    directory: settings.backup?.directory || currentAutoBackupStatusState.directory || '',
+    keepAllDays: Number(settings.backup?.keep_all_days || 3),
+    keepDailyDays: Number(settings.backup?.keep_daily_days || 7),
     hasActiveEndpoint: !!getActiveEndpoint(),
   };
+  if (backupDirectoryInput) {
+    backupDirectoryInput.value = currentAutoBackupStatusState.directory || '';
+  }
+  if (backupKeepAllDaysInput) {
+    backupKeepAllDaysInput.value = currentAutoBackupStatusState.keepAllDays || 3;
+  }
+  if (backupKeepDailyDaysInput) {
+    backupKeepDailyDaysInput.value = currentAutoBackupStatusState.keepDailyDays || 7;
+  }
   syncVueSettingsAutoBackup(currentAutoBackupStatusState);
   syncGlobalHotkeyInputState();
   setSendHotkey(settings.send_hotkey || SEND_HOTKEY.ENTER);
@@ -7552,6 +7607,19 @@ async function saveSettings(options = {}) {
   const backupEnabled = !!currentAutoBackupStatusState.enabled;
   const backupIntervalMinutes = Math.max(5, Number(currentAutoBackupStatusState.intervalMinutes) || 5);
   const backupRetainCount = Math.max(1, Number(currentAutoBackupStatusState.retainCount) || 1);
+  const backupDirectory = (
+    backupDirectoryInput?.value ||
+    currentAutoBackupStatusState.directory ||
+    ''
+  ).trim();
+  const backupKeepAllDays = Math.max(
+    1,
+    Number(backupKeepAllDaysInput?.value || currentAutoBackupStatusState.keepAllDays) || 3,
+  );
+  const backupKeepDailyDays = Math.max(
+    backupKeepAllDays,
+    Number(backupKeepDailyDaysInput?.value || currentAutoBackupStatusState.keepDailyDays) || 7,
+  );
   if (!localHttpApiBindAddress) {
     setErrorStatus('HTTP API 监听地址不能为空');
     return;
@@ -7598,6 +7666,9 @@ async function saveSettings(options = {}) {
       enabled: backupEnabled,
       interval_minutes: backupIntervalMinutes,
       retain_count: backupRetainCount,
+      directory: backupDirectory,
+      keep_all_days: backupKeepAllDays,
+      keep_daily_days: backupKeepDailyDays,
     },
     local_http_api: {
       enabled: !!currentSettingsFormState.localHttpApiEnabled,
@@ -7751,6 +7822,47 @@ async function importSettings() {
   } catch (error) {
     await showSettingsResultDialog('导入配置失败', String(error));
     setErrorStatus(`导入配置失败：${error}`);
+  }
+}
+
+async function handleWebdavConflictStatus(conflict) {
+  const filename = conflict.filename || '';
+  const choice = window.prompt(
+    `WebDAV sync conflict: ${filename}\nType "remote" to download remote over local, or "local" to upload local over remote.`,
+    'remote',
+  );
+  if (!choice) {
+    setErrorStatus('WebDAV 同步冲突等待处理');
+    return;
+  }
+  const normalized = choice.trim().toLowerCase();
+  const action = normalized === 'local' ? 'local-over-remote' : 'remote-over-local';
+  try {
+    await invoke('resolve_webdav_conflict', { action });
+    setSuccessStatus('WebDAV 冲突已处理');
+    await refreshMessages();
+  } catch (error) {
+    setErrorStatus(`处理 WebDAV 冲突失败：${error}`);
+  }
+}
+
+async function createLocalDataBackup() {
+  try {
+    if (!invoke) {
+      await showSettingsResultDialog('本地数据备份失败', '未检测到 Tauri API，请检查应用环境。');
+      return;
+    }
+    setStatus('正在创建本地数据备份...');
+    const result = await invoke('create_local_data_backup');
+    await loadSettingsBackupArchives({ silent: true });
+    setSuccessStatus('本地数据备份完成');
+    await showInfoDialog({
+      title: '本地数据备份完成',
+      message: `备份已创建：\n${result?.path || ''}`,
+    });
+  } catch (error) {
+    setErrorStatus(`本地数据备份失败：${error}`);
+    await showInfoDialog({ title: '本地数据备份失败', message: String(error) });
   }
 }
 
@@ -8903,6 +9015,24 @@ if (importSettingsButton) {
 if (backupWebdavButton) {
   backupWebdavButton.addEventListener('click', backupWebdav);
 }
+if (createLocalDataBackupButton) {
+  createLocalDataBackupButton.addEventListener('click', createLocalDataBackup);
+}
+if (backupDirectoryInput) {
+  backupDirectoryInput.addEventListener('input', (event) => {
+    updateSettingsAutoBackupField('directory', event.target.value);
+  });
+}
+if (backupKeepAllDaysInput) {
+  backupKeepAllDaysInput.addEventListener('input', (event) => {
+    updateSettingsAutoBackupField('keepAllDays', Number(event.target.value || 3));
+  });
+}
+if (backupKeepDailyDaysInput) {
+  backupKeepDailyDaysInput.addEventListener('input', (event) => {
+    updateSettingsAutoBackupField('keepDailyDays', Number(event.target.value || 7));
+  });
+}
 if (restoreWebdavButton) {
   restoreWebdavButton.addEventListener('click', restoreWebdav);
 }
@@ -9069,6 +9199,9 @@ vueBridge?.setActions?.({
   },
   restoreSettingsBackupArchive: (record) => {
     restoreSettingsBackupArchiveRecord(record);
+  },
+  createLocalDataBackup: () => {
+    createLocalDataBackup();
   },
   updateSettingsAutoBackupField: (field, value) => {
     updateSettingsAutoBackupField(field, value);
