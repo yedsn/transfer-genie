@@ -7234,6 +7234,20 @@ fn set_autostart(_app: &AppHandle, enabled: bool) -> Result<(), String> {
 }
 
 #[cfg(desktop)]
+fn refresh_autostart_registration(app: &AppHandle, state: &AppState) {
+    match current_settings(state) {
+        Ok(settings) => {
+            if let Err(err) = set_autostart(app, settings.auto_start) {
+                eprintln!("Refresh autostart registration failed: {err}");
+            }
+        }
+        Err(err) => {
+            eprintln!("Read settings for autostart refresh failed: {err}");
+        }
+    }
+}
+
+#[cfg(desktop)]
 fn update_global_hotkey_registration(
     app: &AppHandle,
     state: &AppState,
@@ -7373,6 +7387,12 @@ fn main() {
                 auto_backup_guard: AsyncMutex::new(()),
                 pending_webdav_conflict: Mutex::new(None),
             });
+
+            #[cfg(desktop)]
+            {
+                let state = app.state::<AppState>();
+                refresh_autostart_registration(&app.handle(), &state);
+            }
 
             #[cfg(desktop)]
             {
