@@ -393,8 +393,7 @@ fn read_cache_metadata(cache_dir: &Path) -> Result<CacheMetadata, String> {
         return Ok(CacheMetadata::default());
     }
     let data = fs::read(&path).map_err(|err| format!("读取历史缓存元数据失败：{err}"))?;
-    serde_json::from_slice::<CacheMetadata>(&data)
-        .map_err(|err| format!("解析历史缓存元数据失败：{err}"))
+    Ok(serde_json::from_slice::<CacheMetadata>(&data).unwrap_or_default())
 }
 
 fn write_cache_metadata(cache_dir: &Path, metadata: &CacheMetadata) -> Result<(), String> {
