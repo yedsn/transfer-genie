@@ -9,13 +9,17 @@ DEFAULT_BRANCH="${CURRENT_BRANCH:-master}"
 usage() {
   cat <<EOF
 Usage:
-  scripts/release/release [version] [--branch <name>] [--push]
+  scripts/release/release.sh [version] [--branch <name>] [--push]
 
 Examples:
-  scripts/release/release 0.1.2
-  scripts/release/release
-  scripts/release/release 0.1.2 --push
-  scripts/release/release 0.1.2 --branch main --push
+  scripts/release/release.sh 0.1.2
+  scripts/release/release.sh
+  scripts/release/release.sh 0.1.2 --push
+  scripts/release/release.sh 0.1.2 --branch main --push
+
+Windows (PowerShell):
+  scripts/release/release.ps1 0.1.2
+  scripts/release/release.ps1 0.1.2 -Push
 
 Behavior:
   - Update Cargo.toml and tauri.conf.json to the target version
@@ -148,7 +152,7 @@ if [[ -z "$VERSION" ]]; then
     fi
   else
     if [[ -n "$SUGGESTED_PATCH_VERSION" ]]; then
-      fail "Missing version argument. Suggested versions: patch=$SUGGESTED_PATCH_VERSION minor=$SUGGESTED_MINOR_VERSION major=$SUGGESTED_MAJOR_VERSION"
+      fail "Missing version argument. Suggested: patch=$SUGGESTED_PATCH_VERSION minor=$SUGGESTED_MINOR_VERSION major=$SUGGESTED_MAJOR_VERSION"
     fi
     fail "Missing version argument"
   fi
@@ -179,7 +183,7 @@ while IFS= read -r remote; do
   fi
 done <<< "$REMOTES"
 
-echo "[release] Preparing version $VERSION"
+echo "[release] Preparing Transfer Genie v$VERSION"
 echo "[release] Branch: $BRANCH"
 echo "[release] Remotes: $(echo "$REMOTES" | tr '\n' ' ')"
 
