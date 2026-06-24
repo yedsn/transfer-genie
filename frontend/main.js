@@ -8651,9 +8651,7 @@ async function refreshMessages(options = {}) {
   }
 }
 
-// Defer Tauri event listeners until API is ready
-(function registerTransferListeners() {
-  if (_hasListen()) {
+if (_hasListen()) {
   listen('download-progress', (event) => {
     const payload = event.payload || {};
     const filename = payload.filename;
@@ -8792,10 +8790,7 @@ async function refreshMessages(options = {}) {
     syncVueSettingsAutoBackup(currentAutoBackupStatusState);
   });
 
-  } else {
-    requestAnimationFrame(registerTransferListeners);
-  }
-})();
+}
 
 refreshButton.addEventListener('click', async () => {
   if (hasActiveContentTransfer()) {
@@ -9317,24 +9312,11 @@ vueBridge?.setActions?.({
     runVueWebdavSpeedTest(endpoint?.id);
   },
 });
-// Wait for Tauri API to be available before initializing
-(function waitForTauriApi() {
-  if (_hasInvoke()) {
-    // Dismiss the loading overlay
-    const loadingEl = document.getElementById('app-loading');
-    if (loadingEl) {
-      loadingEl.style.opacity = '0';
-      setTimeout(() => loadingEl.remove(), 300);
-    }
-    loadSettings();
-    loadMarkedTags();
-    loadMarkedMessages();
-    loadSyncStatus();
-    focusHomeComposer();
-  } else {
-    requestAnimationFrame(waitForTauriApi);
-  }
-})();
+loadSettings();
+loadMarkedTags();
+loadMarkedMessages();
+loadSyncStatus();
+focusHomeComposer();
 
 // 拖拽上传功能
 const composerRow = document.querySelector('.composer-row');
@@ -9398,9 +9380,7 @@ function setDragOverState(active) {
   }
 }
 
-// Defer Tauri event listeners until API is ready
-(function registerAppListeners() {
-  if (_hasListen()) {
+if (_hasListen()) {
   listen('trigger-hide', prepareWindowForHide);
 
   // 全局快捷键的特定监听器
@@ -9438,10 +9418,7 @@ function setDragOverState(active) {
     }
   });
 
-  } else {
-    requestAnimationFrame(registerAppListeners);
-  }
-})();
+}
 
 // 粘贴上传功能
 async function sendFileData(data, originalName) {
@@ -10568,7 +10545,4 @@ async function loadAppVersion() {
   }
 }
 
-// Wait for Tauri API before loading app version
-(function waitVersion() {
-  if (_hasInvoke()) { loadAppVersion(); } else { requestAnimationFrame(waitVersion); }
-})();
+loadAppVersion();
