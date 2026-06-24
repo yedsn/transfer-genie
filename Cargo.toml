@@ -51,3 +51,4 @@ tokio = { version = "1", features = ["full"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
+devtools = ["tauri/devtools"]

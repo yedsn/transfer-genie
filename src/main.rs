@@ -7594,7 +7594,8 @@ fn main() {
 
             start_sync_loop(app.handle().clone());
 
-            // Open DevTools when TRANSFER_GENIE_DEVTOOLS env var is set (for debug builds)
+            // Open DevTools when TRANSFER_GENIE_DEVTOOLS env var is set and devtools feature is enabled.
+            #[cfg(feature = "devtools")]
             if std::env::var("TRANSFER_GENIE_DEVTOOLS").is_ok() {
                 if let Some(window) = app.get_webview_window("main") {
                     window.open_devtools();
