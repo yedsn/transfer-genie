@@ -5,12 +5,13 @@
     return;
   }
 
-  const tauri = (typeof window !== 'undefined' && window.__TAURI__) || {};
-  const invoke = tauri.core?.invoke || tauri.invoke;
-  const openDialog = tauri.dialog?.open;
-  const saveDialog = tauri.dialog?.save;
-  const listen = tauri.event?.listen;
-  const convertFileSrc = tauri.path?.convertFileSrc;
+  // Lazy Tauri API accessors — always resolve from window.__TAURI__ at call time
+  const _getTauri = () => (typeof window !== 'undefined' && window.__TAURI__) || {};
+  const invoke = (...args) => { const t = _getTauri(); const fn = t.core?.invoke || t.invoke; return fn(...args); };
+  const openDialog = (...args) => { const fn = _getTauri().dialog?.open; return fn?.(...args); };
+  const saveDialog = (...args) => { const fn = _getTauri().dialog?.save; return fn?.(...args); };
+  const listen = (...args) => { const fn = _getTauri().event?.listen; return fn?.(...args); };
+  const convertFileSrc = (...args) => { const fn = _getTauri().path?.convertFileSrc; return fn?.(...args); };
 
   // Settings API
   const settingsApi = {

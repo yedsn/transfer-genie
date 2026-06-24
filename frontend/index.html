@@ -18,6 +18,13 @@
     <script src="lib/vue/vue.min.js"></script>
   </head>
   <body>
+    <div id="app-loading" style="position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:#f6f1eb;font-family:'Space Grotesk','Noto Sans SC',sans-serif;transition:opacity .3s">
+      <div style="text-align:center;color:#6b6b73">
+        <svg width="40" height="40" viewBox="0 0 40 40" style="animation:spin 1s linear infinite"><circle cx="20" cy="20" r="16" fill="none" stroke="#e1d7ce" stroke-width="3"/><path d="M36 20a16 16 0 01-16 16" fill="none" stroke="#ff7a2f" stroke-width="3" stroke-linecap="round"/></svg>
+        <p style="margin-top:12px;font-size:14px">Loading...</p>
+      </div>
+    </div>
+    <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
     <div class="app" id="app-shell" :data-active-tab="ui.activeTab">
       <main class="content">
         <section class="tab-panel" data-tab-panel="home" id="tab-home" role="tabpanel" :class="{ 'is-active': ui.activeTab === 'home' }" :aria-hidden="ui.activeTab === 'home' ? 'false' : 'true'">
