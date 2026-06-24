@@ -7,3 +7,5 @@ __pycache__
 
 docs/.vitepress/cache
 docs/.vitepress/dist
+
+/dist

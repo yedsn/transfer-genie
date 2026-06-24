@@ -4,10 +4,10 @@
     "version":  "0.2.8",
     "identifier":  "com.transfergenie",
     "build":  {
-                  "beforeDevCommand":  "",
-                  "beforeBuildCommand":  "",
-                  "devUrl":  null,
-                  "frontendDist":  "./frontend"
+                  "beforeDevCommand":  "npm run dev",
+                  "beforeBuildCommand":  "npm run build",
+                  "devUrl":  "http://127.0.0.1:5180",
+                  "frontendDist":  "./dist"
               },
     "app":  {
                 "withGlobalTauri":  true,
