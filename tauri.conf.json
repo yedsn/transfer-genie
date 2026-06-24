@@ -1,71 +1,73 @@
 {
-  "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Transfer Genie",
-  "version": "0.2.4",
-  "identifier": "com.transfergenie",
-  "build": {
-    "beforeDevCommand": "",
-    "beforeBuildCommand": "",
-    "devUrl": null,
-    "frontendDist": "./frontend"
-  },
-  "app": {
-    "withGlobalTauri": true,
-    "windows": [
-      {
-        "title": "Transfer Genie",
-        "width": 980,
-        "height": 760
-      }
-    ],
-    "security": {
-      "csp": "img-src 'self' asset: http://asset.localhost blob: data:",
-      "assetProtocol": {
-        "enable": true,
-        "scope": [
-          "**"
-        ]
-      }
-    }
-  },
-  "bundle": {
-    "active": true,
-    "createUpdaterArtifacts": true,
-    "targets": [
-      "app",
-      "dmg",
-      "nsis"
-    ],
-    "icon": [
-      "icons/icon.png",
-      "icons/icon.ico",
-      "icons/icon.icns"
-    ],
-    "macOS": {
-      "entitlements": null,
-      "exceptionDomain": "",
-      "frameworks": [],
-      "providerShortName": null,
-      "signingIdentity": "-",
-      "hardenedRuntime": true,
-      "minimumSystemVersion": "10.13"
-    },
-    "windows": {
-      "nsis": {
-        "installMode": "perMachine"
-      }
-    }
-  },
-  "plugins": {
-    "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVFOTM2NEFBQjlBNkU4MzAKUldRdzZLYTVxbVNUWG1uOEhxanJXZTI3QXVsQkJ5Ukh0TGdFY3B2UWdpOW1oMEVFU0poMFNKUnMK",
-      "endpoints": [
-        "https://gitee.com/hongxiaojian/transfer-genie/releases/download/latest/latest.json",
-        "https://github.com/yedsn/transfer-genie/releases/latest/download/latest.json"
-      ],
-      "windows": {
-        "installMode": "passive"
-      }
-    }
-  }
+    "$schema":  "https://schema.tauri.app/config/2",
+    "productName":  "Transfer Genie",
+    "version":  "0.2.5",
+    "identifier":  "com.transfergenie",
+    "build":  {
+                  "beforeDevCommand":  "",
+                  "beforeBuildCommand":  "",
+                  "devUrl":  null,
+                  "frontendDist":  "./frontend"
+              },
+    "app":  {
+                "withGlobalTauri":  true,
+                "windows":  [
+                                {
+                                    "title":  "Transfer Genie",
+                                    "width":  980,
+                                    "height":  760
+                                }
+                            ],
+                "security":  {
+                                 "csp":  "img-src \u0027self\u0027 asset: http://asset.localhost blob: data:",
+                                 "assetProtocol":  {
+                                                       "enable":  true,
+                                                       "scope":  [
+                                                                     "**"
+                                                                 ]
+                                                   }
+                             }
+            },
+    "bundle":  {
+                   "active":  true,
+                   "createUpdaterArtifacts":  true,
+                   "targets":  [
+                                   "app",
+                                   "dmg",
+                                   "nsis"
+                               ],
+                   "icon":  [
+                                "icons/icon.png",
+                                "icons/icon.ico",
+                                "icons/icon.icns"
+                            ],
+                   "macOS":  {
+                                 "entitlements":  null,
+                                 "exceptionDomain":  "",
+                                 "frameworks":  [
+
+                                                ],
+                                 "providerShortName":  null,
+                                 "signingIdentity":  "-",
+                                 "hardenedRuntime":  true,
+                                 "minimumSystemVersion":  "10.13"
+                             },
+                   "windows":  {
+                                   "nsis":  {
+                                                "installMode":  "perMachine"
+                                            }
+                               }
+               },
+    "plugins":  {
+                    "updater":  {
+                                    "pubkey":  "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVFOTM2NEFBQjlBNkU4MzAKUldRdzZLYTVxbVNUWG1uOEhxanJXZTI3QXVsQkJ5Ukh0TGdFY3B2UWdpOW1oMEVFU0poMFNKUnMK",
+                                    "endpoints":  [
+                                                      "https://gitee.com/hongxiaojian/transfer-genie/releases/download/latest/latest.json",
+                                                      "https://github.com/yedsn/transfer-genie/releases/latest/download/latest.json"
+                                                  ],
+                                    "windows":  {
+                                                    "installMode":  "passive"
+                                                }
+                                }
+                }
 }
