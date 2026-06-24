@@ -1,15 +1,9 @@
-﻿// Lazy Tauri API accessors — always resolve from window.__TAURI__ at call time
-// so the API works even when the Tauri init script loads after this file.
-const _tauriApi = () => window.__TAURI__ || {};
-const invoke = (...args) => { const t = _tauriApi(); const fn = t.core?.invoke || t.invoke; return fn(...args); };
-const openDialog = (...args) => { const fn = _tauriApi().dialog?.open; return fn?.(...args); };
-const saveDialog = (...args) => { const fn = _tauriApi().dialog?.save; return fn?.(...args); };
-const listen = (...args) => { const fn = _tauriApi().event?.listen; return fn?.(...args); };
-const convertFileSrc = (...args) => { const fn = _tauriApi().path?.convertFileSrc; return fn?.(...args); };
-const _hasInvoke = () => { const t = _tauriApi(); return !!(t.core?.invoke || t.invoke); };
-const _hasListen = () => !!_tauriApi().event?.listen;
-const _hasOpenDialog = () => !!_tauriApi().dialog?.open;
-const _hasSaveDialog = () => !!_tauriApi().dialog?.save;
+﻿const tauri = window.__TAURI__ || {};
+const invoke = tauri.core?.invoke || tauri.invoke;
+const openDialog = tauri.dialog?.open;
+const saveDialog = tauri.dialog?.save;
+const listen = tauri.event?.listen;
+const convertFileSrc = tauri.path?.convertFileSrc;
 const vueBridge = window.transferGenieVue || null;
 const hasVueAppShell = !!(vueBridge && vueBridge.isEnabled);
 const feedState = window.transferGenieFeedState || null;
@@ -1067,7 +1061,7 @@ function setSendHotkey(value) {
 setSendHotkey(sendHotkey);
 
 async function persistSendHotkeySetting() {
-  if (!_hasInvoke()) return;
+  if (!invoke) return;
   try {
     await invoke('save_send_hotkey', { sendHotkey: sendHotkey });
   } catch (error) {
@@ -1342,7 +1336,7 @@ function syncGlobalHotkeyInputState() {
 }
 
 async function minimizeAppWindow() {
-  if (!_hasInvoke()) {
+  if (!invoke) {
     setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
     return;
   }
@@ -1354,7 +1348,7 @@ async function minimizeAppWindow() {
 }
 
 async function tryOpenMessageFile(message) {
-  if (!_hasInvoke()) {
+  if (!invoke) {
     return { ok: false, error: '未检测到 Tauri API，请检查 app.withGlobalTauri 设置' };
   }
   const originalName = message.original_name || message.filename || '';
@@ -1389,7 +1383,7 @@ async function openMessageFile(message) {
       return;
     }
   }
-  if (!_hasInvoke()) {
+  if (!invoke) {
     setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
     return;
   }
@@ -2108,7 +2102,7 @@ function mergePersistedDownloadHistory(records) {
 
 async function loadPersistedDownloadHistory(options = {}) {
   const silent = options.silent !== false;
-  if (!_hasInvoke()) {
+  if (!invoke) {
     return;
   }
   try {
@@ -2732,7 +2726,7 @@ function mergePersistedUploadHistory(records) {
 
 async function loadPersistedUploadHistory(options = {}) {
   const silent = options.silent !== false;
-  if (!_hasInvoke()) {
+  if (!invoke) {
     return;
   }
   try {
@@ -4060,7 +4054,7 @@ async function loadSettingsSnapshots(options = {}) {
   const silent = !!options.silent;
   syncVueSettingsSnapshotsLoading(true);
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       if (!silent) {
         setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       }
@@ -4088,7 +4082,7 @@ async function loadSettingsBackupArchives(options = {}) {
   const silent = !!options.silent;
   syncVueSettingsBackupArchivesLoading(true);
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       if (!silent) {
         setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 配置');
       }
@@ -4119,7 +4113,7 @@ async function loadSettingsBackupArchives(options = {}) {
 async function loadAutoBackupStatus(options = {}) {
   const silent = !!options.silent;
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       if (!silent) {
         setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 配置');
       }
@@ -4161,7 +4155,7 @@ async function restoreSettingsSnapshotRecord(snapshot) {
   }
 
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       await showSettingsResultDialog('恢复设置快照失败', '未检测到 Tauri API，请检查应用环境。');
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
@@ -4222,7 +4216,7 @@ async function restoreSettingsBackupArchiveRecord(record) {
 
   const originalText = restoreWebdavButton ? restoreWebdavButton.textContent : '恢复';
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       await showSettingsResultDialog('恢复本地备份归档失败', '未检测到 Tauri API，请检查应用环境。');
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 配置');
       return;
@@ -4396,7 +4390,7 @@ async function saveDiagramAsImage(container) {
       bytes[i] = binary.charCodeAt(i);
     }
 
-    if (!_hasSaveDialog()) {
+    if (!saveDialog) {
       showToast('未检测到保存对话框插件', 'error');
       return;
     }
@@ -4547,7 +4541,7 @@ async function downloadTextMessageAsFile(message) {
     }
 
     const defaultPath = message?.original_name || buildTextMessageFilename(message);
-    if (_hasSaveDialog() && _hasInvoke()) {
+    if (saveDialog && invoke) {
       const target = await saveDialog({ defaultPath });
       if (!target) return;
       const bytes = new TextEncoder().encode(content);
@@ -4767,7 +4761,7 @@ async function downloadMessageFile(message) {
       filename: message.filename,
       original_name: message.original_name,
     });
-    if (!_hasInvoke()) {
+    if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
@@ -4848,11 +4842,11 @@ async function saveMessageFileAs(message) {
       filename: message.filename,
       original_name: message.original_name,
     });
-    if (!_hasInvoke()) {
+    if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
-    if (!_hasSaveDialog()) {
+    if (!saveDialog) {
       setErrorStatus('未检测到保存对话框插件，请确认已启用 dialog 插件');
       return;
     }
@@ -4889,11 +4883,11 @@ async function saveMessageFileAs(message) {
 
 async function saveDownloadHistoryAs(task) {
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
-    if (!_hasSaveDialog()) {
+    if (!saveDialog) {
       setErrorStatus('未检测到保存对话框插件，请确认已启用 dialog 插件');
       return;
     }
@@ -4937,7 +4931,7 @@ async function saveDownloadHistoryAs(task) {
 
 async function redownloadDownloadHistory(task) {
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
@@ -4981,7 +4975,7 @@ async function deleteDownloadHistoryRecord(task) {
   }
   const deleteLocalFile = choice === 'local';
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       await showInfoDialog({
         title: '删除失败',
         message: '未检测到 Tauri API，请检查 app.withGlobalTauri 设置',
@@ -5026,7 +5020,7 @@ async function deleteSelectedDownloadTasks() {
       return;
     }
     try {
-      if (!_hasInvoke()) {
+      if (!invoke) {
         await showInfoDialog({
           title: '删除失败',
           message: '未检测到 Tauri API，请检查 app.withGlobalTauri 设置',
@@ -5080,7 +5074,7 @@ async function deleteSelectedDownloadTasks() {
   }
   const deleteLocalFile = choice === 'local';
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       await showInfoDialog({
         title: '删除失败',
         message: '未检测到 Tauri API，请检查 app.withGlobalTauri 设置',
@@ -5153,7 +5147,7 @@ async function clearCurrentTransferList() {
     return;
   }
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       await showInfoDialog({
         title: '清空失败',
         message: '未检测到 Tauri API，请检查应用配置。',
@@ -5188,7 +5182,7 @@ async function openDownloadHistoryDir(task) {
     return;
   }
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
@@ -5210,7 +5204,7 @@ async function openDownloadHistoryFile(task) {
     return;
   }
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 配置');
       return;
     }
@@ -5231,7 +5225,7 @@ async function deleteSingleMessage(message) {
   if (!message || !message.filename) {
     return false;
   }
-  if (!_hasInvoke()) {
+  if (!invoke) {
     await showInfoDialog({
       title: '删除失败',
       message: '未检测到 Tauri API，请检查app.withGlobalTauri 设置',
@@ -5289,7 +5283,7 @@ async function deleteSelectedMessages() {
     });
     return;
   }
-  if (!_hasInvoke()) {
+  if (!invoke) {
     await showInfoDialog({
       title: '删除失败',
       message: '未检测到 Tauri API，请检查 app.withGlobalTauri 设置',
@@ -5346,7 +5340,7 @@ async function deleteSelectedMessages() {
 
 window.setActiveTab = setActiveTab;
 async function cleanupMessages() {
-  if (!_hasInvoke()) {
+  if (!invoke) {
     setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
     return;
   }
@@ -5388,7 +5382,7 @@ async function cleanupMessages() {
 
 async function legacyToggleMessageMarked(message) {
   if (!message || !message.filename) return;
-  if (!_hasInvoke()) return;
+  if (!invoke) return;
   
   const newMarked = !message.marked;
   // Optimistic update
@@ -6468,7 +6462,7 @@ async function loadMessages(options = {}) {
   const checkNew = options.checkNew || false; // 新增：检查新消息模式
   
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
@@ -6670,7 +6664,7 @@ async function loadSyncStatus() {
   }
   isLoadSyncStatusRunning = true;
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
@@ -6799,7 +6793,7 @@ function delay(ms) {
 }
 
 async function waitForSyncToFinish(maxWaitMs = MANUAL_REFRESH_TIMEOUT_MS) {
-  if (!_hasInvoke()) {
+  if (!invoke) {
     return null;
   }
   const deadline = Date.now() + Math.max(1000, maxWaitMs);
@@ -6862,7 +6856,7 @@ function setLocalHttpApiStatusLegacy(status) {
 
 async function loadLocalHttpApiStatus(options = {}) {
   try {
-    if (!_hasInvoke()) return;
+    if (!invoke) return;
     const status = await invoke('get_local_http_api_status');
     renderLocalHttpApiStatus(status);
     syncVueLocalHttpApiStatus(status);
@@ -6987,7 +6981,7 @@ function setTelegramBridgeStatus(status) {
 
 async function loadTelegramBridgeStatus(options = {}) {
   try {
-    if (!_hasInvoke()) return;
+    if (!invoke) return;
     const status = await invoke('get_telegram_bridge_status');
     setTelegramBridgeStatus(status);
     syncVueTelegramBridgeStatus(status);
@@ -7000,7 +6994,7 @@ async function loadTelegramBridgeStatus(options = {}) {
 
 async function loadIntegrationModules(options = {}) {
   try {
-    if (!_hasInvoke()) return;
+    if (!invoke) return;
     const modules = await invoke('list_integration_modules');
     syncVueIntegrationModules(modules);
   } catch (error) {
@@ -7074,7 +7068,7 @@ function renderTelegramChatCandidates(candidates) {
 
 async function discoverTelegramChats() {
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
@@ -7121,7 +7115,7 @@ async function discoverTelegramChats() {
 
 async function discoverTelegramChatsWithFeedback() {
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       await showInfoDialog({
         title: '获取 Chat ID 失败',
@@ -7182,7 +7176,7 @@ async function discoverTelegramChatsWithFeedback() {
 
 async function startTelegramBridge() {
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       await showSettingsResultDialog('启动 Telegram Bridge 失败', '未检测到 Tauri API，请检查应用环境。');
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
@@ -7214,7 +7208,7 @@ async function startTelegramBridge() {
 
 async function stopTelegramBridge() {
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       await showSettingsResultDialog('停止 Telegram Bridge 失败', '未检测到 Tauri API，请检查应用环境。');
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
@@ -7243,7 +7237,7 @@ function startTelegramBridgeStatusPolling() {
 }
 
 async function installAvailableAppUpdate(updateResult) {
-  if (!_hasInvoke()) {
+  if (!invoke) {
     await showInfoDialog({
       title: '安装更新失败',
       message: '未检测到 Tauri API，请检查应用环境。',
@@ -7288,7 +7282,7 @@ async function checkForAppUpdate(options = {}) {
   const silent = !!options.silent;
   const source = options.source || 'manual';
 
-  if (!_hasInvoke()) {
+  if (!invoke) {
     if (!silent) {
       await showInfoDialog({
         title: '检查更新失败',
@@ -7543,7 +7537,7 @@ function applySettings(settings) {
 
 async function loadSettings() {
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
@@ -7694,7 +7688,7 @@ async function saveSettings(options = {}) {
   };
 
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
@@ -7741,12 +7735,12 @@ async function saveSettingsWithFeedback() {
 
 async function exportSettings() {
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       await showSettingsResultDialog('导出配置失败', '未检测到 Tauri API，请检查应用环境。');
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
-    if (!_hasSaveDialog()) {
+    if (!saveDialog) {
       await showSettingsResultDialog('导出配置失败', '未检测到保存对话框插件，请检查应用配置。');
       setErrorStatus('未检测到保存对话框插件，请确认已启用 dialog 插件');
       return;
@@ -7777,12 +7771,12 @@ async function exportSettings() {
 
 async function importSettings() {
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       await showSettingsResultDialog('导入配置失败', '未检测到 Tauri API，请检查应用环境。');
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
-    if (!_hasOpenDialog()) {
+    if (!openDialog) {
       await showSettingsResultDialog('导入配置失败', '未检测到文件对话框插件，请检查应用配置。');
       setErrorStatus('未检测到对话框插件，请确认已启用 dialog 插件');
       return;
@@ -7854,7 +7848,7 @@ async function handleWebdavConflictStatus(conflict) {
 
 async function createLocalDataBackup() {
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       await showSettingsResultDialog('本地数据备份失败', '未检测到 Tauri API，请检查应用环境。');
       return;
     }
@@ -7875,7 +7869,7 @@ async function createLocalDataBackup() {
 async function backupWebdav() {
   const originalText = backupWebdavButton ? backupWebdavButton.textContent : '备份';
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       await showSettingsResultDialog('备份 WebDAV 失败', '未检测到 Tauri API，请检查应用环境。');
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
@@ -7885,7 +7879,7 @@ async function backupWebdav() {
       setErrorStatus('请先选择 WebDAV 端点');
       return;
     }
-    if (!_hasSaveDialog()) {
+    if (!saveDialog) {
       await showSettingsResultDialog('备份 WebDAV 失败', '未检测到保存对话框插件，请检查应用配置。');
       setErrorStatus('未检测到保存对话框插件，请确认已启用 dialog 插件');
       return;
@@ -7952,7 +7946,7 @@ async function backupWebdav() {
 async function restoreWebdav() {
   const originalText = restoreWebdavButton ? restoreWebdavButton.textContent : '恢复';
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       await showSettingsResultDialog('恢复 WebDAV 失败', '未检测到 Tauri API，请检查应用环境。');
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
@@ -7962,7 +7956,7 @@ async function restoreWebdav() {
       setErrorStatus('请先选择 WebDAV 端点');
       return;
     }
-    if (!_hasOpenDialog()) {
+    if (!openDialog) {
       await showSettingsResultDialog('恢复 WebDAV 失败', '未检测到文件对话框插件，请检查应用配置。');
       setErrorStatus('未检测到对话框插件，请确认已启用 dialog 插件');
       return;
@@ -8037,7 +8031,7 @@ async function restoreWebdav() {
 }
 
 async function sendText() {
-  if (!_hasInvoke()) {
+  if (!invoke) {
     setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
     return;
   }
@@ -8189,7 +8183,7 @@ async function sendText() {
 async function selectFiles() {
   let clientId = null;
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
@@ -8197,7 +8191,7 @@ async function selectFiles() {
       setErrorStatus('请先选择 WebDAV 端点');
       return;
     }
-    if (!_hasOpenDialog()) {
+    if (!openDialog) {
       setErrorStatus('未检测到对话框插件，请确认已启用 dialog 插件');
       return;
     }
@@ -8297,7 +8291,7 @@ function removeSelectedFile(index) {
 
 async function chooseDownloadDir() {
   try {
-    if (!_hasOpenDialog()) {
+    if (!openDialog) {
       setErrorStatus('未检测到对话框插件，请确认已启用 dialog 插件');
       return;
     }
@@ -8319,7 +8313,7 @@ async function chooseDownloadDir() {
 
 async function openDownloadDir() {
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请确认应用环境正常');
       return;
     }
@@ -8331,7 +8325,7 @@ async function openDownloadDir() {
 
 async function openLogDir() {
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请确认应用环境正常');
       return;
     }
@@ -8343,7 +8337,7 @@ async function openLogDir() {
 
 async function openDataDir() {
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请确认应用环境正常');
       return;
     }
@@ -8532,7 +8526,7 @@ async function switchActiveEndpoint() {
     return;
   }
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
@@ -8615,7 +8609,7 @@ async function refreshMessages(options = {}) {
     searchInput.value = '';
   }
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
@@ -8651,7 +8645,7 @@ async function refreshMessages(options = {}) {
   }
 }
 
-if (_hasListen()) {
+if (listen) {
   listen('download-progress', (event) => {
     const payload = event.payload || {};
     const filename = payload.filename;
@@ -9324,7 +9318,7 @@ const composerRow = document.querySelector('.composer-row');
 async function sendFileByPath(path) {
   let clientId = null;
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
@@ -9380,7 +9374,7 @@ function setDragOverState(active) {
   }
 }
 
-if (_hasListen()) {
+if (listen) {
   listen('trigger-hide', prepareWindowForHide);
 
   // 全局快捷键的特定监听器
@@ -9424,7 +9418,7 @@ if (_hasListen()) {
 async function sendFileData(data, originalName) {
   let clientId = null;
   try {
-    if (!_hasInvoke()) {
+    if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
       return;
     }
@@ -9625,7 +9619,7 @@ function closeMarkMessageModal() {
 }
 
 async function loadMarkedTags() {
-  if (!_hasInvoke()) return;
+  if (!invoke) return;
   if (!getActiveEndpoint()) {
     markedTags = [];
     renderMarkedTagFilters();
@@ -9652,7 +9646,7 @@ async function loadMarkedTags() {
 }
 
 async function createMarkedTagRecord(name) {
-  if (!_hasInvoke()) return null;
+  if (!invoke) return null;
   const trimmed = String(name || '').trim();
   if (!trimmed) return null;
   const tag = await invoke('create_marked_tag', { name: trimmed });
@@ -9894,7 +9888,7 @@ async function deleteSelectedMarkedMessages() {
     });
     return;
   }
-  if (!_hasInvoke()) {
+  if (!invoke) {
     await showInfoDialog({
       title: '删除失败',
       message: '未检测到 Tauri API，请检查 app.withGlobalTauri 配置',
