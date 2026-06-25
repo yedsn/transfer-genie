@@ -103,12 +103,12 @@ $package = Read-Json $packagePath
 $package.version = $Version
 Write-Json $packagePath $package
 
-$tauriPath = Join-Path $RootDir "src-tauri\tauri.conf.json"
+$tauriPath = Join-Path $RootDir "tauri.conf.json"
 $tauri = Read-Json $tauriPath
 $tauri.version = $Version
 Write-Json $tauriPath $tauri
 
-Set-CargoVersion (Join-Path $RootDir "src-tauri\Cargo.toml") $Version
+Set-CargoVersion (Join-Path $RootDir "Cargo.toml") $Version
 
 Invoke-NpmNoDebug @("--prefix", $RootDir, "install", "--package-lock-only")
 
