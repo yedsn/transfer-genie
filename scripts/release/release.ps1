@@ -9,7 +9,7 @@ $ErrorActionPreference = "Stop"
 $RootDir = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 
 function Fail([string]$Message) {
-  Write-Host "[release] Error: $Message" -ForegroundColor Red
+  Write-Error "[release] $Message"
   exit 1
 }
 
@@ -36,54 +36,35 @@ function Assert-Command([string]$Name) {
 }
 
 Assert-Command git
+Assert-Command npm.cmd
 
-# Read current version from Cargo.toml
-$cargoPath = Join-Path $RootDir "Cargo.toml"
-$cargoText = [System.IO.File]::ReadAllText($cargoPath, [System.Text.UTF8Encoding]::new($false))
-if ($cargoText -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
-  Fail "Cannot read version from Cargo.toml"
-}
-$currentVersion = $Matches[1]
-
-# Suggest versions
-$suggestedPatch = ""
-$suggestedMinor = ""
-$suggestedMajor = ""
-if ($currentVersion -match '^(\d+)\.(\d+)\.(\d+)$') {
-  $major = [int]$Matches[1]
-  $minor = [int]$Matches[2]
-  $patch = [int]$Matches[3]
-  $suggestedPatch = "$major.$minor.$($patch + 1)"
-  $suggestedMinor = "$major.$($minor + 1).0"
-  $suggestedMajor = "$($major + 1).0.0"
+function Invoke-NpmNoDebug([string[]]$Arguments) {
+  $oldNodeOptions = $env:NODE_OPTIONS
+  $oldInspectorOptions = $env:VSCODE_INSPECTOR_OPTIONS
+  try {
+    Remove-Item Env:NODE_OPTIONS -ErrorAction SilentlyContinue
+    Remove-Item Env:VSCODE_INSPECTOR_OPTIONS -ErrorAction SilentlyContinue
+    & npm.cmd @Arguments
+    if ($LASTEXITCODE -ne 0) { Fail "npm failed with exit code $LASTEXITCODE." }
+  } finally {
+    if ($null -ne $oldNodeOptions) { $env:NODE_OPTIONS = $oldNodeOptions }
+    if ($null -ne $oldInspectorOptions) { $env:VSCODE_INSPECTOR_OPTIONS = $oldInspectorOptions }
+  }
 }
 
-# Determine version
+$package = Read-Json (Join-Path $RootDir "package.json")
+$current = [string]$package.version
+$suggestedVersion = ""
+if ($current -match '^(\d+)\.(\d+)\.(\d+)$') {
+  $suggestedVersion = "$($Matches[1]).$($Matches[2]).$([int]$Matches[3] + 1)"
+}
+
 if (-not $Version) {
-  if ($suggestedPatch -and $suggestedMinor -and $suggestedMajor) {
-    Write-Host "[release] 当前版本: $currentVersion"
-    Write-Host "[release] 请选择版本类型:"
-    Write-Host "  1) patch -> $suggestedPatch"
-    Write-Host "  2) minor -> $suggestedMinor"
-    Write-Host "  3) major -> $suggestedMajor"
-    Write-Host "  4) custom"
-
-    $choice = Read-Host "请输入选项 [默认: 1]"
-    $choice = if ($choice.Trim()) { $choice.Trim() } else { "1" }
-
-    switch ($choice) {
-      "1" { $Version = $suggestedPatch }
-      "2" { $Version = $suggestedMinor }
-      "3" { $Version = $suggestedMajor }
-      "4" {
-        $customVersion = Read-Host "请输入自定义版本号"
-        $Version = $customVersion.Trim()
-      }
-      default { Fail "无效选项，请输入 1、2、3 或 4" }
-    }
+  if ($suggestedVersion) {
+    $inputVersion = Read-Host "Release version [default: $suggestedVersion]"
+    $Version = if ($inputVersion.Trim()) { $inputVersion.Trim() } else { $suggestedVersion }
   } else {
-    $inputVersion = Read-Host "请输入版本号"
-    $Version = $inputVersion.Trim()
+    Fail "Missing version argument. Current package version is not semantic: $current"
   }
 }
 
@@ -91,28 +72,25 @@ if ($Version -notmatch '^\d+\.\d+\.\d+([.-][0-9A-Za-z.-]+)?$') {
   Fail "Version must look like 0.1.2 or 0.1.2-beta.1"
 }
 
-# Determine branch
 if (-not $Branch) {
-  $currentBranch = git -C $RootDir branch --show-current 2>$null
-  if (-not $currentBranch) { $currentBranch = "master" }
-  $inputBranch = Read-Host "Release branch [默认: $currentBranch]"
-  $Branch = if ($inputBranch.Trim()) { $inputBranch.Trim() } else { $currentBranch }
+  $inputBranch = Read-Host "Release branch [default: master]"
+  $Branch = if ($inputBranch.Trim()) { $inputBranch.Trim() } else { "master" }
 }
 
-# Validate git state
 $remotes = @(git -C $RootDir remote)
 if ($remotes.Count -eq 0) { Fail "No git remotes configured." }
 
-$dirty = git -C $RootDir status --porcelain
+$dirty = (git -C $RootDir status --porcelain)
 if ($dirty) {
-  Fail "Working tree is not clean. Commit or stash changes before running the release script."
+  Write-Host "[release] Working tree has changes. They will be included in the release commit:"
+  git -C $RootDir status --short
 }
 
 $localTag = git -C $RootDir tag --list "v$Version"
 if ($localTag) { Fail "Git tag v$Version already exists locally." }
 
 foreach ($remote in $remotes) {
-  $existing = git -C $RootDir ls-remote --tags $remote "refs/tags/v$Version" 2>$null
+  $existing = git -C $RootDir ls-remote --tags $remote "refs/tags/v$Version"
   if ($existing) { Fail "Git tag v$Version already exists on remote '$remote'." }
 }
 
@@ -120,23 +98,24 @@ Write-Host "[release] Preparing Transfer Genie v$Version"
 Write-Host "[release] Branch: $Branch"
 Write-Host "[release] Remotes: $($remotes -join ', ')"
 
-# Update versions
-Set-CargoVersion $cargoPath $Version
+$packagePath = Join-Path $RootDir "package.json"
+$package = Read-Json $packagePath
+$package.version = $Version
+Write-Json $packagePath $package
 
-$tauriPath = Join-Path $RootDir "tauri.conf.json"
+$tauriPath = Join-Path $RootDir "src-tauri\tauri.conf.json"
 $tauri = Read-Json $tauriPath
 $tauri.version = $Version
 Write-Json $tauriPath $tauri
 
-# Validate tauri.conf.json is still valid JSON
-$null = Read-Json $tauriPath
+Set-CargoVersion (Join-Path $RootDir "src-tauri\Cargo.toml") $Version
 
-Write-Host "[release] Updated versions:"
-Select-String -LiteralPath $cargoPath -Pattern "^version = " | ForEach-Object { Write-Host "  Cargo.toml:$($_.LineNumber): $($_.Line)" }
-Select-String -LiteralPath $tauriPath -Pattern '"version":' | Select-Object -First 1 | ForEach-Object { Write-Host "  tauri.conf.json:$($_.LineNumber): $($_.Line)" }
+Invoke-NpmNoDebug @("--prefix", $RootDir, "install", "--package-lock-only")
 
-# Commit and tag
-git -C $RootDir add Cargo.toml tauri.conf.json
+git -C $RootDir add -A
+if (-not (git -C $RootDir diff --cached --name-only)) {
+  Fail "No staged changes found for release commit. Check whether version files were already updated."
+}
 git -C $RootDir commit -m "release: v$Version"
 git -C $RootDir tag -a "v$Version" -m "Release v$Version"
 
@@ -148,8 +127,6 @@ if ($Push) {
     git -C $RootDir push $remote $Branch
     git -C $RootDir push $remote "v$Version"
   }
-  Write-Host "[release] Pushed $Branch and tag v$Version to all remotes"
-  Write-Host "[release] Next: open https://github.com/yedsn/transfer-genie/actions and verify the Release workflow"
 } else {
   Write-Host "[release] Push skipped. Next commands:"
   foreach ($remote in $remotes) {

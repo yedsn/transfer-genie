@@ -1,9 +1,24 @@
 {
   "version": "0.2.0",
   "configurations": [
-    {"command":"codex-dsp","name":"codex","request":"launch","type":"node-terminal"},
-    {"command":"cargo tauri dev","name":"dev","request":"launch","type":"node-terminal"},
-    {"command":"cargo tauri build","name":"build","request":"launch","type":"node-terminal"},
+    {
+      "command": "codex-dsp",
+      "name": "codex",
+      "request": "launch",
+      "type": "node-terminal"
+    },
+    {
+      "command": "npm run tauri:dev",
+      "name": "dev",
+      "request": "launch",
+      "type": "node-terminal"
+    },
+    {
+      "command": "npm run tauri:build",
+      "name": "build",
+      "request": "launch",
+      "type": "node-terminal"
+    },
     {
       "command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/release.ps1 -Push",
       "cwd": "${workspaceFolder}",
