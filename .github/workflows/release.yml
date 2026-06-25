@@ -15,6 +15,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+  CARGO_HTTP_TIMEOUT: 600
+  CARGO_HTTP_LOW_SPEED_LIMIT: 1
+  CARGO_HTTP_LOW_SPEED_TIME: 600
 
 jobs:
   publish:
@@ -43,49 +47,56 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Validate updater configuration
-        shell: bash
+      - name: Use crates.io registry in CI
+        shell: pwsh
         run: |
-          python <<'PY'
-          import json
-          import sys
-          from pathlib import Path
+          if (Test-Path .cargo/config.toml) {
+            Move-Item .cargo/config.toml .cargo/config.toml.local-disabled
+          }
+          if (Test-Path .cargo/config) {
+            Move-Item .cargo/config .cargo/config.local-disabled
+          }
 
-          data = json.loads(Path('tauri.conf.json').read_text(encoding='utf-8'))
-          updater = data.get('plugins', {}).get('updater', {})
-          pubkey = updater.get('pubkey', '')
-          endpoints = updater.get('endpoints', [])
-          errors = []
+      - name: Validate release tag version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ($tag -notmatch '^v(.+)$') { throw "Release tag must start with v." }
+          $version = $Matches[1]
+          $package = Get-Content package.json -Raw -Encoding UTF8 | ConvertFrom-Json
+          $tauri = Get-Content tauri.conf.json -Raw -Encoding UTF8 | ConvertFrom-Json
+          $cargo = Get-Content Cargo.toml -Raw -Encoding UTF8
+          $cargoVersionMatch = [regex]::Match($cargo, '(?m)^version\s*=\s*"([^"]+)"\s*$')
+          if (-not $cargoVersionMatch.Success) { throw "Cargo.toml version field was not found." }
+          $cargoVersion = $cargoVersionMatch.Groups[1].Value
+          if ($package.version -ne $version) { throw "package.json version $($package.version) does not match tag $tag." }
+          if ($tauri.version -ne $version) { throw "tauri.conf.json version $($tauri.version) does not match tag $tag." }
+          if ($cargoVersion -ne $version) { throw "Cargo.toml version $cargoVersion does not match tag $tag." }
 
-          if not pubkey or 'REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY' in pubkey:
-              errors.append('tauri.conf.json 中的 plugins.updater.pubkey 仍是占位值。')
-          if not endpoints:
-              errors.append('tauri.conf.json 中缺少 plugins.updater.endpoints。')
-          elif any('github.com/OWNER/REPO' in endpoint for endpoint in endpoints):
-              errors.append('tauri.conf.json 中的 updater endpoint 仍包含 OWNER/REPO 占位值。')
-
-          if errors:
-              for item in errors:
-                  print(f'::error::{item}')
-              sys.exit(1)
-          PY
+      - name: Validate updater configuration
+        shell: pwsh
+        run: |
+          $tauri = Get-Content tauri.conf.json -Raw -Encoding UTF8 | ConvertFrom-Json
+          $updater = $tauri.plugins.updater
+          if (-not $updater.pubkey -or $updater.pubkey -eq 'REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY') {
+            throw 'tauri.conf.json plugins.updater.pubkey is still a placeholder.'
+          }
+          if (-not $updater.endpoints -or $updater.endpoints.Count -eq 0) {
+            throw 'tauri.conf.json plugins.updater.endpoints is empty.'
+          }
+          foreach ($endpoint in $updater.endpoints) {
+            if ($endpoint -match 'github.com/OWNER/REPO') { throw 'Updater endpoint still contains OWNER/REPO placeholder.' }
+            if ($endpoint -notmatch '^https://') { throw "Updater endpoint must use HTTPS: $endpoint" }
+          }
 
       - name: Validate updater signing secrets
-        shell: bash
+        shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            echo '::error::Missing repository secret TAURI_SIGNING_PRIVATE_KEY'
-            exit 1
-          fi
-
-          if [ -z "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]; then
-            echo '::error::Missing repository secret TAURI_SIGNING_PRIVATE_KEY_PASSWORD'
-            echo '::error::Use a password-protected updater key and save the password in GitHub Secrets.'
-            exit 1
-          fi
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { throw 'Missing repository secret TAURI_SIGNING_PRIVATE_KEY.' }
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) { throw 'Missing repository secret TAURI_SIGNING_PRIVATE_KEY_PASSWORD.' }
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -93,6 +104,15 @@ jobs:
       - name: Install extra Rust target
         if: matrix.rust_target != ''
         run: rustup target add ${{ matrix.rust_target }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
@@ -112,13 +132,13 @@ jobs:
           releaseBody: |
             Automated GitHub Release for Transfer Genie.
 
-            - Includes platform bundles and updater artifacts.
-            - `latest.json` is uploaded for the desktop auto-update flow.
+            - Includes the Windows NSIS installer.
+            - Includes macOS Apple Silicon and Intel DMG packages.
+            - Includes `latest.json` for the Tauri desktop auto-update flow.
 
             ### macOS 用户注意事项
 
             如果在 macOS 上打开应用时提示异常，请尝试在终端执行以下命令：
-
             ```bash
             xattr -cr /Applications/Transfer\ Genie.app
             ```
