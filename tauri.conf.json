@@ -19,7 +19,7 @@
                                 }
                             ],
                 "security":  {
-                                 "csp":  "img-src \u0027self\u0027 asset: http://asset.localhost blob: data:",
+                                 "csp":  "default-src \u0027self\u0027; script-src \u0027self\u0027 \u0027unsafe-eval\u0027; img-src \u0027self\u0027 asset: http://asset.localhost blob: data:",
                                  "assetProtocol":  {
                                                        "enable":  true,
                                                        "scope":  [

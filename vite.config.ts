@@ -1,4 +1,5 @@
 import { defineConfig } from "vite";
+import path from "path";
 import vue from "@vitejs/plugin-vue";
 
 export default defineConfig({
@@ -6,6 +7,11 @@ export default defineConfig({
   root: "src-ui",
   base: "./",
   clearScreen: false,
+  resolve: {
+    alias: {
+      vue: path.resolve(__dirname, "node_modules/vue/dist/vue.esm-bundler.js"),
+    },
+  },
   server: {
     host: "127.0.0.1",
     port: 5180,
