@@ -1,11 +1,11 @@
-﻿const tauri = window.__TAURI__ || {};
+const tauri = window.__TAURI__ || {};
 const invoke = tauri.core?.invoke || tauri.invoke;
 const openDialog = tauri.dialog?.open;
 const saveDialog = tauri.dialog?.save;
 const listen = tauri.event?.listen;
 const convertFileSrc = tauri.path?.convertFileSrc;
 const vueBridge = window.transferGenieVue || null;
-const hasVueAppShell = !!(vueBridge && vueBridge.isEnabled);
+const hasVueAppShell = true;
 const feedState = window.transferGenieFeedState || null;
 const feedViewModel = window.transferGenieFeedViewModel || null;
 const settingsFormRuntime = window.transferGenieSettingsFormRuntime || null;
@@ -674,8 +674,12 @@ let currentFormat = 'text';
 
 function initMarkdownEditor() {
   if (mdEditor) return;
-  
-  mdEditor = editormd("markdown-editor", {
+  if (!window.editormd) {
+    console.error('editormd not loaded');
+    return;
+  }
+
+  mdEditor = window.editormd("markdown-editor", {
     width: "100%",
     height: MARKDOWN_EDITOR_DEFAULT_HEIGHT,
     path: "lib/editor.md/lib/",
@@ -3613,6 +3617,10 @@ function setActiveTab(name, options = {}) {
   }
 }
 
+if (typeof window !== 'undefined') {
+  window.transferGenieLegacySetActiveTab = setActiveTab;
+}
+
 function focusHomeComposer(options = {}) {
   const scrollToBottom = options.scrollToBottom !== false;
   setActiveTab('home', { scrollToBottom, focusInput: true });
@@ -5590,7 +5598,7 @@ function renderPreviewContent(message) {
       holder.id = uniqueId;
       holder.className = 'markdown-body editormd-html-preview';
       messagePreviewBody.appendChild(holder);
-      editormd.markdownToHTML(uniqueId, {
+      window.editormd.markdownToHTML(uniqueId, {
         markdown: message.content || '',
         htmlDecode: 'style,script,iframe',
         emoji: true,
@@ -6343,7 +6351,7 @@ function renderMessages(messages, options = {}) {
     setTimeout(() => {
       markdownRenderQueue.forEach(item => {
         try {
-          editormd.markdownToHTML(item.id, {
+          window.editormd.markdownToHTML(item.id, {
             markdown: item.content,
             htmlDecode: "style,script,iframe",
             emoji: true,
