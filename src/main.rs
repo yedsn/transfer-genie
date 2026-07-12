@@ -1255,6 +1255,20 @@ struct MessagesResult {
     marked_count: i64,
 }
 
+#[derive(Serialize)]
+struct DownloadHistoryResult {
+    records: Vec<DownloadHistoryRecord>,
+    total: i64,
+    has_more: bool,
+}
+
+#[derive(Serialize)]
+struct UploadHistoryResult {
+    records: Vec<UploadHistoryRecord>,
+    total: i64,
+    has_more: bool,
+}
+
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ListMessagesWindowInput {
@@ -1691,23 +1705,35 @@ fn list_marked_messages(
     state: State<'_, AppState>,
     tag_id: Option<String>,
     search_query: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
 ) -> Result<MessagesResult, String> {
     let settings = current_settings(&state)?;
     let endpoint = resolve_active_endpoint(&settings)?;
     let marked_count =
         db::count_messages(&state.db_path, &endpoint.id, true).map_err(|err| err.to_string())?;
-    let messages = db::list_marked_messages(
+    let total = db::count_marked_messages(
         &state.db_path,
         &endpoint.id,
         tag_id.as_deref(),
         search_query.as_deref(),
     )
     .map_err(|err| err.to_string())?;
-    let total = messages.len() as i64;
+    let messages = db::list_marked_messages_paged(
+        &state.db_path,
+        &endpoint.id,
+        tag_id.as_deref(),
+        search_query.as_deref(),
+        limit,
+        offset,
+    )
+    .map_err(|err| err.to_string())?;
+    let current_offset = offset.unwrap_or(0).max(0);
+    let current_limit = limit.unwrap_or(total).max(0);
     Ok(MessagesResult {
         messages,
         total,
-        has_more: false,
+        has_more: current_offset + current_limit < total,
         marked_count,
     })
 }
@@ -2949,13 +2975,41 @@ async fn execute_streamed_download(
 
 #[tauri::command]
 
-fn list_download_history(state: State<'_, AppState>) -> Result<Vec<DownloadHistoryRecord>, String> {
-    db::list_download_history(&state.db_path).map_err(|err| format!("读取下载历史失败: {err}"))
+fn list_download_history(
+    state: State<'_, AppState>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<DownloadHistoryResult, String> {
+    let total = db::count_download_history(&state.db_path)
+        .map_err(|err| format!("读取下载历史失败: {err}"))?;
+    let records = db::list_download_history_paged(&state.db_path, limit, offset)
+        .map_err(|err| format!("读取下载历史失败: {err}"))?;
+    let current_offset = offset.unwrap_or(0).max(0);
+    let current_limit = limit.unwrap_or(total).max(0);
+    Ok(DownloadHistoryResult {
+        records,
+        total,
+        has_more: current_offset + current_limit < total,
+    })
 }
 
 #[tauri::command]
-fn list_upload_history(state: State<'_, AppState>) -> Result<Vec<UploadHistoryRecord>, String> {
-    db::list_upload_history(&state.db_path).map_err(|err| format!("读取上传历史失败: {err}"))
+fn list_upload_history(
+    state: State<'_, AppState>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<UploadHistoryResult, String> {
+    let total = db::count_upload_history(&state.db_path)
+        .map_err(|err| format!("读取上传历史失败: {err}"))?;
+    let records = db::list_upload_history_paged(&state.db_path, limit, offset)
+        .map_err(|err| format!("读取上传历史失败: {err}"))?;
+    let current_offset = offset.unwrap_or(0).max(0);
+    let current_limit = limit.unwrap_or(total).max(0);
+    Ok(UploadHistoryResult {
+        records,
+        total,
+        has_more: current_offset + current_limit < total,
+    })
 }
 
 #[tauri::command]
@@ -3481,9 +3535,8 @@ async fn cleanup_messages(
         CleanupRange::All => None,
         CleanupRange::Before7Days => Some(now_ms() - 7_i64 * 24 * 60 * 60 * 1000),
     };
-    let messages =
-        db::list_messages(&state.db_path, &endpoint.id, None).map_err(|err| err.to_string())?;
-    let candidates = collect_cleanup_candidates(messages, cutoff_ms);
+    let candidates = db::list_cleanup_candidates(&state.db_path, &endpoint.id, cutoff_ms)
+        .map_err(|err| err.to_string())?;
 
     if candidates.is_empty() {
         return Ok(DeleteSummary {

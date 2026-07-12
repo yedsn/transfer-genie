@@ -60,7 +60,7 @@
                  <input type="search" id="search-input" placeholder="搜索消息..." />
                  <button id="feed-search-button" class="button ghost small" type="button">搜索</button>
                </div>
-               <ul v-if="ui.homeFeed.useVueList" class="message-list">
+               <ul id="message-list-vue" v-if="ui.homeFeed.useVueList" class="message-list">
                 <li
                   v-for="card in ui.homeFeed.messageCards"
                   :key="card.filename"

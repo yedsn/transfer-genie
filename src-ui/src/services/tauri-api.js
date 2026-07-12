@@ -112,11 +112,11 @@
 
   // Download/Upload history API
   const transferApi = {
-    async listDownloadHistory() {
-      return invoke('list_download_history');
+    async listDownloadHistory(params) {
+      return invoke('list_download_history', params || {});
     },
-    async listUploadHistory() {
-      return invoke('list_upload_history');
+    async listUploadHistory(params) {
+      return invoke('list_upload_history', params || {});
     },
     async saveDownloadHistoryAs(filename, targetPath, endpointId) {
       return invoke('save_download_history_as', { filename, targetPath, endpointId });

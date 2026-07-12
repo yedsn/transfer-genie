@@ -1,8 +1,10 @@
-﻿use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row, ToSql};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row, ToSql};
 use serde_json;
 use std::path::Path;
 
 use crate::types::{DownloadHistoryRecord, MarkedTag, Message, UploadHistoryRecord};
+
+const UNTAGGED_MARKED_TAG_FILTER_ID: &str = "__untagged__";
 
 #[derive(Clone)]
 pub struct DbMessage {
@@ -101,6 +103,7 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
             "CREATE TABLE IF NOT EXISTS messages (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        sender TEXT NOT NULL,        timestamp_ms INTEGER NOT NULL,        size INTEGER NOT NULL,        kind TEXT NOT NULL,        original_name TEXT NOT NULL,        etag TEXT,        mtime TEXT,        content TEXT,        local_path TEXT,        remote_path TEXT,        file_hash TEXT,        marked BOOLEAN NOT NULL DEFAULT 0,        marked_tag_ids TEXT NOT NULL DEFAULT '[]',        marked_pinned BOOLEAN NOT NULL DEFAULT 0,        format TEXT NOT NULL DEFAULT 'text',        PRIMARY KEY(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS marked_tags (        endpoint_id TEXT NOT NULL,        id TEXT NOT NULL,        name TEXT NOT NULL,        PRIMARY KEY(endpoint_id, id)      );      CREATE TABLE IF NOT EXISTS download_history (        id INTEGER PRIMARY KEY AUTOINCREMENT,        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        saved_path TEXT,        status TEXT NOT NULL,        error TEXT,        file_size INTEGER NOT NULL DEFAULT 0,        created_at_ms INTEGER NOT NULL,        updated_at_ms INTEGER NOT NULL,        UNIQUE(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS upload_history (        id INTEGER PRIMARY KEY AUTOINCREMENT,        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        local_path TEXT,        status TEXT NOT NULL,        error TEXT,        file_size INTEGER NOT NULL DEFAULT 0,        created_at_ms INTEGER NOT NULL,        updated_at_ms INTEGER NOT NULL,        UNIQUE(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS partial_downloads (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        final_path TEXT NOT NULL,        temp_path TEXT NOT NULL,        downloaded_bytes INTEGER NOT NULL DEFAULT 0,        total_bytes INTEGER NOT NULL DEFAULT 0,        etag TEXT,        mtime TEXT,        updated_at_ms INTEGER NOT NULL,        PRIMARY KEY(endpoint_id, filename)      );",
         )
         .map_err(|err| format!("初始化数据库表失败: {err}"))?;
+        ensure_indexes(&conn).map_err(|err| format!("初始化数据库索引失败: {err}"))?;
         return Ok(());
     }
 
@@ -293,7 +296,18 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
     )
     .map_err(|err| format!("初始化下载相关数据表失败: {err}"))?;
 
+    ensure_indexes(&conn).map_err(|err| format!("初始化数据库索引失败: {err}"))?;
+
     Ok(())
+}
+
+fn ensure_indexes(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_messages_endpoint_timestamp_filename ON messages(endpoint_id, timestamp_ms, filename);
+         CREATE INDEX IF NOT EXISTS idx_messages_endpoint_marked_pinned_timestamp ON messages(endpoint_id, marked, marked_pinned, timestamp_ms);
+         CREATE INDEX IF NOT EXISTS idx_download_history_updated_at ON download_history(updated_at_ms DESC);
+         CREATE INDEX IF NOT EXISTS idx_upload_history_updated_at ON upload_history(updated_at_ms DESC);",
+    )
 }
 
 pub fn get_message(
@@ -378,7 +392,11 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
     Ok(())
 }
 
-pub fn list_messages(path: &Path, endpoint_id: &str, search_query: Option<&str>) -> rusqlite::Result<Vec<Message>> {
+pub fn list_messages(
+    path: &Path,
+    endpoint_id: &str,
+    search_query: Option<&str>,
+) -> rusqlite::Result<Vec<Message>> {
     list_messages_paged(path, endpoint_id, None, None, false, search_query)
 }
 
@@ -589,11 +607,29 @@ pub fn list_marked_messages(
     tag_id: Option<&str>,
     search_query: Option<&str>,
 ) -> rusqlite::Result<Vec<Message>> {
+    list_marked_messages_paged(path, endpoint_id, tag_id, search_query, None, None)
+}
+
+pub fn list_marked_messages_paged(
+    path: &Path,
+    endpoint_id: &str,
+    tag_id: Option<&str>,
+    search_query: Option<&str>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> rusqlite::Result<Vec<Message>> {
     let conn = Connection::open(path)?;
     let normalized_search = search_query
         .map(str::trim)
         .filter(|query| !query.is_empty())
         .map(|query| format!("%{}%", query.to_lowercase()));
+    let untagged_filter = tag_id == Some(UNTAGGED_MARKED_TAG_FILTER_ID);
+    let tag_pattern = tag_id
+        .filter(|tag_id| *tag_id != UNTAGGED_MARKED_TAG_FILTER_ID)
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?
+        .map(|tag_id| format!("%{tag_id}%"));
     let mut sql =
         "SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, format \
          FROM messages WHERE endpoint_id = ?1 AND marked = 1"
@@ -603,7 +639,27 @@ pub fn list_marked_messages(
             " AND (LOWER(COALESCE(content, '')) LIKE ?2 OR LOWER(COALESCE(original_name, '')) LIKE ?2 OR LOWER(filename) LIKE ?2)",
         );
     }
+    if tag_pattern.is_some() {
+        let placeholder = if normalized_search.is_some() {
+            "?3"
+        } else {
+            "?2"
+        };
+        sql.push_str(" AND marked_tag_ids LIKE ");
+        sql.push_str(placeholder);
+    } else if untagged_filter {
+        sql.push_str(" AND marked_tag_ids = '[]'");
+    }
     sql.push_str(" ORDER BY marked_pinned DESC, timestamp_ms DESC");
+    if let Some(limit) = limit {
+        sql.push_str(" LIMIT ");
+        sql.push_str(&limit.max(0).to_string());
+        if let Some(offset) = offset {
+            sql.push_str(" OFFSET ");
+            sql.push_str(&offset.max(0).to_string());
+        }
+    }
+
     let mut stmt = conn.prepare(&sql)?;
     let map_row = |row: &Row<'_>| -> rusqlite::Result<Message> {
         let marked_tag_ids: String = row.get(11)?;
@@ -625,27 +681,65 @@ pub fn list_marked_messages(
             format: row.get(13)?,
         })
     };
-    let rows = if let Some(search_term) = normalized_search.as_deref() {
-        stmt.query_map(params![endpoint_id, search_term], map_row)?
-    } else {
-        stmt.query_map(params![endpoint_id], map_row)?
-    };
+    let mut params: Vec<&dyn ToSql> = vec![&endpoint_id];
+    if let Some(ref search_term) = normalized_search {
+        params.push(search_term);
+    }
+    if let Some(ref tag_pattern) = tag_pattern {
+        params.push(tag_pattern);
+    }
+    let rows = stmt.query_map(params_from_iter(params), map_row)?;
 
     let mut messages = Vec::new();
     for row in rows {
-        let message = row?;
-        if let Some(expected_tag_id) = tag_id {
-            if !message
-                .marked_tag_ids
-                .iter()
-                .any(|message_tag_id| message_tag_id == expected_tag_id)
-            {
-                continue;
-            }
-        }
-        messages.push(message);
+        messages.push(row?);
     }
     Ok(messages)
+}
+
+pub fn count_marked_messages(
+    path: &Path,
+    endpoint_id: &str,
+    tag_id: Option<&str>,
+    search_query: Option<&str>,
+) -> rusqlite::Result<i64> {
+    let conn = Connection::open(path)?;
+    let normalized_search = search_query
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .map(|query| format!("%{}%", query.to_lowercase()));
+    let untagged_filter = tag_id == Some(UNTAGGED_MARKED_TAG_FILTER_ID);
+    let tag_pattern = tag_id
+        .filter(|tag_id| *tag_id != UNTAGGED_MARKED_TAG_FILTER_ID)
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?
+        .map(|tag_id| format!("%{tag_id}%"));
+    let mut sql = "SELECT COUNT(*) FROM messages WHERE endpoint_id = ?1 AND marked = 1".to_string();
+    if normalized_search.is_some() {
+        sql.push_str(
+            " AND (LOWER(COALESCE(content, '')) LIKE ?2 OR LOWER(COALESCE(original_name, '')) LIKE ?2 OR LOWER(filename) LIKE ?2)",
+        );
+    }
+    if tag_pattern.is_some() {
+        let placeholder = if normalized_search.is_some() {
+            "?3"
+        } else {
+            "?2"
+        };
+        sql.push_str(" AND marked_tag_ids LIKE ");
+        sql.push_str(placeholder);
+    } else if untagged_filter {
+        sql.push_str(" AND marked_tag_ids = '[]'");
+    }
+    let mut params: Vec<&dyn ToSql> = vec![&endpoint_id];
+    if let Some(ref search_term) = normalized_search {
+        params.push(search_term);
+    }
+    if let Some(ref tag_pattern) = tag_pattern {
+        params.push(tag_pattern);
+    }
+    conn.query_row(&sql, params_from_iter(params), |row| row.get(0))
 }
 
 pub fn replace_marked_tags(
@@ -746,6 +840,27 @@ pub fn delete_messages_before(
     )
 }
 
+pub fn list_cleanup_candidates(
+    path: &Path,
+    endpoint_id: &str,
+    cutoff_ms: Option<i64>,
+) -> rusqlite::Result<Vec<Message>> {
+    let conn = Connection::open(path)?;
+    let mut sql = format!(
+        "SELECT {} FROM messages WHERE endpoint_id = ?1 AND marked = 0",
+        message_row_select_sql()
+    );
+    if cutoff_ms.is_some() {
+        sql.push_str(" AND timestamp_ms < ?2");
+    }
+    sql.push_str(" ORDER BY timestamp_ms ASC, filename ASC");
+    if let Some(cutoff_ms) = cutoff_ms {
+        collect_messages(&conn, &sql, &[&endpoint_id, &cutoff_ms])
+    } else {
+        collect_messages(&conn, &sql, &[&endpoint_id])
+    }
+}
+
 pub fn get_download_history(path: &Path, id: i64) -> rusqlite::Result<Option<DbDownloadHistory>> {
     let conn = Connection::open(path)?;
     conn.query_row(
@@ -829,12 +944,25 @@ pub fn upsert_download_history(
         .ok_or(rusqlite::Error::QueryReturnedNoRows)
 }
 
-pub fn list_download_history(path: &Path) -> rusqlite::Result<Vec<DownloadHistoryRecord>> {
+pub fn list_download_history_paged(
+    path: &Path,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> rusqlite::Result<Vec<DownloadHistoryRecord>> {
     let conn = Connection::open(path)?;
-    let mut stmt = conn.prepare(
+    let mut sql =
         "SELECT id, endpoint_id, filename, original_name, saved_path, status, error, file_size, created_at_ms, updated_at_ms \
-         FROM download_history ORDER BY updated_at_ms DESC",
-    )?;
+         FROM download_history ORDER BY updated_at_ms DESC, id DESC"
+            .to_string();
+    if let Some(limit) = limit {
+        sql.push_str(" LIMIT ");
+        sql.push_str(&limit.max(0).to_string());
+        if let Some(offset) = offset {
+            sql.push_str(" OFFSET ");
+            sql.push_str(&offset.max(0).to_string());
+        }
+    }
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |row| {
         let saved_path: Option<String> = row.get(4)?;
         let local_exists = saved_path
@@ -860,6 +988,13 @@ pub fn list_download_history(path: &Path) -> rusqlite::Result<Vec<DownloadHistor
         records.push(row?);
     }
     Ok(records)
+}
+
+pub fn count_download_history(path: &Path) -> rusqlite::Result<i64> {
+    let conn = Connection::open(path)?;
+    conn.query_row("SELECT COUNT(*) FROM download_history", [], |row| {
+        row.get(0)
+    })
 }
 
 fn get_upload_history_by_key(
@@ -921,12 +1056,25 @@ pub fn upsert_upload_history(
         .ok_or(rusqlite::Error::QueryReturnedNoRows)
 }
 
-pub fn list_upload_history(path: &Path) -> rusqlite::Result<Vec<UploadHistoryRecord>> {
+pub fn list_upload_history_paged(
+    path: &Path,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> rusqlite::Result<Vec<UploadHistoryRecord>> {
     let conn = Connection::open(path)?;
-    let mut stmt = conn.prepare(
+    let mut sql =
         "SELECT id, endpoint_id, filename, original_name, local_path, status, error, file_size, created_at_ms, updated_at_ms \
-         FROM upload_history ORDER BY updated_at_ms DESC",
-    )?;
+         FROM upload_history ORDER BY updated_at_ms DESC, id DESC"
+            .to_string();
+    if let Some(limit) = limit {
+        sql.push_str(" LIMIT ");
+        sql.push_str(&limit.max(0).to_string());
+        if let Some(offset) = offset {
+            sql.push_str(" OFFSET ");
+            sql.push_str(&offset.max(0).to_string());
+        }
+    }
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |row| {
         let local_path: Option<String> = row.get(4)?;
         let local_exists = local_path
@@ -952,6 +1100,11 @@ pub fn list_upload_history(path: &Path) -> rusqlite::Result<Vec<UploadHistoryRec
         records.push(row?);
     }
     Ok(records)
+}
+
+pub fn count_upload_history(path: &Path) -> rusqlite::Result<i64> {
+    let conn = Connection::open(path)?;
+    conn.query_row("SELECT COUNT(*) FROM upload_history", [], |row| row.get(0))
 }
 
 pub fn delete_download_history(path: &Path, id: i64) -> rusqlite::Result<usize> {
@@ -1245,6 +1398,115 @@ mod tests {
     }
 
     #[test]
+    fn list_marked_messages_paged_returns_requested_window_and_count() {
+        let path = temp_db_path("marked-message-paged");
+        init_db(&path, None).expect("initialize database");
+
+        upsert_message(&path, &sample_message("old.txt", 100, &["tag-a"], false))
+            .expect("insert old message");
+        upsert_message(&path, &sample_message("middle.txt", 200, &["tag-a"], false))
+            .expect("insert middle message");
+        upsert_message(&path, &sample_message("pinned.txt", 300, &["tag-a"], true))
+            .expect("insert pinned message");
+
+        let total = count_marked_messages(&path, "endpoint-1", Some("tag-a"), None)
+            .expect("count marked messages");
+        let page = list_marked_messages_paged(
+            &path,
+            "endpoint-1",
+            Some("tag-a"),
+            None,
+            Some(1),
+            Some(1),
+        )
+        .expect("list marked page");
+
+        assert_eq!(total, 3);
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].filename, "middle.txt");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn list_cleanup_candidates_filters_in_sql_compatible_order() {
+        let path = temp_db_path("cleanup-candidates");
+        init_db(&path, None).expect("initialize database");
+
+        let mut old_unmarked = sample_message("old-unmarked.txt", 10, &[], false);
+        old_unmarked.marked = false;
+        upsert_message(&path, &old_unmarked).expect("insert old unmarked message");
+        upsert_message(&path, &sample_message("old-marked.txt", 20, &[], false))
+            .expect("insert old marked message");
+        let mut new_unmarked = sample_message("new-unmarked.txt", 100, &[], false);
+        new_unmarked.marked = false;
+        upsert_message(&path, &new_unmarked).expect("insert new unmarked message");
+
+        let candidates = list_cleanup_candidates(&path, "endpoint-1", Some(50))
+            .expect("list cleanup candidates");
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].filename, "old-unmarked.txt");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn transfer_history_lists_are_paged_and_counted() {
+        let path = temp_db_path("transfer-history-paged");
+        init_db(&path, None).expect("initialize database");
+
+        for index in 1..=3 {
+            upsert_download_history(
+                &path,
+                &DbDownloadHistory {
+                    id: 0,
+                    endpoint_id: "endpoint-1".to_string(),
+                    filename: format!("download-{index}.bin"),
+                    original_name: format!("download-{index}.bin"),
+                    saved_path: None,
+                    status: "complete".to_string(),
+                    error: None,
+                    file_size: index,
+                    created_at_ms: index,
+                    updated_at_ms: index,
+                },
+            )
+            .expect("insert download history");
+            upsert_upload_history(
+                &path,
+                &DbUploadHistory {
+                    id: 0,
+                    endpoint_id: "endpoint-1".to_string(),
+                    filename: format!("upload-{index}.bin"),
+                    original_name: format!("upload-{index}.bin"),
+                    local_path: None,
+                    status: "complete".to_string(),
+                    error: None,
+                    file_size: index,
+                    created_at_ms: index,
+                    updated_at_ms: index,
+                },
+            )
+            .expect("insert upload history");
+        }
+
+        let downloads = list_download_history_paged(&path, Some(1), Some(1))
+            .expect("list download history page");
+        let uploads = list_upload_history_paged(&path, Some(1), Some(1))
+            .expect("list upload history page");
+
+        assert_eq!(count_download_history(&path).expect("count downloads"), 3);
+        assert_eq!(downloads.len(), 1);
+        assert_eq!(downloads[0].filename, "download-2.bin");
+        assert_eq!(count_upload_history(&path).expect("count uploads"), 3);
+        assert_eq!(uploads.len(), 1);
+        assert_eq!(uploads[0].filename, "upload-2.bin");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn delete_messages_removes_entries_from_marked_list_results() {
         let path = temp_db_path("marked-message-delete-refresh");
         init_db(&path, None).expect("initialize database");
@@ -1336,19 +1598,28 @@ mod tests {
             upsert_message(&path, &message).expect("insert sample message");
         }
 
-        let latest = list_latest_messages_window(&path, "endpoint-1", 2, false)
-            .expect("latest window");
-        let latest_filenames: Vec<_> = latest.iter().map(|message| message.filename.as_str()).collect();
+        let latest =
+            list_latest_messages_window(&path, "endpoint-1", 2, false).expect("latest window");
+        let latest_filenames: Vec<_> = latest
+            .iter()
+            .map(|message| message.filename.as_str())
+            .collect();
         assert_eq!(latest_filenames, vec!["004.txt", "005.txt"]);
 
         let older = list_messages_before(&path, "endpoint-1", 300, "004.txt", 2, false)
             .expect("older window");
-        let older_filenames: Vec<_> = older.iter().map(|message| message.filename.as_str()).collect();
+        let older_filenames: Vec<_> = older
+            .iter()
+            .map(|message| message.filename.as_str())
+            .collect();
         assert_eq!(older_filenames, vec!["002.txt", "003.txt"]);
 
         let newer = list_messages_after(&path, "endpoint-1", 200, "002.txt", 10, false)
             .expect("newer window");
-        let newer_filenames: Vec<_> = newer.iter().map(|message| message.filename.as_str()).collect();
+        let newer_filenames: Vec<_> = newer
+            .iter()
+            .map(|message| message.filename.as_str())
+            .collect();
         assert_eq!(newer_filenames, vec!["003.txt", "004.txt", "005.txt"]);
 
         let older_count =
@@ -1444,7 +1715,10 @@ mod tests {
         let mut reconstructed = list_latest_messages_window(&path, "endpoint-1", page_size, false)
             .expect("load latest window");
         loop {
-            let first = reconstructed.first().cloned().expect("window should not be empty");
+            let first = reconstructed
+                .first()
+                .cloned()
+                .expect("window should not be empty");
             let older = list_messages_before(
                 &path,
                 "endpoint-1",
@@ -1507,25 +1781,29 @@ mod tests {
             .collect();
         assert_eq!(latest_endpoint_1_filenames, vec!["a-002.txt", "a-003.txt"]);
 
-        let older_endpoint_1 = list_messages_before(&path, "endpoint-1", 300, "a-003.txt", 5, false)
-            .expect("older endpoint-1 window");
+        let older_endpoint_1 =
+            list_messages_before(&path, "endpoint-1", 300, "a-003.txt", 5, false)
+                .expect("older endpoint-1 window");
         let older_endpoint_1_filenames: Vec<_> = older_endpoint_1
             .iter()
             .map(|message| message.filename.as_str())
             .collect();
         assert_eq!(older_endpoint_1_filenames, vec!["a-001.txt", "a-002.txt"]);
 
-        let newer_endpoint_1 = list_messages_after(&path, "endpoint-1", 100, "a-001.txt", 10, false)
-            .expect("newer endpoint-1 window");
+        let newer_endpoint_1 =
+            list_messages_after(&path, "endpoint-1", 100, "a-001.txt", 10, false)
+                .expect("newer endpoint-1 window");
         let newer_endpoint_1_filenames: Vec<_> = newer_endpoint_1
             .iter()
             .map(|message| message.filename.as_str())
             .collect();
         assert_eq!(newer_endpoint_1_filenames, vec!["a-002.txt", "a-003.txt"]);
 
-        let endpoint_1_total = count_messages(&path, "endpoint-1", false).expect("count endpoint-1");
-        let endpoint_1_before_count = count_messages_before(&path, "endpoint-1", 300, "a-003.txt", false)
-            .expect("count older endpoint-1 messages");
+        let endpoint_1_total =
+            count_messages(&path, "endpoint-1", false).expect("count endpoint-1");
+        let endpoint_1_before_count =
+            count_messages_before(&path, "endpoint-1", 300, "a-003.txt", false)
+                .expect("count older endpoint-1 messages");
         assert_eq!(endpoint_1_total, 3);
         assert_eq!(endpoint_1_before_count, 2);
 
@@ -1545,12 +1823,18 @@ mod tests {
 
         let latest = list_latest_messages_window(&path, "endpoint-1", 10, false)
             .expect("latest oversized window");
-        let latest_filenames: Vec<_> = latest.iter().map(|message| message.filename.as_str()).collect();
+        let latest_filenames: Vec<_> = latest
+            .iter()
+            .map(|message| message.filename.as_str())
+            .collect();
         assert_eq!(latest_filenames, vec!["001.txt", "002.txt"]);
 
         let older = list_messages_before(&path, "endpoint-1", 200, "002.txt", 10, false)
             .expect("older partial window");
-        let older_filenames: Vec<_> = older.iter().map(|message| message.filename.as_str()).collect();
+        let older_filenames: Vec<_> = older
+            .iter()
+            .map(|message| message.filename.as_str())
+            .collect();
         assert_eq!(older_filenames, vec!["001.txt"]);
 
         let before_earliest = list_messages_before(&path, "endpoint-1", 100, "001.txt", 10, false)
@@ -1562,7 +1846,8 @@ mod tests {
         assert!(after_newest.is_empty());
 
         let before_earliest_count =
-            count_messages_before(&path, "endpoint-1", 100, "001.txt", false).expect("count before earliest");
+            count_messages_before(&path, "endpoint-1", 100, "001.txt", false)
+                .expect("count before earliest");
         assert_eq!(before_earliest_count, 0);
 
         let _ = std::fs::remove_file(path);

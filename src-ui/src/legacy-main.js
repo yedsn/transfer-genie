@@ -252,6 +252,7 @@ const composerMarkTagList = document.getElementById('composer-mark-tag-list');
 const composerMarkNewTagInput = document.getElementById('composer-mark-new-tag-input');
 const composerMarkAddTagButton = document.getElementById('composer-mark-add-tag');
 const feed = document.querySelector('.feed');
+const feedContent = document.querySelector('#tab-home .feed-content');
 const tabButtons = Array.from(document.querySelectorAll('[data-tab-target]'));
 const tabPanels = Array.from(document.querySelectorAll('[data-tab-panel]'));
 const downloadsTabButton = document.querySelector('[data-tab-target="downloads"]');
@@ -261,6 +262,15 @@ const downloadsPageTitle = document.querySelector('#tab-downloads .downloads-pag
 const downloadsPageDescription = document.querySelector('#tab-downloads .downloads-page-header p');
 const downloadsPageToolbar = document.querySelector('#tab-downloads .downloads-page-toolbar');
 const transferListToolbar = document.querySelector('#tab-downloads .transfer-list-toolbar');
+
+function getCurrentMessageList() {
+  const vueList = document.getElementById('message-list-vue');
+  if (vueList && !vueList.hidden && vueList.offsetParent !== null) {
+    return vueList;
+  }
+  return messageList;
+}
+
 let selectionRow = document.getElementById('selection-row');
 let downloadSelectionRow = document.getElementById('download-selection-row');
 let transferListActions = document.querySelector('#tab-downloads .transfer-list-actions');
@@ -588,6 +598,7 @@ const MARKED_MESSAGE_BODY_COLLAPSE_HEIGHT = 130;
 let isRefreshRunning = false;
 let isLoadMessagesRunning = false;
 let isLoadSyncStatusRunning = false;
+let forceScrollToBottomUntil = 0;
 let markedMessages = [];
 let visibleMarkedMessages = [];
 let markedTags = [];
@@ -607,6 +618,7 @@ let composerMarkPanelRefreshPromise = null;
 
 // 标记列表分页
 let markedMessagesPage = 1;
+let markedMessagesTotal = 0;
 const MARKED_MESSAGES_PER_PAGE = 10;
 const UNTAGGED_MARKED_TAG_FILTER_ID = '__untagged__';
 let currentMarkedPageState = {
@@ -622,6 +634,8 @@ let telegramBridgeStatusPollTimer = null;
 let currentTransferListView = 'downloads';
 let downloadTasksPage = 1;
 let uploadTasksPage = 1;
+let downloadHistoryTotal = 0;
+let uploadHistoryTotal = 0;
 let currentDownloadTaskPageState = {
   summary: '',
   currentPage: 1,
@@ -2070,6 +2084,12 @@ function createPersistedDownloadTask(record) {
 
 function mergePersistedDownloadHistory(records) {
   const persistedKeys = new Set();
+  Array.from(downloadTasks.entries()).forEach(([key, task]) => {
+    if ((task.persisted || task.historyId) && !isDownloadTaskActive(task)) {
+      downloadTasks.delete(key);
+      downloadSpeed.delete(key);
+    }
+  });
   (Array.isArray(records) ? records : []).forEach((record) => {
     const next = createPersistedDownloadTask(record);
     persistedKeys.add(next.key);
@@ -2093,24 +2113,29 @@ function mergePersistedDownloadHistory(records) {
     });
   });
 
-  Array.from(downloadTasks.entries()).forEach(([key, task]) => {
-    if ((task.persisted || task.historyId) && !persistedKeys.has(key) && !isDownloadTaskActive(task)) {
-      downloadTasks.delete(key);
-      downloadSpeed.delete(key);
-    }
-  });
-
   trimDownloadTasks();
   renderDownloadTasks();
 }
 
 async function loadPersistedDownloadHistory(options = {}) {
   const silent = options.silent !== false;
+  const page = Math.max(1, Number(options.page || downloadTasksPage) || 1);
   if (!invoke) {
     return;
   }
   try {
-    const records = await invoke('list_download_history');
+    const result = await invoke('list_download_history', {
+      limit: TRANSFER_TASKS_PER_PAGE,
+      offset: (page - 1) * TRANSFER_TASKS_PER_PAGE,
+    });
+    const records = Array.isArray(result) ? result : (result.records || []);
+    downloadHistoryTotal = Array.isArray(result) ? records.length : (result.total || 0);
+    const totalPages = Math.max(1, Math.ceil(downloadHistoryTotal / TRANSFER_TASKS_PER_PAGE));
+    if (page > totalPages) {
+      downloadTasksPage = totalPages;
+      return loadPersistedDownloadHistory({ silent, page: totalPages });
+    }
+    downloadTasksPage = page;
     mergePersistedDownloadHistory(records);
   } catch (error) {
     if (!silent) {
@@ -2472,7 +2497,9 @@ function renderDownloadTasks() {
   });
   pruneSelectedDownloadTasks();
   downloadTaskList.innerHTML = '';
-  const { currentPage, totalPages, pageTasks } = paginateTransferTasks(tasks, downloadTasksPage);
+  const totalPages = Math.max(1, Math.ceil(Math.max(downloadHistoryTotal, tasks.length) / TRANSFER_TASKS_PER_PAGE));
+  const currentPage = Math.max(1, Math.min(downloadTasksPage, totalPages));
+  const pageTasks = tasks;
   downloadTasksPage = currentPage;
   transferTaskCounts.downloads = getPendingTransferCount(tasks);
   const activeCount = tasks.filter((task) => isDownloadTaskActive(task)).length;
@@ -2675,7 +2702,7 @@ function renderDownloadTasks() {
     totalPages,
     onPageChange: (nextPage) => {
       downloadTasksPage = nextPage;
-      renderDownloadTasks();
+      loadPersistedDownloadHistory({ silent: true, page: nextPage });
     },
   });
 }
@@ -2724,17 +2751,28 @@ function mergePersistedUploadHistory(records) {
     const task = createPersistedUploadTask(record);
     uploadHistoryTasks.set(task.key, task);
   });
-  trimUploadHistoryTasks();
   renderUploadTasks();
 }
 
 async function loadPersistedUploadHistory(options = {}) {
   const silent = options.silent !== false;
+  const page = Math.max(1, Number(options.page || uploadTasksPage) || 1);
   if (!invoke) {
     return;
   }
   try {
-    const records = await invoke('list_upload_history');
+    const result = await invoke('list_upload_history', {
+      limit: TRANSFER_TASKS_PER_PAGE,
+      offset: (page - 1) * TRANSFER_TASKS_PER_PAGE,
+    });
+    const records = Array.isArray(result) ? result : (result.records || []);
+    uploadHistoryTotal = Array.isArray(result) ? records.length : (result.total || 0);
+    const totalPages = Math.max(1, Math.ceil(uploadHistoryTotal / TRANSFER_TASKS_PER_PAGE));
+    if (page > totalPages) {
+      uploadTasksPage = totalPages;
+      return loadPersistedUploadHistory({ silent, page: totalPages });
+    }
+    uploadTasksPage = page;
     mergePersistedUploadHistory(records);
   } catch (error) {
     if (!silent) {
@@ -2813,7 +2851,9 @@ function renderUploadTasks() {
 
   pruneSelectedUploadTasks();
   uploadTaskList.innerHTML = '';
-  const { currentPage, totalPages, pageTasks } = paginateTransferTasks(tasks, uploadTasksPage);
+  const totalPages = Math.max(1, Math.ceil(Math.max(uploadHistoryTotal, tasks.length) / TRANSFER_TASKS_PER_PAGE));
+  const currentPage = Math.max(1, Math.min(uploadTasksPage, totalPages));
+  const pageTasks = tasks;
   uploadTasksPage = currentPage;
   transferTaskCounts.uploads = getPendingTransferCount(tasks);
   updateTransferTaskIndicators();
@@ -2974,7 +3014,7 @@ function renderUploadTasks() {
     totalPages,
     onPageChange: (nextPage) => {
       uploadTasksPage = nextPage;
-      renderUploadTasks();
+      loadPersistedUploadHistory({ silent: true, page: nextPage });
     },
   });
 }
@@ -3377,10 +3417,11 @@ function pruneSelectedDownloadTasks() {
 }
 
 function isMessageListAtBottom() {
-  if (!messageList) return true;
+  const list = getCurrentMessageList();
+  if (!list) return true;
   const threshold = 16;
   return (
-    messageList.scrollTop + messageList.clientHeight >= messageList.scrollHeight - threshold
+    list.scrollTop + list.clientHeight >= list.scrollHeight - threshold
   );
 }
 
@@ -3390,29 +3431,80 @@ function updateScrollToBottomButton() {
 }
 
 function scrollMessageListToBottom() {
-  if (!messageList) return;
-  requestAnimationFrame(() => {
-    messageList.scrollTop = messageList.scrollHeight;
-    lastMessageListScrollTop = messageList.scrollTop;
+  const apply = () => {
+    const list = getCurrentMessageList();
+    if (!list) return;
+    const maxScrollTop = Math.max(0, list.scrollHeight - list.clientHeight);
+    list.scrollTop = maxScrollTop;
+    lastMessageListScrollTop = list.scrollTop;
     updateScrollToBottomButton();
+  };
+  requestAnimationFrame(() => {
+    apply();
+    setTimeout(apply, 0);
+    setTimeout(apply, 80);
+  });
+}
+
+function forceScrollMessageListToBottom(durationMs = 1500) {
+  forceScrollToBottomUntil = Date.now() + durationMs;
+  scrollMessageListToBottom();
+}
+
+function applyForcedScrollToBottomIfNeeded() {
+  if (Date.now() <= forceScrollToBottomUntil) {
+    scrollMessageListToBottom();
+  }
+}
+
+function scrollMessageIntoViewAtBottom(filename) {
+  const list = getCurrentMessageList();
+  if (!list || !filename) return false;
+  const selector = `.message-card[data-filename="${escapeSelector(filename)}"]`;
+  const item = list.querySelector(selector);
+  if (!item) return false;
+  const targetScrollTop = Math.max(
+    0,
+    item.offsetTop + item.offsetHeight - list.clientHeight,
+  );
+  list.scrollTop = targetScrollTop;
+  lastMessageListScrollTop = list.scrollTop;
+  updateScrollToBottomButton();
+  return true;
+}
+
+function forceScrollMessageIntoViewAtBottom(filename, durationMs = 2500) {
+  forceScrollMessageListToBottom(durationMs);
+  const apply = () => {
+    if (!scrollMessageIntoViewAtBottom(filename)) {
+      scrollMessageListToBottom();
+    }
+  };
+  requestAnimationFrame(() => {
+    apply();
+    setTimeout(apply, 0);
+    setTimeout(apply, 80);
+    setTimeout(apply, 250);
   });
 }
 
 function queueLoadMoreIfNeeded() {
-  if (!messageList || loadMoreDebounceTimer) return;
+  if (!getCurrentMessageList() || loadMoreDebounceTimer) return;
   loadMoreDebounceTimer = setTimeout(() => {
     loadMoreDebounceTimer = null;
-    if (!messageList) return;
-    if (messageList.scrollTop < LOAD_MORE_TRIGGER_TOP && hasMoreMessages && !isLoadingMore) {
+    const list = getCurrentMessageList();
+    if (!list) return;
+    if (list.scrollTop < LOAD_MORE_TRIGGER_TOP && hasMoreMessages && !isLoadingMore) {
       loadMessages({ loadMore: true });
     }
   }, LOAD_MORE_DEBOUNCE_MS);
 }
 
 function handleMessageListScroll() {
-  if (!messageList) return;
+  const list = getCurrentMessageList();
+  if (!list) return;
   updateScrollToBottomButton();
-  const currentScrollTop = messageList.scrollTop;
+  const currentScrollTop = list.scrollTop;
   const isScrollingUp = currentScrollTop <= lastMessageListScrollTop;
   lastMessageListScrollTop = currentScrollTop;
   if (isScrollingUp && currentScrollTop < LOAD_MORE_TRIGGER_TOP && hasMoreMessages && !isLoadingMore) {
@@ -5702,9 +5794,10 @@ function shouldShowMenuAbove(item) {
 }
 
 function captureMessageListAnchor() {
-  if (!messageList) return null;
-  const listRect = messageList.getBoundingClientRect();
-  const items = Array.from(messageList.querySelectorAll('.message-card[data-filename]'));
+  const list = getCurrentMessageList();
+  if (!list) return null;
+  const listRect = list.getBoundingClientRect();
+  const items = Array.from(list.querySelectorAll('.message-card[data-filename]'));
   const anchorItem = items.find((item) => item.getBoundingClientRect().bottom > listRect.top + 1) || items[0];
   if (!anchorItem) {
     return null;
@@ -5717,25 +5810,26 @@ function captureMessageListAnchor() {
 }
 
 function restoreMessageListAnchor(anchor, previousScrollTop, previousScrollHeight) {
-  if (!messageList) return;
+  const list = getCurrentMessageList();
+  if (!list) return;
 
   if (anchor?.filename) {
-    const items = Array.from(messageList.querySelectorAll('.message-card[data-filename]'));
+    const items = Array.from(list.querySelectorAll('.message-card[data-filename]'));
     const anchorItem = items.find((item) => item.dataset.filename === anchor.filename);
     if (anchorItem) {
-      const listRect = messageList.getBoundingClientRect();
+      const listRect = list.getBoundingClientRect();
       const anchorRect = anchorItem.getBoundingClientRect();
-      messageList.scrollTop += anchorRect.top - listRect.top - anchor.offsetTop;
-      lastMessageListScrollTop = messageList.scrollTop;
+      list.scrollTop += anchorRect.top - listRect.top - anchor.offsetTop;
+      lastMessageListScrollTop = list.scrollTop;
       updateScrollToBottomButton();
       return;
     }
   }
 
-  const newScrollHeight = messageList.scrollHeight;
+  const newScrollHeight = list.scrollHeight;
   const scrollDiff = newScrollHeight - previousScrollHeight;
-  messageList.scrollTop = previousScrollTop + scrollDiff;
-  lastMessageListScrollTop = messageList.scrollTop;
+  list.scrollTop = previousScrollTop + scrollDiff;
+  lastMessageListScrollTop = list.scrollTop;
   updateScrollToBottomButton();
 }
 
@@ -5789,8 +5883,9 @@ function renderMessages(messages, options = {}) {
   // The `messages` parameter is now the single source of truth for this render pass.
   // We no longer modify the global `lastMessages` here.
   const merged = mergeMessages(messages, options);
-  const previousScrollTop = messageList ? messageList.scrollTop : 0;
-  const previousScrollHeight = messageList ? messageList.scrollHeight : 0;
+  const currentList = getCurrentMessageList();
+  const previousScrollTop = currentList ? currentList.scrollTop : 0;
+  const previousScrollHeight = currentList ? currentList.scrollHeight : 0;
   const scrollAnchor = preserveScroll ? captureMessageListAnchor() : null;
   const available = new Set(merged.map((message) => message.filename));
   expandedTextMessages.forEach((filename) => {
@@ -6345,6 +6440,7 @@ function renderMessages(messages, options = {}) {
     if (preserveScroll) {
       requestAnimationFrame(applyPreservedScroll);
     }
+    applyForcedScrollToBottomIfNeeded();
   };
   if (markdownRenderQueue.length > 0 && window.editormd) {
     // execute after DOM update
@@ -6376,23 +6472,25 @@ function renderMessages(messages, options = {}) {
     setTimeout(runBodyCollapseCheck, 0);
   }
 
-  if (scrollToBottom) {
-    scrollMessageListToBottom();
-  } else if (preserveScroll && messageList) {
-    // 加载更多历史消息时，优先按首个可见消息锚点恢复视口位置。
-    applyPreservedScroll();
-  } else {
-    if (messageList) {
-      const maxScrollTop = Math.max(0, messageList.scrollHeight - messageList.clientHeight);
-      messageList.scrollTop = Math.min(previousScrollTop, maxScrollTop);
-      lastMessageListScrollTop = messageList.scrollTop;
-    }
-    updateScrollToBottomButton();
-  }
   syncVueHomeFeedView({
     query,
     messages: merged,
   });
+
+  if (scrollToBottom) {
+    forceScrollMessageListToBottom();
+  } else if (preserveScroll && messageList) {
+    // 加载更多历史消息时，优先按首个可见消息锚点恢复视口位置。
+    applyPreservedScroll();
+  } else {
+    const list = getCurrentMessageList();
+    if (list) {
+      const maxScrollTop = Math.max(0, list.scrollHeight - list.clientHeight);
+      list.scrollTop = Math.min(previousScrollTop, maxScrollTop);
+      lastMessageListScrollTop = list.scrollTop;
+    }
+    updateScrollToBottomButton();
+  }
 }
 function mergeMessages(messages, options = {}) {
   const { isSearchResult = false } = options;
@@ -6466,6 +6564,8 @@ async function loadMessages(options = {}) {
     typeof options.scrollToBottom === 'boolean'
       ? options.scrollToBottom
       : isMessageListAtBottom();
+  const forceScrollToBottom = !!options.forceScrollToBottom;
+  const preserveScroll = !!options.preserveScroll;
   const loadMore = options.loadMore || false;
   const checkNew = options.checkNew || false; // 新增：检查新消息模式
   
@@ -6477,7 +6577,7 @@ async function loadMessages(options = {}) {
     if (!getActiveEndpoint()) {
       resetLoadedMessagesState();
       totalMessages = 0;
-      renderCurrentMessageView({ scrollToBottom: shouldScroll });
+      renderCurrentMessageView({ scrollToBottom: shouldScroll, preserveScroll });
       return;
     }
     
@@ -6662,6 +6762,9 @@ async function loadMessages(options = {}) {
     isLoadMessagesRunning = false;
     if (!loadMore && getActiveMainTab() === 'marked') {
       loadMarkedMessages();
+    }
+    if (forceScrollToBottom) {
+      forceScrollMessageListToBottom(2500);
     }
   }
 }
@@ -8102,7 +8205,7 @@ async function sendText() {
       }
       
       renderCurrentMessageView();
-      scrollMessageListToBottom();
+      forceScrollMessageListToBottom();
 
       try {
         const result = await invoke('send_text', {
@@ -8114,11 +8217,17 @@ async function sendText() {
           ...pendingSends.get(filename),
           sendStatus: SEND_STATUS.SUCCESS,
         });
+        renderCurrentMessageView({ preserveScroll: true });
         applySuccessfulSendResult(result);
         exitComposerFullscreenAfterSendSuccess();
-        setTimeout(() => {
+        setTimeout(async () => {
+          const shouldStickToBottom = isMessageListAtBottom();
           pendingSends.delete(filename);
-          loadMessages();
+          await loadMessages({
+            scrollToBottom: shouldStickToBottom,
+            preserveScroll: !shouldStickToBottom,
+            forceScrollToBottom: shouldStickToBottom,
+          });
         }, 1000);
       } catch (error) {
         hadSendFailure = true;
@@ -9107,8 +9216,16 @@ if (composerFullscreenToggle) {
   setComposerFullscreen(false);
 }
 
-if (messageList) {
-  messageList.addEventListener('scroll', handleMessageListScroll);
+if (feedContent) {
+  feedContent.addEventListener(
+    'scroll',
+    (event) => {
+      if (event.target === getCurrentMessageList()) {
+        handleMessageListScroll();
+      }
+    },
+    true,
+  );
 }
 
 syncComposerOffset();
@@ -10022,7 +10139,7 @@ function renderMarkedMessages(messages = [], options = {}) {
         ? `没有找到与 "${query}" 匹配的标记消息`
         : (activeMarkedTagId ? '当前标签下暂无标记消息' : '暂无标记消息'),
       currentPage: 1,
-      totalPages: 1,
+      totalPages: Math.max(1, Math.ceil((markedMessagesTotal || 0) / MARKED_MESSAGES_PER_PAGE)),
       selectionMode: markedSelectionMode,
       selectionCount: selectedMarkedMessages.size,
       messages: [],
@@ -10039,13 +10156,12 @@ function renderMarkedMessages(messages = [], options = {}) {
   }
 
   // 分页计算
-  const totalPages = Math.ceil(messages.length / MARKED_MESSAGES_PER_PAGE);
+  const totalCount = Math.max(markedMessagesTotal || messages.length, messages.length);
+  const totalPages = Math.max(1, Math.ceil(totalCount / MARKED_MESSAGES_PER_PAGE));
   const validPage = Math.max(1, Math.min(markedMessagesPage, totalPages));
   markedMessagesPage = validPage;
-  
-  const startIndex = (markedMessagesPage - 1) * MARKED_MESSAGES_PER_PAGE;
-  const endIndex = Math.min(startIndex + MARKED_MESSAGES_PER_PAGE, messages.length);
-  const pageMessages = messages.slice(startIndex, endIndex);
+
+  const pageMessages = messages;
   visibleMarkedMessages = pageMessages;
   pruneSelectedMarkedMessages();
   updateMarkedSelectionBar();
@@ -10293,7 +10409,7 @@ function renderMarkedMessages(messages = [], options = {}) {
   });
 
   // 渲染分页控件
-  renderMarkedPagination(messages.length, totalPages);
+  renderMarkedPagination(totalCount, totalPages);
 }
 
 function renderMarkedPagination(totalCount, totalPages) {
@@ -10315,9 +10431,7 @@ function renderMarkedPagination(totalCount, totalPages) {
   prevButton.addEventListener('click', () => {
     if (markedMessagesPage > 1) {
       markedMessagesPage--;
-      renderMarkedMessages(markedMessages, {
-        query: getAppliedMarkedSearchQuery(),
-      });
+      loadMarkedMessages({ preservePage: true, scrollToTop: true });
     }
   });
   paginationContainer.appendChild(prevButton);
@@ -10336,9 +10450,7 @@ function renderMarkedPagination(totalCount, totalPages) {
   nextButton.addEventListener('click', () => {
     if (markedMessagesPage < totalPages) {
       markedMessagesPage++;
-      renderMarkedMessages(markedMessages, {
-        query: getAppliedMarkedSearchQuery(),
-      });
+      loadMarkedMessages({ preservePage: true, scrollToTop: true });
     }
   });
   paginationContainer.appendChild(nextButton);
@@ -10351,10 +10463,11 @@ function renderMarkedPagination(totalCount, totalPages) {
 
 async function loadMarkedMessages(options = {}) {
   if (!invoke || !markedMessageList) return;
-  const { scrollToTop = false } = options;
+  const { scrollToTop = false, preservePage = false } = options;
   if (!getActiveEndpoint()) {
     markedMessages = [];
     visibleMarkedMessages = [];
+    markedMessagesTotal = 0;
     setMarkedSelectionMode(false);
     renderMarkedMessages([]);
     updateMarkedBadge(0);
@@ -10365,21 +10478,26 @@ async function loadMarkedMessages(options = {}) {
   }
 
   try {
+    if (!preservePage) {
+      markedMessagesPage = 1;
+    }
+    const offset = Math.max(0, (markedMessagesPage - 1) * MARKED_MESSAGES_PER_PAGE);
     const result = await invoke('list_marked_messages', {
       tagId:
-        activeMarkedTagId && activeMarkedTagId !== UNTAGGED_MARKED_TAG_FILTER_ID
+        activeMarkedTagId
           ? activeMarkedTagId
           : null,
       searchQuery: getAppliedMarkedSearchQuery() || null,
+      limit: MARKED_MESSAGES_PER_PAGE,
+      offset,
     });
     markedMessages = result.messages || [];
-    if (activeMarkedTagId === UNTAGGED_MARKED_TAG_FILTER_ID) {
-      markedMessages = markedMessages.filter(
-        (message) => !Array.isArray(message.marked_tag_ids) || message.marked_tag_ids.length === 0,
-      );
+    markedMessagesTotal = result.total || 0;
+    const totalPages = Math.max(1, Math.ceil(markedMessagesTotal / MARKED_MESSAGES_PER_PAGE));
+    if (markedMessagesPage > totalPages) {
+      markedMessagesPage = totalPages;
+      return loadMarkedMessages({ scrollToTop, preservePage: true });
     }
-    // 切换标签时重置页码
-    markedMessagesPage = 1;
     updateMarkedBadge(result.marked_count || 0);
     renderMarkedMessages(markedMessages, {
       query: getAppliedMarkedSearchQuery(),
