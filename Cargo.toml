@@ -4,6 +4,11 @@ version = "0.3.4"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 default-run = "transfer-genie"
+description = "A WebDAV-based cross-device file transfer and text sync desktop app with HTTP API and Telegram Bridge."
+homepage = "https://yedsn.github.io/transfer-genie/"
+repository = "https://github.com/yedsn/transfer-genie"
+categories = ["filesystem", "gui", "network-programming"]
+keywords = ["webdav", "file-transfer", "text-sync", "desktop", "tauri", "rust", "telegram"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

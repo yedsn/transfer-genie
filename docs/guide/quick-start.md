@@ -1,3 +1,7 @@
+---
+description: Transfer Genie 快速开始指南，帮助用户下载安装、配置 WebDAV，并完成第一次跨设备文本或文件传输。
+---
+
 # 快速开始
 
 如果你只是想把 Transfer Genie 用起来，优先按这条路径操作，不需要先看开发环境。

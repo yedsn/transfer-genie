@@ -7,9 +7,14 @@ on:
       - main
     paths:
       - 'docs/**'
+      - 'README.md'
+      - 'README.en.md'
+      - 'scripts/verify_docs_seo.mjs'
+      - 'scripts/verify_docs_live_seo.mjs'
       - 'package.json'
       - 'package-lock.json'
       - '.github/workflows/pages.yml'
+      - '.github/workflows/live-seo-check.yml'
   workflow_dispatch:
 
 permissions:
@@ -45,7 +50,7 @@ jobs:
         run: npm ci
 
       - name: Build docs site
-        run: npm run docs:build
+        run: npm run docs:verify-seo
         env:
           DOCS_BASE: /${{ github.event.repository.name }}/
 

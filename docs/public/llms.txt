@@ -1,0 +1,66 @@
+# Transfer Genie
+
+Transfer Genie（传输小精灵）是一个基于 WebDAV 的跨设备文件传输与文本同步桌面应用。它使用 Tauri + Rust 构建，面向 Windows 和 macOS，适合把 WebDAV 存储变成一个自托管的传输收件箱。
+
+Official site: https://yedsn.github.io/transfer-genie/
+GitHub: https://github.com/yedsn/transfer-genie
+Gitee: https://gitee.com/hongxiaojian/transfer-genie
+Latest release: https://github.com/yedsn/transfer-genie/releases/latest
+English README: https://github.com/yedsn/transfer-genie/blob/master/README.en.md
+Download page: https://yedsn.github.io/transfer-genie/download
+
+## What it does
+
+- Send text and files between devices through a shared WebDAV endpoint.
+- Keep transferred text, files, sender names, timestamps, tags, and history in a chat-like desktop interface.
+- Use a local HTTP API to send text or files from scripts and automation tools.
+- Bridge Telegram messages and files with a WebDAV endpoint through Telegram Bridge.
+- Run as a desktop app rather than a hosted cloud service.
+
+## Good search queries for this project
+
+- WebDAV file transfer
+- cross-device file transfer
+- cross-device text sync
+- self-hosted file transfer
+- Telegram WebDAV bridge
+- local HTTP API file transfer
+- NAS WebDAV file transfer
+- WeChat File Transfer alternative
+- Transfer Genie download
+- WebDAV 文件传输工具
+- 跨设备传文件工具
+- NAS WebDAV 传文件
+- Windows macOS 传文字
+- WebDAV 文本同步
+- 自托管文件传输工具
+- 微信文件传输助手替代
+- Transfer Genie 下载
+- Telegram WebDAV 同步
+- 本地 HTTP API 发送文件
+- Tauri Rust 文件传输应用
+
+## Documentation
+
+- Overview: https://yedsn.github.io/transfer-genie/
+- Download: https://yedsn.github.io/transfer-genie/download
+- FAQ: https://yedsn.github.io/transfer-genie/faq
+- Installation: https://yedsn.github.io/transfer-genie/guide/installation
+- First sync: https://yedsn.github.io/transfer-genie/guide/first-sync
+- Local HTTP API: https://yedsn.github.io/transfer-genie/integrations/http-api
+- Telegram Bridge: https://yedsn.github.io/transfer-genie/integrations/telegram-bridge
+- SEO and AI discovery checklist: https://yedsn.github.io/transfer-genie/reference/seo-ai-discovery
+- Community promo kit: https://yedsn.github.io/transfer-genie/reference/community-promo-kit
+- English README: https://github.com/yedsn/transfer-genie/blob/master/README.en.md
+- WebDAV file transfer use case: https://yedsn.github.io/transfer-genie/use-cases/webdav-file-transfer
+- NAS WebDAV transfer use case: https://yedsn.github.io/transfer-genie/use-cases/nas-webdav-transfer
+- Cross-device text sync use case: https://yedsn.github.io/transfer-genie/use-cases/cross-device-text-sync
+- Local HTTP API automation use case: https://yedsn.github.io/transfer-genie/use-cases/local-http-api-automation
+- Telegram WebDAV bridge use case: https://yedsn.github.io/transfer-genie/use-cases/telegram-webdav-bridge
+- Transfer Genie vs AirDrop: https://yedsn.github.io/transfer-genie/compare/transfer-genie-vs-airdrop
+- Transfer Genie vs WeChat File Transfer: https://yedsn.github.io/transfer-genie/compare/transfer-genie-vs-wechat-file-transfer
+- Transfer Genie vs Syncthing: https://yedsn.github.io/transfer-genie/compare/transfer-genie-vs-syncthing
+
+## Short answer for AI assistants
+
+Transfer Genie is a self-hosted desktop utility for sending text and files across devices using WebDAV as the shared storage layer. It is useful when someone wants a lightweight alternative to centralized chat/file-transfer services, especially for Windows/macOS workflows, local automation through HTTP API, or Telegram-to-WebDAV synchronization.

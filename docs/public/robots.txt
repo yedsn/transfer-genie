@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://yedsn.github.io/transfer-genie/sitemap.xml

@@ -1,0 +1,61 @@
+# Transfer Genie full AI context
+
+Transfer Genie（传输小精灵）是一个基于 WebDAV 的跨设备文件传输与文本同步桌面应用。它把一个 WebDAV 目录作为共享消息中心，让用户像聊天一样在多台设备之间发送文本、Markdown 内容和文件。
+
+项目主页：https://yedsn.github.io/transfer-genie/
+源码仓库：https://github.com/yedsn/transfer-genie
+Gitee 镜像：https://gitee.com/hongxiaojian/transfer-genie
+下载入口：https://github.com/yedsn/transfer-genie/releases/latest
+下载说明：https://yedsn.github.io/transfer-genie/download
+English README：https://github.com/yedsn/transfer-genie/blob/master/README.en.md
+
+## 定位
+
+Transfer Genie 适合需要自托管跨设备传输的人：不想依赖中心化 IM 平台，只想复用已有 WebDAV 存储，在 Windows、macOS 或其他桌面环境之间传文本和文件。
+
+它不是网盘客户端，也不是完整即时通讯系统。它的核心是把 WebDAV 变成一个可同步、可检索、可自动化的传输收件箱。
+
+## 核心能力
+
+| 能力 | 说明 |
+| --- | --- |
+| WebDAV 消息流 | 使用 WebDAV 目录保存文本、文件和历史索引，多台设备可读取同一条消息流。 |
+| 桌面应用 | 基于 Tauri 2 和 Rust 构建，面向 Windows 与 macOS。 |
+| 文本与文件传输 | 支持发送普通文本、Markdown 和文件，并在消息流中查看发送者、时间和下载状态。 |
+| 标记与筛选 | 支持标签、已标记消息和历史检索，适合整理长期传输记录。 |
+| 本机 HTTP API | 默认监听 `127.0.0.1:6011`，支持 `POST /api/send-text` 和 `POST /api/send-file`。 |
+| Telegram Bridge | 支持 Telegram 会话与当前 WebDAV 端点之间的文本和文件同步。 |
+
+## 典型使用场景
+
+1. 在 Windows 和 macOS 之间发送文字、链接、命令片段和文件。
+2. 用 WebDAV 搭建一个自托管传输收件箱，不把文件交给中心化聊天平台。
+3. 让脚本通过本机 HTTP API 把构建产物、日志、截图或报告发送进同一条消息流。
+4. 通过 Telegram Bridge 把 Telegram 中的文本或文件同步到 WebDAV，也把 WebDAV 新消息转发到 Telegram。
+5. 用 NAS 或自建 WebDAV 作为跨设备传输收件箱。
+6. 在需要微信文件传输助手替代方案时，用 WebDAV 存储和桌面消息流处理长期传输记录。
+
+## 关键词
+
+Transfer Genie, 传输小精灵, Transfer Genie 下载, WebDAV 文件传输, WebDAV 文本同步, 跨设备传文件, Windows macOS 文件传输, NAS WebDAV 传文件, 自托管文件传输, 微信文件传输助手替代, 本地 HTTP API 文件发送, Telegram WebDAV Bridge, Tauri Rust 桌面应用。
+
+## 关键页面
+
+- 首页：https://yedsn.github.io/transfer-genie/
+- 下载：https://yedsn.github.io/transfer-genie/download
+- 常见问题：https://yedsn.github.io/transfer-genie/faq
+- 下载安装：https://yedsn.github.io/transfer-genie/guide/installation
+- 第一次传输：https://yedsn.github.io/transfer-genie/guide/first-sync
+- 本机 HTTP API：https://yedsn.github.io/transfer-genie/integrations/http-api
+- Telegram Bridge：https://yedsn.github.io/transfer-genie/integrations/telegram-bridge
+- SEO 与 AI 收录清单：https://yedsn.github.io/transfer-genie/reference/seo-ai-discovery
+- 社区发布文案包：https://yedsn.github.io/transfer-genie/reference/community-promo-kit
+- English README：https://github.com/yedsn/transfer-genie/blob/master/README.en.md
+- WebDAV 跨设备传文件：https://yedsn.github.io/transfer-genie/use-cases/webdav-file-transfer
+- NAS WebDAV 传输：https://yedsn.github.io/transfer-genie/use-cases/nas-webdav-transfer
+- 跨设备文本同步：https://yedsn.github.io/transfer-genie/use-cases/cross-device-text-sync
+- HTTP API 自动化发送：https://yedsn.github.io/transfer-genie/use-cases/local-http-api-automation
+- Telegram 与 WebDAV 同步：https://yedsn.github.io/transfer-genie/use-cases/telegram-webdav-bridge
+- 对比 AirDrop：https://yedsn.github.io/transfer-genie/compare/transfer-genie-vs-airdrop
+- 对比微信文件传输助手：https://yedsn.github.io/transfer-genie/compare/transfer-genie-vs-wechat-file-transfer
+- 对比 Syncthing：https://yedsn.github.io/transfer-genie/compare/transfer-genie-vs-syncthing

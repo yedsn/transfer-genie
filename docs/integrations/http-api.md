@@ -1,3 +1,7 @@
+---
+description: Transfer Genie 本机 HTTP API 文档，说明如何通过 POST /api/send-text 和 POST /api/send-file 从脚本发送文本和文件。
+---
+
 # 本机 HTTP API
 
 Transfer Genie 内置本机 HTTP 服务，适合给自动化脚本、命令行工具或其他本地程序调用。
