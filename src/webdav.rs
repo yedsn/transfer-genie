@@ -545,6 +545,17 @@ pub async fn upload_file(
     remote_path: &str,
     data: Vec<u8>,
 ) -> Result<(), String> {
+    upload_file_with_status(client, endpoint, remote_path, data)
+        .await
+        .map(|_| ())
+}
+
+async fn upload_file_with_status(
+    client: &Client,
+    endpoint: &WebDavEndpoint,
+    remote_path: &str,
+    data: Vec<u8>,
+) -> Result<u16, String> {
     let mut url = base_url(endpoint)?;
     url = url
         .join(remote_path)
@@ -560,7 +571,23 @@ pub async fn upload_file(
     if !status.is_success() {
         return Err(format!("上传文件失败: HTTP {}", status));
     }
-    Ok(())
+    Ok(status.as_u16())
+}
+
+pub async fn upload_file_ensuring_parent(
+    client: &Client,
+    endpoint: &WebDavEndpoint,
+    remote_path: &str,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    match upload_file_with_status(client, endpoint, remote_path, data.clone()).await {
+        Ok(_) => Ok(()),
+        Err(err) if upload_error_may_indicate_missing_parent(&err) => {
+            ensure_parent_directories(client, endpoint, remote_path).await?;
+            upload_file(client, endpoint, remote_path, data).await
+        }
+        Err(err) => Err(err),
+    }
 }
 
 pub async fn upload_file_path_with_progress<F>(
@@ -705,6 +732,12 @@ pub async fn ensure_parent_directories(
     Ok(())
 }
 
+fn upload_error_may_indicate_missing_parent(error: &str) -> bool {
+    ["HTTP 404", "HTTP 405", "HTTP 409", "HTTP 412", "HTTP 423"]
+        .iter()
+        .any(|needle| error.contains(needle))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -712,6 +745,7 @@ mod tests {
     use reqwest::Client;
     use std::fs::File;
     use std::io::Write;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -849,5 +883,139 @@ mod tests {
 
         let _ = std::fs::remove_file(&file_path);
         server.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn upload_file_ensuring_parent_skips_mkcol_when_put_succeeds() {
+        let requests = run_upload_file_ensuring_parent_fixture(false)
+            .await
+            .expect("upload fixture succeeds");
+
+        assert_eq!(requests, vec!["PUT /files/2026/07/message.txt"]);
+    }
+
+    #[tokio::test]
+    async fn upload_file_ensuring_parent_mkcols_and_retries_when_parent_is_missing() {
+        let requests = run_upload_file_ensuring_parent_fixture(true)
+            .await
+            .expect("upload fixture succeeds");
+
+        assert_eq!(
+            requests,
+            vec![
+                "PUT /files/2026/07/message.txt",
+                "MKCOL /files/",
+                "MKCOL /files/2026/",
+                "MKCOL /files/2026/07/",
+                "PUT /files/2026/07/message.txt",
+            ]
+        );
+    }
+
+    async fn run_upload_file_ensuring_parent_fixture(
+        fail_first_put: bool,
+    ) -> Result<Vec<String>, String> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+        let server_requests = Arc::clone(&requests);
+        let server = tokio::spawn(async move {
+            let mut put_count = 0usize;
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut received = Vec::new();
+                let mut buffer = [0u8; 8192];
+                let header_end = loop {
+                    let read = socket.read(&mut buffer).await.expect("read request");
+                    if read == 0 {
+                        return;
+                    }
+                    received.extend_from_slice(&buffer[..read]);
+                    if let Some(index) = received
+                        .windows(4)
+                        .position(|window| window == b"\r\n\r\n")
+                        .map(|value| value + 4)
+                    {
+                        break index;
+                    }
+                };
+                let headers = String::from_utf8_lossy(&received[..header_end]);
+                let request_line = headers.lines().next().unwrap_or_default();
+                let mut parts = request_line.split_whitespace();
+                let method = parts.next().unwrap_or_default().to_string();
+                let path = parts.next().unwrap_or_default().to_string();
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                let mut body_read = received.len().saturating_sub(header_end);
+                while body_read < content_length {
+                    let read = socket.read(&mut buffer).await.expect("read request body");
+                    if read == 0 {
+                        break;
+                    }
+                    body_read += read;
+                }
+
+                server_requests
+                    .lock()
+                    .expect("lock requests")
+                    .push(format!("{method} {path}"));
+                let status = if fail_first_put && method == "PUT" && put_count == 0 {
+                    put_count += 1;
+                    "409 Conflict"
+                } else {
+                    if method == "PUT" {
+                        put_count += 1;
+                    }
+                    match method.as_str() {
+                        "PUT" => "201 Created",
+                        "MKCOL" => "201 Created",
+                        _ => "405 Method Not Allowed",
+                    }
+                };
+                let response =
+                    format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write response");
+                if !fail_first_put && put_count >= 1 {
+                    break;
+                }
+                if fail_first_put && put_count >= 2 {
+                    break;
+                }
+            }
+        });
+
+        let endpoint = WebDavEndpoint {
+            id: "test".to_string(),
+            name: "test".to_string(),
+            url: format!("http://{addr}/"),
+            username: String::new(),
+            password: String::new(),
+            enabled: true,
+        };
+
+        upload_file_ensuring_parent(
+            &Client::new(),
+            &endpoint,
+            "files/2026/07/message.txt",
+            b"hello".to_vec(),
+        )
+        .await?;
+        server.await.expect("fixture server");
+        let requests = requests.lock().expect("lock requests").clone();
+        Ok(requests)
     }
 }

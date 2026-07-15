@@ -44,7 +44,10 @@ pub trait SyncModuleRuntime {
         ModuleKind::Sync
     }
 
-    fn status_from_snapshot(&self, snapshot: ModuleRuntimeStateSnapshot) -> IntegrationModuleStatus {
+    fn status_from_snapshot(
+        &self,
+        snapshot: ModuleRuntimeStateSnapshot,
+    ) -> IntegrationModuleStatus {
         IntegrationModuleStatus {
             id: self.module_id().to_string(),
             display_name: self.display_name().to_string(),
@@ -66,7 +69,10 @@ pub trait BridgeModuleRuntime {
         ModuleKind::Bridge
     }
 
-    fn status_from_snapshot(&self, snapshot: ModuleRuntimeStateSnapshot) -> IntegrationModuleStatus {
+    fn status_from_snapshot(
+        &self,
+        snapshot: ModuleRuntimeStateSnapshot,
+    ) -> IntegrationModuleStatus {
         IntegrationModuleStatus {
             id: self.module_id().to_string(),
             display_name: self.display_name().to_string(),
@@ -121,9 +127,14 @@ pub fn module_status_bundle_path(workspace_root: &Path) -> PathBuf {
 }
 
 pub fn module_status_path(workspace_root: &Path, module_id: &str) -> PathBuf {
-    WorkspaceLayout::new(workspace_root.parent().unwrap_or(workspace_root).to_path_buf())
-        .plugin_dir(module_id)
-        .join("status.json")
+    WorkspaceLayout::new(
+        workspace_root
+            .parent()
+            .unwrap_or(workspace_root)
+            .to_path_buf(),
+    )
+    .plugin_dir(module_id)
+    .join("status.json")
 }
 
 pub fn persist_module_statuses(
@@ -202,8 +213,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        let app_dir = std::env::temp_dir()
-            .join(format!("transfer-genie-integration-runtime-{suffix}"));
+        let app_dir =
+            std::env::temp_dir().join(format!("transfer-genie-integration-runtime-{suffix}"));
         let workspace_root = app_dir.join(workspace::WORKSPACE_DIR_NAME);
         let layout = WorkspaceLayout::new(app_dir.clone());
         let _ = fs::remove_dir_all(&app_dir);

@@ -3274,6 +3274,254 @@ function toggleSelectedMarkedMessage(filename, checked) {
   syncVueMarkedPageState();
 }
 
+function buildPatchedMarkedMessage(message, patch = {}) {
+  const next = {
+    ...message,
+    ...patch,
+  };
+  if (patch.marked_tag_ids !== undefined) {
+    next.marked_tag_ids = Array.isArray(patch.marked_tag_ids) ? patch.marked_tag_ids.slice() : [];
+  } else {
+    next.marked_tag_ids = Array.isArray(message?.marked_tag_ids) ? message.marked_tag_ids.slice() : [];
+  }
+  if (patch.marked !== undefined) {
+    next.marked = !!patch.marked;
+    if (!next.marked) {
+      next.marked_tag_ids = [];
+      next.marked_pinned = false;
+    }
+  }
+  if (patch.marked_pinned !== undefined) {
+    next.marked_pinned = !!patch.marked_pinned;
+  }
+  return next;
+}
+
+function markedMessageMatchesCurrentView(message) {
+  if (!message?.marked) {
+    return false;
+  }
+  const tagIds = Array.isArray(message.marked_tag_ids) ? message.marked_tag_ids : [];
+  if (activeMarkedTagId === UNTAGGED_MARKED_TAG_FILTER_ID && tagIds.length > 0) {
+    return false;
+  }
+  if (
+    activeMarkedTagId
+    && activeMarkedTagId !== UNTAGGED_MARKED_TAG_FILTER_ID
+    && !tagIds.includes(activeMarkedTagId)
+  ) {
+    return false;
+  }
+  const query = String(getAppliedMarkedSearchQuery() || '').trim().toLowerCase();
+  if (!query) {
+    return true;
+  }
+  const haystack = [
+    message.sender,
+    message.content,
+    message.original_name,
+    message.filename,
+  ].map((value) => String(value || '').toLowerCase()).join('\n');
+  return haystack.includes(query);
+}
+
+function applyLocalMarkedPatch(filenames, patch, options = {}) {
+  const targetSet = new Set(
+    (Array.isArray(filenames) ? filenames : [filenames])
+      .map((filename) => String(filename || '').trim())
+      .filter(Boolean),
+  );
+  if (targetSet.size === 0) {
+    return new Map();
+  }
+
+  const beforeMarkedByFilename = new Map();
+  const captureBeforeMarked = (message) => {
+    if (message?.filename && targetSet.has(message.filename) && !beforeMarkedByFilename.has(message.filename)) {
+      beforeMarkedByFilename.set(message.filename, !!message.marked);
+    }
+  };
+  lastMessages.forEach(captureBeforeMarked);
+  markedMessages.forEach(captureBeforeMarked);
+  (Array.isArray(options.sourceMessages) ? options.sourceMessages : []).forEach(captureBeforeMarked);
+  captureBeforeMarked(currentPreviewMessage);
+
+  const updated = new Map();
+  const patchMessage = (message) => {
+    if (!message?.filename || !targetSet.has(message.filename)) {
+      return message;
+    }
+    const next = buildPatchedMarkedMessage(message, patch);
+    updated.set(message.filename, next);
+    return next;
+  };
+
+  let homeChanged = false;
+  lastMessages = lastMessages.map((message) => {
+    const next = patchMessage(message);
+    if (next !== message) {
+      homeChanged = true;
+    }
+    return next;
+  });
+
+  let markedChanged = false;
+  markedMessages = markedMessages
+    .map((message) => {
+      const next = patchMessage(message);
+      if (next !== message) {
+        markedChanged = true;
+      }
+      return next;
+    })
+    .filter((message) => {
+      const keep = markedMessageMatchesCurrentView(message);
+      if (!keep && targetSet.has(message.filename)) {
+        markedChanged = true;
+      }
+      return keep;
+    });
+
+  const sourceMessages = Array.isArray(options.sourceMessages) ? options.sourceMessages : [];
+  sourceMessages.forEach((message) => {
+    if (!message?.filename || !targetSet.has(message.filename)) {
+      return;
+    }
+    const next = updated.get(message.filename) || buildPatchedMarkedMessage(message, patch);
+    updated.set(message.filename, next);
+    Object.assign(message, next);
+  });
+
+  if (patch.marked !== undefined) {
+    let markedTotalDelta = 0;
+    targetSet.forEach((filename) => {
+      const wasMarked = beforeMarkedByFilename.get(filename);
+      if (wasMarked === true && !patch.marked) {
+        markedTotalDelta -= 1;
+      } else if (wasMarked === false && patch.marked) {
+        markedTotalDelta += 1;
+      }
+    });
+    if (markedTotalDelta !== 0) {
+      markedMessagesTotal = Math.max(0, Number(markedMessagesTotal || 0) + markedTotalDelta);
+    }
+  }
+
+  if (currentPreviewMessage?.filename && targetSet.has(currentPreviewMessage.filename)) {
+    currentPreviewMessage = updated.get(currentPreviewMessage.filename)
+      || buildPatchedMarkedMessage(currentPreviewMessage, patch);
+    if (messagePreview?.classList.contains('is-active')) {
+      renderPreviewActions(currentPreviewMessage);
+    }
+  }
+
+  currentMarkingMessages = currentMarkingMessages.map((message) => patchMessage(message));
+
+  if (homeChanged && options.renderHome !== false) {
+    updated.forEach((message, filename) => {
+      const homeCard = document.querySelector(
+        `#message-list .message-card[data-filename="${escapeSelector(filename)}"], #message-list-vue .message-card[data-filename="${escapeSelector(filename)}"]`,
+      );
+      patchMessageCardElement(homeCard, message, patch);
+    });
+    syncVueHomeFeedView({
+      messages: lastMessages,
+      query: searchInput ? searchInput.value.trim() : '',
+    });
+  }
+  if (markedChanged && options.renderMarked !== false) {
+    updated.forEach((message, filename) => {
+      if (!markedMessageMatchesCurrentView(message)) {
+        removeMarkedCardFromCurrentView(filename);
+        return;
+      }
+      const markedCard = document.querySelector(
+        `#marked-message-list .message-card[data-filename="${escapeSelector(filename)}"]`,
+      );
+      patchMessageCardElement(markedCard, message, patch);
+    });
+    currentMarkedPageState.messages = (currentMarkedPageState.messages || []).map((viewModel) => {
+      const message = updated.get(viewModel.filename);
+      return message ? buildMarkedMessageViewModel(message) : viewModel;
+    });
+    currentMarkedPageState.selectionCount = selectedMarkedMessages.size;
+    syncVueMarkedPageState();
+  }
+
+  return updated;
+}
+
+function patchMessageCardElement(card, message, patch = {}) {
+  if (!card || !message) {
+    return false;
+  }
+
+  const next = buildPatchedMarkedMessage(message, patch);
+  const isMarked = !!next.marked;
+  card.classList.toggle('is-marked', isMarked);
+  card.classList.toggle('is-pinned', !!next.marked_pinned);
+
+  const markButton = card.querySelector('.mark-action');
+  if (markButton) {
+    markButton.classList.toggle('is-marked', isMarked);
+    const markIcon = markButton.querySelector('img');
+    if (markIcon) {
+      markIcon.alt = isMarked ? '取消标记' : '标记';
+    }
+  }
+
+  const pinButton = card.querySelector('.marked-pin-button');
+  if (pinButton) {
+    pinButton.classList.toggle('primary', !!next.marked_pinned);
+    pinButton.classList.toggle('ghost', !next.marked_pinned);
+    pinButton.classList.toggle('is-active', !!next.marked_pinned);
+    const label = pinButton.querySelector('.marked-pin-label');
+    if (label) {
+      label.textContent = next.marked_pinned ? '已置顶' : '置顶';
+    }
+  }
+
+  const tagRow = card.querySelector('.marked-message-tags');
+  if (tagRow) {
+    tagRow.innerHTML = '';
+    const resolvedTags = (next.marked_tag_ids || [])
+      .map((tagId) => markedTags.find((tag) => tag.id === tagId))
+      .filter(Boolean);
+    if (resolvedTags.length) {
+      resolvedTags.forEach((tag) => {
+        const chip = document.createElement('span');
+        chip.className = 'marked-message-tag-chip';
+        chip.textContent = tag.name;
+        tagRow.appendChild(chip);
+      });
+    } else {
+      const emptyTag = document.createElement('span');
+      emptyTag.className = 'marked-message-tag-chip is-empty';
+      emptyTag.textContent = '无标签';
+      tagRow.appendChild(emptyTag);
+    }
+  }
+
+  return true;
+}
+
+function removeMarkedCardFromCurrentView(filename) {
+  if (!filename) {
+    return false;
+  }
+  const selector = `#marked-message-list .message-card[data-filename="${escapeSelector(filename)}"]`;
+  const card = document.querySelector(selector);
+  if (card) {
+    card.remove();
+    visibleMarkedMessages = visibleMarkedMessages.filter((message) => message.filename !== filename);
+    currentMarkedPageState.messages = (currentMarkedPageState.messages || []).filter((message) => message.filename !== filename);
+    currentMarkedPageState.selectionCount = selectedMarkedMessages.size;
+    syncVueMarkedPageState();
+    return true;
+  }
+  return false;
+}
+
 function selectAllMarkedMessages() {
   if (!markedSelectionMode) {
     setMarkedSelectionMode(true);
@@ -9964,10 +10212,24 @@ async function confirmMarkMessage() {
     markMessageConfirmButton.disabled = true;
     markMessageConfirmButton.classList.add('is-loading');
   }
+  const filenames = currentMarkingMessages.map((message) => message.filename).filter(Boolean);
+  const previousState = new Map(
+    currentMarkingMessages
+      .filter((message) => message?.filename)
+      .map((message) => [message.filename, buildPatchedMarkedMessage(message)]),
+  );
+  const nextPatch = currentMarkingMode === 'batch'
+    ? { marked_tag_ids: Array.from(selectedMarkTagIds) }
+    : { marked: true, marked_tag_ids: Array.from(selectedMarkTagIds) };
+  applyLocalMarkedPatch(filenames, nextPatch, {
+    sourceMessages: currentMarkingMessages,
+    renderHome: true,
+    renderMarked: true,
+  });
   try {
     if (currentMarkingMode === 'batch') {
       await invoke('set_marked_messages_tags', {
-        filenames: currentMarkingMessages.map((message) => message.filename),
+        filenames,
         tagIds: Array.from(selectedMarkTagIds),
       });
       closeMarkMessageModal();
@@ -9979,11 +10241,18 @@ async function confirmMarkMessage() {
       });
       closeMarkMessageModal();
     }
-    await Promise.all([
-      loadMessages(),
-      loadMarkedMessages(),
-    ]);
   } catch (error) {
+    previousState.forEach((message, filename) => {
+      applyLocalMarkedPatch(filename, {
+        marked: message.marked,
+        marked_tag_ids: message.marked_tag_ids,
+        marked_pinned: message.marked_pinned,
+      }, {
+        sourceMessages: currentMarkingMessages,
+        renderHome: true,
+        renderMarked: true,
+      });
+    });
     showToast(`标记失败: ${error}`, 'error');
   } finally {
     if (markMessageConfirmButton) {
@@ -10074,13 +10343,25 @@ async function toggleMarkedMessagePin(message, button) {
     button.disabled = true;
     button.classList.add('is-loading');
   }
+  const previous = buildPatchedMarkedMessage(message);
+  const nextPinned = !message.marked_pinned;
+  applyLocalMarkedPatch(message.filename, { marked_pinned: nextPinned }, {
+    sourceMessages: [message],
+    renderHome: true,
+    renderMarked: true,
+  });
   try {
     await invoke('toggle_marked_message_pin', { filename: message.filename });
-    await Promise.all([
-      loadMessages(),
-      loadMarkedMessages(),
-    ]);
   } catch (error) {
+    applyLocalMarkedPatch(message.filename, {
+      marked: previous.marked,
+      marked_tag_ids: previous.marked_tag_ids,
+      marked_pinned: previous.marked_pinned,
+    }, {
+      sourceMessages: [message],
+      renderHome: true,
+      renderMarked: true,
+    });
     showToast(`置顶失败: ${error}`, 'error');
   } finally {
     if (button) {
@@ -10100,16 +10381,28 @@ async function toggleMessageMarked(message) {
     return;
   }
 
+  const previous = buildPatchedMarkedMessage(message);
+  applyLocalMarkedPatch(message.filename, { marked: false, marked_tag_ids: [], marked_pinned: false }, {
+    sourceMessages: [message],
+    renderHome: true,
+    renderMarked: true,
+  });
+  if (currentPreviewMessage?.filename === message.filename) {
+    closeMessagePreview();
+  }
+
   try {
     await invoke('unmark_message', { filename: message.filename });
-    await Promise.all([
-      loadMessages(),
-      loadMarkedMessages(),
-    ]);
-    if (currentPreviewMessage?.filename === message.filename) {
-      closeMessagePreview();
-    }
   } catch (error) {
+    applyLocalMarkedPatch(message.filename, {
+      marked: previous.marked,
+      marked_tag_ids: previous.marked_tag_ids,
+      marked_pinned: previous.marked_pinned,
+    }, {
+      sourceMessages: [message],
+      renderHome: true,
+      renderMarked: true,
+    });
     showToast(`操作失败: ${error}`, 'error');
   }
 }
@@ -10290,7 +10583,10 @@ function renderMarkedMessages(messages = [], options = {}) {
     const pinButton = document.createElement('button');
     pinButton.className = `button small has-spinner marked-pin-button ${message.marked_pinned ? 'primary' : 'ghost'}`;
     pinButton.classList.toggle('is-active', !!message.marked_pinned);
-    pinButton.textContent = message.marked_pinned ? '已置顶' : '置顶';
+    const pinLabel = document.createElement('span');
+    pinLabel.className = 'marked-pin-label';
+    pinLabel.textContent = message.marked_pinned ? '已置顶' : '置顶';
+    pinButton.appendChild(pinLabel);
     const pinSpinner = document.createElement('span');
     pinSpinner.className = 'button-spinner';
     pinSpinner.setAttribute('aria-hidden', 'true');

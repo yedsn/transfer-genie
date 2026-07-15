@@ -6,6 +6,17 @@ use crate::types::{DownloadHistoryRecord, MarkedTag, Message, UploadHistoryRecor
 
 const UNTAGGED_MARKED_TAG_FILTER_ID: &str = "__untagged__";
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingMarkedSync {
+    pub endpoint_id: String,
+    pub filename: String,
+    pub timestamp_ms: i64,
+    pub marked: bool,
+    pub marked_tag_ids: Vec<String>,
+    pub marked_pinned: bool,
+    pub updated_at_ms: i64,
+}
+
 #[derive(Clone)]
 pub struct DbMessage {
     pub endpoint_id: String,
@@ -103,6 +114,8 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
             "CREATE TABLE IF NOT EXISTS messages (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        sender TEXT NOT NULL,        timestamp_ms INTEGER NOT NULL,        size INTEGER NOT NULL,        kind TEXT NOT NULL,        original_name TEXT NOT NULL,        etag TEXT,        mtime TEXT,        content TEXT,        local_path TEXT,        remote_path TEXT,        file_hash TEXT,        marked BOOLEAN NOT NULL DEFAULT 0,        marked_tag_ids TEXT NOT NULL DEFAULT '[]',        marked_pinned BOOLEAN NOT NULL DEFAULT 0,        format TEXT NOT NULL DEFAULT 'text',        PRIMARY KEY(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS marked_tags (        endpoint_id TEXT NOT NULL,        id TEXT NOT NULL,        name TEXT NOT NULL,        PRIMARY KEY(endpoint_id, id)      );      CREATE TABLE IF NOT EXISTS download_history (        id INTEGER PRIMARY KEY AUTOINCREMENT,        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        saved_path TEXT,        status TEXT NOT NULL,        error TEXT,        file_size INTEGER NOT NULL DEFAULT 0,        created_at_ms INTEGER NOT NULL,        updated_at_ms INTEGER NOT NULL,        UNIQUE(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS upload_history (        id INTEGER PRIMARY KEY AUTOINCREMENT,        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        local_path TEXT,        status TEXT NOT NULL,        error TEXT,        file_size INTEGER NOT NULL DEFAULT 0,        created_at_ms INTEGER NOT NULL,        updated_at_ms INTEGER NOT NULL,        UNIQUE(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS partial_downloads (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        final_path TEXT NOT NULL,        temp_path TEXT NOT NULL,        downloaded_bytes INTEGER NOT NULL DEFAULT 0,        total_bytes INTEGER NOT NULL DEFAULT 0,        etag TEXT,        mtime TEXT,        updated_at_ms INTEGER NOT NULL,        PRIMARY KEY(endpoint_id, filename)      );",
         )
         .map_err(|err| format!("初始化数据库表失败: {err}"))?;
+        ensure_pending_marked_sync_schema(&conn)
+            .map_err(|err| format!("初始化待同步标记表失败: {err}"))?;
         ensure_indexes(&conn).map_err(|err| format!("初始化数据库索引失败: {err}"))?;
         return Ok(());
     }
@@ -296,15 +309,33 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
     )
     .map_err(|err| format!("初始化下载相关数据表失败: {err}"))?;
 
+    ensure_pending_marked_sync_schema(&conn)
+        .map_err(|err| format!("初始化待同步标记表失败: {err}"))?;
     ensure_indexes(&conn).map_err(|err| format!("初始化数据库索引失败: {err}"))?;
 
     Ok(())
+}
+
+fn ensure_pending_marked_sync_schema(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS pending_marked_sync (
+            endpoint_id TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            timestamp_ms INTEGER NOT NULL,
+            marked BOOLEAN NOT NULL,
+            marked_tag_ids TEXT NOT NULL DEFAULT '[]',
+            marked_pinned BOOLEAN NOT NULL DEFAULT 0,
+            updated_at_ms INTEGER NOT NULL,
+            PRIMARY KEY(endpoint_id, filename)
+        );",
+    )
 }
 
 fn ensure_indexes(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_messages_endpoint_timestamp_filename ON messages(endpoint_id, timestamp_ms, filename);
          CREATE INDEX IF NOT EXISTS idx_messages_endpoint_marked_pinned_timestamp ON messages(endpoint_id, marked, marked_pinned, timestamp_ms);
+         CREATE INDEX IF NOT EXISTS idx_pending_marked_sync_endpoint_updated ON pending_marked_sync(endpoint_id, updated_at_ms);
          CREATE INDEX IF NOT EXISTS idx_download_history_updated_at ON download_history(updated_at_ms DESC);
          CREATE INDEX IF NOT EXISTS idx_upload_history_updated_at ON upload_history(updated_at_ms DESC);",
     )
@@ -392,6 +423,79 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
     Ok(())
 }
 
+pub fn upsert_pending_marked_sync(
+    path: &Path,
+    pending: &PendingMarkedSync,
+) -> rusqlite::Result<()> {
+    let conn = Connection::open(path)?;
+    conn.execute(
+        "INSERT INTO pending_marked_sync
+          (endpoint_id, filename, timestamp_ms, marked, marked_tag_ids, marked_pinned, updated_at_ms)
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+          ON CONFLICT(endpoint_id, filename) DO UPDATE SET
+            timestamp_ms=excluded.timestamp_ms,
+            marked=excluded.marked,
+            marked_tag_ids=excluded.marked_tag_ids,
+            marked_pinned=excluded.marked_pinned,
+            updated_at_ms=excluded.updated_at_ms",
+        params![
+            pending.endpoint_id,
+            pending.filename,
+            pending.timestamp_ms,
+            pending.marked,
+            serialize_tag_ids(&pending.marked_tag_ids)?,
+            pending.marked_pinned,
+            pending.updated_at_ms,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_pending_marked_sync(
+    path: &Path,
+    endpoint_id: &str,
+) -> rusqlite::Result<Vec<PendingMarkedSync>> {
+    let conn = Connection::open(path)?;
+    let mut stmt = conn.prepare(
+        "SELECT endpoint_id, filename, timestamp_ms, marked, marked_tag_ids, marked_pinned, updated_at_ms
+         FROM pending_marked_sync
+         WHERE endpoint_id = ?1
+         ORDER BY updated_at_ms ASC",
+    )?;
+    let rows = stmt.query_map(params![endpoint_id], |row| {
+        let marked_tag_ids: String = row.get(4)?;
+        Ok(PendingMarkedSync {
+            endpoint_id: row.get(0)?,
+            filename: row.get(1)?,
+            timestamp_ms: row.get(2)?,
+            marked: row.get(3)?,
+            marked_tag_ids: parse_tag_ids(marked_tag_ids),
+            marked_pinned: row.get(5)?,
+            updated_at_ms: row.get(6)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn clear_pending_marked_sync_exact(
+    path: &Path,
+    endpoint_id: &str,
+    entries: &[(String, i64, i64)],
+) -> rusqlite::Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let conn = Connection::open(path)?;
+    let mut statement = conn.prepare(
+        "DELETE FROM pending_marked_sync WHERE endpoint_id = ?1 AND filename = ?2 AND timestamp_ms = ?3 AND updated_at_ms = ?4",
+    )?;
+    for (filename, timestamp_ms, updated_at_ms) in entries {
+        statement.execute(params![endpoint_id, filename, timestamp_ms, updated_at_ms])?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 pub fn list_messages(
     path: &Path,
     endpoint_id: &str,
@@ -1411,15 +1515,9 @@ mod tests {
 
         let total = count_marked_messages(&path, "endpoint-1", Some("tag-a"), None)
             .expect("count marked messages");
-        let page = list_marked_messages_paged(
-            &path,
-            "endpoint-1",
-            Some("tag-a"),
-            None,
-            Some(1),
-            Some(1),
-        )
-        .expect("list marked page");
+        let page =
+            list_marked_messages_paged(&path, "endpoint-1", Some("tag-a"), None, Some(1), Some(1))
+                .expect("list marked page");
 
         assert_eq!(total, 3);
         assert_eq!(page.len(), 1);
@@ -1493,8 +1591,8 @@ mod tests {
 
         let downloads = list_download_history_paged(&path, Some(1), Some(1))
             .expect("list download history page");
-        let uploads = list_upload_history_paged(&path, Some(1), Some(1))
-            .expect("list upload history page");
+        let uploads =
+            list_upload_history_paged(&path, Some(1), Some(1)).expect("list upload history page");
 
         assert_eq!(count_download_history(&path).expect("count downloads"), 3);
         assert_eq!(downloads.len(), 1);
@@ -1849,6 +1947,66 @@ mod tests {
             count_messages_before(&path, "endpoint-1", 100, "001.txt", false)
                 .expect("count before earliest");
         assert_eq!(before_earliest_count, 0);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pending_marked_sync_upserts_lists_and_clears_exact_entry() {
+        let path = temp_db_path("pending-marked-sync");
+        init_db(&path, None).expect("initialize database");
+
+        let first = PendingMarkedSync {
+            endpoint_id: "endpoint-1".to_string(),
+            filename: "message.txt".to_string(),
+            timestamp_ms: 100,
+            marked: true,
+            marked_tag_ids: vec!["tag-b".to_string(), "tag-a".to_string()],
+            marked_pinned: false,
+            updated_at_ms: 10,
+        };
+        upsert_pending_marked_sync(&path, &first).expect("insert pending marked sync");
+
+        let second = PendingMarkedSync {
+            marked: false,
+            marked_tag_ids: Vec::new(),
+            marked_pinned: false,
+            updated_at_ms: 20,
+            ..first.clone()
+        };
+        upsert_pending_marked_sync(&path, &second).expect("replace pending marked sync");
+
+        let pending = list_pending_marked_sync(&path, "endpoint-1").expect("list pending sync");
+        assert_eq!(pending, vec![second.clone()]);
+
+        clear_pending_marked_sync_exact(
+            &path,
+            "endpoint-1",
+            &[(
+                second.filename.clone(),
+                second.timestamp_ms,
+                first.updated_at_ms,
+            )],
+        )
+        .expect("stale clear should be ignored");
+        assert_eq!(
+            list_pending_marked_sync(&path, "endpoint-1").expect("list after stale clear"),
+            vec![second.clone()]
+        );
+
+        clear_pending_marked_sync_exact(
+            &path,
+            "endpoint-1",
+            &[(
+                second.filename.clone(),
+                second.timestamp_ms,
+                second.updated_at_ms,
+            )],
+        )
+        .expect("clear exact pending sync");
+        assert!(list_pending_marked_sync(&path, "endpoint-1")
+            .expect("list after clear")
+            .is_empty());
 
         let _ = std::fs::remove_file(path);
     }

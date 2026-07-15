@@ -327,8 +327,16 @@ mod tests {
     use super::*;
 
     fn spawn_sleeping_process() -> Child {
-        Command::new("cmd")
-            .args(["/C", "ping", "-n", "2", "127.0.0.1", ">", "NUL"])
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "ping", "-n", "2", "127.0.0.1", ">", "NUL"]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", "sleep 2"]);
+            command
+        };
+        command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -337,8 +345,16 @@ mod tests {
     }
 
     fn spawn_quick_exit_process() -> Child {
-        Command::new("cmd")
-            .args(["/C", "exit", "0"])
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "exit", "0"]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", "true"]);
+            command
+        };
+        command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

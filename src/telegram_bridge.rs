@@ -2,7 +2,7 @@ use crate::filenames::{
     build_message_filename, message_remote_path, parse_message_filename, MessageKind,
 };
 use crate::history::{
-    append_history, load_history_with_layout, save_history, HistoryEntry, HistoryLayout,
+    append_history, load_history_with_layout, upsert_history_entries, HistoryEntry, HistoryLayout,
 };
 use crate::types::WebDavEndpoint;
 use crate::webdav;
@@ -15,12 +15,15 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fmt::{Display, Formatter};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 5;
 const TELEGRAM_GET_FILE_LIMIT_BYTES: i64 = 20 * 1024 * 1024;
 const TELEGRAM_SEND_FILE_LIMIT_BYTES: i64 = 50 * 1024 * 1024;
+const OUTBOUND_SEND_RESERVATION_TTL_MS: i64 = 10 * 60 * 1000;
 
 #[derive(Clone, Deserialize)]
 pub struct TelegramBridgeConfig {
@@ -124,8 +127,10 @@ impl BridgeState {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum OutboundStatus {
+    Sending,
     Sent,
     RetryableError,
+    DeliveryUnconfirmed,
     PermanentFailure,
 }
 
@@ -136,6 +141,8 @@ pub struct OutboundRecord {
     pub telegram_message_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_attempt_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -265,6 +272,22 @@ enum InboundPayload {
     },
 }
 
+struct BridgeProcessLock {
+    path: PathBuf,
+    pid: u32,
+}
+
+impl Drop for BridgeProcessLock {
+    fn drop(&mut self) {
+        let Ok(raw) = fs::read_to_string(&self.path) else {
+            return;
+        };
+        if raw.trim().parse::<u32>().ok() == Some(self.pid) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 pub async fn run() -> Result<(), String> {
     let config_path = resolve_config_path();
     let config = TelegramBridgeConfig::load(&config_path)?;
@@ -284,6 +307,7 @@ pub async fn run() -> Result<(), String> {
     webdav::ensure_directory(&webdav_client, &config.webdav, "files").await?;
 
     let state_path = config.state_path();
+    let _process_lock = acquire_bridge_process_lock(&state_path)?;
     let mut state = BridgeState::load(&state_path)?;
     state.outbound_live_after_ms = now_ms();
     state.save(&state_path)?;
@@ -322,7 +346,20 @@ pub async fn run() -> Result<(), String> {
             Err(err) => log_bridge_error("telegram_poll_failed", &err),
         }
 
-        match sync_webdav_to_telegram(&telegram_client, &webdav_client, &config, &mut state).await {
+        if dirty {
+            state.save(&state_path)?;
+            dirty = false;
+        }
+
+        match sync_webdav_to_telegram(
+            &telegram_client,
+            &webdav_client,
+            &config,
+            &state_path,
+            &mut state,
+        )
+        .await
+        {
             Ok(changed) => dirty |= changed,
             Err(err) => log_bridge_error("telegram_outbound_failed", &err),
         }
@@ -348,6 +385,73 @@ fn resolve_config_path() -> PathBuf {
         return PathBuf::from(value);
     }
     PathBuf::from("telegram-bridge.json")
+}
+
+fn acquire_bridge_process_lock(state_path: &Path) -> Result<BridgeProcessLock, String> {
+    let lock_path = state_path.with_extension("json.lock");
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("创建 bridge lock 目录失败 {}: {err}", parent.display()))?;
+    }
+
+    let pid = std::process::id();
+    for _ in 0..2 {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+        {
+            Ok(mut file) => {
+                writeln!(file, "{pid}").map_err(|err| {
+                    format!("写入 bridge lock 失败 {}: {err}", lock_path.display())
+                })?;
+                return Ok(BridgeProcessLock {
+                    path: lock_path,
+                    pid,
+                });
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                let existing_pid = fs::read_to_string(&lock_path)
+                    .ok()
+                    .and_then(|raw| raw.trim().parse::<u32>().ok());
+                if let Some(existing_pid) = existing_pid.filter(|pid| process_is_running(*pid)) {
+                    return Err(format!("Telegram bridge 已在运行，pid={}", existing_pid));
+                }
+                let _ = fs::remove_file(&lock_path);
+            }
+            Err(err) => {
+                return Err(format!(
+                    "创建 bridge lock 失败 {}: {err}",
+                    lock_path.display()
+                ));
+            }
+        }
+    }
+
+    Err(format!(
+        "创建 bridge lock 失败 {}: lock 被并发占用",
+        lock_path.display()
+    ))
+}
+
+#[cfg(unix)]
+fn process_is_running(pid: u32) -> bool {
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn process_is_running(pid: u32) -> bool {
+    Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).contains(&pid.to_string()))
+        .unwrap_or(false)
 }
 
 fn build_telegram_client(config: &TelegramBridgeConfig) -> Result<Client, String> {
@@ -448,12 +552,14 @@ async fn import_into_webdav(
             let filename = build_message_filename(sender, "message.txt", timestamp_ms);
             let remote_path = message_remote_path(&filename, timestamp_ms);
             let bytes = text.clone().into_bytes();
-            webdav::ensure_parent_directories(webdav_client, &config.webdav, &remote_path)
-                .await
-                .map_err(|err| BridgeError::transient("webdav_io", err))?;
-            webdav::upload_file(webdav_client, &config.webdav, &remote_path, bytes.clone())
-                .await
-                .map_err(|err| BridgeError::transient("webdav_io", err))?;
+            webdav::upload_file_ensuring_parent(
+                webdav_client,
+                &config.webdav,
+                &remote_path,
+                bytes.clone(),
+            )
+            .await
+            .map_err(|err| BridgeError::transient("webdav_io", err))?;
             append_history(
                 webdav_client,
                 &config.webdav,
@@ -510,10 +616,7 @@ async fn import_into_webdav(
 
             let filename = build_message_filename(sender, original_name, timestamp_ms);
             let remote_path = message_remote_path(&filename, timestamp_ms);
-            webdav::ensure_parent_directories(webdav_client, &config.webdav, &remote_path)
-                .await
-                .map_err(|err| BridgeError::transient("webdav_io", err))?;
-            webdav::upload_file(
+            webdav::upload_file_ensuring_parent(
                 webdav_client,
                 &config.webdav,
                 &remote_path,
@@ -549,15 +652,19 @@ async fn sync_webdav_to_telegram(
     telegram_client: &Client,
     webdav_client: &Client,
     config: &TelegramBridgeConfig,
+    state_path: &Path,
     state: &mut BridgeState,
 ) -> Result<bool, BridgeError> {
     let messages = collect_remote_messages(webdav_client, config).await?;
     let mut dirty = false;
 
     for entry in messages {
-        if should_skip_outbound(state, &entry) {
+        refresh_outbound_state_from_disk(state_path, state)?;
+        let attempt_ms = now_ms();
+        if should_skip_outbound(state, &entry, attempt_ms) {
             continue;
         }
+        reserve_outbound_send(state_path, state, &entry, attempt_ms)?;
         match send_history_entry(telegram_client, webdav_client, config, &entry).await {
             Ok(message_id) => {
                 state.outbound_messages.insert(
@@ -566,8 +673,10 @@ async fn sync_webdav_to_telegram(
                         status: OutboundStatus::Sent,
                         telegram_message_id: Some(message_id),
                         last_error: None,
+                        last_attempt_ms: Some(attempt_ms),
                     },
                 );
+                save_bridge_state(state_path, state)?;
                 dirty = true;
             }
             Err(err) if err.kind == ErrorKind::Permanent => {
@@ -577,8 +686,10 @@ async fn sync_webdav_to_telegram(
                         status: OutboundStatus::PermanentFailure,
                         telegram_message_id: None,
                         last_error: Some(err.message.clone()),
+                        last_attempt_ms: Some(attempt_ms),
                     },
                 );
+                save_bridge_state(state_path, state)?;
                 warn!(
                     "event=webdav_outbound_permanent_failure filename={} category={} message={}",
                     entry.filename, err.category, err.message
@@ -586,14 +697,21 @@ async fn sync_webdav_to_telegram(
                 dirty = true;
             }
             Err(err) => {
+                let status = if is_delivery_unconfirmed_error(&err) {
+                    OutboundStatus::DeliveryUnconfirmed
+                } else {
+                    OutboundStatus::RetryableError
+                };
                 state.outbound_messages.insert(
                     entry.filename.clone(),
                     OutboundRecord {
-                        status: OutboundStatus::RetryableError,
+                        status,
                         telegram_message_id: None,
                         last_error: Some(err.message.clone()),
+                        last_attempt_ms: Some(attempt_ms),
                     },
                 );
+                save_bridge_state(state_path, state)?;
                 warn!(
                     "event=webdav_outbound_retryable_failure filename={} category={} message={}",
                     entry.filename, err.category, err.message
@@ -618,7 +736,7 @@ async fn collect_remote_messages(
         .into_iter()
         .map(|entry| (entry.filename.clone(), entry))
         .collect();
-    let mut derived = false;
+    let mut derived_entries: Vec<HistoryEntry> = Vec::new();
 
     if loaded.layout != HistoryLayout::Manifest {
         let entries = webdav::list_entries(client, &config.webdav, Some("files"), true)
@@ -639,52 +757,105 @@ async fn collect_remote_messages(
                 continue;
             }
             if let Some(parsed) = parse_message_filename(&entry.filename) {
-                map.insert(
-                    entry.filename.clone(),
-                    HistoryEntry {
-                        filename: entry.filename.clone(),
-                        sender: parsed.sender,
-                        timestamp_ms: parsed.timestamp_ms,
-                        size: entry.size.unwrap_or(0) as i64,
-                        kind: parsed.kind.as_str().to_string(),
-                        original_name: parsed.original_name.clone(),
-                        remote_path: Some(entry.remote_path.clone()),
-                        marked: false,
-                        marked_tag_ids: Vec::new(),
-                        marked_pinned: false,
-                        format: if parsed.original_name.to_lowercase().ends_with(".md") {
-                            "markdown".to_string()
-                        } else {
-                            "text".to_string()
-                        },
+                let history_entry = HistoryEntry {
+                    filename: entry.filename.clone(),
+                    sender: parsed.sender,
+                    timestamp_ms: parsed.timestamp_ms,
+                    size: entry.size.unwrap_or(0) as i64,
+                    kind: parsed.kind.as_str().to_string(),
+                    original_name: parsed.original_name.clone(),
+                    remote_path: Some(entry.remote_path.clone()),
+                    marked: false,
+                    marked_tag_ids: Vec::new(),
+                    marked_pinned: false,
+                    format: if parsed.original_name.to_lowercase().ends_with(".md") {
+                        "markdown".to_string()
+                    } else {
+                        "text".to_string()
                     },
-                );
-                derived = true;
+                };
+                map.insert(entry.filename.clone(), history_entry.clone());
+                derived_entries.push(history_entry);
             }
         }
     }
 
     let mut merged: Vec<HistoryEntry> = map.into_values().collect();
     merged.sort_by_key(|entry| entry.timestamp_ms);
-    if derived {
-        save_history(client, &config.webdav, &merged, &loaded.tags)
+    if !derived_entries.is_empty() {
+        upsert_history_entries(client, &config.webdav, derived_entries)
             .await
             .map_err(|err| BridgeError::transient("webdav_history", err))?;
     }
     Ok(merged)
 }
 
-fn should_skip_outbound(state: &BridgeState, entry: &HistoryEntry) -> bool {
+fn refresh_outbound_state_from_disk(
+    state_path: &Path,
+    state: &mut BridgeState,
+) -> Result<(), BridgeError> {
+    let latest =
+        BridgeState::load(state_path).map_err(|err| BridgeError::transient("bridge_state", err))?;
+    state.last_update_id = state.last_update_id.max(latest.last_update_id);
+    state.outbound_live_after_ms = state
+        .outbound_live_after_ms
+        .max(latest.outbound_live_after_ms);
+    state
+        .imported_telegram_messages
+        .extend(latest.imported_telegram_messages);
+    state
+        .telegram_origin_filenames
+        .extend(latest.telegram_origin_filenames);
+    state.outbound_messages.extend(latest.outbound_messages);
+    Ok(())
+}
+
+fn save_bridge_state(state_path: &Path, state: &BridgeState) -> Result<(), BridgeError> {
+    state
+        .save(state_path)
+        .map_err(|err| BridgeError::transient("bridge_state", err))
+}
+
+fn reserve_outbound_send(
+    state_path: &Path,
+    state: &mut BridgeState,
+    entry: &HistoryEntry,
+    attempt_ms: i64,
+) -> Result<(), BridgeError> {
+    state.outbound_messages.insert(
+        entry.filename.clone(),
+        OutboundRecord {
+            status: OutboundStatus::Sending,
+            telegram_message_id: None,
+            last_error: None,
+            last_attempt_ms: Some(attempt_ms),
+        },
+    );
+    save_bridge_state(state_path, state)
+}
+
+fn should_skip_outbound(state: &BridgeState, entry: &HistoryEntry, now_ms: i64) -> bool {
     if state.telegram_origin_filenames.contains(&entry.filename) {
         return true;
     }
     match state.outbound_messages.get(&entry.filename) {
-        Some(record) => matches!(
-            record.status,
-            OutboundStatus::Sent | OutboundStatus::PermanentFailure
-        ),
+        Some(record) => {
+            matches!(
+                record.status,
+                OutboundStatus::Sent
+                    | OutboundStatus::PermanentFailure
+                    | OutboundStatus::DeliveryUnconfirmed
+            ) || (record.status == OutboundStatus::Sending
+                && record.last_attempt_ms.is_some_and(|attempt_ms| {
+                    now_ms - attempt_ms < OUTBOUND_SEND_RESERVATION_TTL_MS
+                }))
+        }
         None => entry.timestamp_ms < state.outbound_live_after_ms,
     }
+}
+
+fn is_delivery_unconfirmed_error(err: &BridgeError) -> bool {
+    matches!(err.category, "telegram_network" | "telegram_api")
 }
 
 fn now_ms() -> i64 {
@@ -1071,6 +1242,7 @@ mod tests {
                 status: OutboundStatus::RetryableError,
                 telegram_message_id: None,
                 last_error: Some("temporary".to_string()),
+                last_attempt_ms: Some(56),
             },
         );
         state.save(&path).expect("save state");
@@ -1082,6 +1254,13 @@ mod tests {
         assert_eq!(
             loaded.outbound_messages.get("g").map(|item| &item.status),
             Some(&OutboundStatus::RetryableError)
+        );
+        assert_eq!(
+            loaded
+                .outbound_messages
+                .get("g")
+                .and_then(|item| item.last_attempt_ms),
+            Some(56)
         );
     }
 
@@ -1096,6 +1275,7 @@ mod tests {
                 status: OutboundStatus::Sent,
                 telegram_message_id: Some(1),
                 last_error: None,
+                last_attempt_ms: Some(120),
             },
         );
         state.outbound_messages.insert(
@@ -1104,6 +1284,7 @@ mod tests {
                 status: OutboundStatus::PermanentFailure,
                 telegram_message_id: None,
                 last_error: Some("too large".to_string()),
+                last_attempt_ms: Some(120),
             },
         );
         state.outbound_messages.insert(
@@ -1112,6 +1293,25 @@ mod tests {
                 status: OutboundStatus::RetryableError,
                 telegram_message_id: None,
                 last_error: Some("temporary".to_string()),
+                last_attempt_ms: Some(120),
+            },
+        );
+        state.outbound_messages.insert(
+            "g".to_string(),
+            OutboundRecord {
+                status: OutboundStatus::Sending,
+                telegram_message_id: None,
+                last_error: None,
+                last_attempt_ms: Some(120),
+            },
+        );
+        state.outbound_messages.insert(
+            "h".to_string(),
+            OutboundRecord {
+                status: OutboundStatus::DeliveryUnconfirmed,
+                telegram_message_id: None,
+                last_error: Some("request timed out".to_string()),
+                last_attempt_ms: Some(120),
             },
         );
         let imported = HistoryEntry {
@@ -1149,12 +1349,63 @@ mod tests {
             timestamp_ms: 100,
             ..imported.clone()
         };
-        assert!(should_skip_outbound(&state, &imported));
-        assert!(should_skip_outbound(&state, &sent));
-        assert!(should_skip_outbound(&state, &permanent));
-        assert!(!should_skip_outbound(&state, &retryable));
-        assert!(should_skip_outbound(&state, &backlog));
-        assert!(!should_skip_outbound(&state, &live));
+        let sending = HistoryEntry {
+            filename: "g".to_string(),
+            ..imported.clone()
+        };
+        let unconfirmed = HistoryEntry {
+            filename: "h".to_string(),
+            ..imported.clone()
+        };
+        assert!(should_skip_outbound(&state, &imported, 130));
+        assert!(should_skip_outbound(&state, &sent, 130));
+        assert!(should_skip_outbound(&state, &permanent, 130));
+        assert!(!should_skip_outbound(&state, &retryable, 130));
+        assert!(should_skip_outbound(&state, &backlog, 130));
+        assert!(!should_skip_outbound(&state, &live, 130));
+        assert!(should_skip_outbound(&state, &sending, 130));
+        assert!(!should_skip_outbound(
+            &state,
+            &sending,
+            120 + OUTBOUND_SEND_RESERVATION_TTL_MS
+        ));
+        assert!(should_skip_outbound(&state, &unconfirmed, 130));
+    }
+
+    #[test]
+    fn bridge_process_lock_rejects_running_pid() {
+        let state_path = std::env::temp_dir().join(format!(
+            "tg-bridge-lock-running-{}.json",
+            std::process::id()
+        ));
+        let lock_path = state_path.with_extension("json.lock");
+        let _ = fs::remove_file(&lock_path);
+
+        let lock = acquire_bridge_process_lock(&state_path).expect("first lock");
+        let error = match acquire_bridge_process_lock(&state_path) {
+            Ok(_) => panic!("second lock should fail"),
+            Err(err) => err,
+        };
+
+        assert!(error.contains("Telegram bridge 已在运行"));
+        drop(lock);
+        assert!(!lock_path.exists());
+    }
+
+    #[test]
+    fn bridge_process_lock_replaces_stale_pid() {
+        let state_path =
+            std::env::temp_dir().join(format!("tg-bridge-lock-stale-{}.json", std::process::id()));
+        let lock_path = state_path.with_extension("json.lock");
+        let _ = fs::remove_file(&lock_path);
+        fs::write(&lock_path, "99999999\n").expect("write stale lock");
+
+        let lock = acquire_bridge_process_lock(&state_path).expect("replace stale lock");
+        let raw = fs::read_to_string(&lock_path).expect("read lock");
+
+        assert_eq!(raw.trim(), std::process::id().to_string());
+        drop(lock);
+        assert!(!lock_path.exists());
     }
 
     #[test]

@@ -103,10 +103,7 @@ pub fn ensure_workspace_dirs(layout: &WorkspaceLayout) -> Result<(), String> {
     Ok(())
 }
 
-pub fn migrate_legacy_layout(
-    app_data_dir: &Path,
-    layout: &WorkspaceLayout,
-) -> Result<(), String> {
+pub fn migrate_legacy_layout(app_data_dir: &Path, layout: &WorkspaceLayout) -> Result<(), String> {
     migrate_legacy_endpoint_dirs(app_data_dir, &layout.endpoints_dir())?;
     migrate_legacy_plugin_dir(
         &app_data_dir.join("telegram-bridge"),
@@ -121,10 +118,11 @@ fn migrate_legacy_endpoint_dirs(app_data_dir: &Path, endpoints_dir: &Path) -> Re
         return Ok(());
     }
 
-    for entry in
-        fs::read_dir(&legacy_files_dir).map_err(|err| format!("failed to read legacy files directory: {err}"))?
+    for entry in fs::read_dir(&legacy_files_dir)
+        .map_err(|err| format!("failed to read legacy files directory: {err}"))?
     {
-        let entry = entry.map_err(|err| format!("failed to read legacy endpoint directory: {err}"))?;
+        let entry =
+            entry.map_err(|err| format!("failed to read legacy endpoint directory: {err}"))?;
         let target_dir = endpoints_dir.join(entry.file_name());
         if target_dir.exists() {
             continue;
@@ -147,8 +145,12 @@ fn migrate_legacy_plugin_dir(source_dir: &Path, target_dir: &Path) -> Result<(),
     }
 
     if let Some(parent) = target_dir.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| format!("failed to create plugin parent directory {}: {err}", parent.display()))?;
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "failed to create plugin parent directory {}: {err}",
+                parent.display()
+            )
+        })?;
     }
 
     fs::rename(source_dir, target_dir).map_err(|err| {
@@ -294,7 +296,9 @@ fn snapshot_target_dir(workspace_root: &Path, target_path: &Path, category: &str
         .or_else(|_| target_path.strip_prefix(workspace_root))
         .ok();
 
-    let mut dir = workspace_root.join("snapshots").join(sanitize_component(category));
+    let mut dir = workspace_root
+        .join("snapshots")
+        .join(sanitize_component(category));
     if let Some(relative) = relative {
         for component in relative.components() {
             let value = sanitize_component(&component.as_os_str().to_string_lossy());
@@ -399,8 +403,14 @@ mod tests {
     #[test]
     fn infer_workspace_root_from_nested_path() {
         let root = temp_dir("infer").join("workspace");
-        let nested = root.join("plugins").join("telegram-bridge").join("state.json");
-        assert_eq!(infer_workspace_root(&nested).as_deref(), Some(root.as_path()));
+        let nested = root
+            .join("plugins")
+            .join("telegram-bridge")
+            .join("state.json");
+        assert_eq!(
+            infer_workspace_root(&nested).as_deref(),
+            Some(root.as_path())
+        );
     }
 
     #[test]
@@ -437,8 +447,8 @@ mod tests {
             .join("settings")
             .join("settings.json");
         assert!(snapshot_dir.is_dir());
-        let snapshots = list_snapshots_for_target(layout.root(), &target, "settings")
-            .expect("list snapshots");
+        let snapshots =
+            list_snapshots_for_target(layout.root(), &target, "settings").expect("list snapshots");
         assert!(!snapshots.is_empty());
 
         let _ = fs::remove_dir_all(app_dir);
@@ -554,8 +564,16 @@ mod tests {
         ensure_workspace_dirs(&layout).expect("ensure workspace dirs");
         migrate_legacy_layout(&app_dir, &layout).expect("migrate legacy layout");
 
-        assert!(layout.endpoints_dir().join("endpoint-a").join("sample.txt").is_file());
-        assert!(layout.plugins_dir().join("telegram-bridge").join("state.json").is_file());
+        assert!(layout
+            .endpoints_dir()
+            .join("endpoint-a")
+            .join("sample.txt")
+            .is_file());
+        assert!(layout
+            .plugins_dir()
+            .join("telegram-bridge")
+            .join("state.json")
+            .is_file());
         assert!(!legacy_endpoint_dir.exists());
         assert!(!legacy_plugin_dir.exists());
 

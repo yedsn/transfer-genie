@@ -10,7 +10,9 @@ mod webdav;
 mod webdav_sync_runtime;
 mod workspace;
 
-use crate::db::{DbDownloadHistory, DbMessage, DbPartialDownload, DbUploadHistory};
+use crate::db::{
+    DbDownloadHistory, DbMessage, DbPartialDownload, DbUploadHistory, PendingMarkedSync,
+};
 use crate::filenames::{
     build_message_filename, message_remote_path, parse_message_filename, thumbnail_remote_path,
     MessageKind,
@@ -20,16 +22,16 @@ use crate::integration_runtime::{
     builtin_module_statuses, persist_module_statuses, IntegrationModuleStatus,
     ModuleRuntimeStateSnapshot,
 };
-use crate::telegram_bridge_runtime::{
-    TelegramBridgeManager, TelegramBridgeStatus,
-};
-use crate::webdav_sync_runtime::WebDavSyncRuntimeAdapter;
-use crate::workspace::WorkspaceLayout;
+#[cfg(test)]
+use crate::telegram_bridge_runtime::ManagedTelegramBridgeProcess;
+use crate::telegram_bridge_runtime::{TelegramBridgeManager, TelegramBridgeStatus};
 use crate::types::{
     BackupSettings, DownloadHistoryRecord, LocalHttpApiSettings, MarkedTag, Message, Settings,
     SyncStatus, TelegramBridgeSettings, UploadHistoryRecord, WebDavConflict, WebDavEndpoint,
     DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS, DEFAULT_LOCAL_HTTP_API_BIND_PORT,
 };
+use crate::webdav_sync_runtime::WebDavSyncRuntimeAdapter;
+use crate::workspace::WorkspaceLayout;
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use axum::body::Bytes;
@@ -53,12 +55,10 @@ use std::fs;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
-use crate::telegram_bridge_runtime::ManagedTelegramBridgeProcess;
+use std::process::Child;
 #[cfg(test)]
 use std::process::Command;
-#[cfg(test)]
-use std::process::Child;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::Window;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -77,7 +77,7 @@ struct AppState {
     default_download_dir: PathBuf,
     settings: Mutex<Settings>,
     sync_status: Mutex<SyncStatus>,
-    sync_guard: AsyncMutex<()>,
+    sync_guard: Arc<AsyncMutex<()>>,
     sync_cancel: Mutex<Option<oneshot::Sender<()>>>,
     sync_loop_signal: watch::Sender<u64>,
     http: Client,
@@ -489,6 +489,14 @@ struct SendMarkedOptionsInput {
     deleted_tag_ids: Vec<String>,
 }
 
+struct AppliedSendMarkedOptions {
+    marked: bool,
+    tag_ids: Vec<String>,
+    tags: Vec<MarkedTag>,
+    tags_changed: bool,
+    cleanup_targets: Vec<crate::history::HistoryEntryTarget>,
+}
+
 #[derive(Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SendMessageResult {
@@ -720,10 +728,12 @@ impl<'a> TelegramBridgeRuntimeAdapter<'a> {
             .telegram_bridge
             .lock()
             .map_err(|_| "读取 Telegram Bridge 状态失败".to_string())?;
-        Ok(crate::telegram_bridge_runtime::telegram_bridge_runtime_snapshot(
-            &telegram_manager,
-            settings.telegram.enabled,
-        ))
+        Ok(
+            crate::telegram_bridge_runtime::telegram_bridge_runtime_snapshot(
+                &telegram_manager,
+                settings.telegram.enabled,
+            ),
+        )
     }
 
     fn status(&self) -> Result<TelegramBridgeStatus, String> {
@@ -765,7 +775,8 @@ fn parse_snapshot_created_at_ms(path: &Path) -> Option<i64> {
 
 fn list_settings_snapshots_for_state(state: &AppState) -> Result<Vec<LocalSnapshotRecord>, String> {
     let workspace_root = workspace_root_for_state(state);
-    let snapshots = workspace::list_snapshots_for_target(&workspace_root, &state.settings_path, "settings")?;
+    let snapshots =
+        workspace::list_snapshots_for_target(&workspace_root, &state.settings_path, "settings")?;
     Ok(snapshots
         .into_iter()
         .filter_map(|path| {
@@ -870,7 +881,10 @@ fn list_local_data_backups(
         .filter(|path| {
             path.file_name()
                 .and_then(|value| value.to_str())
-                .map(|name| name.starts_with("transfer-genie-local-data-") || name.starts_with("transfer-genie-rollback-"))
+                .map(|name| {
+                    name.starts_with("transfer-genie-local-data-")
+                        || name.starts_with("transfer-genie-rollback-")
+                })
                 .unwrap_or(false)
         })
         .map(|path| {
@@ -1343,27 +1357,44 @@ fn sanitize_deleted_marked_tag_ids(tags: &[MarkedTag], tag_ids: Vec<String>) -> 
     sanitize_marked_tag_ids(tags, tag_ids)
 }
 
-fn apply_send_marked_options(
-    loaded: &mut crate::history::LoadedHistory,
+async fn load_and_apply_send_marked_options(
+    state: &AppState,
+    endpoint: &WebDavEndpoint,
     options: SendMarkedOptionsInput,
-) -> Result<(bool, Vec<String>), String> {
-    let deleted_tag_ids = sanitize_deleted_marked_tag_ids(&loaded.tags, options.deleted_tag_ids);
-    if !deleted_tag_ids.is_empty() {
-        let deleted_set: HashSet<&str> = deleted_tag_ids.iter().map(String::as_str).collect();
-        loaded
-            .tags
-            .retain(|tag| !deleted_set.contains(tag.id.as_str()));
-        for entry in loaded.entries.iter_mut() {
-            entry
+) -> Result<AppliedSendMarkedOptions, String> {
+    let mut tags =
+        db::list_marked_tags(&state.db_path, &endpoint.id).map_err(|err| err.to_string())?;
+    let deleted_tag_ids = sanitize_deleted_marked_tag_ids(&tags, options.deleted_tag_ids);
+    let deleted_set: HashSet<&str> = deleted_tag_ids.iter().map(String::as_str).collect();
+    let mut cleanup_targets = Vec::new();
+    let tags_changed = !deleted_set.is_empty() || !options.created_tags.is_empty();
+    if !deleted_set.is_empty() {
+        tags.retain(|tag| !deleted_set.contains(tag.id.as_str()));
+        let marked_messages = db::list_marked_messages(&state.db_path, &endpoint.id, None, None)
+            .map_err(|err| err.to_string())?;
+        for message in marked_messages {
+            if !message
+                .marked_tag_ids
+                .iter()
+                .any(|tag_id| deleted_set.contains(tag_id.as_str()))
+            {
+                continue;
+            }
+            let mut db_message = db::get_message(&state.db_path, &endpoint.id, &message.filename)
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| "未找到消息".to_string())?;
+            db_message
                 .marked_tag_ids
                 .retain(|tag_id| !deleted_set.contains(tag_id.as_str()));
+            db::upsert_message(&state.db_path, &db_message).map_err(|err| err.to_string())?;
+            cleanup_targets.push((db_message.filename.clone(), db_message.timestamp_ms));
         }
     }
 
     let mut selected_created_tag_ids = Vec::new();
     for created_tag in options.created_tags {
         let normalized = normalize_marked_tag_name(&created_tag.name)?;
-        ensure_unique_marked_tag_name(&loaded.tags, &normalized, None)?;
+        ensure_unique_marked_tag_name(&tags, &normalized, None)?;
         let tag = MarkedTag {
             id: generate_marked_tag_id(),
             name: normalized,
@@ -1371,23 +1402,25 @@ fn apply_send_marked_options(
         if created_tag.selected {
             selected_created_tag_ids.push(tag.id.clone());
         }
-        loaded.tags.push(tag);
+        tags.push(tag);
     }
-    loaded
-        .tags
-        .sort_by(|left, right| left.name.cmp(&right.name));
+    tags.sort_by(|left, right| left.name.cmp(&right.name));
 
-    let mut final_tag_ids =
-        sanitize_existing_marked_tag_ids(&loaded.tags, options.selected_tag_ids);
+    let mut final_tag_ids = sanitize_existing_marked_tag_ids(&tags, options.selected_tag_ids);
     final_tag_ids.extend(selected_created_tag_ids);
     final_tag_ids.sort();
     final_tag_ids.dedup();
-
     if !options.marked {
         final_tag_ids.clear();
     }
 
-    Ok((options.marked, final_tag_ids))
+    Ok(AppliedSendMarkedOptions {
+        marked: options.marked,
+        tag_ids: final_tag_ids,
+        tags,
+        tags_changed,
+        cleanup_targets,
+    })
 }
 
 async fn persist_sent_message_with_marked_options(
@@ -1397,27 +1430,58 @@ async fn persist_sent_message_with_marked_options(
     marked_options: Option<SendMarkedOptionsInput>,
 ) -> Result<SendMessageResult, String> {
     let _guard = state.sync_guard.lock().await;
-    let mut loaded = crate::history::load_history_with_layout(&state.http, endpoint).await?;
-    let (marked, final_tag_ids) =
-        apply_send_marked_options(&mut loaded, marked_options.unwrap_or_default())?;
+    let applied_options =
+        load_and_apply_send_marked_options(state, endpoint, marked_options.unwrap_or_default())
+            .await?;
 
-    message.marked = marked;
-    message.marked_tag_ids = final_tag_ids.clone();
+    message.marked = applied_options.marked;
+    message.marked_tag_ids = applied_options.tag_ids.clone();
     message.marked_pinned = false;
 
     db::upsert_message(&state.db_path, message).map_err(|err| err.to_string())?;
-    loaded.entries.push(message_to_history(message));
-    crate::history::save_history(&state.http, endpoint, &loaded.entries, &loaded.tags).await?;
-    sync_marked_metadata_to_db(state, &endpoint.id, &loaded.entries, &loaded.tags)?;
+    let history_result = crate::history::upsert_history_entries(
+        &state.http,
+        endpoint,
+        vec![message_to_history(message)],
+    )
+    .await?;
+    invalidate_history_cache_for_paths(state, &endpoint.id, &history_result.touched_paths)?;
+    if applied_options.tags_changed {
+        crate::history::save_marked_tags(&state.http, endpoint, &applied_options.tags).await?;
+        invalidate_history_cache_for_paths(
+            state,
+            &endpoint.id,
+            &[crate::history::HISTORY_TAGS_PATH.to_string()],
+        )?;
+        db::replace_marked_tags(&state.db_path, &endpoint.id, &applied_options.tags)
+            .map_err(|err| err.to_string())?;
+    }
+    if !applied_options.cleanup_targets.is_empty() {
+        let history_result = crate::history::mutate_history_entries_by_targets(
+            &state.http,
+            endpoint,
+            &applied_options.cleanup_targets,
+            |entry| {
+                let before_len = entry.marked_tag_ids.len();
+                entry
+                    .marked_tag_ids
+                    .retain(|tag_id| applied_options.tags.iter().any(|tag| tag.id == *tag_id));
+                before_len != entry.marked_tag_ids.len()
+            },
+        )
+        .await?;
+        invalidate_history_cache_for_paths(state, &endpoint.id, &history_result.touched_paths)?;
+    }
 
     Ok(SendMessageResult {
-        marked_tag_ids: final_tag_ids,
+        marked_tag_ids: applied_options.tag_ids,
         filename: message.filename.clone(),
         original_name: message.original_name.clone(),
         endpoint_id: endpoint.id.clone(),
     })
 }
 
+#[cfg(test)]
 fn apply_marked_tag_ids_to_entries(
     history_entries: &mut [HistoryEntry],
     filenames: &[String],
@@ -1460,27 +1524,6 @@ fn apply_marked_state(
     }
 }
 
-fn sync_marked_metadata_to_db(
-    state: &AppState,
-    endpoint_id: &str,
-    history_entries: &[HistoryEntry],
-    tags: &[MarkedTag],
-) -> Result<(), String> {
-    db::replace_marked_tags(&state.db_path, endpoint_id, tags).map_err(|err| err.to_string())?;
-    for history_entry in history_entries {
-        if let Some(mut message) =
-            db::get_message(&state.db_path, endpoint_id, &history_entry.filename)
-                .map_err(|err| err.to_string())?
-        {
-            message.marked = history_entry.marked;
-            message.marked_tag_ids = history_entry.marked_tag_ids.clone();
-            message.marked_pinned = history_entry.marked_pinned;
-            db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
-        }
-    }
-    Ok(())
-}
-
 #[tauri::command]
 async fn mark_message(
     state: State<'_, AppState>,
@@ -1504,8 +1547,8 @@ async fn set_message_marked(
     let settings = current_settings(state)?;
     let endpoint = resolve_active_endpoint(&settings)?;
     let _guard = state.sync_guard.lock().await;
-    let mut loaded = crate::history::load_history_with_layout(&state.http, &endpoint).await?;
-    let valid_tag_ids = sanitize_marked_tag_ids(&loaded.tags, tag_ids);
+    let tags = db::list_marked_tags(&state.db_path, &endpoint.id).map_err(|err| err.to_string())?;
+    let valid_tag_ids = sanitize_marked_tag_ids(&tags, tag_ids);
 
     let mut changed = false;
     let existing =
@@ -1529,27 +1572,127 @@ async fn set_message_marked(
             &valid_tag_ids,
         );
         db::upsert_message(&state.db_path, &local_message).map_err(|err| err.to_string())?;
-    }
-
-    for entry in loaded.entries.iter_mut() {
-        if entry.filename == filename {
-            apply_marked_state(
-                &mut entry.marked,
-                &mut entry.marked_tag_ids,
-                &mut entry.marked_pinned,
-                marked,
-                &valid_tag_ids,
-            );
-            changed = true;
-            break;
-        }
+        changed = true;
     }
 
     if changed {
-        crate::history::save_history(&state.http, &endpoint, &loaded.entries, &loaded.tags).await?;
+        let pending = PendingMarkedSync {
+            endpoint_id: local_message.endpoint_id.clone(),
+            filename: local_message.filename.clone(),
+            timestamp_ms: local_message.timestamp_ms,
+            marked: local_message.marked,
+            marked_tag_ids: local_message.marked_tag_ids.clone(),
+            marked_pinned: local_message.marked_pinned,
+            updated_at_ms: now_ms(),
+        };
+        db::upsert_pending_marked_sync(&state.db_path, &pending).map_err(|err| err.to_string())?;
+        schedule_marked_history_sync(state, endpoint, pending);
     }
 
     Ok(())
+}
+
+fn schedule_marked_history_sync(
+    state: &AppState,
+    endpoint: WebDavEndpoint,
+    pending: PendingMarkedSync,
+) {
+    let http = state.http.clone();
+    let db_path = state.db_path.clone();
+    let cache_dir = history_cache_dir(state, &endpoint.id);
+    let sync_guard = Arc::clone(&state.sync_guard);
+    tauri::async_runtime::spawn(async move {
+        let _guard = sync_guard.lock().await;
+        if let Err(err) =
+            flush_marked_history_entries(&http, &endpoint, &db_path, &cache_dir, &[pending.clone()])
+                .await
+        {
+            log::warn!(
+                "后台同步标记状态失败 endpoint={} filename={}: {}",
+                pending.endpoint_id,
+                pending.filename,
+                err
+            );
+        }
+    });
+}
+
+async fn flush_marked_history_entries(
+    http: &Client,
+    endpoint: &WebDavEndpoint,
+    db_path: &Path,
+    cache_dir: &Path,
+    pending_entries: &[PendingMarkedSync],
+) -> Result<(), String> {
+    if pending_entries.is_empty() {
+        return Ok(());
+    }
+    let targets: Vec<crate::history::HistoryEntryTarget> = pending_entries
+        .iter()
+        .map(|pending| (pending.filename.clone(), pending.timestamp_ms))
+        .collect();
+    let by_filename: HashMap<String, PendingMarkedSync> = pending_entries
+        .iter()
+        .cloned()
+        .map(|pending| (pending.filename.clone(), pending))
+        .collect();
+
+    let history_result =
+        crate::history::mutate_history_entries_by_targets(http, endpoint, &targets, |entry| {
+            let Some(pending) = by_filename.get(&entry.filename) else {
+                return false;
+            };
+            let before = (
+                entry.marked,
+                entry.marked_tag_ids.clone(),
+                entry.marked_pinned,
+            );
+            entry.marked = pending.marked;
+            entry.marked_tag_ids = pending.marked_tag_ids.clone();
+            entry.marked_tag_ids.sort();
+            entry.marked_pinned = pending.marked_pinned;
+            before
+                != (
+                    entry.marked,
+                    entry.marked_tag_ids.clone(),
+                    entry.marked_pinned,
+                )
+        })
+        .await?;
+    crate::history::invalidate_history_cache_paths(cache_dir, &history_result.touched_paths)?;
+    let cleared: Vec<(String, i64, i64)> = pending_entries
+        .iter()
+        .map(|pending| {
+            (
+                pending.filename.clone(),
+                pending.timestamp_ms,
+                pending.updated_at_ms,
+            )
+        })
+        .collect();
+    db::clear_pending_marked_sync_exact(db_path, &endpoint.id, &cleared)
+        .map_err(|err| err.to_string())
+}
+
+fn apply_pending_marked_sync_to_message(message: &mut DbMessage, pending: &PendingMarkedSync) {
+    message.marked = pending.marked;
+    message.marked_tag_ids = pending.marked_tag_ids.clone();
+    message.marked_pinned = pending.marked_pinned;
+}
+
+fn apply_pending_marked_sync_to_history(history: &mut HistoryEntry, pending: &PendingMarkedSync) {
+    history.marked = pending.marked;
+    history.marked_tag_ids = pending.marked_tag_ids.clone();
+    history.marked_tag_ids.sort();
+    history.marked_pinned = pending.marked_pinned;
+}
+
+fn pending_marked_sync_map(pending: &[PendingMarkedSync]) -> HashMap<String, PendingMarkedSync> {
+    pending
+        .iter()
+        .cloned()
+        .map(|entry| (entry.filename.clone(), entry))
+        .collect()
 }
 
 #[tauri::command]
@@ -1573,18 +1716,40 @@ async fn set_marked_messages_tags(
         return Ok(0);
     }
 
-    let mut loaded = crate::history::load_history_with_layout(&state.http, &endpoint).await?;
-    let valid_tag_ids = sanitize_marked_tag_ids(&loaded.tags, tag_ids);
-    let changed =
-        apply_marked_tag_ids_to_entries(&mut loaded.entries, &unique_filenames, &valid_tag_ids);
-
-    if changed == 0 {
-        return Ok(0);
+    let tags = db::list_marked_tags(&state.db_path, &endpoint.id).map_err(|err| err.to_string())?;
+    let valid_tag_ids = sanitize_marked_tag_ids(&tags, tag_ids);
+    let mut pending_entries = Vec::new();
+    for filename in &unique_filenames {
+        if let Some(mut message) = db::get_message(&state.db_path, &endpoint.id, filename)
+            .map_err(|err| err.to_string())?
+        {
+            if !message.marked || message.marked_tag_ids == valid_tag_ids {
+                continue;
+            }
+            message.marked_tag_ids = valid_tag_ids.clone();
+            db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
+            let pending = PendingMarkedSync {
+                endpoint_id: message.endpoint_id.clone(),
+                filename: message.filename.clone(),
+                timestamp_ms: message.timestamp_ms,
+                marked: message.marked,
+                marked_tag_ids: message.marked_tag_ids.clone(),
+                marked_pinned: message.marked_pinned,
+                updated_at_ms: now_ms(),
+            };
+            db::upsert_pending_marked_sync(&state.db_path, &pending)
+                .map_err(|err| err.to_string())?;
+            pending_entries.push(pending);
+        }
     }
 
-    crate::history::save_history(&state.http, &endpoint, &loaded.entries, &loaded.tags).await?;
-    sync_marked_metadata_to_db(state.inner(), &endpoint.id, &loaded.entries, &loaded.tags)?;
-    Ok(changed)
+    if pending_entries.is_empty() {
+        return Ok(0);
+    }
+    for pending in pending_entries.iter().cloned() {
+        schedule_marked_history_sync(state.inner(), endpoint.clone(), pending);
+    }
+    Ok(pending_entries.len())
 }
 
 #[tauri::command]
@@ -1599,20 +1764,23 @@ async fn create_marked_tag(state: State<'_, AppState>, name: String) -> Result<M
     let settings = current_settings(&state)?;
     let endpoint = resolve_active_endpoint(&settings)?;
     let _guard = state.sync_guard.lock().await;
-    let mut loaded = crate::history::load_history_with_layout(&state.http, &endpoint).await?;
+    let mut tags =
+        db::list_marked_tags(&state.db_path, &endpoint.id).map_err(|err| err.to_string())?;
     let normalized = normalize_marked_tag_name(&name)?;
-    ensure_unique_marked_tag_name(&loaded.tags, &normalized, None)?;
+    ensure_unique_marked_tag_name(&tags, &normalized, None)?;
     let tag = MarkedTag {
         id: generate_marked_tag_id(),
         name: normalized,
     };
-    loaded.tags.push(tag.clone());
-    loaded
-        .tags
-        .sort_by(|left, right| left.name.cmp(&right.name));
-    crate::history::save_history(&state.http, &endpoint, &loaded.entries, &loaded.tags).await?;
-    db::replace_marked_tags(&state.db_path, &endpoint.id, &loaded.tags)
-        .map_err(|err| err.to_string())?;
+    tags.push(tag.clone());
+    tags.sort_by(|left, right| left.name.cmp(&right.name));
+    crate::history::save_marked_tags(&state.http, &endpoint, &tags).await?;
+    invalidate_history_cache_for_paths(
+        state.inner(),
+        &endpoint.id,
+        &[crate::history::HISTORY_TAGS_PATH.to_string()],
+    )?;
+    db::replace_marked_tags(&state.db_path, &endpoint.id, &tags).map_err(|err| err.to_string())?;
     Ok(tag)
 }
 
@@ -1621,19 +1789,56 @@ async fn delete_marked_tag(state: State<'_, AppState>, tag_id: String) -> Result
     let settings = current_settings(&state)?;
     let endpoint = resolve_active_endpoint(&settings)?;
     let _guard = state.sync_guard.lock().await;
-    let mut loaded = crate::history::load_history_with_layout(&state.http, &endpoint).await?;
-    let before = loaded.tags.len();
-    loaded.tags.retain(|tag| tag.id != tag_id);
-    if before == loaded.tags.len() {
+    let mut tags =
+        db::list_marked_tags(&state.db_path, &endpoint.id).map_err(|err| err.to_string())?;
+    let before = tags.len();
+    tags.retain(|tag| tag.id != tag_id);
+    if before == tags.len() {
         return Err("未找到标签".to_string());
     }
-    for entry in loaded.entries.iter_mut() {
-        entry
-            .marked_tag_ids
-            .retain(|entry_tag_id| entry_tag_id != &tag_id);
+    let mut targets = Vec::new();
+    let marked_messages =
+        db::list_marked_messages(&state.db_path, &endpoint.id, Some(&tag_id), None)
+            .map_err(|err| err.to_string())?;
+    for message in marked_messages {
+        if let Some(mut db_message) =
+            db::get_message(&state.db_path, &endpoint.id, &message.filename)
+                .map_err(|err| err.to_string())?
+        {
+            db_message
+                .marked_tag_ids
+                .retain(|entry_tag_id| entry_tag_id != &tag_id);
+            db::upsert_message(&state.db_path, &db_message).map_err(|err| err.to_string())?;
+            targets.push((db_message.filename.clone(), db_message.timestamp_ms));
+        }
     }
-    crate::history::save_history(&state.http, &endpoint, &loaded.entries, &loaded.tags).await?;
-    sync_marked_metadata_to_db(state.inner(), &endpoint.id, &loaded.entries, &loaded.tags)?;
+    crate::history::save_marked_tags(&state.http, &endpoint, &tags).await?;
+    invalidate_history_cache_for_paths(
+        state.inner(),
+        &endpoint.id,
+        &[crate::history::HISTORY_TAGS_PATH.to_string()],
+    )?;
+    db::replace_marked_tags(&state.db_path, &endpoint.id, &tags).map_err(|err| err.to_string())?;
+    if !targets.is_empty() {
+        let history_result = crate::history::mutate_history_entries_by_targets(
+            &state.http,
+            &endpoint,
+            &targets,
+            |entry| {
+                let before_len = entry.marked_tag_ids.len();
+                entry
+                    .marked_tag_ids
+                    .retain(|entry_tag_id| entry_tag_id != &tag_id);
+                before_len != entry.marked_tag_ids.len()
+            },
+        )
+        .await?;
+        invalidate_history_cache_for_paths(
+            state.inner(),
+            &endpoint.id,
+            &history_result.touched_paths,
+        )?;
+    }
     Ok(())
 }
 
@@ -1646,11 +1851,12 @@ async fn rename_marked_tag(
     let settings = current_settings(&state)?;
     let endpoint = resolve_active_endpoint(&settings)?;
     let _guard = state.sync_guard.lock().await;
-    let mut loaded = crate::history::load_history_with_layout(&state.http, &endpoint).await?;
+    let mut tags =
+        db::list_marked_tags(&state.db_path, &endpoint.id).map_err(|err| err.to_string())?;
     let normalized = normalize_marked_tag_name(&name)?;
-    ensure_unique_marked_tag_name(&loaded.tags, &normalized, Some(&tag_id))?;
+    ensure_unique_marked_tag_name(&tags, &normalized, Some(&tag_id))?;
     let mut found = false;
-    for tag in loaded.tags.iter_mut() {
+    for tag in tags.iter_mut() {
         if tag.id == tag_id {
             tag.name = normalized.clone();
             found = true;
@@ -1660,12 +1866,14 @@ async fn rename_marked_tag(
     if !found {
         return Err("未找到标签".to_string());
     }
-    loaded
-        .tags
-        .sort_by(|left, right| left.name.cmp(&right.name));
-    crate::history::save_history(&state.http, &endpoint, &loaded.entries, &loaded.tags).await?;
-    db::replace_marked_tags(&state.db_path, &endpoint.id, &loaded.tags)
-        .map_err(|err| err.to_string())?;
+    tags.sort_by(|left, right| left.name.cmp(&right.name));
+    crate::history::save_marked_tags(&state.http, &endpoint, &tags).await?;
+    invalidate_history_cache_for_paths(
+        state.inner(),
+        &endpoint.id,
+        &[crate::history::HISTORY_TAGS_PATH.to_string()],
+    )?;
+    db::replace_marked_tags(&state.db_path, &endpoint.id, &tags).map_err(|err| err.to_string())?;
     Ok(())
 }
 
@@ -1677,26 +1885,26 @@ async fn toggle_marked_message_pin(
     let settings = current_settings(&state)?;
     let endpoint = resolve_active_endpoint(&settings)?;
     let _guard = state.sync_guard.lock().await;
-    let mut loaded = crate::history::load_history_with_layout(&state.http, &endpoint).await?;
-    let mut next_value = None;
-    for entry in loaded.entries.iter_mut() {
-        if entry.filename == filename {
-            if !entry.marked {
-                return Err("未标记消息不能置顶".to_string());
-            }
-            entry.marked_pinned = !entry.marked_pinned;
-            next_value = Some(entry.marked_pinned);
-            break;
-        }
+    let mut message = db::get_message(&state.db_path, &endpoint.id, &filename)
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "未找到消息".to_string())?;
+    if !message.marked {
+        return Err("未标记消息不能置顶".to_string());
     }
-    let pinned = next_value.ok_or_else(|| "未找到消息".to_string())?;
-    if let Some(mut message) =
-        db::get_message(&state.db_path, &endpoint.id, &filename).map_err(|err| err.to_string())?
-    {
-        message.marked_pinned = pinned;
-        db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
-    }
-    crate::history::save_history(&state.http, &endpoint, &loaded.entries, &loaded.tags).await?;
+    message.marked_pinned = !message.marked_pinned;
+    let pinned = message.marked_pinned;
+    db::upsert_message(&state.db_path, &message).map_err(|err| err.to_string())?;
+    let pending = PendingMarkedSync {
+        endpoint_id: message.endpoint_id.clone(),
+        filename: message.filename.clone(),
+        timestamp_ms: message.timestamp_ms,
+        marked: message.marked,
+        marked_tag_ids: message.marked_tag_ids.clone(),
+        marked_pinned: message.marked_pinned,
+        updated_at_ms: now_ms(),
+    };
+    db::upsert_pending_marked_sync(&state.db_path, &pending).map_err(|err| err.to_string())?;
+    schedule_marked_history_sync(state.inner(), endpoint, pending);
     Ok(pinned)
 }
 
@@ -1760,9 +1968,15 @@ fn list_messages(
         db::count_messages(&state.db_path, &endpoint.id, true).map_err(|err| err.to_string())?
     };
 
-    let messages =
-        db::list_messages_paged(&state.db_path, &endpoint.id, limit, offset, marked_filter, search_query.as_deref())
-            .map_err(|err| err.to_string())?;
+    let messages = db::list_messages_paged(
+        &state.db_path,
+        &endpoint.id,
+        limit,
+        offset,
+        marked_filter,
+        search_query.as_deref(),
+    )
+    .map_err(|err| err.to_string())?;
 
     let current_offset = offset.unwrap_or(0);
     let current_limit = limit.unwrap_or(total);
@@ -1962,8 +2176,8 @@ async fn resolve_local_http_marked_options(
 
     let settings = current_settings(state)?;
     let endpoint = resolve_active_endpoint(&settings)?;
-    let loaded = crate::history::load_history_with_layout(&state.http, &endpoint).await?;
-    let resolved = build_local_http_marked_options(&loaded.tags, marked_options)?;
+    let tags = db::list_marked_tags(&state.db_path, &endpoint.id).map_err(|err| err.to_string())?;
+    let resolved = build_local_http_marked_options(&tags, marked_options)?;
     Ok(Some(resolved))
 }
 
@@ -1989,8 +2203,7 @@ async fn send_text_impl(
     let remote_path = message_remote_path(&filename, timestamp_ms);
     let data = text.clone().into_bytes();
 
-    webdav::ensure_parent_directories(&state.http, &endpoint, &remote_path).await?;
-    webdav::upload_file(&state.http, &endpoint, &remote_path, data.clone()).await?;
+    webdav::upload_file_ensuring_parent(&state.http, &endpoint, &remote_path, data.clone()).await?;
 
     let mut message = DbMessage {
         endpoint_id: endpoint.id.clone(),
@@ -2106,8 +2319,13 @@ fn spawn_thumbnail_upload(
             };
         let thumb_remote_path =
             resolved_thumbnail_remote_path(Some(&remote_path), &filename, Some(timestamp_ms));
-        let _ = webdav::ensure_parent_directories(&http, &endpoint, &thumb_remote_path).await;
-        let _ = webdav::upload_file(&http, &endpoint, &thumb_remote_path, thumb_data.clone()).await;
+        let _ = webdav::upload_file_ensuring_parent(
+            &http,
+            &endpoint,
+            &thumb_remote_path,
+            thumb_data.clone(),
+        )
+        .await;
 
         let thumb_local_dir = endpoint_dir.join(".thumbs");
         let _ = fs::create_dir_all(&thumb_local_dir);
@@ -2838,8 +3056,9 @@ async fn execute_streamed_download(
                     )
                     .await?;
                     if final_path.exists() {
-                        fs::remove_file(final_path)
-                            .map_err(|err| format!("Failed to replace existing download file: {}", err))?;
+                        fs::remove_file(final_path).map_err(|err| {
+                            format!("Failed to replace existing download file: {}", err)
+                        })?;
                     }
                     fs::rename(&temp_path, final_path)
                         .map_err(|err| format!("Failed to complete download file: {}", err))?;
@@ -3441,6 +3660,7 @@ async fn delete_messages(
 
     let mut failed: Vec<String> = Vec::new();
     let mut succeeded: Vec<String> = targets.clone();
+    let mut succeeded_targets: Vec<crate::history::HistoryEntryTarget> = Vec::new();
     if delete_remote {
         succeeded.clear();
         for filename in &targets {
@@ -3454,13 +3674,27 @@ async fn delete_messages(
                 message.as_ref().map(|item| item.timestamp_ms),
             );
             match webdav::delete_file(&state.http, &endpoint, &remote_path, true).await {
-                Ok(_) => succeeded.push(filename.clone()),
+                Ok(_) => {
+                    succeeded.push(filename.clone());
+                    if let Some(message) = message {
+                        succeeded_targets.push((filename.clone(), message.timestamp_ms));
+                    }
+                }
                 Err(_) => failed.push(filename.clone()),
             }
         }
-        if !succeeded.is_empty() {
-            let success_set: HashSet<String> = succeeded.iter().cloned().collect();
-            crate::history::remove_history_entries(&state.http, &endpoint, &success_set).await?;
+        if !succeeded_targets.is_empty() {
+            let history_result = crate::history::remove_history_entry_targets(
+                &state.http,
+                &endpoint,
+                &succeeded_targets,
+            )
+            .await?;
+            invalidate_history_cache_for_paths(
+                &state,
+                &endpoint.id,
+                &history_result.touched_paths,
+            )?;
         }
     }
 
@@ -3570,6 +3804,7 @@ async fn cleanup_messages(
         CleanupScope::WithRemote => {
             let mut failed: Vec<String> = Vec::new();
             let mut succeeded: Vec<String> = Vec::new();
+            let mut succeeded_targets: Vec<crate::history::HistoryEntryTarget> = Vec::new();
             for message in &candidates {
                 let remote_path = resolved_remote_path(
                     message.remote_path.as_deref(),
@@ -3577,15 +3812,26 @@ async fn cleanup_messages(
                     Some(message.timestamp_ms),
                 );
                 match webdav::delete_file(&state.http, &endpoint, &remote_path, true).await {
-                    Ok(_) => succeeded.push(message.filename.clone()),
+                    Ok(_) => {
+                        succeeded.push(message.filename.clone());
+                        succeeded_targets.push((message.filename.clone(), message.timestamp_ms));
+                    }
                     Err(_) => failed.push(message.filename.clone()),
                 }
             }
 
-            if !succeeded.is_empty() {
-                let success_set: HashSet<String> = succeeded.iter().cloned().collect();
-                crate::history::remove_history_entries(&state.http, &endpoint, &success_set)
-                    .await?;
+            if !succeeded_targets.is_empty() {
+                let history_result = crate::history::remove_history_entry_targets(
+                    &state.http,
+                    &endpoint,
+                    &succeeded_targets,
+                )
+                .await?;
+                invalidate_history_cache_for_paths(
+                    &state,
+                    &endpoint.id,
+                    &history_result.touched_paths,
+                )?;
             }
 
             let success_set: HashSet<String> = succeeded.iter().cloned().collect();
@@ -3779,8 +4025,8 @@ fn zip_add_file(
     archive_name: &str,
     options: zip::write::FileOptions<'_, ()>,
 ) -> Result<(), String> {
-    let mut input =
-        std::fs::File::open(source).map_err(|err| format!("读取备份源文件失败 {}: {err}", source.display()))?;
+    let mut input = std::fs::File::open(source)
+        .map_err(|err| format!("读取备份源文件失败 {}: {err}", source.display()))?;
     zip.start_file(archive_name.replace('\\', "/"), options)
         .map_err(|err| format!("写入备份条目失败 {archive_name}: {err}"))?;
     std::io::copy(&mut input, zip)
@@ -3821,7 +4067,10 @@ fn zip_add_dir_recursive(
     Ok(())
 }
 
-fn create_local_data_backup_to_path(state: &AppState, path: &Path) -> Result<LocalDataBackupResult, String> {
+fn create_local_data_backup_to_path(
+    state: &AppState,
+    path: &Path,
+) -> Result<LocalDataBackupResult, String> {
     use std::io::Write;
     use zip::write::FileOptions;
 
@@ -3891,7 +4140,10 @@ fn safe_restore_archive_path(name: &str) -> Option<PathBuf> {
     if path.is_absolute() {
         return None;
     }
-    if path.components().any(|component| matches!(component, std::path::Component::ParentDir)) {
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
         return None;
     }
     Some(path.to_path_buf())
@@ -3953,8 +4205,13 @@ fn restore_local_data_backup_from_path(state: &AppState, path: &Path) -> Result<
     for (source, target) in replacements {
         if source.is_file() {
             ensure_parent_dir(&target)?;
-            fs::copy(&source, &target)
-                .map_err(|err| format!("恢复本地文件失败 {} -> {}: {err}", source.display(), target.display()))?;
+            fs::copy(&source, &target).map_err(|err| {
+                format!(
+                    "恢复本地文件失败 {} -> {}: {err}",
+                    source.display(),
+                    target.display()
+                )
+            })?;
         }
     }
     for name in ["endpoints", "mirrors", "plugins"] {
@@ -3975,8 +4232,8 @@ fn restore_local_data_backup_from_path(state: &AppState, path: &Path) -> Result<
 fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), String> {
     fs::create_dir_all(target)
         .map_err(|err| format!("创建目录失败 {}: {err}", target.display()))?;
-    for entry in fs::read_dir(source)
-        .map_err(|err| format!("读取目录失败 {}: {err}", source.display()))?
+    for entry in
+        fs::read_dir(source).map_err(|err| format!("读取目录失败 {}: {err}", source.display()))?
     {
         let entry = entry.map_err(|err| format!("读取目录项失败: {err}"))?;
         let source_path = entry.path();
@@ -4086,9 +4343,8 @@ fn prune_auto_backup_archives(dir: &Path, retain_count: u32) -> Result<(), Strin
 
     let remove_count = entries.len() - keep;
     for entry in entries.into_iter().take(remove_count) {
-        fs::remove_file(entry.path()).map_err(|err| {
-            format!("删除过期备份失败 {}: {err}", entry.path().display())
-        })?;
+        fs::remove_file(entry.path())
+            .map_err(|err| format!("删除过期备份失败 {}: {err}", entry.path().display()))?;
     }
 
     Ok(())
@@ -4283,7 +4539,8 @@ async fn backup_webdav_to_path(
         }
     }
 
-    zip.finish().map_err(|e| format!("完成 zip 文件失败: {e}"))?;
+    zip.finish()
+        .map_err(|e| format!("完成 zip 文件失败: {e}"))?;
     let _ = std::fs::remove_dir_all(&temp_dir);
     record_local_backup_event(state, endpoint, &path.to_string_lossy(), "backup-webdav")?;
 
@@ -4301,7 +4558,10 @@ async fn backup_webdav_to_path(
     Ok(())
 }
 
-async fn maybe_run_scheduled_backup(app_handle: &AppHandle, state: &AppState) -> Result<(), String> {
+async fn maybe_run_scheduled_backup(
+    app_handle: &AppHandle,
+    state: &AppState,
+) -> Result<(), String> {
     let _guard = match state.auto_backup_guard.try_lock() {
         Ok(guard) => guard,
         Err(_) => return Ok(()),
@@ -4315,7 +4575,9 @@ async fn maybe_run_scheduled_backup(app_handle: &AppHandle, state: &AppState) ->
     }
 
     let endpoint = resolve_active_endpoint(&settings)?;
-    let archive_dir = configured_backup_dir(&settings).join("webdav").join(&endpoint.id);
+    let archive_dir = configured_backup_dir(&settings)
+        .join("webdav")
+        .join(&endpoint.id);
     fs::create_dir_all(&archive_dir)
         .map_err(|err| format!("创建自动备份目录失败 {}: {err}", archive_dir.display()))?;
     let backup_path = archive_dir.join(format!("{}-{}.zip", endpoint.id, now));
@@ -5675,7 +5937,9 @@ fn is_telegram_bridge_running(state: &AppState) -> Result<bool, String> {
         .lock()
         .map_err(|_| "读取 Telegram bridge 状态失败".to_string())?;
     crate::telegram_bridge_runtime::refresh_telegram_bridge_manager(&mut manager);
-    Ok(crate::telegram_bridge_runtime::telegram_bridge_is_running(&manager))
+    Ok(crate::telegram_bridge_runtime::telegram_bridge_is_running(
+        &manager,
+    ))
 }
 
 fn record_telegram_bridge_restart_failure(state: &AppState, err: String) {
@@ -6549,12 +6813,10 @@ fn build_webdav_conflict(
         return None;
     }
     let remote_size = remote.size.unwrap_or(0) as i64;
-    let etag_diff = existing.etag.is_some()
-        && remote.etag.is_some()
-        && existing.etag != remote.etag;
-    let mtime_diff = existing.mtime.is_some()
-        && remote.mtime.is_some()
-        && existing.mtime != remote.mtime;
+    let etag_diff =
+        existing.etag.is_some() && remote.etag.is_some() && existing.etag != remote.etag;
+    let mtime_diff =
+        existing.mtime.is_some() && remote.mtime.is_some() && existing.mtime != remote.mtime;
     let size_diff = existing.size > 0 && remote_size > 0 && existing.size != remote_size;
     if !(etag_diff || mtime_diff || size_diff) {
         return None;
@@ -6596,6 +6858,14 @@ fn pending_webdav_conflict(state: &AppState) -> Option<WebDavConflict> {
         .lock()
         .ok()
         .and_then(|pending| pending.clone())
+}
+
+fn invalidate_history_cache_for_paths(
+    state: &AppState,
+    endpoint_id: &str,
+    paths: &[String],
+) -> Result<(), String> {
+    crate::history::invalidate_history_cache_paths(&history_cache_dir(state, endpoint_id), paths)
 }
 
 async fn apply_remote_conflict_to_local(
@@ -6641,7 +6911,7 @@ async fn apply_local_conflict_to_remote(
         Some(message.timestamp_ms),
     );
     if message.kind == MessageKind::Text.as_str() {
-        webdav::upload_file(
+        webdav::upload_file_ensuring_parent(
             &state.http,
             endpoint,
             &remote_path,
@@ -6667,19 +6937,16 @@ async fn apply_local_conflict_to_remote(
             return Err("上传本地文件失败".to_string());
         }
     }
-    let mut loaded = crate::history::load_history_with_layout(&state.http, endpoint).await?;
-    let mut replaced = false;
-    for entry in loaded.entries.iter_mut() {
-        if entry.filename == message.filename {
-            *entry = message_to_history(&message);
-            replaced = true;
-            break;
-        }
-    }
-    if !replaced {
-        loaded.entries.push(message_to_history(&message));
-    }
-    crate::history::save_history(&state.http, endpoint, &loaded.entries, &loaded.tags).await?;
+    let mut prior = HashMap::new();
+    prior.insert(message.filename.clone(), message.timestamp_ms);
+    let history_result = crate::history::upsert_history_entries_with_prior(
+        &state.http,
+        endpoint,
+        vec![message_to_history(&message)],
+        &prior,
+    )
+    .await?;
+    invalidate_history_cache_for_paths(state, &endpoint.id, &history_result.touched_paths)?;
     Ok(())
 }
 
@@ -6688,8 +6955,8 @@ async fn resolve_webdav_conflict(
     state: State<'_, AppState>,
     action: String,
 ) -> Result<SyncStatus, String> {
-    let conflict = pending_webdav_conflict(&state)
-        .ok_or_else(|| "没有待处理的 WebDAV 冲突".to_string())?;
+    let conflict =
+        pending_webdav_conflict(&state).ok_or_else(|| "没有待处理的 WebDAV 冲突".to_string())?;
     let settings = current_settings(&state)?;
     let endpoint = resolve_endpoint_by_id(&settings, &conflict.endpoint_id)?;
     let _guard = state.sync_guard.lock().await;
@@ -6728,7 +6995,7 @@ async fn run_sync(
                 "\u{66F4}\u{65B0}\u{540C}\u{6B65}\u{72B6}\u{6001}\u{5931}\u{8D25}".to_string()
             })?;
             if status.running {
-        Some(status.clone())
+                Some(status.clone())
             } else {
                 started_sync = true;
                 status.running = true;
@@ -6833,11 +7100,19 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
         &history_cache_dir(state, &endpoint_id),
     )
     .await?;
+    let pending_marked_sync = db::list_pending_marked_sync(&state.db_path, &endpoint_id)
+        .map_err(|err| err.to_string())?;
+    let pending_marked_sync_by_filename = pending_marked_sync_map(&pending_marked_sync);
+    let mut loaded_history = loaded_history;
+    for entry in loaded_history.entries.iter_mut() {
+        if let Some(pending) = pending_marked_sync_by_filename.get(&entry.filename) {
+            apply_pending_marked_sync_to_history(entry, pending);
+        }
+    }
     db::replace_marked_tags(&state.db_path, &endpoint_id, &loaded_history.tags)
         .map_err(|err| err.to_string())?;
     let history_layout = loaded_history.layout;
-    let marked_tags = loaded_history.tags.clone();
-    let mut history_map: HashMap<String, HistoryEntry> = loaded_history
+    let history_map: HashMap<String, HistoryEntry> = loaded_history
         .entries
         .into_iter()
         .map(|entry| (entry.filename.clone(), entry))
@@ -6963,6 +7238,9 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
             message.marked_pinned = history.marked_pinned;
             message.format = history.format.clone();
         }
+        if let Some(pending) = pending_marked_sync_by_filename.get(&filename) {
+            apply_pending_marked_sync_to_message(&mut message, pending);
+        }
 
         if let Some(entry) = file_entry {
             message.etag = entry.etag.clone();
@@ -7013,7 +7291,11 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
         }
 
         if history_entry.is_none() {
-            new_history_entries.push(message_to_history(&message));
+            let mut history_entry = message_to_history(&message);
+            if let Some(pending) = pending_marked_sync_by_filename.get(&filename) {
+                apply_pending_marked_sync_to_history(&mut history_entry, pending);
+            }
+            new_history_entries.push(history_entry);
         }
 
         let mut should_upsert = existing.is_none() || changed;
@@ -7046,12 +7328,28 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
     }
 
     if !new_history_entries.is_empty() {
-        for entry in new_history_entries {
-            history_map.insert(entry.filename.clone(), entry);
+        let mut prior = HashMap::new();
+        for entry in &new_history_entries {
+            prior.insert(entry.filename.clone(), entry.timestamp_ms);
         }
-        let mut history: Vec<HistoryEntry> = history_map.into_values().collect();
-        history.sort_by_key(|item| item.timestamp_ms);
-        crate::history::save_history(&state.http, &endpoint, &history, &marked_tags).await?;
+        let history_result = crate::history::upsert_history_entries_with_prior(
+            &state.http,
+            &endpoint,
+            new_history_entries.clone(),
+            &prior,
+        )
+        .await?;
+        invalidate_history_cache_for_paths(state, &endpoint.id, &history_result.touched_paths)?;
+    }
+    if !pending_marked_sync.is_empty() {
+        flush_marked_history_entries(
+            &state.http,
+            &endpoint,
+            &state.db_path,
+            &history_cache_dir(state, &endpoint.id),
+            &pending_marked_sync,
+        )
+        .await?;
     }
 
     Ok(new_count)
@@ -7073,6 +7371,7 @@ fn message_to_history(message: &DbMessage) -> HistoryEntry {
     }
 }
 
+#[cfg(test)]
 fn collect_cleanup_candidates(messages: Vec<Message>, cutoff_ms: Option<i64>) -> Vec<Message> {
     messages
         .into_iter()
@@ -7084,43 +7383,6 @@ fn collect_cleanup_candidates(messages: Vec<Message>, cutoff_ms: Option<i64>) ->
         .collect()
 }
 
-#[allow(dead_code)]
-async fn load_history(
-    state: &AppState,
-    endpoint: &WebDavEndpoint,
-) -> Result<Vec<HistoryEntry>, String> {
-    let bytes = webdav::download_optional_file(&state.http, endpoint, "history.json").await?;
-    match bytes {
-        Some(data) => serde_json::from_slice::<Vec<HistoryEntry>>(&data)
-            .map_err(|err| format!("解析历史记录失败: {err}")),
-        None => Ok(Vec::new()),
-    }
-}
-
-#[allow(dead_code)]
-async fn save_history(
-    state: &AppState,
-    endpoint: &WebDavEndpoint,
-    history: &[HistoryEntry],
-) -> Result<(), String> {
-    let data =
-        serde_json::to_vec_pretty(history).map_err(|err| format!("序列化历史记录失败: {err}"))?;
-    webdav::upload_file(&state.http, endpoint, "history.json", data).await
-}
-
-#[allow(dead_code)]
-async fn remove_history_entries(
-    state: &AppState,
-    endpoint: &WebDavEndpoint,
-    filenames: &HashSet<String>,
-) -> Result<(), String> {
-    if filenames.is_empty() {
-        return Ok(());
-    }
-    let mut history = load_history(state, endpoint).await?;
-    history.retain(|entry| !filenames.contains(&entry.filename));
-    save_history(state, endpoint, &history).await
-}
 fn show_main_window(app: &AppHandle) {
     show_main_window_with_event(app, None);
 }
@@ -7425,7 +7687,7 @@ fn main() {
                 default_download_dir,
                 settings: Mutex::new(settings),
                 sync_status: Mutex::new(SyncStatus::idle()),
-                sync_guard: AsyncMutex::new(()),
+                sync_guard: Arc::new(AsyncMutex::new(())),
                 sync_cancel: Mutex::new(None),
                 sync_loop_signal,
                 http: Client::builder()
@@ -7518,7 +7780,9 @@ fn main() {
                                     return;
                                 };
 
-                                if let Err(err) = write_settings_audited(&settings_path, &settings_copy) {
+                                if let Err(err) =
+                                    write_settings_audited(&settings_path, &settings_copy)
+                                {
                                     eprintln!("写入快捷键设置失败: {err}");
                                 } else if let Ok(mut guard) = state.settings.lock() {
                                     *guard = settings_copy.clone();
@@ -7816,7 +8080,7 @@ mod tests {
             default_download_dir: temp_dir.join("downloads"),
             settings: Mutex::new(settings),
             sync_status: Mutex::new(SyncStatus::idle()),
-            sync_guard: AsyncMutex::new(()),
+            sync_guard: Arc::new(AsyncMutex::new(())),
             sync_cancel: Mutex::new(None),
             sync_loop_signal,
             http: Client::builder().build().expect("create http client"),
@@ -8231,6 +8495,76 @@ mod tests {
         assert!(options.deleted_tag_ids.is_empty());
     }
 
+    #[tokio::test]
+    async fn load_send_marked_options_does_not_mark_tags_changed_for_default_send() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-send-options-default-{}", now_ms()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let state = test_app_state(&temp_dir, test_settings());
+        db::init_db(&state.db_path, Some("endpoint-1")).expect("initialize database");
+        let endpoint = state
+            .settings
+            .lock()
+            .expect("lock settings")
+            .webdav_endpoints[0]
+            .clone();
+
+        let applied = load_and_apply_send_marked_options(
+            &state,
+            &endpoint,
+            SendMarkedOptionsInput::default(),
+        )
+        .await
+        .expect("apply default send marked options");
+
+        assert!(!applied.tags_changed);
+        assert!(!applied.marked);
+        assert!(applied.tag_ids.is_empty());
+        assert!(applied.tags.is_empty());
+        assert!(applied.cleanup_targets.is_empty());
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn load_send_marked_options_marks_tags_changed_when_creating_tag() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-send-options-create-tag-{}",
+            now_ms()
+        ));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let state = test_app_state(&temp_dir, test_settings());
+        db::init_db(&state.db_path, Some("endpoint-1")).expect("initialize database");
+        let endpoint = state
+            .settings
+            .lock()
+            .expect("lock settings")
+            .webdav_endpoints[0]
+            .clone();
+
+        let applied = load_and_apply_send_marked_options(
+            &state,
+            &endpoint,
+            SendMarkedOptionsInput {
+                marked: true,
+                created_tags: vec![PendingCreatedTagInput {
+                    name: "重要".to_string(),
+                    selected: true,
+                }],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("apply send marked options with created tag");
+
+        assert!(applied.tags_changed);
+        assert!(applied.marked);
+        assert_eq!(applied.tags.len(), 1);
+        assert_eq!(applied.tags[0].name, "重要");
+        assert_eq!(applied.tag_ids, vec![applied.tags[0].id.clone()]);
+        assert!(applied.cleanup_targets.is_empty());
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
     #[test]
     fn local_http_api_send_text_request_supports_marked_options() {
         let payload = parse_local_http_send_text_request_json(
@@ -8420,7 +8754,10 @@ mod tests {
         persist_integration_module_statuses(&state).expect("persist integration module statuses");
 
         let workspace_root = workspace_root_for_state(&state);
-        assert!(workspace_root.join("plugins").join("module-status.json").is_file());
+        assert!(workspace_root
+            .join("plugins")
+            .join("module-status.json")
+            .is_file());
         assert!(workspace_root
             .join("plugins")
             .join("webdav-sync")
@@ -8446,7 +8783,10 @@ mod tests {
         write_settings_audited(&settings_path, &settings).expect("write settings");
 
         assert!(settings_path.is_file());
-        assert!(workspace_root.join("change-log").join("events.jsonl").is_file());
+        assert!(workspace_root
+            .join("change-log")
+            .join("events.jsonl")
+            .is_file());
 
         let _ = fs::remove_file(&settings_path);
         let _ = fs::remove_dir_all(&temp_dir);
@@ -8471,7 +8811,10 @@ mod tests {
 
         assert!(!snapshots.is_empty());
         assert_eq!(snapshots[0].category, "settings");
-        assert_eq!(snapshots[0].target_path, settings_path.to_string_lossy().to_string());
+        assert_eq!(
+            snapshots[0].target_path,
+            settings_path.to_string_lossy().to_string()
+        );
 
         let _ = fs::remove_file(&settings_path);
         let _ = fs::remove_dir_all(&temp_dir);
@@ -8479,8 +8822,10 @@ mod tests {
 
     #[tokio::test]
     async fn restore_settings_snapshot_updates_in_memory_settings() {
-        let temp_dir =
-            std::env::temp_dir().join(format!("transfer-genie-restore-settings-snapshot-{}", now_ms()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-restore-settings-snapshot-{}",
+            now_ms()
+        ));
         let workspace_layout = WorkspaceLayout::new(temp_dir.clone());
         workspace::ensure_workspace_dirs(&workspace_layout).expect("ensure workspace dirs");
         let settings_path = temp_dir.join("settings.json");
@@ -8504,8 +8849,8 @@ mod tests {
         )
         .expect("restore settings snapshot");
 
-        let restored =
-            load_settings(&state.settings_path, &state.default_download_dir).expect("load restored settings");
+        let restored = load_settings(&state.settings_path, &state.default_download_dir)
+            .expect("load restored settings");
         {
             let mut guard = state.settings.lock().expect("lock settings");
             *guard = restored.clone();
@@ -8513,7 +8858,11 @@ mod tests {
 
         assert_eq!(restored.sender_name, "before");
         assert_eq!(
-            state.settings.lock().expect("lock updated settings").sender_name,
+            state
+                .settings
+                .lock()
+                .expect("lock updated settings")
+                .sender_name,
             "before"
         );
 
@@ -8607,7 +8956,10 @@ mod tests {
         assert_eq!(status.last_run_ms, Some(100));
         assert_eq!(status.last_success_ms, Some(90));
         assert_eq!(status.last_error.as_deref(), Some("backup failed"));
-        assert_eq!(status.last_backup_path.as_deref(), Some("E:/archives/auto.zip"));
+        assert_eq!(
+            status.last_backup_path.as_deref(),
+            Some("E:/archives/auto.zip")
+        );
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
@@ -8619,8 +8971,16 @@ mod tests {
         settings.backup.interval_minutes = 10;
 
         assert!(should_run_auto_backup(&settings, None, 1_000));
-        assert!(!should_run_auto_backup(&settings, Some(1_000), 1_000 + 5 * 60 * 1000));
-        assert!(should_run_auto_backup(&settings, Some(1_000), 1_000 + 10 * 60 * 1000));
+        assert!(!should_run_auto_backup(
+            &settings,
+            Some(1_000),
+            1_000 + 5 * 60 * 1000
+        ));
+        assert!(should_run_auto_backup(
+            &settings,
+            Some(1_000),
+            1_000 + 10 * 60 * 1000
+        ));
 
         settings.backup.enabled = false;
         assert!(!should_run_auto_backup(&settings, None, 1_000));
@@ -8637,8 +8997,8 @@ mod tests {
         settings.backup.keep_all_days = 0;
         settings.backup.keep_daily_days = 1;
 
-        let normalized = normalize_settings(settings, Path::new("downloads"))
-            .expect("normalize settings");
+        let normalized =
+            normalize_settings(settings, Path::new("downloads")).expect("normalize settings");
 
         assert!(normalized.backup.directory.contains("TransferGenie"));
         assert_eq!(normalized.backup.keep_all_days, 1);
@@ -8730,7 +9090,9 @@ mod tests {
         let backup_records = fs::read_dir(&backups_dir)
             .expect("read backups dir")
             .filter_map(Result::ok)
-            .filter(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("json"))
+            .filter(|entry| {
+                entry.path().extension().and_then(|value| value.to_str()) == Some("json")
+            })
             .collect::<Vec<_>>();
         assert_eq!(backup_records.len(), 1);
 
@@ -8738,9 +9100,16 @@ mod tests {
             fs::read_to_string(backup_records[0].path()).expect("read backup record content");
         let record_json: serde_json::Value =
             serde_json::from_str(&record_content).expect("parse backup record json");
-        assert_eq!(record_json.get("endpointId").and_then(|value| value.as_str()), Some("endpoint-1"));
         assert_eq!(
-            record_json.get("backupPath").and_then(|value| value.as_str()),
+            record_json
+                .get("endpointId")
+                .and_then(|value| value.as_str()),
+            Some("endpoint-1")
+        );
+        assert_eq!(
+            record_json
+                .get("backupPath")
+                .and_then(|value| value.as_str()),
             Some("E:/archives/backup.zip")
         );
         assert_eq!(
@@ -8777,26 +9146,44 @@ mod tests {
         fs::write(&archive_a, b"a").expect("write archive a");
         fs::write(&archive_b, b"bb").expect("write archive b");
 
-        record_local_backup_event(&state, &endpoint, &archive_a.to_string_lossy(), "backup-webdav")
-            .expect("record backup event a");
+        record_local_backup_event(
+            &state,
+            &endpoint,
+            &archive_a.to_string_lossy(),
+            "backup-webdav",
+        )
+        .expect("record backup event a");
         std::thread::sleep(std::time::Duration::from_millis(2));
-        record_local_backup_event(&state, &endpoint, &archive_b.to_string_lossy(), "restore-webdav")
-            .expect("record backup event b");
+        record_local_backup_event(
+            &state,
+            &endpoint,
+            &archive_b.to_string_lossy(),
+            "restore-webdav",
+        )
+        .expect("record backup event b");
 
-        let records =
-            list_local_backup_archives_for_state(&state).expect("list local backup archive records");
+        let records = list_local_backup_archives_for_state(&state)
+            .expect("list local backup archive records");
 
         assert_eq!(records.len(), 2);
-        assert_eq!(records[0].backup_path, archive_b.to_string_lossy().to_string());
+        assert_eq!(
+            records[0].backup_path,
+            archive_b.to_string_lossy().to_string()
+        );
         assert_eq!(records[0].source, "restore-webdav");
         assert!(records[0].exists);
         assert_eq!(records[0].size_bytes, 2);
-        assert_eq!(records[1].backup_path, archive_a.to_string_lossy().to_string());
+        assert_eq!(
+            records[1].backup_path,
+            archive_a.to_string_lossy().to_string()
+        );
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
-    fn build_test_restore_archive(entry_names: &[&str]) -> zip::ZipArchive<std::io::Cursor<Vec<u8>>> {
+    fn build_test_restore_archive(
+        entry_names: &[&str],
+    ) -> zip::ZipArchive<std::io::Cursor<Vec<u8>>> {
         use std::io::{Cursor, Write};
         use zip::write::FileOptions;
 
@@ -8828,8 +9215,7 @@ mod tests {
 
     #[test]
     fn validate_restore_archive_history_entries_accepts_manifest_history_file() {
-        let mut archive =
-            build_test_restore_archive(&["history/index.json", "files/example.txt"]);
+        let mut archive = build_test_restore_archive(&["history/index.json", "files/example.txt"]);
 
         assert!(restore_archive_has_history_entries(&mut archive));
         let result = validate_restore_archive_history_entries(&mut archive);
@@ -8856,8 +9242,14 @@ mod tests {
 
     #[test]
     fn restore_archive_target_path_keeps_non_empty_names() {
-        assert_eq!(restore_archive_target_path("files/example.txt"), Some("files/example.txt"));
-        assert_eq!(restore_archive_target_path(" history/index.json "), Some("history/index.json"));
+        assert_eq!(
+            restore_archive_target_path("files/example.txt"),
+            Some("files/example.txt")
+        );
+        assert_eq!(
+            restore_archive_target_path(" history/index.json "),
+            Some("history/index.json")
+        );
     }
 
     #[test]
@@ -8888,8 +9280,14 @@ mod tests {
     fn should_skip_restore_cleanup_path_matches_root_and_root_slash_only() {
         assert!(should_skip_restore_cleanup_path("files", "files"));
         assert!(should_skip_restore_cleanup_path("files/", "files"));
-        assert!(!should_skip_restore_cleanup_path("files/example.txt", "files"));
-        assert!(!should_skip_restore_cleanup_path("history/index.json", "history"));
+        assert!(!should_skip_restore_cleanup_path(
+            "files/example.txt",
+            "files"
+        ));
+        assert!(!should_skip_restore_cleanup_path(
+            "history/index.json",
+            "history"
+        ));
     }
 
     #[test]

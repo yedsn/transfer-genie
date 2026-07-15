@@ -20,14 +20,20 @@ impl<'a> WebDavSyncRuntimeAdapter<'a> {
         Ok(status.clone())
     }
 
-    pub fn status_snapshot(&self, settings: &Settings) -> Result<ModuleRuntimeStateSnapshot, String> {
+    pub fn status_snapshot(
+        &self,
+        settings: &Settings,
+    ) -> Result<ModuleRuntimeStateSnapshot, String> {
         let sync_status = self
             .state
             .sync_status
             .lock()
             .map_err(|_| "读取同步状态失败".to_string())?;
         Ok(ModuleRuntimeStateSnapshot {
-            enabled: settings.webdav_endpoints.iter().any(|endpoint| endpoint.enabled),
+            enabled: settings
+                .webdav_endpoints
+                .iter()
+                .any(|endpoint| endpoint.enabled),
             running: sync_status.running,
             last_error: sync_status.last_error.clone(),
             last_started_ms: None,
