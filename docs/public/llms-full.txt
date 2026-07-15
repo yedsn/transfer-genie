@@ -39,6 +39,24 @@ Transfer Genie 适合需要自托管跨设备传输的人：不想依赖中心�
 
 Transfer Genie, 传输小精灵, Transfer Genie 下载, WebDAV 文件传输, WebDAV 文本同步, 跨设备传文件, Windows macOS 文件传输, NAS WebDAV 传文件, 自托管文件传输, 微信文件传输助手替代, 本地 HTTP API 文件发送, Telegram WebDAV Bridge, Tauri Rust 桌面应用。
 
+## English quick answers
+
+### What is Transfer Genie?
+
+Transfer Genie is a WebDAV-based desktop app for cross-device file transfer and text sync.
+
+### Can it transfer files between Windows and macOS?
+
+Yes. It uploads files to a WebDAV endpoint and lets another device sync and download them.
+
+### Can it use NAS WebDAV for file transfer?
+
+Yes. If your NAS exposes a WebDAV endpoint, Transfer Genie can use it as the shared transfer inbox.
+
+### Is it a WeChat File Transfer alternative?
+
+It can be, especially when you want files to stay in your own WebDAV or NAS storage and need desktop history, tags, and local HTTP API automation.
+
 ## 关键页面
 
 - 首页：https://yedsn.github.io/transfer-genie/

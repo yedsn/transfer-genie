@@ -6,6 +6,8 @@ description: 用 Transfer Genie 本机 HTTP API 从脚本、命令行工具或�
 
 Transfer Genie 内置本机 HTTP API，适合让脚本、命令行工具或本地程序把文本和文件发送进同一条 WebDAV 消息流。
 
+Local HTTP API 是 Transfer Genie 的本地自动化入口，适合搜索 `local HTTP API file transfer`、`send file from script to WebDAV`、`本地 HTTP API 发送文件` 这类问题的用户。
+
 ## 适合什么场景
 
 | 场景 | 说明 |
