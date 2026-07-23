@@ -11,6 +11,27 @@ const feedViewModel = window.transferGenieFeedViewModel || null;
 const settingsFormRuntime = window.transferGenieSettingsFormRuntime || null;
 const settingsOpsRuntime = window.transferGenieSettingsOpsRuntime || null;
 const settingsRuntimeStatus = window.transferGenieSettingsRuntimeStatus || null;
+const DEFAULT_EDITOR_FORMAT_STORAGE_KEY = 'transfer-genie.default-editor-format';
+
+function normalizeEditorFormat(format) {
+  return format === 'markdown' ? 'markdown' : 'text';
+}
+
+function loadDefaultEditorFormat() {
+  try {
+    return normalizeEditorFormat(window.localStorage?.getItem(DEFAULT_EDITOR_FORMAT_STORAGE_KEY));
+  } catch (error) {
+    return 'text';
+  }
+}
+
+function saveDefaultEditorFormat(format) {
+  try {
+    window.localStorage?.setItem(DEFAULT_EDITOR_FORMAT_STORAGE_KEY, normalizeEditorFormat(format));
+  } catch (error) {
+    // Ignore storage failures; the in-memory setting still applies this session.
+  }
+}
 
 function syncVueActiveTab(tab) {
   vueBridge?.syncActiveTab?.(tab);
@@ -95,6 +116,9 @@ function updateSettingsFormField(field, value) {
     ...currentSettingsFormState,
     [field]: value,
   };
+  if (field === 'defaultEditorFormat') {
+    saveDefaultEditorFormat(value);
+  }
   syncVueSettingsForm(currentSettingsFormState);
 }
 
@@ -233,7 +257,6 @@ const downloadDeleteSelectedButton = document.getElementById('download-delete-se
 const downloadCancelSelectionButton = document.getElementById('download-cancel-selection');
 const textInput = document.getElementById('text-input');
 const markdownEditorContainer = document.getElementById('markdown-editor');
-const formatInputs = document.querySelectorAll('input[name="message-format"]');
 const sendTextButton = document.getElementById('send-text');
 const sendFileButton = document.getElementById('send-file');
 const saveSettingsButton = document.getElementById('save-settings');
@@ -537,6 +560,7 @@ let settingsBackupArchives = [];
 let currentSettingsFormState = {
   senderName: '',
   refreshIntervalSecs: 5,
+  defaultEditorFormat: loadDefaultEditorFormat(),
   downloadDir: '',
   autoStart: false,
   autoUpdateEnabled: false,
@@ -753,6 +777,12 @@ function initMarkdownEditor() {
 
 function switchFormat(format) {
   currentFormat = format;
+  // 输入框即工作区：格式切换作用于活动草稿，不切换 legacy 编辑器视图
+  const cw = window.transferGenieComposer;
+  if (cw && cw.isActive && cw.isActive()) {
+    if (cw.setActiveDraftFormat) cw.setActiveDraftFormat(format);
+    return;
+  }
   if (format === 'markdown') {
     textInput.style.display = 'none';
     markdownEditorContainer.style.display = 'block';
@@ -763,38 +793,6 @@ function switchFormat(format) {
   }
 }
 
-function updateFormatToggleIndicator() {
-  const toggle = document.querySelector('.format-toggle');
-  if (!toggle) return;
-
-  const indicator = toggle.querySelector('.active-tab-indicator');
-  const activeRadio = toggle.querySelector('input[name="message-format"]:checked');
-  if (!indicator || !activeRadio) return;
-  
-  const activeLabel = activeRadio.closest('.radio-tab');
-  if (!activeLabel) return;
-
-  indicator.style.left = `${activeLabel.offsetLeft}px`;
-  indicator.style.width = `${activeLabel.offsetWidth}px`;
-}
-
-if (formatInputs) {
-  formatInputs.forEach(input => {
-    input.addEventListener('change', () => {
-      if (input.checked) {
-        switchFormat(input.value);
-        setTimeout(updateFormatToggleIndicator, 50);
-      }
-    });
-  });
-
-  window.addEventListener('load', () => {
-    setTimeout(updateFormatToggleIndicator, 50);
-  });
-  window.addEventListener('resize', () => {
-    setTimeout(updateFormatToggleIndicator, 50);
-  });
-}
 
 // 分页相关状态
 const PAGE_SIZE = 10;
@@ -1089,21 +1087,26 @@ async function persistSendHotkeySetting() {
 
 function setComposerFullscreen(enabled) {
   if (!composer) return;
-  isComposerFullscreen = enabled;
-  composer.classList.toggle('is-fullscreen', enabled);
-  document.body.classList.toggle('composer-fullscreen-active', enabled);
+  const nextEnabled = !!enabled;
+  const changed = isComposerFullscreen !== nextEnabled;
+  isComposerFullscreen = nextEnabled;
+  composer.classList.toggle('is-fullscreen', nextEnabled);
+  document.body.classList.toggle('composer-fullscreen-active', nextEnabled);
   if (composerFullscreenToggle) {
-    const label = enabled ? LABEL_EXIT_FULLSCREEN : LABEL_EXPAND_COMPOSER;
+    const label = nextEnabled ? LABEL_EXIT_FULLSCREEN : LABEL_EXPAND_COMPOSER;
     composerFullscreenToggle.title = label;
     composerFullscreenToggle.setAttribute('aria-label', label);
     if (composerFullscreenIcon) {
-      composerFullscreenIcon.src = enabled ? ICON_EXIT : ICON_EXPAND;
+      composerFullscreenIcon.src = nextEnabled ? ICON_EXIT : ICON_EXPAND;
     }
   }
   if (mdEditor && typeof mdEditor.resize === 'function') {
-    mdEditor.resize('100%', enabled ? '100%' : MARKDOWN_EDITOR_DEFAULT_HEIGHT);
+    mdEditor.resize('100%', nextEnabled ? '100%' : MARKDOWN_EDITOR_DEFAULT_HEIGHT);
   }
-  if (enabled) {
+  if (changed) {
+    window.dispatchEvent(new CustomEvent('transfer-genie:composer-fullscreen-change', { detail: { enabled: nextEnabled } }));
+  }
+  if (nextEnabled) {
     setTimeout(() => {
       if (currentFormat === 'markdown' && mdEditor) {
         mdEditor.focus();
@@ -1458,12 +1461,6 @@ function hasLocalMessageFile(message) {
 
 function prepareWindowForHide() {
   setComposerFullscreen(false);
-  const textRadio = document.querySelector('input[name="message-format"][value="text"]');
-  if (textRadio) {
-    textRadio.checked = true;
-  }
-  switchFormat('text');
-  requestAnimationFrame(updateFormatToggleIndicator);
   setActiveTab('home', { scrollToBottom: false, focusInput: false });
 }
 
@@ -3768,6 +3765,12 @@ function scrollMarkedMessageListToTop() {
 }
 
 function focusTextInput() {
+  // 输入框即工作区：聚焦活动草稿编辑器
+  const cw = window.transferGenieComposer;
+  if (cw && cw.isActive && cw.isActive() && cw.focusActiveDraft) {
+    cw.focusActiveDraft();
+    return;
+  }
   if (currentFormat === 'markdown' && mdEditor) {
     // editormd doesn't always have a simple focus() but we can try its cm instance
     if (mdEditor.cm) {
@@ -6324,18 +6327,18 @@ function renderMessages(messages, options = {}) {
           retryButton.addEventListener('click', () => {
             pendingSends.delete(message.filename);
             const formatToUse = message.format || 'text';
-            
-            // Switch format UI
-            const radio = document.querySelector(`input[name="message-format"][value="${formatToUse}"]`);
-            if (radio) {
-              radio.checked = true;
-              switchFormat(formatToUse);
-            }
-
-            if (formatToUse === 'markdown' && mdEditor) {
-              mdEditor.setMarkdown(message.content || '');
+            const contentToUse = message.content || '';
+            const cw = window.transferGenieComposer;
+            if (cw && cw.isActive && cw.isActive()) {
+              if (cw.setActiveDraftFormat) cw.setActiveDraftFormat(formatToUse);
+              if (cw.setActiveDraftText) cw.setActiveDraftText(contentToUse);
             } else {
-              textInput.value = message.content || '';
+              switchFormat(formatToUse);
+              if (formatToUse === 'markdown' && mdEditor) {
+                mdEditor.setMarkdown(contentToUse);
+              } else {
+                textInput.value = contentToUse;
+              }
             }
             renderCurrentMessageView();
             sendText();
@@ -6420,6 +6423,18 @@ function renderMessages(messages, options = {}) {
         });
 
         menuList.appendChild(downloadAsFileButton);
+        const addToPaneTextBtn = document.createElement('button');
+        addToPaneTextBtn.className = 'button ghost small';
+        addToPaneTextBtn.textContent = '添加到分栏';
+        addToPaneTextBtn.addEventListener('click', () => {
+          menu.open = false;
+          const store = window.transferGenieComposerStore;
+          if (store && store.dockMessageAsDraft) {
+            const paneId = store.state.activePaneId || (store.state.panes[0] && store.state.panes[0].id);
+            if (paneId) store.dockMessageAsDraft(message, paneId, 'center');
+          }
+        });
+        menuList.appendChild(addToPaneTextBtn);
         menuList.appendChild(deleteButton);
         menu.appendChild(summary);
         menu.appendChild(menuList);
@@ -6427,14 +6442,7 @@ function renderMessages(messages, options = {}) {
         
         // 检测菜单是否应该在图标上方显示
         menu.addEventListener('toggle', () => {
-          // 使用setTimeout确保DOM已更新
-          setTimeout(() => {
-            if (menu.open && shouldShowMenuAbove(item)) {
-              menuList.classList.add('menu-up');
-            } else {
-              menuList.classList.remove('menu-up');
-            }
-          }, 0);
+          setTimeout(() => positionActionMenu(menu), 0);
         });
       }
     } else {
@@ -6511,6 +6519,18 @@ function renderMessages(messages, options = {}) {
         });
 
         menuList.appendChild(saveAsButton);
+        const addToPaneBtn = document.createElement('button');
+        addToPaneBtn.className = 'button ghost small';
+        addToPaneBtn.textContent = '添加到分栏';
+        addToPaneBtn.addEventListener('click', () => {
+          menu.open = false;
+          const store = window.transferGenieComposerStore;
+          if (store && store.dockMessageAsDraft) {
+            const paneId = store.state.activePaneId || (store.state.panes[0] && store.state.panes[0].id);
+            if (paneId) store.dockMessageAsDraft(message, paneId, 'center');
+          }
+        });
+        menuList.appendChild(addToPaneBtn);
         menuList.appendChild(deleteButton);
         menu.appendChild(summary);
         menu.appendChild(menuList);
@@ -6518,14 +6538,7 @@ function renderMessages(messages, options = {}) {
         
         // 检测菜单是否应该在图标上方显示
         menu.addEventListener('toggle', () => {
-          // 使用setTimeout确保DOM已更新
-          setTimeout(() => {
-            if (menu.open && shouldShowMenuAbove(item)) {
-              menuList.classList.add('menu-up');
-            } else {
-              menuList.classList.remove('menu-up');
-            }
-          }, 0);
+          setTimeout(() => positionActionMenu(menu), 0);
         });
       }
     }
@@ -7814,6 +7827,9 @@ function applySettings(settings) {
   currentSettingsFormState = {
     senderName: settings.sender_name || '',
     refreshIntervalSecs: Number(settings.refresh_interval_secs || 5),
+    defaultEditorFormat: normalizeEditorFormat(
+      settings.default_editor_format || loadDefaultEditorFormat() || currentSettingsFormState.defaultEditorFormat,
+    ),
     downloadDir: settings.download_dir || '',
     autoStart: !!settings.auto_start,
     autoUpdateEnabled: !!settings.auto_update_enabled,
@@ -8015,6 +8031,7 @@ async function saveSettings(options = {}) {
     active_webdav_id: activeCandidate ? activeEndpointId : null,
     sender_name: (currentSettingsFormState.senderName || '').trim(),
     refresh_interval_secs: Number(currentSettingsFormState.refreshIntervalSecs) || 5,
+    default_editor_format: currentSettingsFormState.defaultEditorFormat === 'markdown' ? 'markdown' : 'text',
     download_dir: (currentSettingsFormState.downloadDir || '').trim(),
     global_hotkey_enabled: globalHotkeyEnabled,
     global_hotkey: normalizedGlobalHotkey || DEFAULT_GLOBAL_HOTKEY,
@@ -8396,7 +8413,12 @@ async function sendText() {
   }
   
   let text = '';
-  if (currentFormat === 'markdown' && mdEditor) {
+ const cw = window.transferGenieComposer;
+ if (cw && cw.isActive && cw.isActive() && cw.getActiveDraft) {
+   const draft = cw.getActiveDraft();
+    if (draft && draft.format) currentFormat = draft.format;
+   text = draft ? (draft.text || '') : '';
+ } else if (currentFormat === 'markdown' && mdEditor) {
     text = mdEditor.getMarkdown();
   } else {
     text = textInput.value;
@@ -8451,6 +8473,8 @@ async function sendText() {
       } else {
         textInput.value = '';
       }
+      // 输入框即工作区：发送成功后清空活动草稿
+      if (cw && cw.clearActiveDraftAfterSend) cw.clearActiveDraftAfterSend();
       
       renderCurrentMessageView();
       forceScrollMessageListToBottom();
@@ -9463,6 +9487,11 @@ if (composerFullscreenToggle) {
   // Ensure icon and labels reflect initial state
   setComposerFullscreen(false);
 }
+// R5: 暴露全屏切换给 Vue 工具栏按钮（放大按钮已合并到工作区工具栏）
+window.transferGenieLegacyFullscreen = {
+  set: function (enabled) { setComposerFullscreen(enabled); },
+  get: function () { return isComposerFullscreen; },
+};
 
 if (feedContent) {
   feedContent.addEventListener(
@@ -9478,6 +9507,55 @@ if (feedContent) {
 
 syncComposerOffset();
 window.addEventListener('resize', syncComposerOffset);
+
+// 使用 fixed 定位菜单，避免被 overflow 容器裁切
+function positionActionMenu(menu) {
+  if (!menu) return;
+  const menuList = menu.querySelector('.action-menu-list');
+  if (!menuList) return;
+  if (!menu.open) {
+    menuList.style.left = '';
+    menuList.style.top = '';
+    menuList.classList.remove('menu-up');
+    return;
+  }
+  const summary = menu.querySelector('summary');
+  if (!summary) return;
+  const rect = summary.getBoundingClientRect();
+  // 先让菜单可见以测量尺寸
+  menuList.style.left = rect.right + 'px';
+  menuList.style.top = rect.bottom + 'px';
+  const menuW = menuList.offsetWidth;
+  const menuH = menuList.offsetHeight || 120;
+  const spaceBelow = window.innerHeight - rect.bottom;
+  let left = rect.right - menuW;
+  if (left < 8) left = 8;
+  let top;
+  if (spaceBelow < menuH + 12 && rect.top > menuH + 12) {
+    top = rect.top - menuH - 8;
+    menuList.classList.add('menu-up');
+  } else {
+    top = rect.bottom + 8;
+    menuList.classList.remove('menu-up');
+  }
+  menuList.style.left = left + 'px';
+  menuList.style.top = top + 'px';
+}
+
+// 全局 toggle 监听：处理 Vue 渲染的 action-menu
+document.addEventListener('toggle', function(e) {
+  var target = e.target;
+  if (target && target.classList && target.classList.contains('action-menu')) {
+    setTimeout(function() { positionActionMenu(target); }, 0);
+  }
+}, true);
+
+// 窗口滚动/缩放时重新定位已打开的菜单
+function repositionOpenActionMenus() {
+  document.querySelectorAll('.action-menu[open]').forEach(positionActionMenu);
+}
+window.addEventListener('resize', repositionOpenActionMenus);
+window.addEventListener('scroll', repositionOpenActionMenus, true);
 
 // 点击外部区域关闭更多菜单
 document.addEventListener('click', (event) => {

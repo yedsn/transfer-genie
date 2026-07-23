@@ -68,6 +68,7 @@ export const transferGenieState = reactive<TransferGenieState>({
   settingsForm: {
     senderName: "",
     refreshIntervalSecs: 5,
+    defaultEditorFormat: "text",
     downloadDir: "",
     autoStart: false,
     autoUpdateEnabled: false,

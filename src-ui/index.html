@@ -36,11 +36,11 @@
                   <span id="marked-filter-label">已标记 (0)</span>
                 </button>
                 <button id="open-download-dir" class="button ghost small" type="button">打开下载目录</button>
-                <button id="refresh-btn" class="button ghost small refresh-button" type="button">
-                  <span class="refresh-label">刷新</span>
-                  <span class="refresh-spinner" aria-hidden="true"></span>
-                </button>
-                <button id="toggle-selection" class="button ghost small" type="button">选择</button>
+               <button id="refresh-btn" class="button ghost small refresh-button" type="button">
+                 <span class="refresh-label">刷新</span>
+                 <span class="refresh-spinner" aria-hidden="true"></span>
+               </button>
+               <button id="toggle-selection" class="button ghost small" type="button">选择</button>
               </div>
             </div>
             <section id="download-task-panel-legacy" class="download-task-panel" hidden>
@@ -64,10 +64,10 @@
                 <li
                   v-for="card in ui.homeFeed.messageCards"
                   :key="card.filename"
-                  class="message-card"
-                  :class="{ 'is-file': card.isFile, 'is-text': card.isText, 'is-self': card.isSelf, 'is-marked': card.isMarked }"
-                  :data-filename="card.filename"
-                  @dblclick="openMessagePreview(card.message)"
+                 class="message-card"
+                 :class="{ 'is-file': card.isFile, 'is-text': card.isText, 'is-self': card.isSelf, 'is-marked': card.isMarked }"
+                 :data-filename="card.filename"
+                 @dblclick="openMessagePreview(card.message)"
                 >
                   <div class="message-header">
                     <span>{{ card.headerText }}</span>
@@ -115,6 +115,7 @@
                         </summary>
                         <div class="action-menu-list">
                           <button class="button ghost small" type="button" @click="downloadTextMessageAsFile(card.message)">下载为文件</button>
+                          <button class="button ghost small" type="button" @click="addMessageToWorkspace(card.message)">添加到分栏</button>
                           <button class="button ghost small delete-action" type="button" @click="deleteSingleMessage(card.message)">删除</button>
                           <button v-if="card.showSaveFileAsAction" class="button ghost small" type="button" @click="saveMessageFileAs(card.message)">&#x53E6;&#x5B58;&#x4E3A;</button>
                         </div>
@@ -131,10 +132,11 @@
             <section class="composer">
               <label for="text-input" class="visually-hidden">发送文本</label>
         <div class="composer-body">
-              <button id="composer-fullscreen-toggle" class="composer-expand-button" type="button" title="放大输入框" aria-label="放大输入框">
-                <img id="composer-fullscreen-icon" src="icons/fullscreen.svg" alt="" />
-              </button>
-              <div class="composer-row">
+             <button id="composer-fullscreen-toggle" class="composer-expand-button" type="button" title="放大输入框" aria-label="放大输入框" style="display:none">
+               <img id="composer-fullscreen-icon" src="icons/fullscreen.svg" alt="" />
+             </button>
+              <composer-workspace></composer-workspace>
+             <div class="composer-row">
                 <div id="editor-container" style="width: 100%; display: flex; flex-direction: column;">
                   <textarea id="text-input" placeholder="输入消息..."></textarea>
                   <div id="markdown-editor" style="display: none;"></div>
@@ -142,17 +144,6 @@
               </div>
               <div id="selected-files-container" class="selected-files"></div>
               <div class="composer-toolbar">
-                <div class="format-toggle">
-                  <div class="active-tab-indicator"></div>
-                  <label class="radio-tab">
-                    <input type="radio" name="message-format" value="text" checked />
-                    <span>纯文本</span>
-                  </label>
-                  <label class="radio-tab">
-                    <input type="radio" name="message-format" value="markdown" />
-                    <span>Markdown</span>
-                  </label>
-                </div>
                 <div class="composer-actions">
                   <div id="composer-marking" class="composer-marking">
                     <button
@@ -851,6 +842,24 @@
                 </div>
               </div>
 
+              <div class="settings-group settings-default-editor-format">
+                <h3 class="settings-group-title">编辑器默认格式</h3>
+                <div class="settings-group-content">
+                  <div class="format-toggle format-toggle-inline">
+                    <div class="active-tab-indicator" :class="{ 'is-md': ui.settingsForm.defaultEditorFormat === 'markdown' }"></div>
+                    <label class="radio-tab">
+                      <input type="radio" name="default-editor-format" value="text" :checked="ui.settingsForm.defaultEditorFormat !== 'markdown'" @change="updateSettingsFormField('defaultEditorFormat', 'text')" />
+                      <span>纯文本</span>
+                    </label>
+                    <label class="radio-tab">
+                      <input type="radio" name="default-editor-format" value="markdown" :checked="ui.settingsForm.defaultEditorFormat === 'markdown'" @change="updateSettingsFormField('defaultEditorFormat', 'markdown')" />
+                      <span>Markdown</span>
+                    </label>
+                  </div>
+                  <span class="field-hint">新建草稿时默认使用该格式；每个草稿可在编辑器底部单独切换。</span>
+                </div>
+              </div>
+
               <button id="save-settings" class="button primary">保存设置</button>
 
               <div class="settings-group">
@@ -1156,9 +1165,9 @@
           aria-controls="tab-settings"
         >
           <img src="icons/setting.svg" alt="设置" class="tab-icon" />
-          <span class="tab-label">设置</span>
-          <span class="tab-caption">同步配置</span>
-        </button>
+         <span class="tab-label">设置</span>
+         <span class="tab-caption">同步配置</span>
+       </button>
       </nav>
     </div>
     <script type="module" src="/src/main.ts"></script>

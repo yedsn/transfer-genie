@@ -1,6 +1,10 @@
 import { createApp } from "vue";
 import { installTransferGenieBridge, useTransferGenieStore } from "./store";
 import "./styles.css";
+import ComposerWorkspace from "./workspace/ComposerWorkspace.vue";
+import "./workspace/composer.css";
+import { composerStore } from "./workspace/composer-store";
+
 
 function loadLegacyScript(src: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -30,6 +34,7 @@ async function loadLegacyEditorDeps() {
 }
 
 installTransferGenieBridge();
+
 
 const store = useTransferGenieStore();
 const callAction = (name: string, ...args: any[]) => store.callAction(name, ...args);
@@ -322,6 +327,31 @@ const app = createApp({
       if (!message || message.selectionMode) return;
       callAction("openMessagePreview", message.message || message);
     },
+
+    // --- Composer workspace: 消息卡片拖拽源 ---
+    startMessageDrag(event: any, card: any) {
+      const drag = (window as any).transferGenieWorkspaceDrag;
+      const ctx = (window as any).transferGenieComposerDragCtx;
+      if (!drag || !ctx) return;
+      const message = card?.message || card;
+      ctx.payload = drag.createMessageDragPayload(message, card?.headerText || message?.sender);
+      if (event.dataTransfer) {
+        event.dataTransfer.setData("text/plain", message?.filename || "message");
+        event.dataTransfer.effectAllowed = "copy";
+      }
+    },
+    endMessageDrag() {
+      const ctx = (window as any).transferGenieComposerDragCtx;
+      if (ctx) ctx.payload = null;
+    },
+    // R3: 消息三点菜单 -> 添加到分栏（停靠为草稿到活动分栏）
+    addMessageToWorkspace(message: any) {
+      const store = (window as any).transferGenieComposerStore;
+      if (store && store.dockMessageAsDraft) {
+        const paneId = store.state.activePaneId || store.state.panes[0]?.id;
+        if (paneId) store.dockMessageAsDraft(message, paneId, "center");
+      }
+    },
   },
 });
 
@@ -330,6 +360,8 @@ app.component("home-page-shell", { template: "<div style='display:flex;flex-dire
 app.component("marked-page-shell", { template: "<div style='display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden'><slot /></div>", inheritAttrs: false });
 app.component("downloads-page-shell", { template: "<div style='display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden'><slot /></div>", inheritAttrs: false });
 app.component("settings-page-shell", { template: "<div style='display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden'><slot /></div>", inheritAttrs: false });
+app.component("composer-workspace", ComposerWorkspace);
+(window as any).transferGenieComposerStore = composerStore;
 
 app.mount("#app-shell");
 

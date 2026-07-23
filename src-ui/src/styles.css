@@ -1490,6 +1490,10 @@ body {
   opacity: 1;
 }
 
+.action-menu[open] {
+  z-index: 10000;
+}
+
 .action-menu[open] summary {
   background: var(--panel-soft);
 }
@@ -1499,9 +1503,9 @@ body {
 }
 
 .action-menu-list {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 8px);
+  position: fixed;
+  right: auto;
+  top: auto;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -1510,7 +1514,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  z-index: 500;
+  z-index: 10000;
   width: max-content;
   min-width: 120px;
   animation: menuFadeIn 0.2s ease;
@@ -1598,9 +1602,10 @@ body {
 
 .composer-toolbar {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   align-items: center;
   padding: 2px 8px 6px;
+  gap: 8px;
 }
 
 .composer-marking {
@@ -1701,7 +1706,8 @@ body {
 
 .format-toggle {
   position: relative;
-  display: inline-flex;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 0;
   background-color: #fafafa;
   padding: 2px;
@@ -1713,13 +1719,18 @@ body {
   position: absolute;
   top: 2px;
   bottom: 2px;
-  left: 2px; /* Will be updated by JS */
-  width: 50px; /* Will be updated by JS */
+  left: 2px;
+  width: calc(50% - 2px);
   border-radius: 6px;
   background: #fff;
   box-shadow: 0 1px 2px rgba(0,0,0,0.08), 0 2px 4px rgba(0,0,0,0.04);
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 180ms ease;
   z-index: 0;
+  will-change: transform;
+}
+
+.active-tab-indicator.is-md {
+  transform: translateX(100%);
 }
 
 .radio-tab {
@@ -1729,10 +1740,11 @@ body {
   font-size: 12px;
   font-weight: 500;
   color: var(--muted);
-  transition: color 0.25s ease;
+  transition: color 180ms ease, font-weight 180ms ease;
   z-index: 1;
   display: flex;
   align-items: center;
+  justify-content: center;
 }
 
 .radio-tab input {
@@ -1744,6 +1756,13 @@ body {
   font-weight: 600;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .active-tab-indicator,
+  .radio-tab {
+    transition: none;
+  }
+}
+
 .composer-body {
   border-radius: 5px;
   border: 1px solid var(--border);
@@ -1753,11 +1772,6 @@ body {
   position: relative;
   display: flex;
   flex-direction: column;
-}
-
-.composer-body:focus-within {
-  border-color: #ffc29c;
-  box-shadow: 0 0 0 2px rgba(255, 122, 47, 0.15), 0 10px 26px rgba(15, 15, 25, 0.06);
 }
 
 .composer-row {
@@ -2763,7 +2777,7 @@ input {
   box-shadow: none;
   backdrop-filter: none;
   z-index: 20;
-  animation: float-in 0.45s ease;
+  animation: panel-in 0.45s ease;
 }
 
 .tab-button {
@@ -2866,7 +2880,7 @@ input {
   }
 }
 
-@keyframes float-in {
+@keyframes panel-in {
   from {
     opacity: 0;
     transform: translateY(8px);
@@ -3481,7 +3495,43 @@ body.preview-open {
 
 
 .editormd-toolbar {
-  height: 45px;
+  height: 42px;
+  min-height: 42px;
+  box-sizing: border-box;
+  padding-bottom: 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(15, 23, 42, 0.10) transparent;
+}
+
+.editormd-toolbar::-webkit-scrollbar {
+  height: 5px;
+}
+
+.editormd-toolbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.editormd-toolbar::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0.08);
+  border-radius: 999px;
+}
+
+.editormd-toolbar:hover::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0.14);
+}
+
+.editormd-toolbar ul {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  min-width: max-content;
+}
+
+.editormd-toolbar li {
+  flex: 0 0 auto;
 }
 home-page-shell,
 marked-page-shell,
@@ -3654,3 +3704,9 @@ settings-page-shell {
 
 
 
+
+
+.format-toggle-inline {
+  display: inline-grid;
+  margin-top: 6px;
+}

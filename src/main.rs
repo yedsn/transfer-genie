@@ -3594,6 +3594,7 @@ fn minimize_window(app: AppHandle, window: Window) -> Result<(), String> {
     Ok(())
 }
 
+
 #[tauri::command]
 async fn fetch_image_preview(
     state: State<'_, AppState>,
