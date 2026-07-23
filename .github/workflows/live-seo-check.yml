@@ -1,0 +1,35 @@
+name: Live SEO Check
+
+on:
+  workflow_dispatch:
+    inputs:
+      site_url:
+        description: 'Site URL to check'
+        required: false
+        default: 'https://yedsn.github.io/transfer-genie/'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Verify live SEO files and pages
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify live SEO
+        run: npm run docs:verify-live-seo
+        env:
+          SITE_URL: ${{ github.event.inputs.site_url }}

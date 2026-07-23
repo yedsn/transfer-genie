@@ -1,3 +1,7 @@
+---
+description: 完成 Transfer Genie 第一次文本或文件传输，验证 WebDAV 端点、消息流、下载和历史记录是否正常。
+---
+
 # 第一次传输
 
 这份文档帮助你完成第一次成功的文本或文件传输，确认 Transfer Genie 已经可用。

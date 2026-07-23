@@ -1,3 +1,7 @@
+---
+description: Transfer Genie Telegram Bridge 文档，说明如何在 Telegram 会话和 WebDAV 端点之间同步文本与文件。
+---
+
 # Telegram Bridge
 
 `Telegram Bridge` 用来在一个 Telegram 会话和一个 WebDAV 端点之间做双向同步。

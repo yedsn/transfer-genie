@@ -1,3 +1,7 @@
+---
+description: 下载并安装 Transfer Genie，在 Windows 或 macOS 上配置 WebDAV 后开始跨设备发送文本和文件。
+---
+
 # 下载安装
 
 这份文档面向“我要把软件装起来并开始用”的场景，不涉及源码开发。

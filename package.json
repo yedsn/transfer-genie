@@ -3,6 +3,25 @@
     "version": "0.4.0",
     "private": true,
     "type": "module",
+    "description": "A WebDAV-based cross-device file transfer and text sync desktop app with HTTP API and Telegram Bridge.",
+    "homepage": "https://yedsn.github.io/transfer-genie/",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/yedsn/transfer-genie.git"
+    },
+    "keywords": [
+        "webdav",
+        "file-transfer",
+        "text-sync",
+        "desktop-app",
+        "tauri",
+        "rust",
+        "self-hosted",
+        "telegram-bot",
+        "http-api",
+        "windows",
+        "macos"
+    ],
     "scripts": {
         "dev": "vite --host 127.0.0.1",
         "build": "vue-tsc --noEmit && vite build",
@@ -12,7 +31,9 @@
         "tauri:build": "tauri build",
         "docs:dev": "vitepress dev docs",
         "docs:build": "vitepress build docs",
-        "docs:preview": "vitepress preview docs"
+        "docs:preview": "vitepress preview docs",
+        "docs:verify-seo": "DOCS_BASE=/transfer-genie/ vitepress build docs && node scripts/verify_docs_seo.mjs",
+        "docs:verify-live-seo": "node scripts/verify_docs_live_seo.mjs"
     },
     "engines": {
         "node": ">=20"

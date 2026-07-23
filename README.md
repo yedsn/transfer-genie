@@ -1,11 +1,15 @@
 # Transfer Genie
 
+[English README](README.en.md)
+
 <p align="center">
   <img src="icons/icon.png" alt="Transfer Genie" width="160">
 </p>
 
-<p align="center"><strong>一个基于 WebDAV 的跨平台文件与文本传输助手。</strong></p>
-<p align="center">像聊天一样在多台设备之间传文字、传文件、做同步，也能接入本机 HTTP API 和 Telegram Bridge。</p>
+<p align="center"><strong>一个基于 WebDAV 的跨设备文件传输与文本同步工具。</strong></p>
+<p align="center">面向 Windows 和 macOS，像聊天一样发送文本、Markdown 和文件，也能通过本机 HTTP API 与 Telegram Bridge 接入自动化流程。</p>
+
+Transfer Genie is a WebDAV-based cross-device file transfer and text sync desktop app. It is useful for self-hosted transfer workflows, Windows/macOS text and file sharing, local HTTP API automation, and Telegram-to-WebDAV synchronization.
 
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-2021-000000?logo=rust" alt="Rust 2021">
@@ -32,7 +36,17 @@
 <p align="center">
   <a href="https://yedsn.github.io/transfer-genie/">官网</a>
   ·
+  <a href="https://yedsn.github.io/transfer-genie/download">下载</a>
+  ·
   <a href="https://yedsn.github.io/transfer-genie/guide/quick-start">文档站</a>
+  ·
+  <a href="https://yedsn.github.io/transfer-genie/compare/transfer-genie-vs-airdrop">对比 AirDrop</a>
+  ·
+  <a href="https://yedsn.github.io/transfer-genie/compare/transfer-genie-vs-wechat-file-transfer">对比微信文件传输助手</a>
+  ·
+  <a href="https://yedsn.github.io/transfer-genie/compare/transfer-genie-vs-syncthing">对比 Syncthing</a>
+  ·
+  <a href="https://yedsn.github.io/transfer-genie/faq">FAQ</a>
   ·
   <a href="#http-api-速览">做自动化</a>
   ·
@@ -132,6 +146,9 @@ Transfer Genie（传输小精灵）使用 **Tauri + Rust + WebDAV** 构建，目
 - 想自己构建程序：继续看 `3` 和 `4`
 - 想做自动化：跳到“HTTP API 速览”
 - 想做 Bot / IM 桥接：跳到“Telegram Bridge 速览”
+- 想下载安装包：看 <https://yedsn.github.io/transfer-genie/download>
+- 想用 NAS/WebDAV 做自托管传输：看 <https://yedsn.github.io/transfer-genie/use-cases/nas-webdav-transfer>
+- 想替代微信文件传输助手：看 <https://yedsn.github.io/transfer-genie/compare/transfer-genie-vs-wechat-file-transfer>
 
 ### 1. 准备环境
 
