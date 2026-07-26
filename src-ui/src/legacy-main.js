@@ -9603,6 +9603,36 @@ if (textInput) {
 }
 
 document.addEventListener('keydown', (event) => {
+  if (event.defaultPrevented || event.key !== 'Enter' || event.isComposing) {
+    return;
+  }
+  const target = event.target;
+  if (!(target instanceof Element) || !target.closest('.cw-editor')) {
+    return;
+  }
+  if (target.closest('button, input[type="radio"], input[type="checkbox"], select')) {
+    return;
+  }
+
+  const isCtrlLike = event.ctrlKey || event.metaKey;
+  const isAlt = event.altKey;
+  const isShift = event.shiftKey;
+
+  if (sendHotkey === SEND_HOTKEY.ENTER) {
+    if (!isCtrlLike && !isAlt && !isShift) {
+      event.preventDefault();
+      sendText();
+    }
+    return;
+  }
+
+  if (isCtrlLike && !isAlt) {
+    event.preventDefault();
+    sendText();
+  }
+}, true);
+
+document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape' || event.defaultPrevented) {
     return;
   }
