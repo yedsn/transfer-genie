@@ -1841,7 +1841,8 @@ body {
   opacity: 1;
 }
 
-.composer.is-fullscreen {
+html.composer-fullscreen-active .composer,
+body.composer-fullscreen-active .composer {
   position: fixed;
   inset: 12px;
   z-index: 1000;
@@ -1853,49 +1854,60 @@ body {
   flex-direction: column;
 }
 
-.composer.is-fullscreen .composer-body {
+html.composer-fullscreen-active .composer .composer-body,
+body.composer-fullscreen-active .composer .composer-body {
   flex: 1;
   min-height: 0;
 }
 
-.composer.is-fullscreen .composer-row {
+html.composer-fullscreen-active .composer .composer-row,
+body.composer-fullscreen-active .composer .composer-row {
   flex: 1;
   min-height: 0;
 }
 
-.composer.is-fullscreen #editor-container {
+html.composer-fullscreen-active .composer #editor-container,
+body.composer-fullscreen-active .composer #editor-container {
   height: 100%;
 }
 
-.composer.is-fullscreen textarea {
+html.composer-fullscreen-active .composer textarea,
+body.composer-fullscreen-active .composer textarea {
   height: 100%;
   min-height: unset;
   max-height: none;
 }
 
-.composer.is-fullscreen #markdown-editor {
+html.composer-fullscreen-active .composer #markdown-editor,
+body.composer-fullscreen-active .composer #markdown-editor {
   flex: 1;
   height: 100%;
   display: flex;
   flex-direction: column;
 }
 
-.composer.is-fullscreen .editormd,
-.composer.is-fullscreen .editormd-container {
+html.composer-fullscreen-active .composer .editormd,
+html.composer-fullscreen-active .composer .editormd-container,
+body.composer-fullscreen-active .composer .editormd,
+body.composer-fullscreen-active .composer .editormd-container {
   height: 100% !important;
   display: flex;
   flex-direction: column;
 }
 
-.composer.is-fullscreen .CodeMirror,
-.composer.is-fullscreen .CodeMirror-scroll {
+html.composer-fullscreen-active .composer .CodeMirror,
+html.composer-fullscreen-active .composer .CodeMirror-scroll,
+body.composer-fullscreen-active .composer .CodeMirror,
+body.composer-fullscreen-active .composer .CodeMirror-scroll {
   height: 100% !important;
 }
 
-.composer.is-fullscreen .composer-toolbar {
+html.composer-fullscreen-active .composer .composer-toolbar,
+body.composer-fullscreen-active .composer .composer-toolbar {
   margin-top: 6px;
 }
 
+html.composer-fullscreen-active,
 body.composer-fullscreen-active {
   overflow: hidden;
 }

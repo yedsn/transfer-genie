@@ -4,9 +4,70 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Transfer Genie</title>
+    <style>
+      [v-cloak] { display: none !important; }
+      #app-boot-screen {
+        position: fixed;
+        inset: 0;
+        z-index: 99999;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #f7f5f2;
+        color: #2f2a25;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .boot-card {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 14px 18px;
+        border: 1px solid rgba(47, 42, 37, 0.08);
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.82);
+        box-shadow: 0 16px 42px rgba(47, 42, 37, 0.10);
+      }
+      .boot-spinner {
+        width: 18px;
+        height: 18px;
+        border: 2px solid rgba(47, 42, 37, 0.12);
+        border-top-color: #ff7a2f;
+        border-radius: 50%;
+        animation: boot-spin 720ms linear infinite;
+      }
+      .boot-title {
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .boot-subtitle {
+        margin-top: 2px;
+        font-size: 12px;
+        color: rgba(47, 42, 37, 0.62);
+      }
+      @keyframes boot-spin { to { transform: rotate(360deg); } }
+      @media (prefers-reduced-motion: reduce) {
+        .boot-spinner { animation: none; }
+      }
+    </style>
   </head>
   <body>
-    <div class="app" id="app-shell" :data-active-tab="ui.activeTab">
+    <div id="app-boot-screen" role="status" aria-live="polite">
+      <div class="boot-card">
+        <div class="boot-spinner" aria-hidden="true"></div>
+        <div>
+          <div class="boot-title">Transfer Genie</div>
+          <div class="boot-subtitle" id="app-boot-subtitle">正在加载...</div>
+        </div>
+      </div>
+    </div>
+    <script>
+      window.setTimeout(function () {
+        var boot = document.getElementById('app-boot-screen');
+        var subtitle = document.getElementById('app-boot-subtitle');
+        if (boot && subtitle) subtitle.textContent = '加载时间较长，请稍候...';
+      }, 5000);
+    </script>
+    <div class="app" id="app-shell" v-cloak :data-active-tab="ui.activeTab">
       <main class="content">
         <section class="tab-panel" data-tab-panel="home" id="tab-home" role="tabpanel" :class="{ 'is-active': ui.activeTab === 'home' }" :aria-hidden="ui.activeTab === 'home' ? 'false' : 'true'">
           <home-page-shell inline-template>

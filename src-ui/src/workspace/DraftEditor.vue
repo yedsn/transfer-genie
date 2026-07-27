@@ -10,8 +10,16 @@ const textEl = ref<HTMLTextAreaElement | null>(null);
 const mdWrap = ref<HTMLElement | null>(null);
 let editor: any = null;
 let initRetry = 0;
+let fullscreenListener: ((event: Event) => void) | null = null;
+let resizeListener: (() => void) | null = null;
+
+const MARKDOWN_NORMAL_HEIGHT = "180px";
 
 const mdId = "cw-md-" + props.paneId + "-" + props.draft.id;
+
+function isComposerFullscreen() {
+  return document.documentElement.classList.contains("composer-fullscreen-active") || document.body.classList.contains("composer-fullscreen-active");
+}
 
 function registerFocus() {
   // 注册活动草稿聚焦函数，供 legacy focusTextInput 复用
@@ -43,6 +51,25 @@ function onTextInput(event: Event) {
   composerStore.setDraftText(props.draft.id, v);
 }
 
+function shouldSendForEnter(event: KeyboardEvent) {
+  if (event.defaultPrevented || event.key !== "Enter" || event.isComposing) return false;
+  const bridge = (window as any).transferGenieComposer;
+  const hotkey = bridge?.getSendHotkey?.() === "ctrl_enter" ? "ctrl_enter" : "enter";
+  const isCtrlLike = event.ctrlKey || event.metaKey;
+  const isAlt = event.altKey;
+  const isShift = event.shiftKey;
+  if (hotkey === "ctrl_enter") return isCtrlLike && !isAlt;
+  return !isCtrlLike && !isAlt && !isShift;
+}
+
+function handleEditorKeydown(event: KeyboardEvent) {
+  if (!shouldSendForEnter(event)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const bridge = (window as any).transferGenieComposer;
+  if (bridge && typeof bridge.sendActiveDraft === "function") bridge.sendActiveDraft();
+}
+
 function initMarkdown() {
   if (editor) return;
   if (!(window as any).editormd) {
@@ -56,7 +83,7 @@ function initMarkdown() {
   try {
     editor = (window as any).editormd(mdId, {
       width: "100%",
-      height: "100%",
+      height: isComposerFullscreen() ? "100%" : MARKDOWN_NORMAL_HEIGHT,
       path: "lib/editor.md/lib/",
       pluginPath: "lib/editor.md/plugins/",
       placeholder: "使用 Markdown 输入草稿…",
@@ -71,18 +98,32 @@ function initMarkdown() {
       },
       onload: function () {
         try { this.setMarkdown(props.draft.text || ""); } catch (e) { /* ignore */ }
+        window.requestAnimationFrame(() => refreshMarkdownLayout());
         const cm = this.cm;
         if (cm) {
           cm.on("change", () => {
             try { composerStore.setDraftText(props.draft.id, cm.getValue()); } catch (e) { /* ignore */ }
           });
           cm.on("focus", () => { onActivated(); });
+          cm.on("keydown", (_cm: any, event: KeyboardEvent) => { handleEditorKeydown(event); });
         }
       },
     });
   } catch (e) {
     console.error("editormd init failed", e);
   }
+}
+
+function refreshMarkdownLayout(fullscreen = isComposerFullscreen()) {
+  if (!isMarkdown.value || !editor) return;
+  try {
+    if (typeof editor.resize === "function") {
+      editor.resize("100%", fullscreen ? "100%" : MARKDOWN_NORMAL_HEIGHT);
+    }
+    if (editor.cm && typeof editor.cm.refresh === "function") {
+      editor.cm.refresh();
+    }
+  } catch (e) { /* ignore */ }
 }
 
 function destroyMarkdown() {
@@ -98,6 +139,16 @@ function destroyMarkdown() {
 onMounted(() => {
   if (isMarkdown.value) initMarkdown();
   registerFocus();
+  fullscreenListener = (event: Event) => {
+    const custom = event as CustomEvent<{ enabled?: boolean }>;
+    const fullscreen = typeof custom?.detail?.enabled === "boolean" ? custom.detail.enabled : isComposerFullscreen();
+    window.requestAnimationFrame(() => {
+      refreshMarkdownLayout(fullscreen);
+    });
+  };
+  resizeListener = () => refreshMarkdownLayout();
+  window.addEventListener("transfer-genie:composer-fullscreen-change", fullscreenListener as EventListener);
+  window.addEventListener("resize", resizeListener);
 });
 watch(() => props.isActive, (active) => { if (active) registerFocus(); });
 watch(isMarkdown, (next) => {
@@ -108,8 +159,18 @@ watch(isMarkdown, (next) => {
     destroyMarkdown();
   }
 });
+watch(() => props.draft.id, () => {
+  if (isMarkdown.value) {
+    initRetry = 0;
+    setTimeout(() => {
+      refreshMarkdownLayout();
+    }, 0);
+  }
+});
 onBeforeUnmount(() => {
   destroyMarkdown();
+  if (fullscreenListener) window.removeEventListener("transfer-genie:composer-fullscreen-change", fullscreenListener as EventListener);
+  if (resizeListener) window.removeEventListener("resize", resizeListener);
   const bridge = (window as any).transferGenieComposer;
   if (bridge && props.isActive) { bridge._focusActive = null; bridge._clearActive = null; }
 });
@@ -130,6 +191,7 @@ function setFormat(format: string) {
       spellcheck="false"
       ref="textEl"
       @input="onTextInput"
+      @keydown="handleEditorKeydown"
       @focus="onActivated"
     ></textarea>
     <div class="cw-editor-foot">

@@ -364,6 +364,7 @@ app.component("composer-workspace", ComposerWorkspace);
 (window as any).transferGenieComposerStore = composerStore;
 
 app.mount("#app-shell");
+document.getElementById("app-boot-screen")?.remove();
 
 async function loadLegacyRuntime() {
   await loadLegacyEditorDeps();

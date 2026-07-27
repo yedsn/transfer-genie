@@ -62,6 +62,15 @@ function activePaneId(): string {
   return state.activePaneId || state.panes[0]?.id || "";
 }
 
+function getDefaultDraftFormat(): DraftFormat {
+  if (typeof window !== "undefined") {
+    const vueStore = (window as any).transferGenieVue?.store;
+    const defaultFormat = vueStore?.settingsForm?.defaultEditorFormat;
+    if (defaultFormat === "markdown") return "markdown";
+  }
+  return "text";
+}
+
 // 内容保护确认：关闭非空草稿或收起布局丢弃其他分栏草稿前，要求用户确认。
 let confirmer: (msg: string) => boolean = (msg: string) =>
   typeof window !== "undefined" && typeof window.confirm === "function" ? window.confirm(msg) : true;
@@ -83,14 +92,7 @@ export const composerStore = {
   addDraft(paneId?: string): string | undefined {
     const targetId = paneId || activePaneId();
     if (!targetId) return;
-    // 新建草稿默认格式跟随左下角编辑器当前选中的格式
-    let format: DraftFormat = "text";
-    if (typeof window !== "undefined") {
-      const vueStore = (window as any).transferGenieVue?.store;
-      const defaultFormat = vueStore?.settingsForm?.defaultEditorFormat;
-      if (defaultFormat === "markdown") format = "markdown";
-    }
-    const { state: next, draftId } = ccore.addDraft(state, targetId, { format });
+    const { state: next, draftId } = ccore.addDraft(state, targetId, { format: getDefaultDraftFormat() });
     commit(next);
     return draftId;
   },
@@ -100,7 +102,7 @@ export const composerStore = {
   setDraftFormat(tabId: string, format: DraftFormat) { commit(ccore.setDraftFormat(state, tabId, format)); },
   clearWorkspaceConfirmed() {
     ccore.resetSeq();
-    commit(ccore.createInitialComposer());
+    commit(ccore.createInitialComposer({ format: getDefaultDraftFormat() }));
   },
   isDraftNonEmpty(tabId: string) {
     const found = state.panes.flatMap((p) => p.tabs).find((t) => t.id === tabId);
@@ -124,7 +126,9 @@ export const composerStore = {
   },
   removeDraftConfirmed(tabId: string) { commit(core.closeTab(state, tabId)); },
   closeOthersInPaneConfirmed(paneId: string, keepTabId: string) { commit(ccore.closeOtherTabsInPane(state, paneId, keepTabId)); },
-  closeAllInPaneConfirmed(paneId: string) { commit(ccore.closeAllTabsInPane(state, paneId)); },
+  closeAllInPaneConfirmed(paneId: string) {
+    commit(ccore.closeAllTabsInPane(state, paneId, { format: getDefaultDraftFormat() }));
+  },
   closeRightInPaneConfirmed(paneId: string, tabId: string) { commit(ccore.closeTabsRightOf(state, paneId, tabId)); },
   closeLeftInPaneConfirmed(paneId: string, tabId: string) { commit(ccore.closeTabsLeftOf(state, paneId, tabId)); },
   removeDraft(tabId: string) {

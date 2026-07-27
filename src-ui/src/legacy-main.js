@@ -33,6 +33,22 @@ function saveDefaultEditorFormat(format) {
   }
 }
 
+function applyDefaultEditorFormat(format) {
+  const normalized = normalizeEditorFormat(format);
+  currentFormat = normalized;
+  const cw = window.transferGenieComposer;
+  if (cw && cw.isActive && cw.isActive() && cw.getActiveDraft) {
+    const draft = cw.getActiveDraft();
+    if (!draft || !String(draft.text || '').trim()) {
+      cw.setActiveDraftFormat?.(normalized);
+    }
+    return;
+  }
+  if (textInput && !String(textInput.value || '').trim()) {
+    switchFormat(normalized);
+  }
+}
+
 function syncVueActiveTab(tab) {
   vueBridge?.syncActiveTab?.(tab);
 }
@@ -118,6 +134,7 @@ function updateSettingsFormField(field, value) {
   };
   if (field === 'defaultEditorFormat') {
     saveDefaultEditorFormat(value);
+    applyDefaultEditorFormat(value);
   }
   syncVueSettingsForm(currentSettingsFormState);
 }
@@ -1066,6 +1083,7 @@ function updateComposerHint() {
 
 function setSendHotkey(value) {
   sendHotkey = normalizeSendHotkey(value);
+  window.transferGenieSendHotkey = sendHotkey;
   if (sendHotkeyInputs && sendHotkeyInputs.length > 0) {
     sendHotkeyInputs.forEach((input) => {
       input.checked = input.value === sendHotkey;
@@ -1088,9 +1106,8 @@ async function persistSendHotkeySetting() {
 function setComposerFullscreen(enabled) {
   if (!composer) return;
   const nextEnabled = !!enabled;
-  const changed = isComposerFullscreen !== nextEnabled;
   isComposerFullscreen = nextEnabled;
-  composer.classList.toggle('is-fullscreen', nextEnabled);
+  document.documentElement.classList.toggle('composer-fullscreen-active', nextEnabled);
   document.body.classList.toggle('composer-fullscreen-active', nextEnabled);
   if (composerFullscreenToggle) {
     const label = nextEnabled ? LABEL_EXIT_FULLSCREEN : LABEL_EXPAND_COMPOSER;
@@ -1103,9 +1120,7 @@ function setComposerFullscreen(enabled) {
   if (mdEditor && typeof mdEditor.resize === 'function') {
     mdEditor.resize('100%', nextEnabled ? '100%' : MARKDOWN_EDITOR_DEFAULT_HEIGHT);
   }
-  if (changed) {
-    window.dispatchEvent(new CustomEvent('transfer-genie:composer-fullscreen-change', { detail: { enabled: nextEnabled } }));
-  }
+  window.dispatchEvent(new CustomEvent('transfer-genie:composer-fullscreen-change', { detail: { enabled: nextEnabled } }));
   if (nextEnabled) {
     setTimeout(() => {
       if (currentFormat === 'markdown' && mdEditor) {
@@ -7849,6 +7864,7 @@ function applySettings(settings) {
     telegramPollIntervalSecs: normalizeTelegramPollInterval(telegram.poll_interval_secs),
   };
   syncVueSettingsForm(currentSettingsFormState);
+  applyDefaultEditorFormat(currentSettingsFormState.defaultEditorFormat);
   if (telegramAutoStartInput) {
     telegramAutoStartInput.checked = telegram.auto_start || false;
   }
@@ -9482,7 +9498,11 @@ if (scrollToBottomButton) {
 
 if (composerFullscreenToggle) {
   composerFullscreenToggle.addEventListener('click', () => {
-    setComposerFullscreen(!isComposerFullscreen);
+    const isActuallyFullscreen = !!(
+      document.documentElement.classList.contains('composer-fullscreen-active') ||
+      document.body.classList.contains('composer-fullscreen-active')
+    );
+    setComposerFullscreen(!isActuallyFullscreen);
   });
   // Ensure icon and labels reflect initial state
   setComposerFullscreen(false);
@@ -9490,8 +9510,14 @@ if (composerFullscreenToggle) {
 // R5: 暴露全屏切换给 Vue 工具栏按钮（放大按钮已合并到工作区工具栏）
 window.transferGenieLegacyFullscreen = {
   set: function (enabled) { setComposerFullscreen(enabled); },
-  get: function () { return isComposerFullscreen; },
+  exit: function () { setComposerFullscreen(false); },
+  get: function () {
+    return document.documentElement.classList.contains('composer-fullscreen-active') ||
+      document.body.classList.contains('composer-fullscreen-active');
+  },
 };
+window.transferGenieSendHotkey = sendHotkey;
+window.transferGenieSendActiveDraft = function () { sendText(); };
 
 if (feedContent) {
   feedContent.addEventListener(

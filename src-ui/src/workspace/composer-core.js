@@ -138,8 +138,8 @@
     return null;
   }
 
-  function createInitialComposer() {
-    var draft = createDraft({});
+  function createInitialComposer(spec) {
+    var draft = createDraft(spec || {});
     var pane = { id: core.nextId("pane"), tabs: [draft], activeTabId: draft.id };
     return {
       panes: [pane],
@@ -167,11 +167,11 @@
     return next;
   }
   /** 关闭分栏内全部草稿，并留一条空草稿。返回新状态。 */
-  function closeAllTabsInPane(state, paneId) {
+  function closeAllTabsInPane(state, paneId, spec) {
     var next = clone(state);
     var pane = core.findPane(next, paneId);
     if (!pane) return next;
-    var d = createDraft({});
+    var d = createDraft(spec || {});
     pane.tabs = [d];
     pane.activeTabId = d.id;
     next.activePaneId = paneId;

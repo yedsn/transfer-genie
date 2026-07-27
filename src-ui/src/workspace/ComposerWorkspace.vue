@@ -186,12 +186,17 @@ function closeDestructivePromptOnLayoutChange() {
 }
 // R5: 放大输入框 —— 合并到工具栏，调用 legacy setComposerFullscreen
 const isFullscreen = ref(false);
+function readFullscreenState() {
+  const legacy = (window as any).transferGenieLegacyFullscreen;
+  if (legacy && typeof legacy.get === "function") return !!legacy.get();
+  return document.documentElement.classList.contains("composer-fullscreen-active") || document.body.classList.contains("composer-fullscreen-active");
+}
+
 function toggleFullscreen() {
   const legacy = (window as any).transferGenieLegacyFullscreen;
-  const current = legacy && typeof legacy.get === "function" ? !!legacy.get() : isFullscreen.value;
-  const next = !current;
+  const next = !readFullscreenState();
   if (legacy && typeof legacy.set === "function") legacy.set(next);
-  isFullscreen.value = next;
+  isFullscreen.value = readFullscreenState();
 }
 
 function syncFullscreenState(event?: Event) {
@@ -200,8 +205,7 @@ function syncFullscreenState(event?: Event) {
     isFullscreen.value = custom.detail.enabled;
     return;
   }
-  const legacy = (window as any).transferGenieLegacyFullscreen;
-  if (legacy && typeof legacy.get === "function") isFullscreen.value = !!legacy.get();
+  isFullscreen.value = readFullscreenState();
 }
 
 function globalDragEnd() {
@@ -228,6 +232,11 @@ onMounted(() => {
   bridge.clearActiveDraftAfterSend = () => {
     composerStore.clearActiveDraftAfterSend();
     if (bridge._clearActive) bridge._clearActive();
+  };
+  bridge.getSendHotkey = () => (window as any).transferGenieSendHotkey || "enter";
+  bridge.sendActiveDraft = () => {
+    const send = (window as any).transferGenieSendActiveDraft;
+    if (typeof send === "function") send();
   };
   bridge.focusActiveDraft = () => { if (bridge._focusActive) bridge._focusActive(); };
   bridge.setActiveDraftText = (text: string) => {
