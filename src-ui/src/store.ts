@@ -93,6 +93,7 @@ export const transferGenieState = reactive<TransferGenieState>({
     aiTimeoutSecs: 60,
     aiDefaultActionId: "polish",
     aiActions: [],
+    activeAiActionCategory: "",
   },
   settingsSnapshots: [],
   settingsSnapshotsLoading: false,
@@ -169,6 +170,7 @@ export function installTransferGenieBridge() {
     syncSettingsBackupArchivesLoading: (isLoading: boolean) => { transferGenieState.settingsBackupArchivesLoading = !!isLoading; },
     syncSettingsAutoBackup: (autoBackupState: Record<string, any>) => { transferGenieState.settingsAutoBackup = Object.assign({}, transferGenieState.settingsAutoBackup, cloneValue(autoBackupState || {})); },
     syncAppVersion: (version: string) => { transferGenieState.appVersion = String(version || ""); },
+    callAction,
     setActions,
   };
 }

@@ -21,13 +21,23 @@ The system SHALL support an AI provider configuration for text processing. The f
 
 ### Requirement: Prompt-Based Text Actions
 
-The system SHALL define AI text actions as prompt-backed configuration entries. Each action SHALL include an id, name, enabled state, prompt template, optional system prompt, and output mode. The system SHALL provide built-in actions for polishing, making text more formal, and shortening text. Prompt templates SHALL support known variables including the input text and draft format.
+The system SHALL define AI text actions as prompt-backed configuration entries. Each action SHALL include an id, type/category, name, built-in/custom marker, enabled state, favorite state, prompt template, optional system prompt, and output mode. The system SHALL provide built-in actions for general writing, development, design, and film/TV content workflows, and SHALL allow users to add custom actions. Prompt templates SHALL support known variables including the input text and draft format.
 
 #### Scenario: Run built-in polish action
 - **WHEN** the user runs the built-in polish action with input text
 - **THEN** the system renders the polish prompt with the provided text
 - **AND** sends the rendered prompt to the configured AI provider
 - **AND** returns generated text without directly modifying the draft
+
+#### Scenario: Select actions from grouped menu
+- **WHEN** the user opens the AI action dropdown from the draft editor
+- **THEN** enabled actions are grouped by their configured type/category
+- **AND** selecting an action runs that action against the current draft input
+
+#### Scenario: Select favorite actions from dedicated submenu
+- **WHEN** the user opens the AI action dropdown and enabled favorite actions exist
+- **THEN** the menu shows a dedicated favorite submenu
+- **AND** selecting a favorite action runs the same action without removing it from its original type/category submenu
 
 #### Scenario: Run disabled action
 - **WHEN** the user attempts to run a disabled AI text action

@@ -2446,6 +2446,77 @@ input {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.ai-action-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 4px;
+}
+
+.ai-action-manager {
+  display: grid;
+  grid-template-columns: 148px minmax(0, 1fr);
+  gap: 12px;
+  height: min(520px, 58vh);
+  min-height: 360px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 10px;
+  box-sizing: border-box;
+}
+
+.ai-action-category-list {
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-right: 2px;
+}
+
+.ai-action-category-item {
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 8px;
+  text-align: left;
+  font-size: 12px;
+}
+
+.ai-action-category-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-action-category-item small {
+  flex: 0 0 auto;
+  color: inherit;
+  font-size: 11px;
+  opacity: 0.78;
+}
+
+.ai-action-category-item:hover,
+.ai-action-category-item.is-active {
+  border-color: rgba(107, 140, 255, 0.35);
+  background: #fff;
+  color: var(--accent-strong);
 }
 
 .ai-action-card {
@@ -2458,9 +2529,84 @@ input {
   background: #fff;
 }
 
+.ai-action-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ai-action-card-head .toggle-left {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ai-action-badge {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.ai-action-favorite {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(15, 23, 42, 0.32);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.ai-action-favorite:hover {
+  background: var(--panel-soft);
+  color: rgba(230, 86, 86, 0.72);
+}
+
+.ai-action-favorite.is-active {
+  color: #e65656;
+}
+
+.ai-action-remove {
+  flex: 0 0 auto;
+}
+
+.ai-action-meta-row {
+  align-items: flex-start;
+}
+
 .ai-action-card textarea {
   min-height: 72px;
   resize: vertical;
+}
+
+@media (max-width: 760px) {
+  .ai-action-manager {
+    grid-template-columns: 1fr;
+    height: min(620px, 68vh);
+  }
+
+  .ai-action-category-list {
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding-right: 0;
+    padding-bottom: 2px;
+  }
+
+  .ai-action-category-item {
+    width: auto;
+    min-width: 104px;
+  }
 }
 
 .telegram-bridge-actions {

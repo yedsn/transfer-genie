@@ -5339,8 +5339,22 @@ fn normalize_ai_settings(ai: &mut AiSettings) -> Result<(), String> {
     }
     ai.provider.timeout_secs = ai.provider.timeout_secs.clamp(5, 300);
 
+    let builtin_actions = AiSettings::default().actions;
+    let builtin_ids: HashSet<String> = builtin_actions
+        .iter()
+        .map(|action| action.id.clone())
+        .collect();
     if ai.actions.is_empty() {
-        ai.actions = AiSettings::default().actions;
+        ai.actions = builtin_actions;
+    } else {
+        let existing_ids: HashSet<String> =
+            ai.actions.iter().map(|action| action.id.clone()).collect();
+        ai.actions.extend(
+            builtin_actions
+                .iter()
+                .cloned()
+                .filter(|action| !existing_ids.contains(&action.id)),
+        );
     }
     let mut seen_ids = HashSet::new();
     for action in ai.actions.iter_mut() {
@@ -5351,9 +5365,16 @@ fn normalize_ai_settings(ai: &mut AiSettings) -> Result<(), String> {
         if !seen_ids.insert(action.id.clone()) {
             return Err("AI 动作 ID 重复".to_string());
         }
+        if builtin_ids.contains(&action.id) {
+            action.builtin = true;
+        }
         action.name = action.name.trim().to_string();
         if action.name.is_empty() {
             action.name = action.id.clone();
+        }
+        action.category = action.category.trim().to_string();
+        if action.category.is_empty() {
+            action.category = "通用".to_string();
         }
         if action.user_prompt.trim().is_empty() {
             return Err(format!("AI 动作 {} 必须填写用户提示词", action.name));
@@ -9442,6 +9463,21 @@ mod tests {
         assert_eq!(loaded.ai.provider.kind, "openai_compatible");
         assert_eq!(loaded.ai.default_action_id, "polish");
         assert!(loaded.ai.actions.iter().any(|action| action.id == "polish"));
+        assert!(loaded
+            .ai
+            .actions
+            .iter()
+            .any(|action| action.category == "开发"));
+        assert!(loaded
+            .ai
+            .actions
+            .iter()
+            .any(|action| action.category == "设计"));
+        assert!(loaded
+            .ai
+            .actions
+            .iter()
+            .any(|action| action.category == "影视"));
 
         let _ = fs::remove_file(&settings_path);
         let _ = fs::remove_dir_all(&temp_dir);
@@ -9456,6 +9492,17 @@ mod tests {
         settings.ai.provider.model = " model-a ".to_string();
         settings.ai.provider.temperature = 3.0;
         settings.ai.provider.timeout_secs = 0;
+        settings.ai.actions.push(AiTextAction {
+            id: "custom-dev".to_string(),
+            name: " 自定义开发提示词 ".to_string(),
+            category: " ".to_string(),
+            builtin: false,
+            favorite: true,
+            enabled: true,
+            system_prompt: "".to_string(),
+            user_prompt: "处理 {{text}}".to_string(),
+            output_mode: "".to_string(),
+        });
 
         let normalized = normalize_settings(settings, Path::new("downloads")).expect("normalize");
 
@@ -9468,6 +9515,15 @@ mod tests {
         assert_eq!(normalized.ai.provider.model, "model-a");
         assert_eq!(normalized.ai.provider.temperature, 2.0);
         assert_eq!(normalized.ai.provider.timeout_secs, 60);
+        let custom = normalized
+            .ai
+            .actions
+            .iter()
+            .find(|action| action.id == "custom-dev")
+            .expect("custom action");
+        assert_eq!(custom.name, "自定义开发提示词");
+        assert_eq!(custom.category, "通用");
+        assert_eq!(custom.output_mode, "preview_replace");
     }
 
     #[test]

@@ -46,6 +46,7 @@ export interface TransferGenieBridge {
   syncSettingsBackupArchivesLoading: (isLoading: boolean) => void;
   syncSettingsAutoBackup: (autoBackupState: Record<string, any>) => void;
   syncAppVersion: (version: string) => void;
+  callAction: (name: string, ...args: any[]) => any;
   setActions: (nextActions: TransferGenieActions) => void;
 }
 

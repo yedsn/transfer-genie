@@ -109,6 +109,24 @@ const aiActions = computed(() => {
   return actions.filter((action: any) => action && action.enabled !== false);
 });
 
+const groupedAiActions = computed(() => {
+  const groups: Array<{ category: string; actions: any[] }> = [];
+  const indexByCategory = new Map<string, number>();
+  aiActions.value.forEach((action: any) => {
+    const category = String(action?.category || "通用").trim() || "通用";
+    let index = indexByCategory.get(category);
+    if (index === undefined) {
+      index = groups.length;
+      indexByCategory.set(category, index);
+      groups.push({ category, actions: [] });
+    }
+    groups[index].actions.push(action);
+  });
+  return groups;
+});
+
+const favoriteAiActions = computed(() => aiActions.value.filter((action: any) => !!action.favorite));
+
 const canRunAi = computed(() => {
   const settings = aiSettings.value;
   return !!settings.aiEnabled && !!String(settings.aiBaseUrl || "").trim() && !!String(settings.aiApiKey || "").trim() && !!String(settings.aiModel || "").trim() && aiActions.value.length > 0;
@@ -270,13 +288,21 @@ function onEditorContextMenu(event: MouseEvent) {
 
 function closeAiMenu() { aiMenu.value = null; }
 
+function toggleAiActionFavorite(action: any) {
+  const store = (window as any).transferGenieVue?.store;
+  const actions = Array.isArray(store?.settingsForm?.aiActions) ? store.settingsForm.aiActions : [];
+  const index = actions.findIndex((item: any) => item && item.id === action?.id);
+  if (index < 0) return;
+  (window as any).transferGenieVue?.callAction?.("updateAiActionField", index, "favorite", !action.favorite);
+}
+
 function openAiActionMenu(event: MouseEvent) {
   onActivated();
   if (!canRunAi.value || aiBusy.value) return;
   const target = event.currentTarget as HTMLElement;
   const rect = target.getBoundingClientRect();
   aiMenuPreferSelection.value = false;
-  const menuWidth = 148;
+  const menuWidth = 132;
   const x = Math.max(8, Math.min(rect.right - menuWidth, window.innerWidth - menuWidth - 8));
   const y = Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 8));
   aiMenu.value = { x, y };
@@ -450,7 +476,34 @@ function setFormat(format: string) {
     ></textarea>
     <div v-if="aiMenu" class="cw-ai-menu-backdrop" @click="closeAiMenu" @contextmenu.prevent="closeAiMenu"></div>
     <div v-if="aiMenu" class="cw-ai-menu" :style="{ left: aiMenu.x + 'px', top: aiMenu.y + 'px' }" @contextmenu.prevent>
-      <button v-for="action in aiActions" :key="action.id" type="button" class="cw-ai-menu-item" @click="runAiAction(action.id, aiMenuPreferSelection)">{{ action.name || action.id }}</button>
+      <div v-if="favoriteAiActions.length" class="cw-ai-menu-group cw-ai-menu-favorite-group">
+        <button type="button" class="cw-ai-menu-category-item">
+          <span>收藏</span>
+          <span class="cw-ai-menu-arrow" aria-hidden="true"></span>
+        </button>
+        <div class="cw-ai-submenu">
+          <div v-for="action in favoriteAiActions" :key="action.id" class="cw-ai-action-row">
+            <button type="button" class="cw-ai-menu-item" @click="runAiAction(action.id, aiMenuPreferSelection)">
+              <span>{{ action.name || action.id }}</span>
+            </button>
+            <button type="button" class="cw-ai-favorite-button is-active" title="取消收藏" @click.stop="toggleAiActionFavorite(action)"><span aria-hidden="true">♥</span></button>
+          </div>
+        </div>
+      </div>
+      <div v-for="group in groupedAiActions" :key="group.category" class="cw-ai-menu-group">
+        <button type="button" class="cw-ai-menu-category-item">
+          <span>{{ group.category }}</span>
+          <span class="cw-ai-menu-arrow" aria-hidden="true"></span>
+        </button>
+        <div class="cw-ai-submenu">
+          <div v-for="action in group.actions" :key="action.id" class="cw-ai-action-row">
+            <button type="button" class="cw-ai-menu-item" @click="runAiAction(action.id, aiMenuPreferSelection)">
+              <span>{{ action.name || action.id }}</span>
+            </button>
+            <button type="button" class="cw-ai-favorite-button" :class="{ 'is-active': action.favorite }" :title="action.favorite ? '取消收藏' : '收藏'" @click.stop="toggleAiActionFavorite(action)"><span aria-hidden="true">♥</span></button>
+          </div>
+        </div>
+      </div>
     </div>
     <div v-if="aiBusy" class="cw-ai-loading-backdrop">
       <div class="cw-ai-loading-box" role="status" aria-live="polite">

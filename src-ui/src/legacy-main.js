@@ -144,6 +144,9 @@ function defaultAiActions() {
     {
       id: 'polish',
       name: '润色',
+      category: '通用',
+      builtin: true,
+      favorite: true,
       enabled: true,
       system_prompt: '你是一个中文写作助手。',
       user_prompt: '请润色下面的内容，保持原意不变，让表达更清晰、自然。如果输入是 Markdown，请保持 Markdown 结构。只输出润色后的文本。\n\n{{text}}',
@@ -152,6 +155,9 @@ function defaultAiActions() {
     {
       id: 'formalize',
       name: '正式一点',
+      category: '通用',
+      builtin: true,
+      favorite: false,
       enabled: true,
       system_prompt: '你是一个中文写作助手。',
       user_prompt: '请将下面的内容改写得更正式、得体，保持原意不变。如果输入是 Markdown，请保持 Markdown 结构。只输出改写后的文本。\n\n{{text}}',
@@ -160,33 +166,181 @@ function defaultAiActions() {
     {
       id: 'shorten',
       name: '简洁一点',
+      category: '通用',
+      builtin: true,
+      favorite: false,
       enabled: true,
       system_prompt: '你是一个中文写作助手。',
       user_prompt: '请压缩下面的内容，去掉冗余表达，保留关键信息。如果输入是 Markdown，请保持 Markdown 结构。只输出处理后的文本。\n\n{{text}}',
+      output_mode: 'preview_replace',
+    },
+    {
+      id: 'dev-explain',
+      name: '解释代码/技术内容',
+      category: '开发',
+      builtin: true,
+      favorite: false,
+      enabled: true,
+      system_prompt: '你是一个资深软件工程师，擅长用清晰、准确的中文解释技术内容。',
+      user_prompt: '请解释下面的代码或技术内容，先说明核心作用，再列出关键逻辑和注意事项。保持简洁，不要编造上下文。\n\n{{text}}',
+      output_mode: 'preview_replace',
+    },
+    {
+      id: 'dev-pr-summary',
+      name: '生成变更说明',
+      category: '开发',
+      builtin: true,
+      favorite: false,
+      enabled: true,
+      system_prompt: '你是一个严谨的软件工程协作者。',
+      user_prompt: '请把下面的开发记录整理成简洁的变更说明，包含用户可见变化和验证方式。如果输入是 Markdown，请保持 Markdown 结构。\n\n{{text}}',
+      output_mode: 'preview_replace',
+    },
+    {
+      id: 'design-feedback',
+      name: '设计反馈',
+      category: '设计',
+      builtin: true,
+      favorite: false,
+      enabled: true,
+      system_prompt: '你是一个注重产品质感和可用性的设计工程师。',
+      user_prompt: '请对下面的界面或交互描述给出设计反馈，重点关注信息层级、可用性、视觉一致性和可落地的优化建议。只输出反馈内容。\n\n{{text}}',
+      output_mode: 'preview_replace',
+    },
+    {
+      id: 'design-copy',
+      name: '优化界面文案',
+      category: '设计',
+      builtin: true,
+      favorite: false,
+      enabled: true,
+      system_prompt: '你是一个中文产品文案设计师，擅长写清晰、克制、可操作的界面文案。',
+      user_prompt: '请优化下面的界面文案，让它更清晰、自然、符合产品语境。保留原意，只输出优化后的文案。\n\n{{text}}',
+      output_mode: 'preview_replace',
+    },
+    {
+      id: 'film-logline',
+      name: '影视一句话梗概',
+      category: '影视',
+      builtin: true,
+      favorite: false,
+      enabled: true,
+      system_prompt: '你是一个影视策划编辑，擅长提炼故事卖点。',
+      user_prompt: '请把下面的影视创意或剧情整理成一句话梗概，突出主角、目标、冲突和看点。只输出梗概。\n\n{{text}}',
+      output_mode: 'preview_replace',
+    },
+    {
+      id: 'film-scene-polish',
+      name: '润色场景描述',
+      category: '影视',
+      builtin: true,
+      favorite: false,
+      enabled: true,
+      system_prompt: '你是一个影视剧本文案编辑，擅长增强画面感和节奏感。',
+      user_prompt: '请润色下面的场景描述，增强画面感、动作节奏和情绪氛围，保持原始信息不变。只输出润色后的文本。\n\n{{text}}',
       output_mode: 'preview_replace',
     },
   ];
 }
 
 function normalizeAiActions(actions) {
-  const source = Array.isArray(actions) && actions.length ? actions : defaultAiActions();
-  return source
-    .map((action, index) => ({
-      id: String(action?.id || `custom-${index + 1}`).trim(),
-      name: String(action?.name || action?.id || `动作 ${index + 1}`).trim(),
-      enabled: action?.enabled !== false,
-      system_prompt: String(action?.system_prompt || action?.systemPrompt || ''),
-      user_prompt: String(action?.user_prompt || action?.userPrompt || ''),
-      output_mode: String(action?.output_mode || action?.outputMode || 'preview_replace'),
-    }))
+  const builtins = defaultAiActions();
+  const builtinById = new Map(builtins.map((action) => [action.id, action]));
+  const source = Array.isArray(actions) && actions.length ? actions : builtins;
+  const normalized = source
+    .map((action, index) => {
+      const id = String(action?.id || `custom-${index + 1}`).trim();
+      const builtin = builtinById.get(id);
+      return {
+        id,
+        name: String(action?.name || action?.id || builtin?.name || `动作 ${index + 1}`).trim(),
+        category: String(action?.category || builtin?.category || '通用').trim() || '通用',
+        builtin: !!builtin || !!action?.builtin,
+        favorite: !!action?.favorite,
+        enabled: action?.enabled !== false,
+        system_prompt: String(action?.system_prompt || action?.systemPrompt || builtin?.system_prompt || ''),
+        user_prompt: String(action?.user_prompt || action?.userPrompt || builtin?.user_prompt || ''),
+        output_mode: String(action?.output_mode || action?.outputMode || 'preview_replace'),
+      };
+    })
     .filter((action) => action.id && action.user_prompt.trim());
+  const existingIds = new Set(normalized.map((action) => action.id));
+  builtins.forEach((action) => {
+    if (!existingIds.has(action.id)) {
+      normalized.push({ ...action });
+    }
+  });
+  return normalized;
 }
 
 function updateAiActionField(index, field, value) {
   const actions = normalizeAiActions(currentSettingsFormState.aiActions).map((action) => ({ ...action }));
   if (!actions[index]) return;
   actions[index][field] = value;
+  if (field === 'category') {
+    currentSettingsFormState = {
+      ...currentSettingsFormState,
+      aiActions: actions,
+      activeAiActionCategory: String(value || '通用').trim() || '通用',
+    };
+    syncVueSettingsForm(currentSettingsFormState);
+    return;
+  }
   updateSettingsFormField('aiActions', actions);
+}
+
+function makeCustomAiAction() {
+  const existing = normalizeAiActions(currentSettingsFormState.aiActions);
+  let nextIndex = existing.length + 1;
+  let id = `custom-${nextIndex}`;
+  const usedIds = new Set(existing.map((action) => action.id));
+  while (usedIds.has(id)) {
+    nextIndex += 1;
+    id = `custom-${nextIndex}`;
+  }
+  return {
+    id,
+    name: `自定义提示词 ${nextIndex}`,
+    category: '自定义',
+    builtin: false,
+    favorite: false,
+    enabled: true,
+    system_prompt: '你是一个可靠的中文内容处理助手。',
+    user_prompt: '请根据下面的内容完成处理。只输出处理后的文本。\n\n{{text}}',
+    output_mode: 'preview_replace',
+  };
+}
+
+function addAiAction() {
+  const actions = normalizeAiActions(currentSettingsFormState.aiActions).map((action) => ({ ...action }));
+  const action = makeCustomAiAction();
+  actions.push(action);
+  currentSettingsFormState = {
+    ...currentSettingsFormState,
+    aiActions: actions,
+    activeAiActionCategory: action.category,
+  };
+  syncVueSettingsForm(currentSettingsFormState);
+}
+
+function removeAiAction(index) {
+  const actions = normalizeAiActions(currentSettingsFormState.aiActions).map((action) => ({ ...action }));
+  const action = actions[index];
+  if (!action || action.builtin) return;
+  actions.splice(index, 1);
+  const nextDefault = actions.some((item) => item.id === currentSettingsFormState.aiDefaultActionId)
+    ? currentSettingsFormState.aiDefaultActionId
+    : actions[0]?.id || 'polish';
+  currentSettingsFormState = {
+    ...currentSettingsFormState,
+    aiActions: actions,
+    aiDefaultActionId: nextDefault,
+  };
+  syncVueSettingsForm(currentSettingsFormState);
+}
+
+function selectAiActionCategory(category) {
+  updateSettingsFormField('activeAiActionCategory', String(category || ''));
 }
 
 function getCurrentSenderName() {
@@ -7933,6 +8087,7 @@ function applySettings(settings) {
     aiTimeoutSecs: Number(aiProvider.timeout_secs || 60),
     aiDefaultActionId: ai.default_action_id || aiActions[0]?.id || 'polish',
     aiActions,
+    activeAiActionCategory: currentSettingsFormState.activeAiActionCategory || aiActions[0]?.category || '通用',
   };
   syncVueSettingsForm(currentSettingsFormState);
   applyDefaultEditorFormat(currentSettingsFormState.defaultEditorFormat);
@@ -9821,6 +9976,15 @@ vueBridge?.setActions?.({
   },
   updateAiActionField: (index, field, value) => {
     updateAiActionField(index, field, value);
+  },
+  addAiAction: () => {
+    addAiAction();
+  },
+  removeAiAction: (index) => {
+    removeAiAction(index);
+  },
+  selectAiActionCategory: (category) => {
+    selectAiActionCategory(category);
   },
   openMessagePreview: (message) => {
     openMessagePreview(message);

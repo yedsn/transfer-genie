@@ -120,6 +120,31 @@ const app = createApp({
     settingsFormState(): Record<string, any> {
       return store.state.settingsForm || {};
     },
+    aiActionCategories(): Array<{ name: string; total: number; enabled: number }> {
+      const actions = Array.isArray(this.settingsFormState().aiActions) ? this.settingsFormState().aiActions : [];
+      const map = new Map<string, { name: string; total: number; enabled: number }>();
+      actions.forEach((action: any) => {
+        const name = String(action && action.category ? action.category : "通用").trim() || "通用";
+        const entry = map.get(name) || { name, total: 0, enabled: 0 };
+        entry.total += 1;
+        if (action && action.enabled !== false) entry.enabled += 1;
+        map.set(name, entry);
+      });
+      return Array.from(map.values());
+    },
+    activeAiActionCategory(): string {
+      const categories = this.aiActionCategories();
+      const active = String(this.settingsFormState().activeAiActionCategory || "");
+      if (categories.some((category) => category.name === active)) return active;
+      return categories[0]?.name || "";
+    },
+    aiActionsForActiveCategory(): Array<{ action: any; index: number }> {
+      const active = this.activeAiActionCategory();
+      const actions = Array.isArray(this.settingsFormState().aiActions) ? this.settingsFormState().aiActions : [];
+      return actions
+        .map((action: any, index: number) => ({ action, index }))
+        .filter((item: any) => (String(item.action?.category || "通用").trim() || "通用") === active);
+    },
     currentSettingsWebdavEndpoints(): any[] {
       return this.settingsWebdavState().endpoints || [];
     },
@@ -317,6 +342,10 @@ const app = createApp({
     createLocalDataBackup: (...args: any[]) => callAction("createLocalDataBackup", ...args),
     updateSettingsAutoBackupField: (...args: any[]) => callAction("updateSettingsAutoBackupField", ...args),
     updateSettingsFormField: (...args: any[]) => callAction("updateSettingsFormField", ...args),
+    updateAiActionField: (...args: any[]) => callAction("updateAiActionField", ...args),
+    addAiAction: (...args: any[]) => callAction("addAiAction", ...args),
+    removeAiAction: (...args: any[]) => callAction("removeAiAction", ...args),
+    selectAiActionCategory: (...args: any[]) => callAction("selectAiActionCategory", ...args),
 
     // --- Convenience handlers ---
     handleMarkedBodyClick: (message: any) => {
