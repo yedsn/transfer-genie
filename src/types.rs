@@ -70,6 +70,55 @@ fn default_backup_dir() -> String {
     }
 }
 
+fn default_ai_provider_kind() -> String {
+    "openai_compatible".to_string()
+}
+
+fn default_ai_timeout_secs() -> u64 {
+    60
+}
+
+fn default_ai_temperature() -> f32 {
+    0.3
+}
+
+fn default_ai_action_output_mode() -> String {
+    "preview_replace".to_string()
+}
+
+fn default_ai_default_action_id() -> String {
+    "polish".to_string()
+}
+
+fn default_ai_actions() -> Vec<AiTextAction> {
+    vec![
+        AiTextAction {
+            id: "polish".to_string(),
+            name: "润色".to_string(),
+            enabled: true,
+            system_prompt: "你是一个中文写作助手。".to_string(),
+            user_prompt: "请润色下面的内容，保持原意不变，让表达更清晰、自然。如果输入是 Markdown，请保持 Markdown 结构。只输出润色后的文本。\n\n{{text}}".to_string(),
+            output_mode: default_ai_action_output_mode(),
+        },
+        AiTextAction {
+            id: "formalize".to_string(),
+            name: "正式一点".to_string(),
+            enabled: true,
+            system_prompt: "你是一个中文写作助手。".to_string(),
+            user_prompt: "请将下面的内容改写得更正式、得体，保持原意不变。如果输入是 Markdown，请保持 Markdown 结构。只输出改写后的文本。\n\n{{text}}".to_string(),
+            output_mode: default_ai_action_output_mode(),
+        },
+        AiTextAction {
+            id: "shorten".to_string(),
+            name: "简洁一点".to_string(),
+            enabled: true,
+            system_prompt: "你是一个中文写作助手。".to_string(),
+            user_prompt: "请压缩下面的内容，去掉冗余表达，保留关键信息。如果输入是 Markdown，请保持 Markdown 结构。只输出处理后的文本。\n\n{{text}}".to_string(),
+            output_mode: default_ai_action_output_mode(),
+        },
+    ]
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LocalHttpApiSettings {
     #[serde(default)]
@@ -166,6 +215,72 @@ impl Default for BackupSettings {
     }
 }
 
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct AiProviderSettings {
+    #[serde(default = "default_ai_provider_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default = "default_ai_temperature")]
+    pub temperature: f32,
+    #[serde(default = "default_ai_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl Default for AiProviderSettings {
+    fn default() -> Self {
+        Self {
+            kind: default_ai_provider_kind(),
+            base_url: String::new(),
+            api_key: String::new(),
+            model: String::new(),
+            temperature: default_ai_temperature(),
+            timeout_secs: default_ai_timeout_secs(),
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AiTextAction {
+    pub id: String,
+    pub name: String,
+    #[serde(default = "default_endpoint_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub system_prompt: String,
+    #[serde(default)]
+    pub user_prompt: String,
+    #[serde(default = "default_ai_action_output_mode")]
+    pub output_mode: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct AiSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub provider: AiProviderSettings,
+    #[serde(default = "default_ai_default_action_id")]
+    pub default_action_id: String,
+    #[serde(default = "default_ai_actions")]
+    pub actions: Vec<AiTextAction>,
+}
+
+impl Default for AiSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: AiProviderSettings::default(),
+            default_action_id: default_ai_default_action_id(),
+            actions: default_ai_actions(),
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MarkedTag {
     pub id: String,
@@ -200,6 +315,8 @@ pub struct Settings {
     pub telegram: TelegramBridgeSettings,
     #[serde(default)]
     pub backup: BackupSettings,
+    #[serde(default)]
+    pub ai: AiSettings,
 }
 
 #[derive(Clone, Serialize)]

@@ -644,6 +644,7 @@
                   <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-basic">基本设置</button>
                   <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-system">系统设置</button>
                   <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-api">API 接口</button>
+                  <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-ai">AI 助手</button>
                   <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-telegram">Telegram Bridge</button>
                   <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-data">数据管理</button>
                 </div>
@@ -833,6 +834,74 @@
                     <div class="local-http-api-status-row">
                       <span class="local-http-api-status-label">最近错误</span>
                       <span id="local-http-api-last-error" class="local-http-api-error">无</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-section-anchor" id="settings-section-ai" data-settings-section aria-hidden="true"></div>
+              <div class="settings-group">
+                <h3 class="settings-group-title">AI 助手</h3>
+                <div class="settings-group-content">
+                  <label class="toggle-left">
+                    <span class="toggle-label">启用 AI 文本处理</span>
+                    <input type="checkbox" :checked="ui.settingsForm.aiEnabled" @change="updateSettingsFormField('aiEnabled', $event.target.checked)" />
+                  </label>
+                  <label>
+                    Provider 类型
+                    <select :value="ui.settingsForm.aiProviderKind" @change="updateSettingsFormField('aiProviderKind', $event.target.value)">
+                      <option value="openai_compatible">OpenAI-compatible</option>
+                    </select>
+                  </label>
+                  <label>
+                    Base URL
+                    <input type="text" placeholder="https://api.openai.com/v1" :value="ui.settingsForm.aiBaseUrl" @input="updateSettingsFormField('aiBaseUrl', $event.target.value)" />
+                    <span class="field-hint">兼容 Chat Completions 的 `/v1` 地址；本地或其他厂商网关也可填写。</span>
+                  </label>
+                  <label>
+                    API Key
+                    <input type="password" :value="ui.settingsForm.aiApiKey" @input="updateSettingsFormField('aiApiKey', $event.target.value)" />
+                    <span class="field-hint">导出配置时会作为敏感字段加密处理。</span>
+                  </label>
+                  <label>
+                    模型
+                    <input type="text" placeholder="gpt-4.1-mini" :value="ui.settingsForm.aiModel" @input="updateSettingsFormField('aiModel', $event.target.value)" />
+                  </label>
+                  <div class="field-row">
+                    <label>
+                      温度
+                      <input type="number" min="0" max="2" step="0.1" :value="ui.settingsForm.aiTemperature" @input="updateSettingsFormField('aiTemperature', Number($event.target.value || 0.3))" />
+                    </label>
+                    <label>
+                      超时（秒）
+                      <input type="number" min="5" max="300" step="1" :value="ui.settingsForm.aiTimeoutSecs" @input="updateSettingsFormField('aiTimeoutSecs', Number($event.target.value || 60))" />
+                    </label>
+                  </div>
+                  <label>
+                    默认动作
+                    <select :value="ui.settingsForm.aiDefaultActionId" @change="updateSettingsFormField('aiDefaultActionId', $event.target.value)">
+                      <option v-for="action in ui.settingsForm.aiActions" :key="action.id" :value="action.id">{{ action.name || action.id }}</option>
+                    </select>
+                  </label>
+                  <div class="ai-action-list">
+                    <div class="ai-action-card" v-for="(action, index) in ui.settingsForm.aiActions" :key="action.id || index">
+                      <label class="toggle-left">
+                        <span class="toggle-label">{{ action.name || action.id }}</span>
+                        <input type="checkbox" :checked="action.enabled" @change="updateAiActionField(index, 'enabled', $event.target.checked)" />
+                      </label>
+                      <label>
+                        动作名称
+                        <input type="text" :value="action.name" @input="updateAiActionField(index, 'name', $event.target.value)" />
+                      </label>
+                      <label>
+                        系统提示词
+                        <textarea rows="2" :value="action.system_prompt" @input="updateAiActionField(index, 'system_prompt', $event.target.value)"></textarea>
+                      </label>
+                      <label>
+                        用户提示词模板
+                        <textarea rows="4" :value="action.user_prompt" @input="updateAiActionField(index, 'user_prompt', $event.target.value)"></textarea>
+                        <span class="field-hint">可使用 `{{text}}` 和 `{{format}}`。</span>
+                      </label>
                     </div>
                   </div>
                 </div>

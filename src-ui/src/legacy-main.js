@@ -139,6 +139,56 @@ function updateSettingsFormField(field, value) {
   syncVueSettingsForm(currentSettingsFormState);
 }
 
+function defaultAiActions() {
+  return [
+    {
+      id: 'polish',
+      name: '润色',
+      enabled: true,
+      system_prompt: '你是一个中文写作助手。',
+      user_prompt: '请润色下面的内容，保持原意不变，让表达更清晰、自然。如果输入是 Markdown，请保持 Markdown 结构。只输出润色后的文本。\n\n{{text}}',
+      output_mode: 'preview_replace',
+    },
+    {
+      id: 'formalize',
+      name: '正式一点',
+      enabled: true,
+      system_prompt: '你是一个中文写作助手。',
+      user_prompt: '请将下面的内容改写得更正式、得体，保持原意不变。如果输入是 Markdown，请保持 Markdown 结构。只输出改写后的文本。\n\n{{text}}',
+      output_mode: 'preview_replace',
+    },
+    {
+      id: 'shorten',
+      name: '简洁一点',
+      enabled: true,
+      system_prompt: '你是一个中文写作助手。',
+      user_prompt: '请压缩下面的内容，去掉冗余表达，保留关键信息。如果输入是 Markdown，请保持 Markdown 结构。只输出处理后的文本。\n\n{{text}}',
+      output_mode: 'preview_replace',
+    },
+  ];
+}
+
+function normalizeAiActions(actions) {
+  const source = Array.isArray(actions) && actions.length ? actions : defaultAiActions();
+  return source
+    .map((action, index) => ({
+      id: String(action?.id || `custom-${index + 1}`).trim(),
+      name: String(action?.name || action?.id || `动作 ${index + 1}`).trim(),
+      enabled: action?.enabled !== false,
+      system_prompt: String(action?.system_prompt || action?.systemPrompt || ''),
+      user_prompt: String(action?.user_prompt || action?.userPrompt || ''),
+      output_mode: String(action?.output_mode || action?.outputMode || 'preview_replace'),
+    }))
+    .filter((action) => action.id && action.user_prompt.trim());
+}
+
+function updateAiActionField(index, field, value) {
+  const actions = normalizeAiActions(currentSettingsFormState.aiActions).map((action) => ({ ...action }));
+  if (!actions[index]) return;
+  actions[index][field] = value;
+  updateSettingsFormField('aiActions', actions);
+}
+
 function getCurrentSenderName() {
   if (settingsFormRuntime?.getCurrentSenderName) {
     return settingsFormRuntime.getCurrentSenderName(
@@ -593,6 +643,15 @@ let currentSettingsFormState = {
   telegramChatId: '',
   telegramSenderName: '',
   telegramPollIntervalSecs: 10,
+  aiEnabled: false,
+  aiProviderKind: 'openai_compatible',
+  aiBaseUrl: '',
+  aiApiKey: '',
+  aiModel: '',
+  aiTemperature: 0.3,
+  aiTimeoutSecs: 60,
+  aiDefaultActionId: 'polish',
+  aiActions: [],
 };
 let currentAutoBackupStatusState = {
   enabled: false,
@@ -7796,6 +7855,9 @@ function applySettings(settings) {
     activeEndpointId = null;
   }
   const telegram = settings.telegram || {};
+  const ai = settings.ai || {};
+  const aiProvider = ai.provider || {};
+  const aiActions = normalizeAiActions(ai.actions);
   if (senderNameInput) {
     senderNameInput.value = settings.sender_name || '';
   }
@@ -7862,6 +7924,15 @@ function applySettings(settings) {
     telegramChatId: telegram.chat_id || '',
     telegramSenderName: telegram.sender_name || '',
     telegramPollIntervalSecs: normalizeTelegramPollInterval(telegram.poll_interval_secs),
+    aiEnabled: !!ai.enabled,
+    aiProviderKind: aiProvider.kind || 'openai_compatible',
+    aiBaseUrl: aiProvider.base_url || '',
+    aiApiKey: aiProvider.api_key || '',
+    aiModel: aiProvider.model || '',
+    aiTemperature: Number(aiProvider.temperature ?? 0.3),
+    aiTimeoutSecs: Number(aiProvider.timeout_secs || 60),
+    aiDefaultActionId: ai.default_action_id || aiActions[0]?.id || 'polish',
+    aiActions,
   };
   syncVueSettingsForm(currentSettingsFormState);
   applyDefaultEditorFormat(currentSettingsFormState.defaultEditorFormat);
@@ -8011,6 +8082,24 @@ async function saveSettings(options = {}) {
     backupKeepAllDays,
     Number(backupKeepDailyDaysInput?.value || currentAutoBackupStatusState.keepDailyDays) || 7,
   );
+  const aiActions = normalizeAiActions(currentSettingsFormState.aiActions);
+  const aiDefaultActionId = aiActions.some((action) => action.id === currentSettingsFormState.aiDefaultActionId)
+    ? currentSettingsFormState.aiDefaultActionId
+    : aiActions[0]?.id || 'polish';
+  if (currentSettingsFormState.aiEnabled) {
+    if (!(currentSettingsFormState.aiBaseUrl || '').trim()) {
+      setErrorStatus('启用 AI 前请先填写 Provider Base URL');
+      return;
+    }
+    if (!(currentSettingsFormState.aiApiKey || '').trim()) {
+      setErrorStatus('启用 AI 前请先填写 API Key');
+      return;
+    }
+    if (!(currentSettingsFormState.aiModel || '').trim()) {
+      setErrorStatus('启用 AI 前请先填写模型');
+      return;
+    }
+  }
   if (!localHttpApiBindAddress) {
     setErrorStatus('HTTP API 监听地址不能为空');
     return;
@@ -8076,6 +8165,19 @@ async function saveSettings(options = {}) {
       proxy_url: telegramProxyUrl,
       chat_id: telegramChatId,
       poll_interval_secs: telegramPollInterval,
+    },
+    ai: {
+      enabled: !!currentSettingsFormState.aiEnabled,
+      provider: {
+        kind: currentSettingsFormState.aiProviderKind || 'openai_compatible',
+        base_url: (currentSettingsFormState.aiBaseUrl || '').trim(),
+        api_key: (currentSettingsFormState.aiApiKey || '').trim(),
+        model: (currentSettingsFormState.aiModel || '').trim(),
+        temperature: Number(currentSettingsFormState.aiTemperature ?? 0.3),
+        timeout_secs: Number(currentSettingsFormState.aiTimeoutSecs || 60),
+      },
+      default_action_id: aiDefaultActionId,
+      actions: aiActions,
     },
   };
 
@@ -9716,6 +9818,9 @@ vueBridge?.setActions?.({
   },
   updateSettingsFormField: (field, value) => {
     updateSettingsFormField(field, value);
+  },
+  updateAiActionField: (index, field, value) => {
+    updateAiActionField(index, field, value);
   },
   openMessagePreview: (message) => {
     openMessagePreview(message);

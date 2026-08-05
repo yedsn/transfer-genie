@@ -26,9 +26,10 @@ use crate::integration_runtime::{
 use crate::telegram_bridge_runtime::ManagedTelegramBridgeProcess;
 use crate::telegram_bridge_runtime::{TelegramBridgeManager, TelegramBridgeStatus};
 use crate::types::{
-    BackupSettings, DownloadHistoryRecord, LocalHttpApiSettings, MarkedTag, Message, Settings,
-    SyncStatus, TelegramBridgeSettings, UploadHistoryRecord, WebDavConflict, WebDavEndpoint,
-    DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS, DEFAULT_LOCAL_HTTP_API_BIND_PORT,
+    AiProviderSettings, AiSettings, AiTextAction, BackupSettings, DownloadHistoryRecord,
+    LocalHttpApiSettings, MarkedTag, Message, Settings, SyncStatus, TelegramBridgeSettings,
+    UploadHistoryRecord, WebDavConflict, WebDavEndpoint, DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS,
+    DEFAULT_LOCAL_HTTP_API_BIND_PORT,
 };
 use crate::webdav_sync_runtime::WebDavSyncRuntimeAdapter;
 use crate::workspace::WorkspaceLayout;
@@ -246,6 +247,8 @@ struct ExportSettings {
     local_http_api: LocalHttpApiSettings,
     #[serde(default)]
     telegram: ExportTelegramSettings,
+    #[serde(default)]
+    ai: AiSettings,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -279,6 +282,8 @@ struct ExportSecrets {
     endpoints: Vec<EndpointSecret>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     telegram: Option<ExportTelegramSecret>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ai: Option<ExportAiSecret>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -292,6 +297,11 @@ struct EndpointSecret {
 struct ExportTelegramSecret {
     bot_token: String,
     chat_id: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ExportAiSecret {
+    api_key: String,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -358,6 +368,88 @@ struct AppUpdateEventPayload {
     chunk_length: Option<u64>,
     content_length: Option<u64>,
     message: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiTextProcessRequest {
+    action_id: String,
+    text: String,
+    #[serde(default)]
+    format: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiTextProcessResult {
+    action_id: String,
+    action_name: String,
+    output_text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_text: Option<String>,
+    output_mode: String,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct AiTextStreamEvent {
+    request_id: String,
+    event_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    action_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    action_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delta: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct OpenAiCompatibleRequestMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Serialize)]
+struct OpenAiCompatibleRequest {
+    model: String,
+    messages: Vec<OpenAiCompatibleRequestMessage>,
+    temperature: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiCompatibleResponse {
+    choices: Vec<OpenAiCompatibleChoice>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiCompatibleChoice {
+    message: OpenAiCompatibleResponseMessage,
+}
+
+#[derive(Deserialize)]
+struct OpenAiCompatibleResponseMessage {
+    content: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiCompatibleStreamResponse {
+    choices: Vec<OpenAiCompatibleStreamChoice>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiCompatibleStreamChoice {
+    delta: OpenAiCompatibleStreamDelta,
+}
+
+#[derive(Deserialize)]
+struct OpenAiCompatibleStreamDelta {
+    content: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1134,6 +1226,98 @@ fn save_send_hotkey(state: State<'_, AppState>, send_hotkey: String) -> Result<S
 }
 
 #[tauri::command]
+async fn process_text_with_ai(
+    state: State<'_, AppState>,
+    request: AiTextProcessRequest,
+) -> Result<AiTextProcessResult, String> {
+    let settings = current_settings(&state)?;
+    process_text_with_ai_impl(&state.http, &settings, request).await
+}
+
+#[tauri::command]
+async fn process_text_with_ai_stream(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request_id: String,
+    request: AiTextProcessRequest,
+) -> Result<(), String> {
+    let text = request.text.trim();
+    if text.is_empty() {
+        return Err("请先输入或选中需要处理的文本".to_string());
+    }
+    let settings = current_settings(&state)?;
+    if !settings.ai.enabled {
+        return Err("AI 功能未启用，请先在设置中开启".to_string());
+    }
+    let mut ai_settings = settings.ai.clone();
+    normalize_ai_settings(&mut ai_settings)?;
+    let action = find_ai_action(&ai_settings, &request.action_id)?.clone();
+    if !action.enabled {
+        return Err("该 AI 动作已禁用".to_string());
+    }
+    let format = normalize_draft_format(request.format.as_deref());
+    emit_ai_stream_event(
+        &app,
+        AiTextStreamEvent {
+            request_id: request_id.clone(),
+            event_type: "start".to_string(),
+            action_id: Some(action.id.clone()),
+            action_name: Some(action.name.clone()),
+            output_mode: Some(action.output_mode.clone()),
+            delta: None,
+            error: None,
+        },
+    );
+    let result = match ai_settings.provider.kind.as_str() {
+        "openai_compatible" => {
+            stream_openai_compatible_text_action(
+                &app,
+                &state.http,
+                &ai_settings,
+                &action,
+                &request_id,
+                text,
+                &format,
+            )
+            .await
+        }
+        other => Err(format!("不支持的 AI Provider: {other}")),
+    };
+    match result {
+        Ok(()) => {
+            emit_ai_stream_event(
+                &app,
+                AiTextStreamEvent {
+                    request_id,
+                    event_type: "done".to_string(),
+                    action_id: None,
+                    action_name: None,
+                    output_mode: None,
+                    delta: None,
+                    error: None,
+                },
+            );
+            Ok(())
+        }
+        Err(err) => {
+            emit_ai_stream_event(
+                &app,
+                AiTextStreamEvent {
+                    request_id,
+                    event_type: "error".to_string(),
+                    action_id: None,
+                    action_name: None,
+                    output_mode: None,
+                    delta: None,
+                    error: Some(err.clone()),
+                },
+            );
+            Err(err)
+        }
+    }
+}
+
+#[tauri::command]
 fn get_device_name() -> String {
     resolve_device_name()
 }
@@ -1168,11 +1352,13 @@ fn export_settings(
             proxy_url: settings.telegram.proxy_url.clone(),
             poll_interval_secs: settings.telegram.poll_interval_secs,
         },
+        ai: settings.ai.clone(),
     };
     for endpoint in export_settings.webdav_endpoints.iter_mut() {
         endpoint.username.clear();
         endpoint.password.clear();
     }
+    export_settings.ai.provider.api_key.clear();
 
     let bundle = ExportBundle {
         version: EXPORT_VERSION,
@@ -1229,6 +1415,7 @@ async fn import_settings(
         auto_update_enabled: bundle.settings.auto_update_enabled,
         local_http_api: bundle.settings.local_http_api,
         backup: existing.backup.clone(),
+        ai: bundle.settings.ai,
         telegram: TelegramBridgeSettings {
             enabled: bundle.settings.telegram.enabled,
             auto_start: bundle.settings.telegram.auto_start,
@@ -3594,7 +3781,6 @@ fn minimize_window(app: AppHandle, window: Window) -> Result<(), String> {
     Ok(())
 }
 
-
 #[tauri::command]
 async fn fetch_image_preview(
     state: State<'_, AppState>,
@@ -5122,6 +5308,75 @@ fn normalize_local_http_api_bind_port(port: u16) -> u16 {
     }
 }
 
+fn is_valid_ai_action_id(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+}
+
+fn normalize_ai_settings(ai: &mut AiSettings) -> Result<(), String> {
+    ai.provider.kind = match ai.provider.kind.trim() {
+        "" => "openai_compatible".to_string(),
+        "openai_compatible" => "openai_compatible".to_string(),
+        other => return Err(format!("不支持的 AI Provider: {other}")),
+    };
+    ai.provider.base_url = ai
+        .provider
+        .base_url
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+    ai.provider.api_key = ai.provider.api_key.trim().to_string();
+    ai.provider.model = ai.provider.model.trim().to_string();
+    if !ai.provider.temperature.is_finite() {
+        ai.provider.temperature = AiProviderSettings::default().temperature;
+    }
+    ai.provider.temperature = ai.provider.temperature.clamp(0.0, 2.0);
+    if ai.provider.timeout_secs == 0 {
+        ai.provider.timeout_secs = AiProviderSettings::default().timeout_secs;
+    }
+    ai.provider.timeout_secs = ai.provider.timeout_secs.clamp(5, 300);
+
+    if ai.actions.is_empty() {
+        ai.actions = AiSettings::default().actions;
+    }
+    let mut seen_ids = HashSet::new();
+    for action in ai.actions.iter_mut() {
+        action.id = action.id.trim().to_string();
+        if !is_valid_ai_action_id(&action.id) {
+            return Err("AI 动作 ID 无效，只能包含字母、数字、下划线或短横线".to_string());
+        }
+        if !seen_ids.insert(action.id.clone()) {
+            return Err("AI 动作 ID 重复".to_string());
+        }
+        action.name = action.name.trim().to_string();
+        if action.name.is_empty() {
+            action.name = action.id.clone();
+        }
+        if action.user_prompt.trim().is_empty() {
+            return Err(format!("AI 动作 {} 必须填写用户提示词", action.name));
+        }
+        action.output_mode = match action.output_mode.trim() {
+            "" => "preview_replace".to_string(),
+            "preview_replace" => "preview_replace".to_string(),
+            "preview_insert" => "preview_insert".to_string(),
+            other => return Err(format!("不支持的 AI 输出模式: {other}")),
+        };
+    }
+    let default_id = ai.default_action_id.trim().to_string();
+    ai.default_action_id = if seen_ids.contains(&default_id) {
+        default_id
+    } else {
+        ai.actions
+            .first()
+            .map(|action| action.id.clone())
+            .unwrap_or_else(|| "polish".to_string())
+    };
+    Ok(())
+}
+
 fn normalize_settings(
     mut settings: Settings,
     default_download_dir: &Path,
@@ -5217,7 +5472,405 @@ fn normalize_settings(
         .keep_daily_days
         .max(settings.backup.keep_all_days);
 
+    normalize_ai_settings(&mut settings.ai)?;
+
     Ok(settings)
+}
+
+fn render_ai_prompt(template: &str, text: &str, format: &str) -> String {
+    template
+        .replace("{{text}}", text)
+        .replace("{{format}}", format)
+}
+
+fn split_ai_think_blocks(output: &str) -> (String, Option<String>) {
+    let mut rest = output;
+    let mut visible = String::new();
+    let mut thoughts: Vec<String> = Vec::new();
+    loop {
+        let lower = rest.to_lowercase();
+        let Some(start) = lower.find("<think>") else {
+            visible.push_str(rest);
+            break;
+        };
+        visible.push_str(&rest[..start]);
+        let content_start = start + "<think>".len();
+        let after_start = &rest[content_start..];
+        let after_lower = after_start.to_lowercase();
+        let Some(end_rel) = after_lower.find("</think>") else {
+            thoughts.push(after_start.trim().to_string());
+            break;
+        };
+        let thought = after_start[..end_rel].trim();
+        if !thought.is_empty() {
+            thoughts.push(thought.to_string());
+        }
+        rest = &after_start[end_rel + "</think>".len()..];
+    }
+    let cleaned = visible.trim().to_string();
+    let reasoning = thoughts
+        .into_iter()
+        .filter(|item| !item.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+        .trim()
+        .to_string();
+    let reasoning = if reasoning.is_empty() {
+        None
+    } else {
+        Some(reasoning)
+    };
+    (cleaned, reasoning)
+}
+
+fn normalize_draft_format(format: Option<&str>) -> String {
+    match format.unwrap_or("text").trim().to_lowercase().as_str() {
+        "markdown" => "markdown".to_string(),
+        _ => "text".to_string(),
+    }
+}
+
+fn chat_completions_url(base_url: &str) -> Result<String, String> {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err("请先填写 AI Provider Base URL".to_string());
+    }
+    if trimmed.ends_with("/chat/completions") {
+        Ok(trimmed.to_string())
+    } else {
+        Ok(format!("{trimmed}/chat/completions"))
+    }
+}
+
+fn find_ai_action<'a>(
+    settings: &'a AiSettings,
+    action_id: &str,
+) -> Result<&'a AiTextAction, String> {
+    let target_id = action_id.trim();
+    settings
+        .actions
+        .iter()
+        .find(|action| action.id == target_id)
+        .ok_or_else(|| "AI 动作不存在".to_string())
+}
+
+fn validate_ai_provider(provider: &AiProviderSettings) -> Result<(), String> {
+    if provider.base_url.trim().is_empty() {
+        return Err("请先填写 AI Provider Base URL".to_string());
+    }
+    if provider.api_key.trim().is_empty() {
+        return Err("请先填写 AI API Key".to_string());
+    }
+    if provider.model.trim().is_empty() {
+        return Err("请先填写 AI 模型".to_string());
+    }
+    Ok(())
+}
+
+fn build_ai_request_messages(
+    action: &AiTextAction,
+    text: &str,
+    format: &str,
+) -> Vec<OpenAiCompatibleRequestMessage> {
+    let mut messages = Vec::new();
+    if !action.system_prompt.trim().is_empty() {
+        messages.push(OpenAiCompatibleRequestMessage {
+            role: "system".to_string(),
+            content: render_ai_prompt(&action.system_prompt, text, format),
+        });
+    }
+    messages.push(OpenAiCompatibleRequestMessage {
+        role: "user".to_string(),
+        content: render_ai_prompt(&action.user_prompt, text, format),
+    });
+    messages
+}
+
+fn emit_ai_stream_event(app: &AppHandle, payload: AiTextStreamEvent) {
+    if let Err(err) = app.emit("ai-text-stream", payload) {
+        eprintln!("emit ai text stream event failed: {err}");
+    }
+}
+
+#[derive(Default)]
+struct AiThinkStreamSplitter {
+    in_think: bool,
+    pending: String,
+}
+
+impl AiThinkStreamSplitter {
+    fn push(&mut self, delta: &str) -> Vec<(String, String)> {
+        split_stream_delta(delta, self)
+    }
+
+    fn finish(&mut self) -> Vec<(String, String)> {
+        if self.pending.is_empty() {
+            return Vec::new();
+        }
+        let event_type = if self.in_think {
+            "reasoning_delta"
+        } else {
+            "output_delta"
+        };
+        let delta = std::mem::take(&mut self.pending);
+        vec![(event_type.to_string(), delta)]
+    }
+}
+
+fn trailing_tag_prefix_len(text: &str, tag: &str) -> usize {
+    let lower = text.to_lowercase();
+    let tag = tag.to_lowercase();
+    let max_len = tag.len().saturating_sub(1).min(lower.len());
+    (1..=max_len)
+        .rev()
+        .find(|len| lower.ends_with(&tag[..*len]))
+        .unwrap_or(0)
+}
+
+fn split_stream_delta(delta: &str, splitter: &mut AiThinkStreamSplitter) -> Vec<(String, String)> {
+    let mut combined = String::new();
+    combined.push_str(&splitter.pending);
+    combined.push_str(delta);
+    splitter.pending.clear();
+
+    let mut rest = combined.as_str();
+    let mut events = Vec::new();
+    while !rest.is_empty() {
+        let lower = rest.to_lowercase();
+        if splitter.in_think {
+            if let Some(end) = lower.find("</think>") {
+                let part = &rest[..end];
+                if !part.is_empty() {
+                    events.push(("reasoning_delta".to_string(), part.to_string()));
+                }
+                rest = &rest[end + "</think>".len()..];
+                splitter.in_think = false;
+            } else {
+                let pending_len = trailing_tag_prefix_len(rest, "</think>");
+                let emit_len = rest.len() - pending_len;
+                if emit_len > 0 {
+                    events.push(("reasoning_delta".to_string(), rest[..emit_len].to_string()));
+                }
+                splitter.pending.push_str(&rest[emit_len..]);
+                break;
+            }
+        } else if let Some(start) = lower.find("<think>") {
+            let part = &rest[..start];
+            if !part.is_empty() {
+                events.push(("output_delta".to_string(), part.to_string()));
+            }
+            rest = &rest[start + "<think>".len()..];
+            splitter.in_think = true;
+        } else {
+            let pending_len = trailing_tag_prefix_len(rest, "<think>");
+            let emit_len = rest.len() - pending_len;
+            if emit_len > 0 {
+                events.push(("output_delta".to_string(), rest[..emit_len].to_string()));
+            }
+            splitter.pending.push_str(&rest[emit_len..]);
+            break;
+        }
+    }
+    events
+}
+
+fn emit_ai_stream_deltas(app: &AppHandle, request_id: &str, events: Vec<(String, String)>) {
+    for (event_type, delta) in events {
+        if delta.is_empty() {
+            continue;
+        }
+        emit_ai_stream_event(
+            app,
+            AiTextStreamEvent {
+                request_id: request_id.to_string(),
+                event_type,
+                action_id: None,
+                action_name: None,
+                output_mode: None,
+                delta: Some(delta),
+                error: None,
+            },
+        );
+    }
+}
+
+async fn stream_openai_compatible_text_action(
+    app: &AppHandle,
+    http: &Client,
+    settings: &AiSettings,
+    action: &AiTextAction,
+    request_id: &str,
+    text: &str,
+    format: &str,
+) -> Result<(), String> {
+    use futures_util::StreamExt;
+
+    let provider = &settings.provider;
+    validate_ai_provider(provider)?;
+    let request = OpenAiCompatibleRequest {
+        model: provider.model.clone(),
+        messages: build_ai_request_messages(action, text, format),
+        temperature: provider.temperature,
+        stream: Some(true),
+    };
+    let url = chat_completions_url(&provider.base_url)?;
+    let response = http
+        .post(url)
+        .bearer_auth(&provider.api_key)
+        .timeout(Duration::from_secs(provider.timeout_secs))
+        .json(&request)
+        .send()
+        .await
+        .map_err(|err| {
+            if err.is_timeout() {
+                "AI 请求超时".to_string()
+            } else {
+                format!("AI 请求失败: {err}")
+            }
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        let detail = body.trim();
+        if detail.is_empty() {
+            return Err(format!("AI Provider 返回错误: HTTP {status}"));
+        }
+        return Err(format!("AI Provider 返回错误: HTTP {status}: {detail}"));
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut splitter = AiThinkStreamSplitter::default();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|err| format!("AI 响应流中断: {err}"))?;
+        buffer.extend_from_slice(&chunk);
+        while let Some(index) = buffer.iter().position(|byte| *byte == b'\n') {
+            let mut line_bytes: Vec<u8> = buffer.drain(..=index).collect();
+            line_bytes.pop();
+            if line_bytes.last() == Some(&b'\r') {
+                line_bytes.pop();
+            }
+            let line = String::from_utf8(line_bytes)
+                .map_err(|err| format!("解析 AI 流式响应编码失败: {err}"))?;
+            let line = line.trim();
+            if line.is_empty() || line.starts_with(':') {
+                continue;
+            }
+            let Some(data) = line.strip_prefix("data:") else {
+                continue;
+            };
+            let data = data.trim();
+            if data == "[DONE]" {
+                emit_ai_stream_deltas(app, request_id, splitter.finish());
+                return Ok(());
+            }
+            let parsed: OpenAiCompatibleStreamResponse =
+                serde_json::from_str(data).map_err(|err| format!("解析 AI 流式响应失败: {err}"))?;
+            for choice in parsed.choices {
+                let Some(delta) = choice.delta.content else {
+                    continue;
+                };
+                emit_ai_stream_deltas(app, request_id, splitter.push(&delta));
+            }
+        }
+    }
+    emit_ai_stream_deltas(app, request_id, splitter.finish());
+    Ok(())
+}
+
+async fn call_openai_compatible_text_action(
+    http: &Client,
+    settings: &AiSettings,
+    action: &AiTextAction,
+    text: &str,
+    format: &str,
+) -> Result<String, String> {
+    let provider = &settings.provider;
+    validate_ai_provider(provider)?;
+
+    let request = OpenAiCompatibleRequest {
+        model: provider.model.clone(),
+        messages: build_ai_request_messages(action, text, format),
+        temperature: provider.temperature,
+        stream: None,
+    };
+    let url = chat_completions_url(&provider.base_url)?;
+    let response = http
+        .post(url)
+        .bearer_auth(&provider.api_key)
+        .timeout(Duration::from_secs(provider.timeout_secs))
+        .json(&request)
+        .send()
+        .await
+        .map_err(|err| {
+            if err.is_timeout() {
+                "AI 请求超时".to_string()
+            } else {
+                format!("AI 请求失败: {err}")
+            }
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        let detail = body.trim();
+        if detail.is_empty() {
+            return Err(format!("AI Provider 返回错误: HTTP {status}"));
+        }
+        return Err(format!("AI Provider 返回错误: HTTP {status}: {detail}"));
+    }
+    let parsed: OpenAiCompatibleResponse = response
+        .json()
+        .await
+        .map_err(|err| format!("解析 AI 响应失败: {err}"))?;
+    let output = parsed
+        .choices
+        .into_iter()
+        .find_map(|choice| choice.message.content)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if output.is_empty() {
+        return Err("AI 响应为空".to_string());
+    }
+    Ok(output)
+}
+
+async fn process_text_with_ai_impl(
+    http: &Client,
+    settings: &Settings,
+    request: AiTextProcessRequest,
+) -> Result<AiTextProcessResult, String> {
+    let text = request.text.trim();
+    if text.is_empty() {
+        return Err("请先输入或选中需要处理的文本".to_string());
+    }
+    if !settings.ai.enabled {
+        return Err("AI 功能未启用，请先在设置中开启".to_string());
+    }
+    let mut ai_settings = settings.ai.clone();
+    normalize_ai_settings(&mut ai_settings)?;
+    let action = find_ai_action(&ai_settings, &request.action_id)?.clone();
+    if !action.enabled {
+        return Err("该 AI 动作已禁用".to_string());
+    }
+    let format = normalize_draft_format(request.format.as_deref());
+    let raw_output_text = match ai_settings.provider.kind.as_str() {
+        "openai_compatible" => {
+            call_openai_compatible_text_action(http, &ai_settings, &action, text, &format).await?
+        }
+        other => return Err(format!("不支持的 AI Provider: {other}")),
+    };
+    let (output_text, reasoning_text) = split_ai_think_blocks(&raw_output_text);
+    if output_text.is_empty() {
+        return Err("AI 响应只包含思考过程，没有可应用的正文".to_string());
+    }
+    Ok(AiTextProcessResult {
+        action_id: action.id,
+        action_name: action.name,
+        output_text,
+        reasoning_text,
+        output_mode: action.output_mode,
+    })
 }
 
 fn extract_export_secrets(settings: &Settings) -> ExportSecrets {
@@ -5239,9 +5892,17 @@ fn extract_export_secrets(settings: &Settings) -> ExportSecrets {
             chat_id: settings.telegram.chat_id.clone(),
         })
     };
+    let ai = if settings.ai.provider.api_key.is_empty() {
+        None
+    } else {
+        Some(ExportAiSecret {
+            api_key: settings.ai.provider.api_key.clone(),
+        })
+    };
     ExportSecrets {
         endpoints,
         telegram,
+        ai,
     }
 }
 
@@ -5325,6 +5986,9 @@ fn apply_export_secrets(settings: &mut Settings, secrets: ExportSecrets) -> Resu
     if let Some(telegram) = secrets.telegram {
         settings.telegram.bot_token = telegram.bot_token;
         settings.telegram.chat_id = telegram.chat_id;
+    }
+    if let Some(ai) = secrets.ai {
+        settings.ai.provider.api_key = ai.api_key;
     }
     Ok(())
 }
@@ -5523,6 +6187,7 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
                 local_http_api: LocalHttpApiSettings::default(),
                 backup: BackupSettings::default(),
                 telegram: TelegramBridgeSettings::default(),
+                ai: AiSettings::default(),
             }
         };
         let normalized = normalize_settings(settings, fallback_download_dir)?;
@@ -5543,6 +6208,7 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
             local_http_api: LocalHttpApiSettings::default(),
             backup: BackupSettings::default(),
             telegram: TelegramBridgeSettings::default(),
+            ai: AiSettings::default(),
         };
         write_settings_audited(path, &settings)?;
         Ok(settings)
@@ -7955,6 +8621,8 @@ fn main() {
             list_local_backup_archives,
             restore_settings_snapshot,
             save_send_hotkey,
+            process_text_with_ai,
+            process_text_with_ai_stream,
             get_device_name,
             export_settings,
             import_settings,
@@ -8064,6 +8732,7 @@ mod tests {
             local_http_api: LocalHttpApiSettings::default(),
             backup: BackupSettings::default(),
             telegram: TelegramBridgeSettings::default(),
+            ai: AiSettings::default(),
         }
     }
 
@@ -8728,6 +9397,224 @@ mod tests {
 
         let _ = fs::remove_file(&settings_path);
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn load_settings_defaults_ai_for_legacy_config() {
+        let temp_dir = std::env::temp_dir().join(format!("transfer-genie-ai-legacy-{}", now_ms()));
+        let settings_path = temp_dir.join("settings.json");
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        fs::write(
+            &settings_path,
+            r#"{
+                "webdav_endpoints": [],
+                "active_webdav_id": null,
+                "sender_name": "legacy",
+                "refresh_interval_secs": 5,
+                "download_dir": "/tmp",
+                "send_hotkey": "enter",
+                "global_hotkey_enabled": true,
+                "global_hotkey": "alt+t",
+                "auto_start": false,
+                "auto_update_enabled": false,
+                "local_http_api": {
+                    "enabled": false,
+                    "bind_address": "127.0.0.1",
+                    "bind_port": 6011
+                },
+                "telegram": {
+                    "enabled": false,
+                    "auto_start": false,
+                    "sender_name": "",
+                    "bot_token": "",
+                    "chat_id": "",
+                    "proxy_enabled": false,
+                    "proxy_url": "http://127.0.0.1:7890",
+                    "poll_interval_secs": 5
+                }
+            }"#,
+        )
+        .expect("write legacy settings");
+
+        let loaded = load_settings(&settings_path, &temp_dir).expect("load settings");
+
+        assert!(!loaded.ai.enabled);
+        assert_eq!(loaded.ai.provider.kind, "openai_compatible");
+        assert_eq!(loaded.ai.default_action_id, "polish");
+        assert!(loaded.ai.actions.iter().any(|action| action.id == "polish"));
+
+        let _ = fs::remove_file(&settings_path);
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn normalize_settings_preserves_ai_configuration() {
+        let mut settings = test_settings();
+        settings.ai.enabled = true;
+        settings.ai.provider.base_url = " https://api.example.com/v1/ ".to_string();
+        settings.ai.provider.api_key = " sk-test ".to_string();
+        settings.ai.provider.model = " model-a ".to_string();
+        settings.ai.provider.temperature = 3.0;
+        settings.ai.provider.timeout_secs = 0;
+
+        let normalized = normalize_settings(settings, Path::new("downloads")).expect("normalize");
+
+        assert!(normalized.ai.enabled);
+        assert_eq!(
+            normalized.ai.provider.base_url,
+            "https://api.example.com/v1"
+        );
+        assert_eq!(normalized.ai.provider.api_key, "sk-test");
+        assert_eq!(normalized.ai.provider.model, "model-a");
+        assert_eq!(normalized.ai.provider.temperature, 2.0);
+        assert_eq!(normalized.ai.provider.timeout_secs, 60);
+    }
+
+    #[test]
+    fn render_ai_prompt_replaces_known_variables() {
+        let rendered = render_ai_prompt("格式: {{format}}\n{{text}}", "你好", "markdown");
+
+        assert_eq!(rendered, "格式: markdown\n你好");
+    }
+
+    #[test]
+    fn split_ai_think_blocks_removes_reasoning_from_output() {
+        let raw = "<think>分析一下原文</think>\n\n润色后的正文";
+
+        let (output, reasoning) = split_ai_think_blocks(raw);
+
+        assert_eq!(output, "润色后的正文");
+        assert_eq!(reasoning.as_deref(), Some("分析一下原文"));
+    }
+
+    #[test]
+    fn split_ai_think_blocks_collects_multiple_blocks_case_insensitive() {
+        let raw = "开头<THINK>第一段</THINK>中间<think>第二段</think>结尾";
+
+        let (output, reasoning) = split_ai_think_blocks(raw);
+
+        assert_eq!(output, "开头中间结尾");
+        assert_eq!(reasoning.as_deref(), Some("第一段\n\n第二段"));
+    }
+
+    #[test]
+    fn split_stream_delta_routes_reasoning_and_output() {
+        let mut splitter = AiThinkStreamSplitter::default();
+
+        let events = split_stream_delta("正文<think>思考</think>结尾", &mut splitter);
+
+        assert_eq!(
+            events,
+            vec![
+                ("output_delta".to_string(), "正文".to_string()),
+                ("reasoning_delta".to_string(), "思考".to_string()),
+                ("output_delta".to_string(), "结尾".to_string()),
+            ]
+        );
+        assert!(!splitter.in_think);
+        assert!(splitter.pending.is_empty());
+    }
+
+    #[test]
+    fn split_stream_delta_keeps_think_state_across_chunks() {
+        let mut splitter = AiThinkStreamSplitter::default();
+
+        let first = split_stream_delta("正文<think>思", &mut splitter);
+        let second = split_stream_delta("考</think>结尾", &mut splitter);
+
+        assert_eq!(
+            first,
+            vec![
+                ("output_delta".to_string(), "正文".to_string()),
+                ("reasoning_delta".to_string(), "思".to_string()),
+            ]
+        );
+        assert_eq!(
+            second,
+            vec![
+                ("reasoning_delta".to_string(), "考".to_string()),
+                ("output_delta".to_string(), "结尾".to_string()),
+            ]
+        );
+        assert!(!splitter.in_think);
+        assert!(splitter.pending.is_empty());
+    }
+
+    #[test]
+    fn split_stream_delta_handles_tags_split_across_chunks() {
+        let mut splitter = AiThinkStreamSplitter::default();
+
+        let first = splitter.push("正文<thi");
+        let second = splitter.push("nk>思考</thi");
+        let third = splitter.push("nk>结尾");
+
+        assert_eq!(
+            first,
+            vec![("output_delta".to_string(), "正文".to_string())]
+        );
+        assert_eq!(
+            second,
+            vec![("reasoning_delta".to_string(), "思考".to_string())]
+        );
+        assert_eq!(
+            third,
+            vec![("output_delta".to_string(), "结尾".to_string())]
+        );
+        assert!(!splitter.in_think);
+        assert!(splitter.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn process_text_with_ai_rejects_disabled_ai() {
+        let settings = test_settings();
+        let request = AiTextProcessRequest {
+            action_id: "polish".to_string(),
+            text: "需要润色".to_string(),
+            format: Some("text".to_string()),
+        };
+
+        let error = process_text_with_ai_impl(&Client::new(), &settings, request)
+            .await
+            .expect_err("disabled ai should fail");
+
+        assert!(error.contains("AI 功能未启用"));
+    }
+
+    #[tokio::test]
+    async fn process_text_with_ai_rejects_incomplete_provider() {
+        let mut settings = test_settings();
+        settings.ai.enabled = true;
+        let request = AiTextProcessRequest {
+            action_id: "polish".to_string(),
+            text: "需要润色".to_string(),
+            format: Some("markdown".to_string()),
+        };
+
+        let error = process_text_with_ai_impl(&Client::new(), &settings, request)
+            .await
+            .expect_err("incomplete provider should fail");
+
+        assert!(error.contains("Base URL"));
+    }
+
+    #[test]
+    fn export_secrets_include_ai_key_without_plain_export_setting() {
+        let mut settings = test_settings();
+        settings.ai.enabled = true;
+        settings.ai.provider.base_url = "https://api.example.com/v1".to_string();
+        settings.ai.provider.api_key = "sk-secret".to_string();
+        settings.ai.provider.model = "model-a".to_string();
+
+        let secrets = extract_export_secrets(&settings);
+        assert_eq!(
+            secrets.ai.as_ref().map(|secret| secret.api_key.as_str()),
+            Some("sk-secret")
+        );
+
+        let mut export_ai = settings.ai.clone();
+        export_ai.provider.api_key.clear();
+        let exported = serde_json::to_string(&export_ai).expect("serialize export ai");
+        assert!(!exported.contains("sk-secret"));
     }
 
     #[test]

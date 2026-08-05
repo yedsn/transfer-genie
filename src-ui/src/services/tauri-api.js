@@ -85,6 +85,15 @@
     },
   };
 
+  const aiApi = {
+    async processText(request) {
+      return invoke('process_text_with_ai', { request });
+    },
+    async processTextStream(requestId, request) {
+      return invoke('process_text_with_ai_stream', { requestId, request });
+    },
+  };
+
   // Marked messages API
   const markedApi = {
     async getMarkedMessages(params) {
@@ -254,6 +263,7 @@
     settings: settingsApi,
     sync: syncApi,
     message: messageApi,
+    ai: aiApi,
     marked: markedApi,
     transfer: transferApi,
     backup: backupApi,

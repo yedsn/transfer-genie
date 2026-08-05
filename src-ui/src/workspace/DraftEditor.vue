@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { composerStore } from "./composer-store";
 import type { DraftTab } from "./composer-store";
 
@@ -8,6 +8,21 @@ const props = defineProps<{ draft: DraftTab; paneId: string; isActive?: boolean 
 const isMarkdown = computed(() => props.draft.format === "markdown");
 const textEl = ref<HTMLTextAreaElement | null>(null);
 const mdWrap = ref<HTMLElement | null>(null);
+const aiBusy = ref(false);
+const aiError = ref("");
+const aiMenu = ref<{ x: number; y: number } | null>(null);
+const aiMenuPreferSelection = ref(false);
+const aiLoadingReasoning = ref<HTMLElement | null>(null);
+let activeAiRequestId = "";
+const aiPreview = ref<{
+  title: string;
+  sourceText: string;
+  outputText: string;
+  reasoningText: string;
+  mode: "selection" | "draft" | "cursor";
+  selectionStart: number;
+  selectionEnd: number;
+} | null>(null);
 let editor: any = null;
 let initRetry = 0;
 let fullscreenListener: ((event: Event) => void) | null = null;
@@ -16,6 +31,45 @@ let resizeListener: (() => void) | null = null;
 const MARKDOWN_NORMAL_HEIGHT = "180px";
 
 const mdId = "cw-md-" + props.paneId + "-" + props.draft.id;
+
+function createAiRequestId() {
+  return "ai-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+}
+
+function appendAiStreamEvent(payload: any) {
+  if (!payload || payload.requestId !== activeAiRequestId || !aiPreview.value) return;
+  if (payload.eventType === "start") {
+    aiPreview.value.title = payload.actionName || aiPreview.value.title;
+    return;
+  }
+  if (payload.eventType === "reasoning_delta") {
+    aiPreview.value.reasoningText += payload.delta || "";
+    nextTick(() => {
+      const el = aiLoadingReasoning.value;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+    return;
+  }
+  if (payload.eventType === "output_delta") {
+    const delta = payload.delta || "";
+    aiPreview.value.outputText += aiPreview.value.outputText ? delta : delta.replace(/^\s+/, "");
+    return;
+  }
+  if (payload.eventType === "error") {
+    aiError.value = payload.error || "AI 处理失败";
+    aiPreview.value = null;
+    return;
+  }
+}
+
+async function listenAiStream(requestId: string) {
+  const eventApi = (window as any).transferGenieApi?.event;
+  const tauriListen = (window as any).__TAURI__?.event?.listen;
+  const handler = (event: any) => appendAiStreamEvent(event?.payload || {});
+  if (eventApi?.listen) return eventApi.listen("ai-text-stream", handler);
+  if (tauriListen) return tauriListen("ai-text-stream", handler);
+  return null;
+}
 
 function isComposerFullscreen() {
   return document.documentElement.classList.contains("composer-fullscreen-active") || document.body.classList.contains("composer-fullscreen-active");
@@ -43,6 +97,194 @@ function onActivated() {
   composerStore.setActivePane(props.paneId);
   registerFocus();
 
+}
+
+const aiSettings = computed(() => {
+  const store = (window as any).transferGenieVue?.store;
+  return store?.settingsForm || {};
+});
+
+const aiActions = computed(() => {
+  const actions = Array.isArray(aiSettings.value.aiActions) ? aiSettings.value.aiActions : [];
+  return actions.filter((action: any) => action && action.enabled !== false);
+});
+
+const canRunAi = computed(() => {
+  const settings = aiSettings.value;
+  return !!settings.aiEnabled && !!String(settings.aiBaseUrl || "").trim() && !!String(settings.aiApiKey || "").trim() && !!String(settings.aiModel || "").trim() && aiActions.value.length > 0;
+});
+
+const aiPreviewRows = computed(() => {
+  const text = aiPreview.value?.outputText || "";
+  const visualLines = text.split(/\r\n|\r|\n/).reduce((count, line) => {
+    return count + Math.max(1, Math.ceil(Array.from(line).length / 56));
+  }, 0);
+  return Math.min(14, Math.max(4, visualLines));
+});
+
+function defaultAiActionId() {
+  const settings = aiSettings.value;
+  const configured = String(settings.aiDefaultActionId || "polish");
+  if (aiActions.value.some((action: any) => action.id === configured)) return configured;
+  return aiActions.value[0]?.id || "polish";
+}
+
+function getPlainSelection() {
+  const textarea = textEl.value;
+  const text = props.draft.text || "";
+  if (!textarea) return { mode: "draft" as const, text, start: 0, end: text.length };
+  const start = typeof textarea.selectionStart === "number" ? textarea.selectionStart : 0;
+  const end = typeof textarea.selectionEnd === "number" ? textarea.selectionEnd : start;
+  if (end > start) return { mode: "selection" as const, text: text.slice(start, end), start, end };
+  return { mode: "draft" as const, text, start: 0, end: text.length };
+}
+
+function getMarkdownSelection(preferSelection = false) {
+  const text = props.draft.text || "";
+  const cm = editor?.cm;
+  if (cm && preferSelection && typeof cm.getSelection === "function") {
+    const selected = String(cm.getSelection() || "");
+    if (selected) return { mode: "selection" as const, text: selected, start: -1, end: -1 };
+  }
+  return { mode: "draft" as const, text, start: 0, end: text.length };
+}
+
+function currentAiInput(preferSelection = false) {
+  return isMarkdown.value ? getMarkdownSelection(preferSelection) : getPlainSelection();
+}
+
+async function runAiAction(actionId?: string, preferSelection = false) {
+  aiMenu.value = null;
+  aiError.value = "";
+  if (!canRunAi.value) {
+    aiError.value = "请先在设置中启用并配置 AI。";
+    return;
+  }
+  const input = currentAiInput(preferSelection);
+  if (!input.text.trim()) {
+    aiError.value = "请先输入或选中需要处理的文本。";
+    return;
+  }
+  aiBusy.value = true;
+  activeAiRequestId = createAiRequestId();
+  aiPreview.value = {
+    title: "AI 处理中...",
+    sourceText: input.text,
+    outputText: "",
+    reasoningText: "",
+    mode: input.mode,
+    selectionStart: input.start,
+    selectionEnd: input.end,
+  };
+  let unlisten: any = null;
+  try {
+    const api = (window as any).transferGenieApi;
+    const payload = {
+      actionId: actionId || defaultAiActionId(),
+      text: input.text,
+      format: props.draft.format,
+    };
+    const tauriInvoke = (window as any).__TAURI__?.core?.invoke || (window as any).__TAURI__?.invoke;
+    const streamInvoke = api?.ai?.processTextStream
+      ? (requestId: string, request: any) => api.ai.processTextStream(requestId, request)
+      : tauriInvoke
+        ? (requestId: string, request: any) => tauriInvoke("process_text_with_ai_stream", { requestId, request })
+        : null;
+    if (streamInvoke) {
+      unlisten = await listenAiStream(activeAiRequestId);
+      await streamInvoke(activeAiRequestId, payload);
+    } else {
+      const result = api?.ai?.processText
+        ? await api.ai.processText(payload)
+        : api?.invoke
+          ? await api.invoke("process_text_with_ai", { request: payload })
+          : await tauriInvoke("process_text_with_ai", { request: payload });
+      aiPreview.value = {
+        title: result?.actionName || "AI 处理结果",
+        sourceText: input.text,
+        outputText: result?.outputText || "",
+        reasoningText: result?.reasoningText || "",
+        mode: input.mode,
+        selectionStart: input.start,
+        selectionEnd: input.end,
+      };
+    }
+  } catch (error: any) {
+    aiError.value = String(error || "AI 处理失败");
+    aiPreview.value = null;
+  } finally {
+    if (typeof unlisten === "function") {
+      try { unlisten(); } catch (e) { /* ignore */ }
+    }
+    aiBusy.value = false;
+  }
+}
+
+function applyAiPreview(mode?: "replace" | "insert") {
+  const preview = aiPreview.value;
+  if (!preview) return;
+  const output = preview.outputText || "";
+  if (isMarkdown.value && editor?.cm) {
+    const cm = editor.cm;
+    if (mode === "insert") {
+      cm.replaceSelection(output);
+    } else if (preview.mode === "selection" && typeof cm.replaceSelection === "function") {
+      cm.replaceSelection(output);
+    } else if (typeof editor.setMarkdown === "function") {
+      editor.setMarkdown(output);
+    } else if (typeof cm.setValue === "function") {
+      cm.setValue(output);
+    }
+    try { composerStore.setDraftText(props.draft.id, cm.getValue()); } catch (e) { /* ignore */ }
+  } else {
+    const current = props.draft.text || "";
+    let next = output;
+    let cursor = output.length;
+    if (mode === "insert" && textEl.value) {
+      const start = textEl.value.selectionStart || 0;
+      const end = textEl.value.selectionEnd || start;
+      next = current.slice(0, start) + output + current.slice(end);
+      cursor = start + output.length;
+    } else if (preview.mode === "selection" && preview.selectionStart >= 0 && preview.selectionEnd >= preview.selectionStart) {
+      next = current.slice(0, preview.selectionStart) + output + current.slice(preview.selectionEnd);
+      cursor = preview.selectionStart + output.length;
+    }
+    composerStore.setDraftText(props.draft.id, next);
+    setTimeout(() => {
+      if (textEl.value) textEl.value.setSelectionRange(cursor, cursor);
+    }, 0);
+  }
+  aiPreview.value = null;
+}
+
+function closeAiPreview() { aiPreview.value = null; }
+
+function onEditorContextMenu(event: MouseEvent) {
+  onActivated();
+  const input = currentAiInput(true);
+  if (!input.text.trim()) return;
+  event.preventDefault();
+  aiMenuPreferSelection.value = true;
+  aiMenu.value = { x: event.clientX, y: event.clientY };
+}
+
+function closeAiMenu() { aiMenu.value = null; }
+
+function openAiActionMenu(event: MouseEvent) {
+  onActivated();
+  if (!canRunAi.value || aiBusy.value) return;
+  const target = event.currentTarget as HTMLElement;
+  const rect = target.getBoundingClientRect();
+  aiMenuPreferSelection.value = false;
+  const menuWidth = 148;
+  const x = Math.max(8, Math.min(rect.right - menuWidth, window.innerWidth - menuWidth - 8));
+  const y = Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 8));
+  aiMenu.value = { x, y };
+}
+
+function onPreviewInput(event: Event) {
+  if (!aiPreview.value) return;
+  aiPreview.value.outputText = (event.target as HTMLTextAreaElement).value;
 }
 
 
@@ -182,7 +424,18 @@ function setFormat(format: string) {
 
 <template>
   <div class="cw-editor">
-    <div v-if="isMarkdown" class="cw-md-wrap" ref="mdWrap" @focusin="onActivated"></div>
+    <div class="cw-ai-bar">
+      <div class="cw-ai-split-button">
+        <button class="cw-btn cw-ai-main-button" type="button" :disabled="aiBusy || !canRunAi" @click="runAiAction(defaultAiActionId(), false)" title="使用默认提示词润色">
+          <span>{{ aiBusy ? '处理中...' : '一键润色' }}</span>
+        </button>
+        <button class="cw-btn cw-ai-dropdown-button" type="button" :disabled="aiBusy || !canRunAi" @click="openAiActionMenu" title="选择提示词" aria-label="选择提示词">
+          <span class="cw-ai-chevron" aria-hidden="true"></span>
+        </button>
+      </div>
+      <span v-if="aiError" class="cw-ai-error">{{ aiError }}</span>
+    </div>
+    <div v-if="isMarkdown" class="cw-md-wrap" ref="mdWrap" @focusin="onActivated" @contextmenu="onEditorContextMenu"></div>
     <textarea
       v-else
       class="cw-textarea"
@@ -193,7 +446,35 @@ function setFormat(format: string) {
       @input="onTextInput"
       @keydown="handleEditorKeydown"
       @focus="onActivated"
+      @contextmenu="onEditorContextMenu"
     ></textarea>
+    <div v-if="aiMenu" class="cw-ai-menu-backdrop" @click="closeAiMenu" @contextmenu.prevent="closeAiMenu"></div>
+    <div v-if="aiMenu" class="cw-ai-menu" :style="{ left: aiMenu.x + 'px', top: aiMenu.y + 'px' }" @contextmenu.prevent>
+      <button v-for="action in aiActions" :key="action.id" type="button" class="cw-ai-menu-item" @click="runAiAction(action.id, aiMenuPreferSelection)">{{ action.name || action.id }}</button>
+    </div>
+    <div v-if="aiBusy" class="cw-ai-loading-backdrop">
+      <div class="cw-ai-loading-box" role="status" aria-live="polite">
+        <span class="cw-ai-loading-spinner" aria-hidden="true"></span>
+        <div class="cw-ai-loading-text">
+          <strong>AI 正在处理...</strong>
+          <span>完成后将显示结果预览</span>
+        </div>
+        <div v-if="aiPreview?.reasoningText" ref="aiLoadingReasoning" class="cw-ai-loading-reasoning">
+          <pre>{{ aiPreview.reasoningText }}</pre>
+        </div>
+      </div>
+    </div>
+    <div v-if="aiPreview && !aiBusy" class="cw-modal-backdrop" @click.self="closeAiPreview">
+      <div class="cw-modal cw-ai-preview">
+        <div class="cw-modal-title cw-ai-preview-title">{{ aiPreview.title }}</div>
+        <textarea class="cw-ai-preview-text" :rows="aiPreviewRows" :value="aiPreview.outputText" @input="onPreviewInput"></textarea>
+        <div class="cw-modal-actions">
+          <button class="cw-btn" type="button" @click="closeAiPreview">取消</button>
+          <button class="cw-btn" type="button" :disabled="!aiPreview.outputText" @click="applyAiPreview('insert')">插入</button>
+          <button class="cw-btn cw-btn-primary" type="button" :disabled="!aiPreview.outputText" @click="applyAiPreview('replace')">替换</button>
+        </div>
+      </div>
+    </div>
     <div class="cw-editor-foot">
       <div class="cw-fmt-toggle">
         <div class="cw-fmt-indicator" :class="{ 'is-md': isMarkdown }"></div>
