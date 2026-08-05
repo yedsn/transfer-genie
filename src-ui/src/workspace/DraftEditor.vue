@@ -293,7 +293,7 @@ function toggleAiActionFavorite(action: any) {
   const actions = Array.isArray(store?.settingsForm?.aiActions) ? store.settingsForm.aiActions : [];
   const index = actions.findIndex((item: any) => item && item.id === action?.id);
   if (index < 0) return;
-  (window as any).transferGenieVue?.callAction?.("updateAiActionField", index, "favorite", !action.favorite);
+  (window as any).transferGenieVue?.callAction?.("updateAiActionFavorite", index, !action.favorite, { save: true });
 }
 
 function openAiActionMenu(event: MouseEvent) {
@@ -486,7 +486,7 @@ function setFormat(format: string) {
             <button type="button" class="cw-ai-menu-item" @click="runAiAction(action.id, aiMenuPreferSelection)">
               <span>{{ action.name || action.id }}</span>
             </button>
-            <button type="button" class="cw-ai-favorite-button is-active" title="取消收藏" @click.stop="toggleAiActionFavorite(action)"><span aria-hidden="true">♥</span></button>
+            <button type="button" class="cw-ai-favorite-button is-active" title="取消收藏" @click.stop="toggleAiActionFavorite(action)"><span aria-hidden="true">★</span></button>
           </div>
         </div>
       </div>
@@ -500,7 +500,7 @@ function setFormat(format: string) {
             <button type="button" class="cw-ai-menu-item" @click="runAiAction(action.id, aiMenuPreferSelection)">
               <span>{{ action.name || action.id }}</span>
             </button>
-            <button type="button" class="cw-ai-favorite-button" :class="{ 'is-active': action.favorite }" :title="action.favorite ? '取消收藏' : '收藏'" @click.stop="toggleAiActionFavorite(action)"><span aria-hidden="true">♥</span></button>
+            <button type="button" class="cw-ai-favorite-button" :class="{ 'is-active': action.favorite }" :title="action.favorite ? '取消收藏' : '收藏'" @click.stop="toggleAiActionFavorite(action)"><span aria-hidden="true">★</span></button>
           </div>
         </div>
       </div>

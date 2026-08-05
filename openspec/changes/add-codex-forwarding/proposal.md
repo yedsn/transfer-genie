@@ -1,32 +1,26 @@
 ## Why
 
-Users increasingly use Transfer Genie as a prompt drafting workspace before moving prompts into Codex. Copying the finished prompt into Codex is repetitive and breaks the flow, especially when the prompt is already ready to send.
+Users often draft prompts or notes in Transfer Genie and then paste the sent content into another app. Copying manually after a successful send adds a repetitive step.
 
-This change lets users opt in to forwarding sent text prompts to Codex, so a prompt can be written once in Transfer Genie and delivered to Codex during the normal send action.
+This change lets users opt in to copying successfully sent text or Markdown content to the clipboard, so the sent prompt is immediately ready to paste elsewhere.
 
 ## What Changes
 
-- Add a settings option to enable or disable Codex forwarding for text sends.
-- Add Codex forwarding configuration with a target endpoint and delivery mode options suitable for a local Codex bridge.
-- When the user sends a text or Markdown message, keep the existing Transfer Genie send behavior and also attempt to forward the same prompt to Codex when enabled.
-- Report Codex forwarding success or failure without blocking the original WebDAV/local message send.
-- Add validation and tests for settings persistence, forwarding payload construction, and send-flow failure handling.
+- Add a Send Settings section that groups send hotkey, default editor format, and send-after-copy controls.
+- Add a persisted setting for copying sent text or Markdown content to the clipboard after a successful send.
+- Add a send-adjacent shortcut menu for quickly toggling send-after-copy from the composer.
+- Preserve existing send behavior when clipboard copying is disabled or when the original send fails.
 - No breaking changes to existing WebDAV sync, local HTTP API, Telegram Bridge, or AI text action behavior.
 
 ## Capabilities
 
-### New Capabilities
-
-- `codex-forwarding`: Configuring and delivering prompt text from Transfer Genie to Codex-compatible local targets.
-
 ### Modified Capabilities
 
-- `client-settings`: Settings must expose and persist Codex forwarding configuration.
-- `message-feed`: Text send behavior must optionally trigger Codex forwarding while preserving the existing message send pipeline.
+- `client-settings`: Settings must expose and persist send-after-copy configuration under Send Settings.
+- `message-feed`: Text send behavior must optionally copy successfully sent content to the clipboard while preserving the existing message send pipeline.
 
 ## Impact
 
-- Affected frontend: settings UI in `src-ui/index.html`, settings state/save/load mapping in `src-ui/src/legacy-main.js`, and related Vue/store helpers.
-- Affected backend: settings types in `src/types.rs`, save/load normalization in `src/main.rs`, and a new Codex forwarding helper or module invoked from the text send flow.
-- Affected tests: Rust unit tests for settings/defaults and forwarding payload behavior; frontend tests for settings form state; targeted send-flow tests where practical.
-- External systems: a user-configured local Codex bridge or endpoint. The app should not assume direct access to an active Codex Desktop thread unless a stable endpoint is configured.
+- Affected frontend: settings UI in `src-ui/index.html`, settings state/save/load mapping in `src-ui/src/legacy-main.js`, and composer send controls.
+- Affected backend: settings types in `src/types.rs`, load/save/default handling in `src/main.rs`.
+- Affected tests: Rust unit tests for settings defaults; frontend tests for settings form state and save payload mapping.

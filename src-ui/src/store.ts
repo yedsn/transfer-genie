@@ -77,6 +77,7 @@ export const transferGenieState = reactive<TransferGenieState>({
     localHttpApiEnabled: false,
     localHttpApiBindAddress: "127.0.0.1",
     localHttpApiBindPort: 6011,
+    copyAfterSend: false,
     telegramAutoStart: false,
     telegramBotToken: "",
     telegramProxyEnabled: false,

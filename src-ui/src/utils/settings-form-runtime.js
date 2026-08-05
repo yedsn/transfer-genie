@@ -48,11 +48,19 @@
     return String(legacySenderName || '').trim();
   }
 
+  function getSendSettingsPayload(formState) {
+    var state = formState || {};
+    return {
+      copy_after_send: !!state.copyAfterSend,
+    };
+  }
+
   globalScope.transferGenieSettingsFormRuntime = {
     normalizeTelegramPollInterval: normalizeTelegramPollInterval,
     getTelegramBridgeFormState: getTelegramBridgeFormState,
     normalizeLocalHttpApiBindPort: normalizeLocalHttpApiBindPort,
     getLocalHttpApiConfiguredUrl: getLocalHttpApiConfiguredUrl,
     getCurrentSenderName: getCurrentSenderName,
+    getSendSettingsPayload: getSendSettingsPayload,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

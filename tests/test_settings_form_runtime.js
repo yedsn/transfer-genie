@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import '../frontend/settings-form-runtime.js';
+import '../src-ui/src/utils/settings-form-runtime.js';
 
 const runtime = globalThis.transferGenieSettingsFormRuntime;
 
@@ -82,10 +82,20 @@ function testGetCurrentSenderName() {
   assert.equal(runtime.getCurrentSenderName({}, ''), '');
 }
 
+function testSendSettingsPayload() {
+  assert.deepEqual(runtime.getSendSettingsPayload({ copyAfterSend: true }), {
+    copy_after_send: true,
+  });
+  assert.deepEqual(runtime.getSendSettingsPayload({}), {
+    copy_after_send: false,
+  });
+}
+
 testNormalizeTelegramPollInterval();
 testGetTelegramBridgeFormState();
 testNormalizeLocalHttpApiBindPort();
 testGetLocalHttpApiConfiguredUrl();
 testGetCurrentSenderName();
+testSendSettingsPayload();
 
 console.log('settings-form-runtime tests passed');

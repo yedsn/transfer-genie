@@ -152,6 +152,17 @@ fn default_ai_actions() -> Vec<AiTextAction> {
             output_mode: default_ai_action_output_mode(),
         },
         AiTextAction {
+            id: "dev-requirements-brief".to_string(),
+            name: "梳理需求".to_string(),
+            category: "开发".to_string(),
+            builtin: true,
+            favorite: false,
+            enabled: true,
+            system_prompt: "你是一个严谨的产品需求分析师和软件工程协作者，擅长把零散想法整理成可执行需求。".to_string(),
+            user_prompt: "请把下面的需求描述整理成结构清晰的需求说明，包含：目标、范围、核心流程、功能点、验收标准、待确认问题。保持原意，不要编造不存在的信息；如果信息不足，请放入待确认问题。\n\n{{text}}".to_string(),
+            output_mode: default_ai_action_output_mode(),
+        },
+        AiTextAction {
             id: "design-feedback".to_string(),
             name: "设计反馈".to_string(),
             category: "设计".to_string(),
@@ -214,6 +225,20 @@ impl Default for LocalHttpApiSettings {
             enabled: false,
             bind_address: default_local_http_api_bind_address(),
             bind_port: default_local_http_api_bind_port(),
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SendSettings {
+    #[serde(default)]
+    pub copy_after_send: bool,
+}
+
+impl Default for SendSettings {
+    fn default() -> Self {
+        Self {
+            copy_after_send: false,
         }
     }
 }
@@ -396,6 +421,8 @@ pub struct Settings {
     pub auto_update_enabled: bool,
     #[serde(default)]
     pub local_http_api: LocalHttpApiSettings,
+    #[serde(default)]
+    pub send: SendSettings,
     #[serde(default)]
     pub telegram: TelegramBridgeSettings,
     #[serde(default)]

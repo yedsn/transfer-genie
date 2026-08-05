@@ -233,10 +233,21 @@
                     <img src="icons/attachment.svg" alt="附件" style="width: 16px; height: 16px;" />
                     <span>附件</span>
                   </button>
-                  <button id="send-text" class="icon-button primary" type="button">
-                    <img src="icons/send.svg" alt="发送" style="width: 16px; height: 16px;" />
-                    <span>发送</span>
-                  </button>
+                  <div class="send-action-split">
+                    <button id="send-text" class="icon-button primary send-action-main" type="button">
+                      <img src="icons/send.svg" alt="发送" style="width: 16px; height: 16px;" />
+                      <span>发送</span>
+                    </button>
+                    <button id="send-options-toggle" class="icon-button primary send-options-toggle" type="button" title="发送选项" aria-label="发送选项" aria-expanded="false">
+                      <span class="send-options-chevron" aria-hidden="true"></span>
+                    </button>
+                    <div id="send-options-menu" class="send-options-menu" hidden>
+                      <label class="send-options-item">
+                        <input id="quick-copy-after-send" type="checkbox" />
+                        <span>发送后复制到剪贴板</span>
+                      </label>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -642,6 +653,7 @@
                 <div class="settings-nav-list">
                   <button class="settings-nav-button is-active" type="button" data-settings-nav-target="settings-section-webdav">WebDAV 端点</button>
                   <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-basic">基本设置</button>
+                  <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-send">发送设置</button>
                   <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-system">系统设置</button>
                   <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-api">API 接口</button>
                   <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-ai">AI 助手</button>
@@ -739,6 +751,23 @@
                     刷新间隔（秒）
                     <input id="refresh-interval" type="number" min="1" step="1" :value="ui.settingsForm.refreshIntervalSecs" @input="updateSettingsFormField('refreshIntervalSecs', Number($event.target.value || 5))" />
                   </label>
+                  <label>
+                    下载目录
+                    <div class="field-row">
+                      <input id="download-dir" type="text" placeholder="系统默认下载目录" :value="ui.settingsForm.downloadDir" @input="updateSettingsFormField('downloadDir', $event.target.value)" />
+                      <button id="choose-download-dir" class="button ghost small" type="button">
+                        选择
+                      </button>
+                    </div>
+                    <span id="download-dir-hint" class="field-hint"></span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="settings-section-anchor" id="settings-section-send" data-settings-section aria-hidden="true"></div>
+              <div class="settings-group">
+                <h3 class="settings-group-title">发送设置</h3>
+                <div class="settings-group-content">
                   <div class="settings-choice">
                     <div class="settings-choice-header">
                       <span class="settings-choice-title">发送快捷键</span>
@@ -761,16 +790,29 @@
                       </label>
                     </div>
                   </div>
-                  <label>
-                    下载目录
-                    <div class="field-row">
-                      <input id="download-dir" type="text" placeholder="系统默认下载目录" :value="ui.settingsForm.downloadDir" @input="updateSettingsFormField('downloadDir', $event.target.value)" />
-                      <button id="choose-download-dir" class="button ghost small" type="button">
-                        选择
-                      </button>
+                  <div class="settings-choice settings-default-editor-format">
+                    <div class="settings-choice-header">
+                      <span class="settings-choice-title">编辑器默认格式</span>
+                      <span class="settings-choice-subtitle">新建草稿时默认使用该格式</span>
                     </div>
-                    <span id="download-dir-hint" class="field-hint"></span>
+                    <div class="format-toggle format-toggle-inline">
+                      <div class="active-tab-indicator" :class="{ 'is-md': ui.settingsForm.defaultEditorFormat === 'markdown' }"></div>
+                      <label class="radio-tab">
+                        <input type="radio" name="default-editor-format" value="text" :checked="ui.settingsForm.defaultEditorFormat !== 'markdown'" @change="updateSettingsFormField('defaultEditorFormat', 'text')" />
+                        <span>纯文本</span>
+                      </label>
+                      <label class="radio-tab">
+                        <input type="radio" name="default-editor-format" value="markdown" :checked="ui.settingsForm.defaultEditorFormat === 'markdown'" @change="updateSettingsFormField('defaultEditorFormat', 'markdown')" />
+                        <span>Markdown</span>
+                      </label>
+                    </div>
+                    <span class="field-hint">每个草稿也可在编辑器底部单独切换。</span>
+                  </div>
+                  <label class="toggle-left">
+                    <span class="toggle-label">发送后复制到剪贴板</span>
+                    <input type="checkbox" :checked="ui.settingsForm.copyAfterSend" @change="updateSettingsFormField('copyAfterSend', $event.target.checked)" />
                   </label>
+                  <span class="field-hint">仅在纯文本或 Markdown 发送成功后复制本次发送内容，不影响文件发送。</span>
                 </div>
               </div>
 
@@ -905,8 +947,8 @@
                             <input type="checkbox" :checked="item.action.enabled" @change="updateAiActionField(item.index, 'enabled', $event.target.checked)" />
                           </label>
                           <span class="ai-action-badge">{{ item.action.builtin ? '内置' : '自定义' }}</span>
-                          <button class="ai-action-favorite" :class="{ 'is-active': item.action.favorite }" type="button" :title="item.action.favorite ? '取消收藏' : '收藏'" @click="updateAiActionField(item.index, 'favorite', !item.action.favorite)">
-                            <span aria-hidden="true">♥</span>
+                          <button class="ai-action-favorite" :class="{ 'is-active': item.action.favorite }" type="button" :title="item.action.favorite ? '取消收藏' : '收藏'" @click="updateAiActionFavorite(item.index, !item.action.favorite, { save: true })">
+                            <span aria-hidden="true">★</span>
                           </button>
                           <button v-if="!item.action.builtin" class="button ghost ai-action-remove" type="button" @click="removeAiAction(item.index)">删除</button>
                         </div>
@@ -1001,24 +1043,6 @@
                       <span id="telegram-bridge-last-error" class="telegram-bridge-error">无</span>
                     </div>
                   </div>
-                </div>
-              </div>
-
-              <div class="settings-group settings-default-editor-format">
-                <h3 class="settings-group-title">编辑器默认格式</h3>
-                <div class="settings-group-content">
-                  <div class="format-toggle format-toggle-inline">
-                    <div class="active-tab-indicator" :class="{ 'is-md': ui.settingsForm.defaultEditorFormat === 'markdown' }"></div>
-                    <label class="radio-tab">
-                      <input type="radio" name="default-editor-format" value="text" :checked="ui.settingsForm.defaultEditorFormat !== 'markdown'" @change="updateSettingsFormField('defaultEditorFormat', 'text')" />
-                      <span>纯文本</span>
-                    </label>
-                    <label class="radio-tab">
-                      <input type="radio" name="default-editor-format" value="markdown" :checked="ui.settingsForm.defaultEditorFormat === 'markdown'" @change="updateSettingsFormField('defaultEditorFormat', 'markdown')" />
-                      <span>Markdown</span>
-                    </label>
-                  </div>
-                  <span class="field-hint">新建草稿时默认使用该格式；每个草稿可在编辑器底部单独切换。</span>
                 </div>
               </div>
 

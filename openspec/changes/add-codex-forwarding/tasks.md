@@ -1,25 +1,23 @@
 ## 1. Settings Model
 
-- [ ] 1.1 Add `CodexForwardingSettings` to Rust settings types with serde defaults disabled by default.
-- [ ] 1.2 Normalize and validate Codex forwarding settings when saving settings, including URL validation when enabled.
-- [ ] 1.3 Extend frontend settings form state, load mapping, save payload mapping, and defaults for Codex forwarding fields.
+- [x] 1.1 Add persisted send settings with `copy_after_send` disabled by default.
+- [x] 1.2 Extend frontend settings form state, load mapping, save payload mapping, and defaults for send-after-copy.
 
-## 2. Forwarding Runtime
+## 2. Send Runtime
 
-- [ ] 2.1 Add an isolated Codex forwarding helper/module that builds the JSON payload without sensitive settings.
-- [ ] 2.2 Implement HTTP POST forwarding with timeout/error handling using existing HTTP runtime patterns.
-- [ ] 2.3 Ensure forwarding runs only after successful text or Markdown sends and never for file-only sends.
-- [ ] 2.4 Surface forwarding failures as non-blocking status messages while preserving original send success state.
+- [x] 2.1 Copy sent text or Markdown content to the clipboard only after the original send succeeds.
+- [x] 2.2 Ensure file-only sends do not copy file bytes or file metadata to the clipboard.
+- [x] 2.3 Preserve original send success state when clipboard copy fails.
 
-## 3. Settings UI
+## 3. Settings UI and Composer Shortcut
 
-- [ ] 3.1 Add Codex forwarding controls to the settings page with enable switch, endpoint URL input, and concise helper text.
-- [ ] 3.2 Wire settings controls to existing Vue/legacy form update helpers without changing unrelated settings sections.
-- [ ] 3.3 Verify Chinese UI text remains readable after edits.
+- [x] 3.1 Move send hotkey, default editor format, and send-after-copy controls under a Send Settings section.
+- [x] 3.2 Add a send-adjacent shortcut menu for toggling send-after-copy from the composer.
+- [x] 3.3 Wire shortcut menu toggles to the existing settings save path without sending messages.
+- [x] 3.4 Verify Chinese UI text remains readable after edits.
 
 ## 4. Tests and Validation
 
-- [ ] 4.1 Add Rust tests for settings defaults, URL validation, and forwarding payload construction.
-- [ ] 4.2 Add or update frontend tests for settings form state and save payload mapping.
-- [ ] 4.3 Add a targeted forwarding test using a local/mock HTTP receiver or an isolated payload helper test.
-- [ ] 4.4 Run `cargo test`, relevant Node frontend tests, and `openspec validate add-codex-forwarding --strict`.
+- [x] 4.1 Add Rust tests for send settings defaults.
+- [x] 4.2 Add or update frontend tests for send settings form payload mapping.
+- [x] 4.3 Run `cargo test`, relevant Node frontend tests, and `openspec validate add-codex-forwarding --strict`.

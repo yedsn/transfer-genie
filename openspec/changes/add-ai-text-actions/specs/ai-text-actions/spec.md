@@ -39,6 +39,11 @@ The system SHALL define AI text actions as prompt-backed configuration entries. 
 - **THEN** the menu shows a dedicated favorite submenu
 - **AND** selecting a favorite action runs the same action without removing it from its original type/category submenu
 
+#### Scenario: Toggle favorite from action menu
+- **WHEN** the user toggles favorite state from the AI action dropdown
+- **THEN** the favorite state is persisted
+- **AND** reopening the app preserves the favorite submenu contents
+
 #### Scenario: Run disabled action
 - **WHEN** the user attempts to run a disabled AI text action
 - **THEN** the system rejects the request with an action unavailable error

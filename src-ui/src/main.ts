@@ -130,7 +130,16 @@ const app = createApp({
         if (action && action.enabled !== false) entry.enabled += 1;
         map.set(name, entry);
       });
-      return Array.from(map.values());
+      const categories = Array.from(map.values());
+      const favorites = actions.filter((action: any) => action && action.favorite);
+      if (favorites.length) {
+        categories.unshift({
+          name: "收藏",
+          total: favorites.length,
+          enabled: favorites.filter((action: any) => action.enabled !== false).length,
+        });
+      }
+      return categories;
     },
     activeAiActionCategory(): string {
       const categories = this.aiActionCategories();
@@ -141,6 +150,11 @@ const app = createApp({
     aiActionsForActiveCategory(): Array<{ action: any; index: number }> {
       const active = this.activeAiActionCategory();
       const actions = Array.isArray(this.settingsFormState().aiActions) ? this.settingsFormState().aiActions : [];
+      if (active === "收藏") {
+        return actions
+          .map((action: any, index: number) => ({ action, index }))
+          .filter((item: any) => !!item.action?.favorite);
+      }
       return actions
         .map((action: any, index: number) => ({ action, index }))
         .filter((item: any) => (String(item.action?.category || "通用").trim() || "通用") === active);
@@ -343,6 +357,7 @@ const app = createApp({
     updateSettingsAutoBackupField: (...args: any[]) => callAction("updateSettingsAutoBackupField", ...args),
     updateSettingsFormField: (...args: any[]) => callAction("updateSettingsFormField", ...args),
     updateAiActionField: (...args: any[]) => callAction("updateAiActionField", ...args),
+    updateAiActionFavorite: (...args: any[]) => callAction("updateAiActionFavorite", ...args),
     addAiAction: (...args: any[]) => callAction("addAiAction", ...args),
     removeAiAction: (...args: any[]) => callAction("removeAiAction", ...args),
     selectAiActionCategory: (...args: any[]) => callAction("selectAiActionCategory", ...args),

@@ -593,11 +593,11 @@
 }
 
 .cw-ai-favorite-button:hover {
-  color: rgba(230, 86, 86, 0.72);
+  color: rgba(234, 179, 8, 0.82);
 }
 
 .cw-ai-favorite-button.is-active {
-  color: #e65656;
+  color: #eab308;
 }
 
 .cw-ai-preview {

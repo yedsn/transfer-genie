@@ -137,6 +137,7 @@ function updateSettingsFormField(field, value) {
     applyDefaultEditorFormat(value);
   }
   syncVueSettingsForm(currentSettingsFormState);
+  syncSendOptionsMenuState();
 }
 
 function defaultAiActions() {
@@ -194,6 +195,17 @@ function defaultAiActions() {
       enabled: true,
       system_prompt: '你是一个严谨的软件工程协作者。',
       user_prompt: '请把下面的开发记录整理成简洁的变更说明，包含用户可见变化和验证方式。如果输入是 Markdown，请保持 Markdown 结构。\n\n{{text}}',
+      output_mode: 'preview_replace',
+    },
+    {
+      id: 'dev-requirements-brief',
+      name: '梳理需求',
+      category: '开发',
+      builtin: true,
+      favorite: false,
+      enabled: true,
+      system_prompt: '你是一个严谨的产品需求分析师和软件工程协作者，擅长把零散想法整理成可执行需求。',
+      user_prompt: '请把下面的需求描述整理成结构清晰的需求说明，包含：目标、范围、核心流程、功能点、验收标准、待确认问题。保持原意，不要编造不存在的信息；如果信息不足，请放入待确认问题。\n\n{{text}}',
       output_mode: 'preview_replace',
     },
     {
@@ -343,6 +355,13 @@ function selectAiActionCategory(category) {
   updateSettingsFormField('activeAiActionCategory', String(category || ''));
 }
 
+async function updateAiActionFavorite(index, value, options = {}) {
+  updateAiActionField(index, 'favorite', !!value);
+  if (options.save) {
+    await saveSettings({ silent: true });
+  }
+}
+
 function getCurrentSenderName() {
   if (settingsFormRuntime?.getCurrentSenderName) {
     return settingsFormRuntime.getCurrentSenderName(
@@ -479,6 +498,9 @@ const downloadCancelSelectionButton = document.getElementById('download-cancel-s
 const textInput = document.getElementById('text-input');
 const markdownEditorContainer = document.getElementById('markdown-editor');
 const sendTextButton = document.getElementById('send-text');
+const sendOptionsToggle = document.getElementById('send-options-toggle');
+const sendOptionsMenu = document.getElementById('send-options-menu');
+const quickCopyAfterSendInput = document.getElementById('quick-copy-after-send');
 const sendFileButton = document.getElementById('send-file');
 const saveSettingsButton = document.getElementById('save-settings');
 const settingsPanel = document.querySelector('#tab-settings .settings');
@@ -790,6 +812,7 @@ let currentSettingsFormState = {
   localHttpApiEnabled: false,
   localHttpApiBindAddress: '127.0.0.1',
   localHttpApiBindPort: 6011,
+  copyAfterSend: false,
   telegramAutoStart: false,
   telegramBotToken: '',
   telegramProxyEnabled: false,
@@ -5098,6 +5121,50 @@ async function copyTextToClipboard(text) {
   }
 }
 
+async function copySentTextAfterSend(text) {
+  if (!currentSettingsFormState.copyAfterSend || !String(text || '').trim()) {
+    return;
+  }
+  await copyTextToClipboard(text);
+}
+
+function syncSendOptionsMenuState() {
+  if (quickCopyAfterSendInput) {
+    quickCopyAfterSendInput.checked = !!currentSettingsFormState.copyAfterSend;
+  }
+}
+
+function closeSendOptionsMenu() {
+  if (sendOptionsMenu) {
+    sendOptionsMenu.hidden = true;
+  }
+  if (sendOptionsToggle) {
+    sendOptionsToggle.setAttribute('aria-expanded', 'false');
+  }
+}
+
+function toggleSendOptionsMenu(event) {
+  event?.stopPropagation?.();
+  if (!sendOptionsMenu || !sendOptionsToggle) {
+    return;
+  }
+  const nextHidden = !sendOptionsMenu.hidden;
+  sendOptionsMenu.hidden = nextHidden;
+  sendOptionsToggle.setAttribute('aria-expanded', nextHidden ? 'false' : 'true');
+  syncSendOptionsMenuState();
+}
+
+async function updateQuickSendOption(field, checked) {
+  updateSettingsFormField(field, !!checked);
+  try {
+    await saveSettings({ silent: true });
+    showToast('发送设置已更新', 'success');
+  } catch (error) {
+    showToast(`发送设置保存失败：${error}`, 'error');
+    await loadSettings();
+  }
+}
+
 function buildTextMessageFilename(message) {
   const extension = message?.format === 'markdown' ? 'md' : 'txt';
   const sender = String(message?.sender || 'message')
@@ -8010,6 +8077,7 @@ function applySettings(settings) {
   }
   const telegram = settings.telegram || {};
   const ai = settings.ai || {};
+  const send = settings.send || {};
   const aiProvider = ai.provider || {};
   const aiActions = normalizeAiActions(ai.actions);
   if (senderNameInput) {
@@ -8071,6 +8139,7 @@ function applySettings(settings) {
       settings.local_http_api?.bind_address || DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS,
     localHttpApiBindPort:
       settings.local_http_api?.bind_port || DEFAULT_LOCAL_HTTP_API_BIND_PORT,
+    copyAfterSend: !!send.copy_after_send,
     telegramAutoStart: !!telegram.auto_start,
     telegramBotToken: telegram.bot_token || '',
     telegramProxyEnabled: !!telegram.proxy_enabled,
@@ -8090,6 +8159,7 @@ function applySettings(settings) {
     activeAiActionCategory: currentSettingsFormState.activeAiActionCategory || aiActions[0]?.category || '通用',
   };
   syncVueSettingsForm(currentSettingsFormState);
+  syncSendOptionsMenuState();
   applyDefaultEditorFormat(currentSettingsFormState.defaultEditorFormat);
   if (telegramAutoStartInput) {
     telegramAutoStartInput.checked = telegram.auto_start || false;
@@ -8311,6 +8381,9 @@ async function saveSettings(options = {}) {
       bind_address: localHttpApiBindAddress,
       bind_port: localHttpApiBindPort,
     },
+    send: {
+      copy_after_send: !!currentSettingsFormState.copyAfterSend,
+    },
     telegram: {
       enabled: telegramFormState.isConfigured,
       auto_start: !!currentSettingsFormState.telegramAutoStart,
@@ -8343,14 +8416,18 @@ async function saveSettings(options = {}) {
     }
     const previousActive = activeEndpointId;
     const updated = await invoke('save_settings', { settings: payload });
-    setSuccessStatus('设置已保存');
+    if (!silent) {
+      setSuccessStatus('设置已保存');
+    }
     applySettings(updated);
     await loadLocalHttpApiStatus({ silent: true });
     await loadAutoBackupStatus({ silent: true });
     await loadIntegrationModules({ silent: true });
     await loadSettingsSnapshots({ silent: true });
     await loadTelegramBridgeStatus({ silent: true });
-    setHint(downloadDirHint, '下载目录已保存');
+    if (!silent) {
+      setHint(downloadDirHint, '下载目录已保存');
+    }
     if (previousActive !== activeEndpointId && getActiveEndpoint()) {
       setSelectionMode(false);
       pendingUploads.clear();
@@ -8361,7 +8438,12 @@ async function saveSettings(options = {}) {
     }
     return updated;
   } catch (error) {
-    setErrorStatus(`保存设置失败：${error}`);
+    if (!silent) {
+      setErrorStatus(`保存设置失败：${error}`);
+    }
+    if (silent) {
+      throw error;
+    }
   }
 }
 
@@ -8764,6 +8846,7 @@ async function sendText() {
         });
         renderCurrentMessageView({ preserveScroll: true });
         applySuccessfulSendResult(result);
+        await copySentTextAfterSend(text);
         exitComposerFullscreenAfterSendSuccess();
         setTimeout(async () => {
           const shouldStickToBottom = isMessageListAtBottom();
@@ -9499,6 +9582,18 @@ if (transferClearButton) {
   transferClearButton.addEventListener('click', clearCurrentTransferList);
 }
 sendTextButton.addEventListener('click', sendText);
+if (sendOptionsToggle) {
+  sendOptionsToggle.addEventListener('click', toggleSendOptionsMenu);
+}
+if (sendOptionsMenu) {
+  sendOptionsMenu.addEventListener('click', (event) => event.stopPropagation());
+}
+if (quickCopyAfterSendInput) {
+  quickCopyAfterSendInput.addEventListener('change', (event) => {
+    updateQuickSendOption('copyAfterSend', event.target.checked);
+  });
+}
+document.addEventListener('click', closeSendOptionsMenu);
 sendFileButton.addEventListener('click', selectFiles);
 if (composerMarkToggle) {
   composerMarkToggle.addEventListener('click', () => {
@@ -9985,6 +10080,9 @@ vueBridge?.setActions?.({
   },
   selectAiActionCategory: (category) => {
     selectAiActionCategory(category);
+  },
+  updateAiActionFavorite: (index, value, options) => {
+    updateAiActionFavorite(index, value, options);
   },
   openMessagePreview: (message) => {
     openMessagePreview(message);

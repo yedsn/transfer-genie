@@ -2140,6 +2140,70 @@ body.composer-fullscreen-active {
   filter: brightness(0) saturate(100%) invert(54%) sepia(95%) saturate(1391%) hue-rotate(350deg) brightness(96%) contrast(94%);
 }
 
+.send-action-split {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.composer-actions .send-action-main {
+  border-radius: 999px 0 0 999px;
+  padding-right: 10px;
+}
+
+.composer-actions .send-options-toggle {
+  border-left: none;
+  border-radius: 0 999px 999px 0;
+  min-width: 34px;
+  padding: 4px 10px;
+}
+
+.send-options-chevron {
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid currentColor;
+}
+
+.send-options-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 40;
+  width: 226px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 16px 38px rgba(15, 15, 25, 0.16);
+}
+
+.send-options-menu[hidden] {
+  display: none;
+}
+
+.send-options-item {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 9px;
+  min-height: 34px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  color: var(--ink);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.send-options-item:hover {
+  background: var(--panel-soft);
+}
+
+.send-options-item input {
+  flex: 0 0 auto;
+}
+
 label {
   display: flex;
   flex-direction: column;
@@ -2569,11 +2633,11 @@ input {
 
 .ai-action-favorite:hover {
   background: var(--panel-soft);
-  color: rgba(230, 86, 86, 0.72);
+  color: rgba(234, 179, 8, 0.82);
 }
 
 .ai-action-favorite.is-active {
-  color: #e65656;
+  color: #eab308;
 }
 
 .ai-action-remove {

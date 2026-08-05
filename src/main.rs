@@ -27,9 +27,9 @@ use crate::telegram_bridge_runtime::ManagedTelegramBridgeProcess;
 use crate::telegram_bridge_runtime::{TelegramBridgeManager, TelegramBridgeStatus};
 use crate::types::{
     AiProviderSettings, AiSettings, AiTextAction, BackupSettings, DownloadHistoryRecord,
-    LocalHttpApiSettings, MarkedTag, Message, Settings, SyncStatus, TelegramBridgeSettings,
-    UploadHistoryRecord, WebDavConflict, WebDavEndpoint, DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS,
-    DEFAULT_LOCAL_HTTP_API_BIND_PORT,
+    LocalHttpApiSettings, MarkedTag, Message, SendSettings, Settings, SyncStatus,
+    TelegramBridgeSettings, UploadHistoryRecord, WebDavConflict, WebDavEndpoint,
+    DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS, DEFAULT_LOCAL_HTTP_API_BIND_PORT,
 };
 use crate::webdav_sync_runtime::WebDavSyncRuntimeAdapter;
 use crate::workspace::WorkspaceLayout;
@@ -245,6 +245,8 @@ struct ExportSettings {
     auto_update_enabled: bool,
     #[serde(default)]
     local_http_api: LocalHttpApiSettings,
+    #[serde(default)]
+    send: SendSettings,
     #[serde(default)]
     telegram: ExportTelegramSettings,
     #[serde(default)]
@@ -1344,6 +1346,7 @@ fn export_settings(
         send_hotkey: Some(settings.send_hotkey.clone()),
         auto_update_enabled: settings.auto_update_enabled,
         local_http_api: settings.local_http_api.clone(),
+        send: settings.send.clone(),
         telegram: ExportTelegramSettings {
             enabled: settings.telegram.enabled,
             auto_start: settings.telegram.auto_start,
@@ -1414,6 +1417,7 @@ async fn import_settings(
         auto_start: existing.auto_start,
         auto_update_enabled: bundle.settings.auto_update_enabled,
         local_http_api: bundle.settings.local_http_api,
+        send: bundle.settings.send,
         backup: existing.backup.clone(),
         ai: bundle.settings.ai,
         telegram: TelegramBridgeSettings {
@@ -6206,6 +6210,7 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
                 auto_start: false,
                 auto_update_enabled: false,
                 local_http_api: LocalHttpApiSettings::default(),
+                send: SendSettings::default(),
                 backup: BackupSettings::default(),
                 telegram: TelegramBridgeSettings::default(),
                 ai: AiSettings::default(),
@@ -6227,6 +6232,7 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
             auto_start: false,
             auto_update_enabled: false,
             local_http_api: LocalHttpApiSettings::default(),
+            send: SendSettings::default(),
             backup: BackupSettings::default(),
             telegram: TelegramBridgeSettings::default(),
             ai: AiSettings::default(),
@@ -8751,6 +8757,7 @@ mod tests {
             auto_start: false,
             auto_update_enabled: false,
             local_http_api: LocalHttpApiSettings::default(),
+            send: SendSettings::default(),
             backup: BackupSettings::default(),
             telegram: TelegramBridgeSettings::default(),
             ai: AiSettings::default(),
@@ -9078,6 +9085,16 @@ mod tests {
 
         assert_eq!(normalized.local_http_api.bind_address, "127.0.0.1");
         assert_eq!(normalized.local_http_api.bind_port, 6011);
+    }
+
+    #[test]
+    fn send_settings_default_copy_after_send_to_disabled() {
+        let settings = Settings {
+            send: SendSettings::default(),
+            ..test_settings()
+        };
+
+        assert!(!settings.send.copy_after_send);
     }
 
     #[test]
@@ -9468,6 +9485,11 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.category == "开发"));
+        assert!(loaded
+            .ai
+            .actions
+            .iter()
+            .any(|action| action.id == "dev-requirements-brief"));
         assert!(loaded
             .ai
             .actions
