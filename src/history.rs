@@ -155,10 +155,13 @@ pub async fn load_history_for_sync(
 
     let mut entries = Vec::new();
     for shard in &index.shards {
-        let shard_path =
-            refresh_cached_file(client, endpoint, cache_dir, &mut metadata, &shard.path)
-                .await?
-                .ok_or_else(|| format!("历史分片图像未找到：{}", shard.path))?;
+        let Some(shard_path) =
+            refresh_cached_file(client, endpoint, cache_dir, &mut metadata, &shard.path).await?
+        else {
+            // 索引引用的分片在远端已缺失（清理旧数据后索引与分片可能短暂不一致），
+            // 跳过该分片而不是让整个刷新失败，后续变更会重建索引以清理失效引用。
+            continue;
+        };
         let shard_bytes =
             fs::read(&shard_path).map_err(|err| format!("读取历史分片图像缓存失败：{err}"))?;
         entries.extend(parse_manifest_shard(&shard_bytes)?);
@@ -443,6 +446,14 @@ where
             index_refs.insert(key.clone(), next_ref);
         }
     }
+    // rebuild_index_from_shards（在 mutate 闭包内调用）会用 retain 移除空分片，
+    // 因此上面的循环看不到这些键。这里补齐：对 keys 中已被裁掉的分片，
+    // 同步从 index_refs 移除其失效引用，避免索引指向不存在的分片。
+    for key in keys {
+        if !shards.contains_key(key) {
+            index_refs.remove(key);
+        }
+    }
     index.version = HISTORY_INDEX_VERSION;
     index.shards = index_refs.values().cloned().collect();
 
@@ -515,10 +526,16 @@ async fn load_manifest_shards_by_key_remote(
         let Some(shard_ref) = refs.get(key) else {
             continue;
         };
-        let shard_bytes = webdav::download_optional_file(client, endpoint, &shard_ref.path)
-            .await?
-            .ok_or_else(|| format!("历史分片未找到：{}", shard_ref.path))?;
-        shards.insert(key.clone(), parse_manifest_shard(&shard_bytes)?);
+        match webdav::download_optional_file(client, endpoint, &shard_ref.path).await? {
+            Some(shard_bytes) => {
+                shards.insert(key.clone(), parse_manifest_shard(&shard_bytes)?);
+            }
+            None => {
+                // 引用的分片在远端已不存在（清理旧数据后索引与分片可能不一致），
+                // 视为空分片，让后续变更逻辑重建索引并清理失效引用。
+                shards.insert(key.clone(), Vec::new());
+            }
+        }
     }
     Ok(shards)
 }
@@ -633,10 +650,14 @@ async fn load_manifest_remote(
 
     let mut entries = Vec::new();
     for shard in index.shards {
-        let shard_bytes = webdav::download_optional_file(client, endpoint, &shard.path)
-            .await?
-            .ok_or_else(|| format!("历史分片图像未找到：{}", shard.path))?;
-        entries.extend(parse_manifest_shard(&shard_bytes)?);
+        match webdav::download_optional_file(client, endpoint, &shard.path).await? {
+            Some(shard_bytes) => entries.extend(parse_manifest_shard(&shard_bytes)?),
+            None => {
+                // 索引引用的分片在远端缺失，跳过该分片而不是让整个加载失败。
+                // 这通常发生在清理旧数据后索引与分片短暂不一致时。
+                continue;
+            }
+        }
     }
     Ok(Some(dedupe_and_sort(entries)))
 }
@@ -1418,5 +1439,122 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["2024-01", "2024-02"]
         );
+    }
+
+    struct HistoryCacheDirGuard(PathBuf);
+    impl HistoryCacheDirGuard {
+        fn new(name: &str) -> Self {
+            static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path =
+                std::env::temp_dir().join(format!("transfer-genie-history-test-{name}-{id}"));
+            fs::create_dir_all(&path).expect("create temp cache dir");
+            HistoryCacheDirGuard(path)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for HistoryCacheDirGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn load_history_with_layout_skips_missing_shard() {
+        let jan_entry = normalize_manifest_entry(sample_entry("jan.txt", 1_704_067_200_000));
+        let feb_entry = normalize_manifest_entry(sample_entry("feb.txt", 1_706_745_600_000));
+        // 索引引用了 2024-02 分片，但该分片在远端缺失（清理旧数据后不一致）。
+        let fixture = HistoryWebDavFixture::start(vec![
+            (
+                HISTORY_INDEX_PATH,
+                index_file(vec![
+                    build_shard_ref("2024-01", std::slice::from_ref(&jan_entry)),
+                    build_shard_ref("2024-02", std::slice::from_ref(&feb_entry)),
+                ]),
+            ),
+            (
+                "history/shards/2024-01.json",
+                shard_file(vec![jan_entry.clone()]),
+            ),
+        ])
+        .await;
+
+        let loaded = load_history_with_layout(&Client::new(), fixture.endpoint())
+            .await
+            .expect("load history tolerates missing shard");
+        assert_eq!(loaded.layout, HistoryLayout::Manifest);
+        assert_eq!(loaded.entries.len(), 1);
+        assert_eq!(loaded.entries[0].filename, "jan.txt");
+    }
+
+    #[tokio::test]
+    async fn load_history_for_sync_skips_missing_cached_shard() {
+        let jan_entry = normalize_manifest_entry(sample_entry("jan.txt", 1_704_067_200_000));
+        let feb_entry = normalize_manifest_entry(sample_entry("feb.txt", 1_706_745_600_000));
+        let fixture = HistoryWebDavFixture::start(vec![
+            (
+                HISTORY_INDEX_PATH,
+                index_file(vec![
+                    build_shard_ref("2024-01", std::slice::from_ref(&jan_entry)),
+                    build_shard_ref("2024-02", std::slice::from_ref(&feb_entry)),
+                ]),
+            ),
+            (
+                "history/shards/2024-01.json",
+                shard_file(vec![jan_entry.clone()]),
+            ),
+        ])
+        .await;
+
+        let cache = HistoryCacheDirGuard::new("missing-shard");
+        let loaded = load_history_for_sync(&Client::new(), fixture.endpoint(), cache.path())
+            .await
+            .expect("load for sync tolerates missing shard");
+
+        assert_eq!(loaded.layout, HistoryLayout::Manifest);
+        assert_eq!(loaded.entries.len(), 1);
+        assert_eq!(loaded.entries[0].filename, "jan.txt");
+    }
+
+    #[tokio::test]
+    async fn remove_history_targets_self_heals_missing_shard_in_keys() {
+        let jan_entry = normalize_manifest_entry(sample_entry("jan.txt", 1_704_067_200_000));
+        let feb_entry = normalize_manifest_entry(sample_entry("feb.txt", 1_706_745_600_000));
+        // 2024-01 分片被索引引用但缺失，且本次删除目标落在 2024-01。
+        let fixture = HistoryWebDavFixture::start(vec![
+            (
+                HISTORY_INDEX_PATH,
+                index_file(vec![
+                    build_shard_ref("2024-01", std::slice::from_ref(&jan_entry)),
+                    build_shard_ref("2024-02", std::slice::from_ref(&feb_entry)),
+                ]),
+            ),
+            (
+                "history/shards/2024-02.json",
+                shard_file(vec![feb_entry.clone()]),
+            ),
+        ])
+        .await;
+
+        let result = remove_history_entry_targets(
+            &Client::new(),
+            fixture.endpoint(),
+            &[(jan_entry.filename.clone(), jan_entry.timestamp_ms)],
+        )
+        .await
+        .expect("remove targets self-heals missing shard");
+
+        // 自愈：失效的 2024-01 引用应从索引中移除。
+        let index: HistoryIndex = fixture.stored_json(HISTORY_INDEX_PATH).await;
+        assert_eq!(index.shards.len(), 1);
+        assert_eq!(index.shards[0].key, "2024-02");
+        assert!(result
+            .touched_paths
+            .contains(&"history/shards/2024-01.json".to_string()));
+        assert!(result
+            .touched_paths
+            .contains(&HISTORY_INDEX_PATH.to_string()));
     }
 }
