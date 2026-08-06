@@ -1064,15 +1064,41 @@
                         <div class="settings-snapshot-title">设置快照</div>
                         <span class="field-hint">查看本地设置历史快照，并按需恢复到某个版本。</span>
                       </div>
-                      <button
-                        id="refresh-settings-snapshots"
-                        class="button ghost small"
-                        type="button"
-                        :disabled="ui.settingsSnapshotsLoading"
-                        @click="refreshSettingsSnapshots"
-                      >
-                        {{ ui.settingsSnapshotsLoading ? '刷新中...' : '刷新快照' }}
-                      </button>
+                      <div class="settings-snapshot-actions">
+                        <button
+                          class="button ghost small"
+                          type="button"
+                          :disabled="ui.settingsBackupArchivesLoading || ui.settingsOps.backupRunning"
+                          @click="createLocalDataBackup"
+                        >
+                          新建归档
+                        </button>
+                        <button
+                          class="button primary small"
+                          type="button"
+                          :disabled="ui.manualBackupDialog.loading"
+                          @click="openManualBackupDialog('settings-snapshot')"
+                        >
+                          手动备份
+                        </button>
+                        <button
+                          id="refresh-settings-snapshots"
+                          class="button ghost small"
+                          type="button"
+                          :disabled="ui.settingsSnapshotsLoading"
+                          @click="refreshSettingsSnapshots"
+                        >
+                          {{ ui.settingsSnapshotsLoading ? '刷新中...' : '刷新快照' }}
+                        </button>
+                        <button
+                          class="button danger small"
+                          type="button"
+                          :disabled="ui.settingsSnapshotsLoading || !ui.settingsSnapshots.length"
+                          @click="clearSettingsSnapshots"
+                        >
+                          清空快照
+                        </button>
+                      </div>
                     </div>
                     <div v-if="!ui.settingsSnapshots.length" class="settings-snapshot-empty">
                       {{ ui.settingsSnapshotsLoading ? '正在加载设置快照...' : '暂无设置快照' }}
@@ -1084,12 +1110,17 @@
                         :key="snapshot.path || snapshot.file_name"
                       >
                         <div class="settings-snapshot-meta">
-                          <div class="settings-snapshot-name">{{ snapshot.file_name || 'snapshot.json' }}</div>
+                          <div class="settings-snapshot-name">
+                            {{ snapshot.name || snapshot.file_name || 'snapshot.json' }}
+                            <span v-if="snapshot.manual" class="settings-snapshot-badge">手动</span>
+                          </div>
                           <div class="settings-snapshot-detail">
                             {{ snapshot.created_at_ms ? formatRuntimeTime(snapshot.created_at_ms) : '未知时间' }}
                             ·
                             {{ formatBytes(snapshot.size_bytes || 0) }}
                           </div>
+                          <div v-if="snapshot.note" class="settings-snapshot-detail">备注：{{ snapshot.note }}</div>
+                          <div v-if="snapshot.name" class="settings-snapshot-detail">文件：{{ snapshot.file_name || 'snapshot.json' }}</div>
                           <div class="settings-snapshot-detail">{{ snapshot.path || '' }}</div>
                         </div>
                         <div class="settings-snapshot-actions">
@@ -1128,16 +1159,27 @@
                         <span class="field-hint">最小 5 分钟，后台会按当前活动 WebDAV 端点执行自动归档。</span>
                       </label>
                       <label>
-                        本地保留数量
+                        本地备份归档最多自动保留数量
                         <input
                           id="backup-retain-count"
                           type="number"
                           min="1"
                           step="1"
                           :value="ui.settingsAutoBackup.retainCount"
-                          @input="updateSettingsAutoBackupField('retainCount', Number($event.target.value || 1))"
+                          @input="updateSettingsAutoBackupField('retainCount', Number($event.target.value || 7))"
                         />
-                        <span class="field-hint">自动清理旧归档时至少保留 1 份最新备份。</span>
+                        <span class="field-hint">自动清理旧归档时至少保留 1 份最新自动备份，手动备份不受此上限影响。</span>
+                      </label>
+                      <label>
+                        设置快照保留数量
+                        <input
+                          type="number"
+                          min="1"
+                          step="1"
+                          :value="ui.settingsAutoBackup.settingsSnapshotRetainCount"
+                          @input="updateSettingsAutoBackupField('settingsSnapshotRetainCount', Number($event.target.value || 7))"
+                        />
+                        <span class="field-hint">保存配置时会自动清理旧设置快照，默认保留 7 个。</span>
                       </label>
                     </div>
                   </div>
@@ -1173,15 +1215,33 @@
                         <div class="settings-snapshot-title">本地备份归档</div>
                         <span class="field-hint">查看本地备份与恢复记录，并可直接从仍然存在的归档文件执行恢复。</span>
                       </div>
-                      <button
-                        id="refresh-settings-backups"
-                        class="button ghost small"
-                        type="button"
-                        :disabled="ui.settingsBackupArchivesLoading"
-                        @click="refreshSettingsBackupArchives"
-                      >
-                        {{ ui.settingsBackupArchivesLoading ? '刷新中...' : '刷新归档' }}
-                      </button>
+                      <div class="settings-snapshot-actions">
+                        <button
+                          class="button primary small"
+                          type="button"
+                          :disabled="ui.manualBackupDialog.loading"
+                          @click="openManualBackupDialog('local-data')"
+                        >
+                          手动备份
+                        </button>
+                        <button
+                          id="refresh-settings-backups"
+                          class="button ghost small"
+                          type="button"
+                          :disabled="ui.settingsBackupArchivesLoading"
+                          @click="refreshSettingsBackupArchives"
+                        >
+                          {{ ui.settingsBackupArchivesLoading ? '刷新中...' : '刷新归档' }}
+                        </button>
+                        <button
+                          class="button danger small"
+                          type="button"
+                          :disabled="ui.settingsBackupArchivesLoading || !ui.settingsBackupArchives.length"
+                          @click="clearSettingsBackupArchives"
+                        >
+                          清空归档
+                        </button>
+                      </div>
                     </div>
                     <div v-if="!ui.settingsBackupArchives.length" class="settings-snapshot-empty">
                       {{ ui.settingsBackupArchivesLoading ? '正在加载本地备份归档...' : '暂无本地备份归档记录' }}
@@ -1193,7 +1253,10 @@
                         :key="`${record.backup_path || record.backupPath}-${record.created_at_ms || record.createdAtMs}-${record.source}`"
                       >
                         <div class="settings-snapshot-meta">
-                          <div class="settings-snapshot-name">{{ record.file_name || record.fileName || 'backup.zip' }}</div>
+                          <div class="settings-snapshot-name">
+                            {{ record.name || record.file_name || record.fileName || 'backup.zip' }}
+                            <span v-if="record.manual" class="settings-snapshot-badge">手动</span>
+                          </div>
                           <div class="settings-snapshot-detail">
                             {{ formatRuntimeTime(record.created_at_ms || record.createdAtMs) }}
                             路
@@ -1201,6 +1264,8 @@
                             路
                             {{ record.source || 'backup-webdav' }}
                           </div>
+                          <div v-if="record.note" class="settings-snapshot-detail">备注：{{ record.note }}</div>
+                          <div v-if="record.name" class="settings-snapshot-detail">文件：{{ record.file_name || record.fileName || 'backup.zip' }}</div>
                           <div class="settings-snapshot-detail">{{ record.backup_path || record.backupPath || '' }}</div>
                           <div class="settings-snapshot-detail">端点：{{ record.endpoint_id || record.endpointId || '-' }}</div>
                         </div>
@@ -1291,6 +1356,45 @@
           <div class="dialog-actions">
             <button id="mark-message-cancel" class="button ghost small" type="button">取消</button>
             <button id="mark-message-confirm" class="button primary small" type="button">确认标记</button>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="ui.manualBackupDialog.open" class="message-preview mark-message-modal is-active" aria-hidden="false">
+        <div class="message-preview-backdrop" @click="closeManualBackupDialog"></div>
+        <div class="message-preview-dialog manual-backup-dialog" role="dialog" aria-modal="true" aria-labelledby="manual-backup-title">
+          <div class="message-preview-header">
+            <div>
+              <div id="manual-backup-title" class="dialog-title">{{ ui.manualBackupDialog.title || '手动备份' }}</div>
+              <div class="dialog-text">填写备份名称和备注，提交后会创建一条不参与自动清理的手动备份。</div>
+            </div>
+            <button type="button" class="message-preview-close" aria-label="关闭手动备份弹框" @click="closeManualBackupDialog">×</button>
+          </div>
+          <div class="manual-backup-body">
+            <label>
+              备份名称
+              <input
+                type="text"
+                placeholder="例如：升级前备份"
+                :value="ui.manualBackupDialog.name"
+                @input="updateManualBackupDialogField('name', $event.target.value)"
+              />
+            </label>
+            <label>
+              备注
+              <textarea
+                rows="4"
+                placeholder="记录这次备份的用途或背景"
+                :value="ui.manualBackupDialog.note"
+                @input="updateManualBackupDialogField('note', $event.target.value)"
+              ></textarea>
+            </label>
+          </div>
+          <div class="dialog-actions">
+            <button class="button ghost small" type="button" :disabled="ui.manualBackupDialog.loading" @click="closeManualBackupDialog">取消</button>
+            <button class="button primary small" type="button" :disabled="ui.manualBackupDialog.loading" @click="submitManualBackupDialog">
+              {{ ui.manualBackupDialog.loading ? '备份中...' : '确认备份' }}
+            </button>
           </div>
         </div>
       </div>

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const WORKSPACE_DIR_NAME: &str = "workspace";
-pub const DEFAULT_SNAPSHOT_RETAIN_COUNT: usize = 20;
+pub const DEFAULT_SNAPSHOT_RETAIN_COUNT: usize = 7;
 
 #[derive(Clone, Debug)]
 pub struct WorkspaceLayout {
@@ -242,10 +242,38 @@ pub fn list_snapshots_for_target(
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.is_file())
+        .filter(|path| !is_manual_metadata_path(path))
         .collect::<Vec<_>>();
     entries.sort();
     entries.reverse();
     Ok(entries)
+}
+
+pub fn clear_snapshots_for_target(
+    workspace_root: &Path,
+    target_path: &Path,
+    category: &str,
+) -> Result<usize, String> {
+    let snapshot_dir = snapshot_target_dir(workspace_root, target_path, category);
+    clear_snapshot_dir(&snapshot_dir)
+}
+
+pub fn prune_snapshots_for_target(
+    workspace_root: &Path,
+    target_path: &Path,
+    category: &str,
+    retain_count: usize,
+) -> Result<(), String> {
+    let snapshot_dir = snapshot_target_dir(workspace_root, target_path, category);
+    prune_snapshot_dir(&snapshot_dir, retain_count.max(1))
+}
+
+pub fn snapshot_dir_for_target(
+    workspace_root: &Path,
+    target_path: &Path,
+    category: &str,
+) -> PathBuf {
+    snapshot_target_dir(workspace_root, target_path, category)
 }
 
 #[allow(dead_code)]
@@ -323,6 +351,8 @@ fn prune_snapshot_dir(snapshot_dir: &Path, retain_count: usize) -> Result<(), St
         .map_err(|err| format!("读取快照目录失败 {}: {err}", snapshot_dir.display()))?
         .filter_map(Result::ok)
         .filter(|entry| entry.path().is_file())
+        .filter(|entry| !is_manual_metadata_path(&entry.path()))
+        .filter(|entry| !snapshot_has_manual_metadata(&entry.path()))
         .collect::<Vec<_>>();
     entries.sort_by_key(|entry| entry.file_name());
 
@@ -332,11 +362,65 @@ fn prune_snapshot_dir(snapshot_dir: &Path, retain_count: usize) -> Result<(), St
 
     let remove_count = entries.len() - retain_count;
     for entry in entries.into_iter().take(remove_count) {
-        fs::remove_file(entry.path())
-            .map_err(|err| format!("清理旧快照失败 {}: {err}", entry.path().display()))?;
+        remove_snapshot_file_with_metadata(&entry.path())?;
     }
 
     Ok(())
+}
+
+fn manual_metadata_path(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.manual.json", path.to_string_lossy()))
+}
+
+fn is_manual_metadata_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .map(|name| name.ends_with(".manual.json"))
+        .unwrap_or(false)
+}
+
+fn snapshot_has_manual_metadata(path: &Path) -> bool {
+    let metadata_path = manual_metadata_path(path);
+    if !metadata_path.is_file() {
+        return false;
+    }
+    fs::read_to_string(metadata_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .and_then(|value| value.get("manual").and_then(|manual| manual.as_bool()))
+        .unwrap_or(false)
+}
+
+fn remove_snapshot_file_with_metadata(path: &Path) -> Result<(), String> {
+    fs::remove_file(path).map_err(|err| format!("清理旧快照失败 {}: {err}", path.display()))?;
+    let metadata_path = manual_metadata_path(path);
+    if metadata_path.is_file() {
+        fs::remove_file(&metadata_path)
+            .map_err(|err| format!("清理快照元数据失败 {}: {err}", metadata_path.display()))?;
+    }
+    Ok(())
+}
+
+fn clear_snapshot_dir(snapshot_dir: &Path) -> Result<usize, String> {
+    if !snapshot_dir.is_dir() {
+        return Ok(0);
+    }
+
+    let entries = fs::read_dir(snapshot_dir)
+        .map_err(|err| format!("读取快照目录失败 {}: {err}", snapshot_dir.display()))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_file())
+        .filter(|entry| !is_manual_metadata_path(&entry.path()))
+        .filter(|entry| !snapshot_has_manual_metadata(&entry.path()))
+        .collect::<Vec<_>>();
+    let mut removed = 0;
+    for entry in entries {
+        fs::remove_file(entry.path())
+            .map_err(|err| format!("清空快照失败 {}: {err}", entry.path().display()))?;
+        removed += 1;
+    }
+
+    Ok(removed)
 }
 
 fn append_change_record(
@@ -532,6 +616,87 @@ mod tests {
         let snapshots =
             list_snapshots_for_target(layout.root(), &target, "settings").expect("list snapshots");
         assert_eq!(snapshots.len(), DEFAULT_SNAPSHOT_RETAIN_COUNT);
+
+        let _ = fs::remove_dir_all(app_dir);
+    }
+
+    #[test]
+    fn snapshot_retention_preserves_manual_snapshots() {
+        let app_dir = temp_dir("manual-retention");
+        let layout = WorkspaceLayout::new(app_dir.clone());
+        ensure_workspace_dirs(&layout).expect("ensure workspace dirs");
+        let target = app_dir.join("settings.json");
+
+        write_bytes_with_audit_at(
+            &target,
+            br#"{"version":0}"#,
+            Some(layout.root()),
+            "settings",
+            "write",
+        )
+        .expect("seed write");
+        let snapshot_dir = snapshot_dir_for_target(layout.root(), &target, "settings");
+        fs::create_dir_all(&snapshot_dir).expect("create snapshot dir");
+        let manual_snapshot = snapshot_dir.join("000-manual-settings.json");
+        fs::write(&manual_snapshot, br#"{"manual":true}"#).expect("write manual snapshot");
+        fs::write(
+            manual_metadata_path(&manual_snapshot),
+            br#"{"manual":true,"name":"keep"}"#,
+        )
+        .expect("write manual metadata");
+
+        for index in 1..=(DEFAULT_SNAPSHOT_RETAIN_COUNT + 3) {
+            let payload = format!("{{\"version\":{index}}}");
+            write_bytes_with_audit_at(
+                &target,
+                payload.as_bytes(),
+                Some(layout.root()),
+                "settings",
+                "write",
+            )
+            .expect("write revision");
+        }
+
+        let snapshots =
+            list_snapshots_for_target(layout.root(), &target, "settings").expect("list snapshots");
+        assert!(manual_snapshot.exists());
+        assert!(manual_metadata_path(&manual_snapshot).exists());
+        assert!(snapshots.iter().any(|path| path == &manual_snapshot));
+
+        let _ = fs::remove_dir_all(app_dir);
+    }
+
+    #[test]
+    fn clear_snapshots_for_target_removes_existing_entries() {
+        let app_dir = temp_dir("clear-snapshots");
+        let layout = WorkspaceLayout::new(app_dir.clone());
+        ensure_workspace_dirs(&layout).expect("ensure workspace dirs");
+        let target = app_dir.join("settings.json");
+
+        write_bytes_with_audit_at(
+            &target,
+            br#"{"version":0}"#,
+            Some(layout.root()),
+            "settings",
+            "write",
+        )
+        .expect("seed write");
+        write_bytes_with_audit_at(
+            &target,
+            br#"{"version":1}"#,
+            Some(layout.root()),
+            "settings",
+            "write",
+        )
+        .expect("second write");
+
+        let removed = clear_snapshots_for_target(layout.root(), &target, "settings")
+            .expect("clear snapshots");
+        let snapshots =
+            list_snapshots_for_target(layout.root(), &target, "settings").expect("list snapshots");
+
+        assert_eq!(removed, 1);
+        assert!(snapshots.is_empty());
 
         let _ = fs::remove_dir_all(app_dir);
     }

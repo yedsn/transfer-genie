@@ -109,6 +109,10 @@ function syncVueSettingsBackupArchivesLoading(isLoading) {
   vueBridge?.syncSettingsBackupArchivesLoading?.(isLoading);
 }
 
+function syncVueManualBackupDialog(dialogState) {
+  vueBridge?.syncManualBackupDialog?.(dialogState);
+}
+
 function syncVueSettingsAutoBackup(autoBackupState) {
   vueBridge?.syncSettingsAutoBackup?.(autoBackupState);
 }
@@ -833,7 +837,8 @@ let currentSettingsFormState = {
 let currentAutoBackupStatusState = {
   enabled: false,
   intervalMinutes: 5,
-  retainCount: 1,
+  retainCount: 7,
+  settingsSnapshotRetainCount: 7,
   directory: '',
   keepAllDays: 3,
   keepDailyDays: 7,
@@ -842,6 +847,14 @@ let currentAutoBackupStatusState = {
   lastSuccessMs: null,
   lastError: null,
   lastBackupPath: '',
+};
+let manualBackupDialogState = {
+  open: false,
+  target: 'local-data',
+  title: '手动备份',
+  name: '',
+  note: '',
+  loading: false,
 };
 let currentSettingsOpsState = settingsOpsRuntime?.createDefaultSettingsOpsState
   ? settingsOpsRuntime.createDefaultSettingsOpsState()
@@ -4680,6 +4693,30 @@ async function loadSettingsSnapshots(options = {}) {
   }
 }
 
+async function clearSettingsSnapshots() {
+  const confirmed = await showConfirmationDialog({
+    title: '清空设置快照',
+    message: '清空后将删除所有本地设置历史快照，当前配置不会被删除。确定继续吗？',
+    confirmLabel: '清空',
+  });
+  if (!confirmed) {
+    return;
+  }
+  try {
+    if (!invoke) {
+      await showSettingsResultDialog('清空设置快照失败', '未检测到 Tauri API，请检查应用环境。');
+      return;
+    }
+    const removed = await invoke('clear_settings_snapshots');
+    await loadSettingsSnapshots({ silent: true });
+    setSuccessStatus('设置快照已清空');
+    await showSettingsResultDialog('清空设置快照成功', `已删除 ${Number(removed || 0)} 个设置快照。`);
+  } catch (error) {
+    await showSettingsResultDialog('清空设置快照失败', String(error));
+    setErrorStatus(`清空设置快照失败：${error}`);
+  }
+}
+
 async function loadSettingsBackupArchives(options = {}) {
   const silent = !!options.silent;
   syncVueSettingsBackupArchivesLoading(true);
@@ -4712,6 +4749,33 @@ async function loadSettingsBackupArchives(options = {}) {
   }
 }
 
+async function clearSettingsBackupArchives() {
+  const confirmed = await showConfirmationDialog({
+    title: '清空本地备份归档',
+    message: '清空后将删除当前列表中的本地备份归档文件及元数据记录。确定继续吗？',
+    confirmLabel: '清空',
+  });
+  if (!confirmed) {
+    return;
+  }
+  try {
+    if (!invoke) {
+      await showSettingsResultDialog('清空本地备份归档失败', '未检测到 Tauri API，请检查应用环境。');
+      return;
+    }
+    syncVueSettingsBackupArchivesLoading(true);
+    const removed = await invoke('clear_local_backup_archives');
+    await loadSettingsBackupArchives({ silent: true });
+    setSuccessStatus('本地备份归档已清空');
+    await showSettingsResultDialog('清空本地备份归档成功', `已删除 ${Number(removed || 0)} 个归档文件。`);
+  } catch (error) {
+    await showSettingsResultDialog('清空本地备份归档失败', String(error));
+    setErrorStatus(`清空本地备份归档失败：${error}`);
+  } finally {
+    syncVueSettingsBackupArchivesLoading(false);
+  }
+}
+
 async function loadAutoBackupStatus(options = {}) {
   const silent = !!options.silent;
   try {
@@ -4725,7 +4789,10 @@ async function loadAutoBackupStatus(options = {}) {
     currentAutoBackupStatusState = {
       enabled: !!status?.enabled,
       intervalMinutes: Number(status?.intervalMinutes || status?.interval_minutes || 5),
-      retainCount: Number(status?.retainCount || status?.retain_count || 1),
+      retainCount: Number(status?.retainCount || status?.retain_count || 7),
+      settingsSnapshotRetainCount: Number(
+        status?.settingsSnapshotRetainCount || status?.settings_snapshot_retain_count || 7,
+      ),
       directory: status?.directory || '',
       keepAllDays: Number(status?.keepAllDays || status?.keep_all_days || 3),
       keepDailyDays: Number(status?.keepDailyDays || status?.keep_daily_days || 7),
@@ -8293,7 +8360,11 @@ async function saveSettings(options = {}) {
   };
   const backupEnabled = !!currentAutoBackupStatusState.enabled;
   const backupIntervalMinutes = Math.max(5, Number(currentAutoBackupStatusState.intervalMinutes) || 5);
-  const backupRetainCount = Math.max(1, Number(currentAutoBackupStatusState.retainCount) || 1);
+  const backupRetainCount = Math.max(1, Number(currentAutoBackupStatusState.retainCount) || 7);
+  const settingsSnapshotRetainCount = Math.max(
+    1,
+    Number(currentAutoBackupStatusState.settingsSnapshotRetainCount) || 7,
+  );
   const backupDirectory = (
     backupDirectoryInput?.value ||
     currentAutoBackupStatusState.directory ||
@@ -8372,6 +8443,7 @@ async function saveSettings(options = {}) {
       enabled: backupEnabled,
       interval_minutes: backupIntervalMinutes,
       retain_count: backupRetainCount,
+      settings_snapshot_retain_count: settingsSnapshotRetainCount,
       directory: backupDirectory,
       keep_all_days: backupKeepAllDays,
       keep_daily_days: backupKeepDailyDays,
@@ -8594,6 +8666,73 @@ async function createLocalDataBackup() {
   } catch (error) {
     setErrorStatus(`本地数据备份失败：${error}`);
     await showInfoDialog({ title: '本地数据备份失败', message: String(error) });
+  }
+}
+
+function syncManualBackupDialogState(nextState = {}) {
+  manualBackupDialogState = settingsFormRuntime?.getManualBackupDialogState
+    ? settingsFormRuntime.getManualBackupDialogState(manualBackupDialogState, nextState)
+    : {
+        ...manualBackupDialogState,
+        ...nextState,
+      };
+  syncVueManualBackupDialog(manualBackupDialogState);
+}
+
+function openManualBackupDialog(target = 'local-data') {
+  const normalizedTarget = target === 'settings-snapshot' ? 'settings-snapshot' : 'local-data';
+  syncManualBackupDialogState({
+    open: true,
+    target: normalizedTarget,
+    title: normalizedTarget === 'settings-snapshot' ? '手动备份设置快照' : '手动备份本地归档',
+    name: '',
+    note: '',
+    loading: false,
+  });
+}
+
+function closeManualBackupDialog() {
+  if (manualBackupDialogState.loading) {
+    return;
+  }
+  syncManualBackupDialogState({ open: false });
+}
+
+function updateManualBackupDialogField(field, value) {
+  if (field !== 'name' && field !== 'note') {
+    return;
+  }
+  syncManualBackupDialogState({ [field]: value });
+}
+
+async function submitManualBackupDialog() {
+  if (!manualBackupDialogState.open || manualBackupDialogState.loading) {
+    return;
+  }
+  try {
+    if (!invoke) {
+      await showSettingsResultDialog('手动备份失败', '未检测到 Tauri API，请检查应用环境。');
+      return;
+    }
+    syncManualBackupDialogState({ loading: true });
+    const payload = {
+      name: String(manualBackupDialogState.name || ''),
+      note: String(manualBackupDialogState.note || ''),
+    };
+    if (manualBackupDialogState.target === 'settings-snapshot') {
+      await invoke('create_manual_settings_snapshot', payload);
+      await loadSettingsSnapshots({ silent: true });
+    } else {
+      await invoke('create_manual_local_data_backup', payload);
+      await loadSettingsBackupArchives({ silent: true });
+    }
+    syncManualBackupDialogState({ open: false, loading: false, name: '', note: '' });
+    setSuccessStatus('手动备份已创建');
+    await showSettingsResultDialog('手动备份成功', '已创建手动备份，自动清理不会删除该记录。');
+  } catch (error) {
+    syncManualBackupDialogState({ loading: false });
+    setErrorStatus(`手动备份失败：${error}`);
+    await showSettingsResultDialog('手动备份失败', String(error));
   }
 }
 
@@ -10047,12 +10186,19 @@ startTelegramBridgeStatusPolling();
 renderComposerMarkTagList();
 initializeSettingsNavigation();
 syncVueSettingsOpsState();
+syncManualBackupDialogState();
 vueBridge?.setActions?.({
   refreshSettingsSnapshots: () => {
     loadSettingsSnapshots();
   },
+  clearSettingsSnapshots: () => {
+    clearSettingsSnapshots();
+  },
   refreshSettingsBackupArchives: () => {
     loadSettingsBackupArchives();
+  },
+  clearSettingsBackupArchives: () => {
+    clearSettingsBackupArchives();
   },
   restoreSettingsSnapshot: (snapshot) => {
     restoreSettingsSnapshotRecord(snapshot);
@@ -10062,6 +10208,18 @@ vueBridge?.setActions?.({
   },
   createLocalDataBackup: () => {
     createLocalDataBackup();
+  },
+  openManualBackupDialog: (target) => {
+    openManualBackupDialog(target);
+  },
+  closeManualBackupDialog: () => {
+    closeManualBackupDialog();
+  },
+  updateManualBackupDialogField: (field, value) => {
+    updateManualBackupDialogField(field, value);
+  },
+  submitManualBackupDialog: () => {
+    submitManualBackupDialog();
   },
   updateSettingsAutoBackupField: (field, value) => {
     updateSettingsAutoBackupField(field, value);

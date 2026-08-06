@@ -20,6 +20,7 @@ export interface TransferGenieState {
   settingsSnapshotsLoading: boolean;
   settingsBackupArchives: any[];
   settingsBackupArchivesLoading: boolean;
+  manualBackupDialog: Record<string, any>;
   settingsAutoBackup: Record<string, any>;
   appVersion: string;
   lastSettingsSavedAt: number | null;
@@ -44,6 +45,7 @@ export interface TransferGenieBridge {
   syncSettingsSnapshotsLoading: (isLoading: boolean) => void;
   syncSettingsBackupArchives: (records: any[]) => void;
   syncSettingsBackupArchivesLoading: (isLoading: boolean) => void;
+  syncManualBackupDialog: (dialogState: Record<string, any>) => void;
   syncSettingsAutoBackup: (autoBackupState: Record<string, any>) => void;
   syncAppVersion: (version: string) => void;
   callAction: (name: string, ...args: any[]) => any;

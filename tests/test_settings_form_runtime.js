@@ -91,11 +91,38 @@ function testSendSettingsPayload() {
   });
 }
 
+function testManualBackupDialogState() {
+  const opened = runtime.getManualBackupDialogState({}, {
+    open: true,
+    target: 'settings-snapshot',
+    name: ' 升级前 ',
+    note: '保留一份',
+  });
+  assert.deepEqual(opened, {
+    open: true,
+    target: 'settings-snapshot',
+    title: '手动备份设置快照',
+    name: ' 升级前 ',
+    note: '保留一份',
+    loading: false,
+  });
+
+  const fallback = runtime.getManualBackupDialogState(opened, {
+    target: 'unknown',
+    loading: true,
+  });
+  assert.equal(fallback.target, 'local-data');
+  assert.equal(fallback.name, ' 升级前 ');
+  assert.equal(fallback.note, '保留一份');
+  assert.equal(fallback.loading, true);
+}
+
 testNormalizeTelegramPollInterval();
 testGetTelegramBridgeFormState();
 testNormalizeLocalHttpApiBindPort();
 testGetLocalHttpApiConfiguredUrl();
 testGetCurrentSenderName();
 testSendSettingsPayload();
+testManualBackupDialogState();
 
 console.log('settings-form-runtime tests passed');

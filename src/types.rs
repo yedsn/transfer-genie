@@ -44,7 +44,11 @@ fn default_backup_interval_minutes() -> u64 {
 }
 
 fn default_backup_retain_count() -> u32 {
-    10
+    7
+}
+
+fn default_settings_snapshot_retain_count() -> u32 {
+    7
 }
 
 fn default_backup_keep_all_days() -> u32 {
@@ -298,6 +302,8 @@ pub struct BackupSettings {
     pub interval_minutes: u64,
     #[serde(default = "default_backup_retain_count")]
     pub retain_count: u32,
+    #[serde(default = "default_settings_snapshot_retain_count")]
+    pub settings_snapshot_retain_count: u32,
     #[serde(default = "default_backup_dir")]
     pub directory: String,
     #[serde(default = "default_backup_keep_all_days")]
@@ -312,6 +318,7 @@ impl Default for BackupSettings {
             enabled: false,
             interval_minutes: default_backup_interval_minutes(),
             retain_count: default_backup_retain_count(),
+            settings_snapshot_retain_count: default_settings_snapshot_retain_count(),
             directory: default_backup_dir(),
             keep_all_days: default_backup_keep_all_days(),
             keep_daily_days: default_backup_keep_daily_days(),

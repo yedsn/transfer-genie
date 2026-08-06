@@ -97,6 +97,12 @@ struct LocalBackupRecord {
     backup_path: String,
     created_at_ms: i64,
     source: String,
+    #[serde(default)]
+    manual: bool,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    note: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -108,6 +114,9 @@ struct LocalSnapshotRecord {
     file_name: String,
     size_bytes: u64,
     created_at_ms: Option<i64>,
+    manual: bool,
+    name: String,
+    note: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -120,6 +129,9 @@ struct LocalBackupArchiveRecord {
     file_name: String,
     size_bytes: u64,
     exists: bool,
+    manual: bool,
+    name: String,
+    note: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -129,6 +141,24 @@ struct LocalDataBackupResult {
     file_name: String,
     size_bytes: u64,
     created_at_ms: i64,
+    manual: bool,
+    name: String,
+    note: String,
+}
+
+#[derive(Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupManualMetadata {
+    #[serde(default)]
+    manual: bool,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    note: String,
+    #[serde(default)]
+    created_at_ms: Option<i64>,
+    #[serde(default)]
+    kind: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -155,6 +185,7 @@ struct AutoBackupStatus {
     enabled: bool,
     interval_minutes: u64,
     retain_count: u32,
+    settings_snapshot_retain_count: u32,
     directory: String,
     keep_all_days: u32,
     keep_daily_days: u32,
@@ -867,6 +898,51 @@ fn parse_snapshot_created_at_ms(path: &Path) -> Option<i64> {
         .and_then(|prefix| prefix.parse::<i64>().ok())
 }
 
+fn normalize_manual_text(value: Option<String>) -> String {
+    value.unwrap_or_default().trim().to_string()
+}
+
+fn backup_metadata_path(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.manual.json", path.to_string_lossy()))
+}
+
+fn load_backup_manual_metadata(path: &Path) -> BackupManualMetadata {
+    let metadata_path = backup_metadata_path(path);
+    if !metadata_path.is_file() {
+        return BackupManualMetadata::default();
+    }
+    fs::read_to_string(metadata_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<BackupManualMetadata>(&content).ok())
+        .unwrap_or_default()
+}
+
+fn save_backup_manual_metadata(
+    path: &Path,
+    metadata: &BackupManualMetadata,
+    audit_root: Option<&Path>,
+    category: &str,
+    operation: &str,
+) -> Result<(), String> {
+    workspace::write_json_with_audit_at(
+        &backup_metadata_path(path),
+        metadata,
+        audit_root,
+        category,
+        operation,
+    )
+}
+
+fn remove_backup_file_with_metadata(path: &Path) -> Result<(), String> {
+    fs::remove_file(path).map_err(|err| format!("删除过期备份失败 {}: {err}", path.display()))?;
+    let metadata_path = backup_metadata_path(path);
+    if metadata_path.is_file() {
+        fs::remove_file(&metadata_path)
+            .map_err(|err| format!("删除备份元数据失败 {}: {err}", metadata_path.display()))?;
+    }
+    Ok(())
+}
+
 fn list_settings_snapshots_for_state(state: &AppState) -> Result<Vec<LocalSnapshotRecord>, String> {
     let workspace_root = workspace_root_for_state(state);
     let snapshots =
@@ -875,6 +951,7 @@ fn list_settings_snapshots_for_state(state: &AppState) -> Result<Vec<LocalSnapsh
         .into_iter()
         .filter_map(|path| {
             let metadata = fs::metadata(&path).ok()?;
+            let manual_metadata = load_backup_manual_metadata(&path);
             Some(LocalSnapshotRecord {
                 path: path.to_string_lossy().to_string(),
                 category: "settings".to_string(),
@@ -886,6 +963,9 @@ fn list_settings_snapshots_for_state(state: &AppState) -> Result<Vec<LocalSnapsh
                     .to_string(),
                 size_bytes: metadata.len(),
                 created_at_ms: parse_snapshot_created_at_ms(&path),
+                manual: manual_metadata.manual,
+                name: manual_metadata.name,
+                note: manual_metadata.note,
             })
         })
         .collect())
@@ -922,12 +1002,78 @@ fn list_local_backup_archives_for_state(
                     .to_string(),
                 size_bytes: metadata.as_ref().map(|value| value.len()).unwrap_or(0),
                 exists: metadata.is_some(),
+                manual: record.manual,
+                name: record.name,
+                note: record.note,
             })
         })
         .collect::<Vec<_>>();
 
     records.sort_by(|left, right| right.created_at_ms.cmp(&left.created_at_ms));
     Ok(records)
+}
+
+fn clear_local_backup_archives_for_state(state: &AppState) -> Result<usize, String> {
+    let mut removed = 0;
+    let workspace_backups_dir = workspace_root_for_state(state).join("backups");
+    if workspace_backups_dir.is_dir() {
+        for entry in fs::read_dir(&workspace_backups_dir).map_err(|err| {
+            format!(
+                "读取本地备份记录失败 {}: {err}",
+                workspace_backups_dir.display()
+            )
+        })? {
+            let entry = entry.map_err(|err| format!("读取本地备份记录失败: {err}"))?;
+            let record_path = entry.path();
+            if !record_path.is_file()
+                || record_path.extension().and_then(|value| value.to_str()) != Some("json")
+                || entry.file_name().to_string_lossy() == "auto-backup-state.json"
+            {
+                continue;
+            }
+            if let Ok(content) = fs::read_to_string(&record_path) {
+                if let Ok(record) = serde_json::from_str::<LocalBackupRecord>(&content) {
+                    let archive_path = PathBuf::from(record.backup_path);
+                    if archive_path.is_file() {
+                        remove_backup_file_with_metadata(&archive_path)?;
+                        removed += 1;
+                    }
+                }
+            }
+            fs::remove_file(&record_path)
+                .map_err(|err| format!("删除本地备份记录失败 {}: {err}", record_path.display()))?;
+        }
+    }
+
+    let settings = current_settings(state)?;
+    let backup_dir = configured_backup_dir(&settings);
+    if backup_dir.is_dir() {
+        for entry in fs::read_dir(&backup_dir)
+            .map_err(|err| format!("读取本地备份目录失败 {}: {err}", backup_dir.display()))?
+        {
+            let entry = entry.map_err(|err| format!("读取本地备份目录失败: {err}"))?;
+            let path = entry.path();
+            if !path.is_file()
+                || path.extension().and_then(|value| value.to_str()) != Some("zip")
+                || !is_listed_local_data_backup_path(&path)
+            {
+                continue;
+            }
+            remove_backup_file_with_metadata(&path)?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+fn is_listed_local_data_backup_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .map(|name| {
+            name.starts_with("transfer-genie-local-data-")
+                || name.starts_with("transfer-genie-rollback-")
+        })
+        .unwrap_or(false)
 }
 
 fn persist_integration_module_statuses(state: &AppState) -> Result<(), String> {
@@ -951,10 +1097,21 @@ fn list_settings_snapshots(state: State<'_, AppState>) -> Result<Vec<LocalSnapsh
 }
 
 #[tauri::command]
+fn clear_settings_snapshots(state: State<'_, AppState>) -> Result<usize, String> {
+    let workspace_root = workspace_root_for_state(&state);
+    workspace::clear_snapshots_for_target(&workspace_root, &state.settings_path, "settings")
+}
+
+#[tauri::command]
 fn list_local_backup_archives(
     state: State<'_, AppState>,
 ) -> Result<Vec<LocalBackupArchiveRecord>, String> {
     list_local_backup_archives_for_state(&state)
+}
+
+#[tauri::command]
+fn clear_local_backup_archives(state: State<'_, AppState>) -> Result<usize, String> {
+    clear_local_backup_archives_for_state(&state)
 }
 
 #[tauri::command]
@@ -972,17 +1129,10 @@ fn list_local_data_backups(
         .map(|entry| entry.path())
         .filter(|path| path.is_file())
         .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("zip"))
-        .filter(|path| {
-            path.file_name()
-                .and_then(|value| value.to_str())
-                .map(|name| {
-                    name.starts_with("transfer-genie-local-data-")
-                        || name.starts_with("transfer-genie-rollback-")
-                })
-                .unwrap_or(false)
-        })
+        .filter(|path| is_listed_local_data_backup_path(path))
         .map(|path| {
             let metadata = fs::metadata(&path).ok();
+            let manual_metadata = load_backup_manual_metadata(&path);
             LocalBackupArchiveRecord {
                 endpoint_id: "local".to_string(),
                 backup_path: path.to_string_lossy().to_string(),
@@ -995,6 +1145,9 @@ fn list_local_data_backups(
                     .to_string(),
                 size_bytes: metadata.as_ref().map(|value| value.len()).unwrap_or(0),
                 exists: metadata.is_some(),
+                manual: manual_metadata.manual,
+                name: manual_metadata.name,
+                note: manual_metadata.note,
             }
         })
         .collect::<Vec<_>>();
@@ -1017,6 +1170,99 @@ async fn create_local_data_backup(
         now_ms(),
     )?;
     Ok(result)
+}
+
+#[tauri::command]
+async fn create_manual_local_data_backup(
+    state: State<'_, AppState>,
+    name: Option<String>,
+    note: Option<String>,
+) -> Result<LocalDataBackupResult, String> {
+    let _guard = state.sync_guard.lock().await;
+    let settings = current_settings(&state)?;
+    let path = local_data_backup_path(&settings, now_ms())
+        .with_file_name(format!("transfer-genie-local-data-manual-{}.zip", now_ms()));
+    let mut result = create_local_data_backup_to_path(&state, &path)?;
+    let manual_name = normalize_manual_text(name);
+    let manual_note = normalize_manual_text(note);
+    let metadata = BackupManualMetadata {
+        manual: true,
+        name: manual_name.clone(),
+        note: manual_note.clone(),
+        created_at_ms: Some(result.created_at_ms),
+        kind: "local-data".to_string(),
+    };
+    save_backup_manual_metadata(
+        &path,
+        &metadata,
+        Some(&workspace_root_for_state(&state)),
+        "backup-metadata",
+        "manual-local-data-backup",
+    )?;
+    result.manual = true;
+    result.name = manual_name;
+    result.note = manual_note;
+    Ok(result)
+}
+
+#[tauri::command]
+fn create_manual_settings_snapshot(
+    state: State<'_, AppState>,
+    name: Option<String>,
+    note: Option<String>,
+) -> Result<LocalSnapshotRecord, String> {
+    let workspace_root = workspace_root_for_state(&state);
+    let snapshot_dir =
+        workspace::snapshot_dir_for_target(&workspace_root, &state.settings_path, "settings");
+    fs::create_dir_all(&snapshot_dir)
+        .map_err(|err| format!("创建设置快照目录失败 {}: {err}", snapshot_dir.display()))?;
+    let file_name = state
+        .settings_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("settings.json");
+    let created_at_ms = now_ms();
+    let snapshot_path = snapshot_dir.join(format!("{}-{}", created_at_ms, file_name));
+    fs::copy(&state.settings_path, &snapshot_path).map_err(|err| {
+        format!(
+            "创建手动设置快照失败 {} -> {}: {err}",
+            state.settings_path.display(),
+            snapshot_path.display()
+        )
+    })?;
+    let manual_name = normalize_manual_text(name);
+    let manual_note = normalize_manual_text(note);
+    let metadata = BackupManualMetadata {
+        manual: true,
+        name: manual_name.clone(),
+        note: manual_note.clone(),
+        created_at_ms: Some(created_at_ms),
+        kind: "settings-snapshot".to_string(),
+    };
+    save_backup_manual_metadata(
+        &snapshot_path,
+        &metadata,
+        Some(&workspace_root),
+        "backup-metadata",
+        "manual-settings-snapshot",
+    )?;
+    let file_metadata = fs::metadata(&snapshot_path)
+        .map_err(|err| format!("读取设置快照信息失败 {}: {err}", snapshot_path.display()))?;
+    Ok(LocalSnapshotRecord {
+        path: snapshot_path.to_string_lossy().to_string(),
+        category: "settings".to_string(),
+        target_path: state.settings_path.to_string_lossy().to_string(),
+        file_name: snapshot_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("snapshot.json")
+            .to_string(),
+        size_bytes: file_metadata.len(),
+        created_at_ms: Some(created_at_ms),
+        manual: true,
+        name: manual_name,
+        note: manual_note,
+    })
 }
 
 #[tauri::command]
@@ -4323,6 +4569,9 @@ fn create_local_data_backup_to_path(
             .to_string(),
         size_bytes: metadata.len(),
         created_at_ms,
+        manual: false,
+        name: String::new(),
+        note: String::new(),
     })
 }
 
@@ -4459,6 +4708,9 @@ fn record_local_backup_event(
         backup_path: backup_path.to_string(),
         created_at_ms: now_ms(),
         source: source.to_string(),
+        manual: false,
+        name: String::new(),
+        note: String::new(),
     };
     workspace::write_json_with_audit_at(
         &target,
@@ -4493,6 +4745,7 @@ fn auto_backup_status_for_state(state: &AppState) -> Result<AutoBackupStatus, St
         enabled: settings.backup.enabled,
         interval_minutes: settings.backup.interval_minutes,
         retain_count: settings.backup.retain_count,
+        settings_snapshot_retain_count: settings.backup.settings_snapshot_retain_count,
         directory: settings.backup.directory.clone(),
         keep_all_days: settings.backup.keep_all_days,
         keep_daily_days: settings.backup.keep_daily_days,
@@ -4524,6 +4777,15 @@ fn prune_auto_backup_archives(dir: &Path, retain_count: u32) -> Result<(), Strin
         .map_err(|err| format!("读取备份目录失败 {}: {err}", dir.display()))?
         .filter_map(Result::ok)
         .filter(|entry| entry.path().is_file())
+        .filter(|entry| {
+            entry
+                .path()
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(|name| !name.ends_with(".manual.json"))
+                .unwrap_or(true)
+        })
+        .filter(|entry| !load_backup_manual_metadata(&entry.path()).manual)
         .collect::<Vec<_>>();
     entries.sort_by_key(|entry| entry.file_name());
 
@@ -4534,8 +4796,7 @@ fn prune_auto_backup_archives(dir: &Path, retain_count: u32) -> Result<(), Strin
 
     let remove_count = entries.len() - keep;
     for entry in entries.into_iter().take(remove_count) {
-        fs::remove_file(entry.path())
-            .map_err(|err| format!("删除过期备份失败 {}: {err}", entry.path().display()))?;
+        remove_backup_file_with_metadata(&entry.path())?;
     }
 
     Ok(())
@@ -4598,6 +4859,7 @@ fn cleanup_backup_snapshots_by_retention(
         .map(|entry| entry.path())
         .filter(|path| path.is_file())
         .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("zip"))
+        .filter(|path| !load_backup_manual_metadata(path).manual)
         .map(|path| {
             let modified = file_modified_ms(&path);
             (path, modified)
@@ -4611,8 +4873,7 @@ fn cleanup_backup_snapshots_by_retention(
     );
     for (path, _) in entries {
         if !retained.contains(&path) {
-            fs::remove_file(&path)
-                .map_err(|err| format!("删除过期备份失败 {}: {err}", path.display()))?;
+            remove_backup_file_with_metadata(&path)?;
         }
     }
     Ok(())
@@ -5486,6 +5747,8 @@ fn normalize_settings(
         .max(DEFAULT_TELEGRAM_POLL_INTERVAL_SECS);
     settings.backup.interval_minutes = settings.backup.interval_minutes.max(5);
     settings.backup.retain_count = settings.backup.retain_count.max(1);
+    settings.backup.settings_snapshot_retain_count =
+        settings.backup.settings_snapshot_retain_count.max(1);
     if settings.backup.directory.trim().is_empty() {
         settings.backup.directory = BackupSettings::default().directory;
     } else {
@@ -6254,6 +6517,12 @@ fn write_settings_audited(path: &Path, settings: &Settings) -> Result<(), String
         Some(&audit_root),
         "settings",
         "write-settings",
+    )?;
+    workspace::prune_snapshots_for_target(
+        &audit_root,
+        path,
+        "settings",
+        settings.backup.settings_snapshot_retain_count as usize,
     )
 }
 
@@ -8636,6 +8905,8 @@ fn main() {
             get_auto_backup_status,
             list_local_data_backups,
             create_local_data_backup,
+            create_manual_local_data_backup,
+            create_manual_settings_snapshot,
             restore_local_data_backup,
             get_local_http_api_status,
             get_app_version,
@@ -8645,7 +8916,9 @@ fn main() {
             discover_telegram_chats,
             save_settings,
             list_settings_snapshots,
+            clear_settings_snapshots,
             list_local_backup_archives,
+            clear_local_backup_archives,
             restore_settings_snapshot,
             save_send_hotkey,
             process_text_with_ai,
@@ -9869,6 +10142,57 @@ mod tests {
     }
 
     #[test]
+    fn local_backup_record_legacy_json_defaults_manual_metadata() {
+        let content = r#"{
+            "endpointId":"endpoint-a",
+            "backupPath":"E:/archives/backup.zip",
+            "createdAtMs":100,
+            "source":"backup-webdav"
+        }"#;
+
+        let record: LocalBackupRecord = serde_json::from_str(content).expect("parse legacy record");
+
+        assert!(!record.manual);
+        assert_eq!(record.name, "");
+        assert_eq!(record.note, "");
+    }
+
+    #[test]
+    fn prune_auto_backup_archives_preserves_manual_files() {
+        let archive_dir =
+            std::env::temp_dir().join(format!("transfer-genie-backup-prune-manual-{}", now_ms()));
+        fs::create_dir_all(&archive_dir).expect("create archive dir");
+        for name in ["001.zip", "002.zip", "003.zip", "manual.zip"] {
+            fs::write(archive_dir.join(name), name.as_bytes()).expect("write archive");
+        }
+        let manual_path = archive_dir.join("manual.zip");
+        save_backup_manual_metadata(
+            &manual_path,
+            &BackupManualMetadata {
+                manual: true,
+                name: "keep".to_string(),
+                note: "manual".to_string(),
+                created_at_ms: Some(1),
+                kind: "local-data".to_string(),
+            },
+            None,
+            "backup-metadata",
+            "test",
+        )
+        .expect("write manual metadata");
+
+        prune_auto_backup_archives(&archive_dir, 2).expect("prune backups");
+
+        assert!(!archive_dir.join("001.zip").exists());
+        assert!(archive_dir.join("002.zip").exists());
+        assert!(archive_dir.join("003.zip").exists());
+        assert!(manual_path.exists());
+        assert!(backup_metadata_path(&manual_path).exists());
+
+        let _ = fs::remove_dir_all(&archive_dir);
+    }
+
+    #[test]
     fn save_and_load_auto_backup_state_round_trip() {
         let temp_dir =
             std::env::temp_dir().join(format!("transfer-genie-backup-state-{}", now_ms()));
@@ -9904,6 +10228,7 @@ mod tests {
         settings.backup.enabled = true;
         settings.backup.interval_minutes = 15;
         settings.backup.retain_count = 3;
+        settings.backup.settings_snapshot_retain_count = 4;
         let state = test_app_state(&temp_dir, settings);
         let persisted = AutoBackupStateRecord {
             last_run_ms: Some(100),
@@ -9918,6 +10243,7 @@ mod tests {
         assert!(status.enabled);
         assert_eq!(status.interval_minutes, 15);
         assert_eq!(status.retain_count, 3);
+        assert_eq!(status.settings_snapshot_retain_count, 4);
         assert!(status.has_active_endpoint);
         assert_eq!(status.last_run_ms, Some(100));
         assert_eq!(status.last_success_ms, Some(90));
@@ -10143,6 +10469,74 @@ mod tests {
             records[1].backup_path,
             archive_a.to_string_lossy().to_string()
         );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn clear_local_backup_archives_removes_archives_metadata_and_records() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-clear-backup-records-{}", now_ms()));
+        let workspace_layout = WorkspaceLayout::new(temp_dir.clone());
+        workspace::ensure_workspace_dirs(&workspace_layout).expect("ensure workspace dirs");
+        let mut settings = test_settings();
+        settings.backup.directory = temp_dir
+            .join("configured-backups")
+            .to_string_lossy()
+            .to_string();
+        let endpoint = settings
+            .webdav_endpoints
+            .first()
+            .cloned()
+            .expect("test endpoint");
+        let state = test_app_state(&temp_dir, settings.clone());
+
+        let webdav_archive = temp_dir.join("archive-webdav.zip");
+        fs::write(&webdav_archive, b"webdav").expect("write webdav archive");
+        record_local_backup_event(
+            &state,
+            &endpoint,
+            &webdav_archive.to_string_lossy(),
+            "backup-webdav",
+        )
+        .expect("record webdav backup");
+
+        let local_archive =
+            configured_backup_dir(&settings).join("transfer-genie-local-data-1.zip");
+        ensure_parent_dir(&local_archive).expect("create local archive parent");
+        fs::write(&local_archive, b"local").expect("write local archive");
+        save_backup_manual_metadata(
+            &local_archive,
+            &BackupManualMetadata {
+                manual: true,
+                name: "manual".to_string(),
+                note: "note".to_string(),
+                created_at_ms: Some(1),
+                kind: "local-data".to_string(),
+            },
+            None,
+            "backup-metadata",
+            "test",
+        )
+        .expect("write local metadata");
+
+        let removed = clear_local_backup_archives_for_state(&state).expect("clear archives");
+
+        assert_eq!(removed, 2);
+        assert!(!webdav_archive.exists());
+        assert!(!local_archive.exists());
+        assert!(!backup_metadata_path(&local_archive).exists());
+        assert!(list_local_backup_archives_for_state(&state)
+            .expect("list webdav records")
+            .is_empty());
+        let remaining_local_archives = fs::read_dir(configured_backup_dir(&settings))
+            .expect("read backup dir")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.path().extension().and_then(|value| value.to_str()) == Some("zip")
+            })
+            .count();
+        assert_eq!(remaining_local_archives, 0);
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

@@ -55,6 +55,27 @@
     };
   }
 
+  function getManualBackupDialogState(currentState, patch) {
+    var current = currentState || {};
+    var next = patch || {};
+    var target = next.target || current.target || 'local-data';
+    if (target !== 'settings-snapshot') {
+      target = 'local-data';
+    }
+    return {
+      open: !!(next.open !== undefined ? next.open : current.open),
+      target: target,
+      title: String(
+        next.title ||
+          current.title ||
+          (target === 'settings-snapshot' ? '手动备份设置快照' : '手动备份本地归档'),
+      ),
+      name: String(next.name !== undefined ? next.name : current.name || ''),
+      note: String(next.note !== undefined ? next.note : current.note || ''),
+      loading: !!(next.loading !== undefined ? next.loading : current.loading),
+    };
+  }
+
   globalScope.transferGenieSettingsFormRuntime = {
     normalizeTelegramPollInterval: normalizeTelegramPollInterval,
     getTelegramBridgeFormState: getTelegramBridgeFormState,
@@ -62,5 +83,6 @@
     getLocalHttpApiConfiguredUrl: getLocalHttpApiConfiguredUrl,
     getCurrentSenderName: getCurrentSenderName,
     getSendSettingsPayload: getSendSettingsPayload,
+    getManualBackupDialogState: getManualBackupDialogState,
   };
 })(typeof window !== 'undefined' ? window : globalThis);
