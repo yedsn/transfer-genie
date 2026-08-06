@@ -92,6 +92,15 @@ def request_no_content(method: str, url: str) -> None:
         fail(f"{method} {url} failed: {exc}")
 
 
+def build_github_headers() -> dict:
+    token = os.environ.get("GH_TOKEN", "").strip() or os.environ.get("GITHUB_TOKEN", "").strip()
+    headers = {"User-Agent": "transfer-genie-release-sync"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        headers["X-GitHub-Api-Version"] = "2022-11-28"
+    return headers
+
+
 def download_file(url: str, target_path: Path, proxy: Optional[str] = None) -> None:
     handlers = []
     if proxy:
@@ -341,7 +350,7 @@ def main() -> None:
     github_release = request_json(
         "GET",
         github_release_url,
-        headers={"User-Agent": "transfer-genie-release-sync"},
+        headers=build_github_headers(),
     )
 
     tag_name = github_release.get("tag_name")

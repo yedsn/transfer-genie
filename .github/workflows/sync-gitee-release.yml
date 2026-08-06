@@ -14,6 +14,7 @@ jobs:
     runs-on: [self-hosted]
     env:
       PYTHONUNBUFFERED: "1"
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
       https_proxy: http://192.168.3.36:7890
       http_proxy: http://192.168.3.36:7890
