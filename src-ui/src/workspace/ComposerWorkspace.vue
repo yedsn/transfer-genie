@@ -199,6 +199,13 @@ function toggleFullscreen() {
   isFullscreen.value = readFullscreenState();
 }
 
+// 双击工具栏空白区域快速切换全屏；落在按钮上时放行按钮自身行为
+function onToolbarDblClick(event: MouseEvent) {
+  const target = event.target as HTMLElement | null;
+  if (target && target.closest("button")) return;
+  toggleFullscreen();
+}
+
 function syncFullscreenState(event?: Event) {
   const custom = event as CustomEvent<{ enabled?: boolean }>;
   if (custom?.detail && typeof custom.detail.enabled === "boolean") {
@@ -255,7 +262,7 @@ onUnmounted(() => {
 
 <template>
   <div class="composer-ws" ref="mainEl">
-    <div class="composer-ws-toolbar">
+    <div class="composer-ws-toolbar" @dblclick="onToolbarDblClick" title="双击空白处可全屏 / 退出全屏">
       <div class="cw-toolbar-group">
         <button class="cw-btn cw-btn-icon" type="button" @click="composerStore.addDraft(state.activePaneId || state.panes[0]?.id)" title="新建草稿">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
