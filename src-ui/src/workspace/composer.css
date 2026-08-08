@@ -22,6 +22,8 @@
   flex: 0 0 auto;
   padding: 0 0 2px;
   flex-wrap: wrap;
+  -webkit-user-select: none;
+  user-select: none;
 }
 .cw-toolbar-group {
   display: inline-flex;
