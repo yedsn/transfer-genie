@@ -12,6 +12,7 @@ const settingsFormRuntime = window.transferGenieSettingsFormRuntime || null;
 const settingsOpsRuntime = window.transferGenieSettingsOpsRuntime || null;
 const settingsRuntimeStatus = window.transferGenieSettingsRuntimeStatus || null;
 const DEFAULT_EDITOR_FORMAT_STORAGE_KEY = 'transfer-genie.default-editor-format';
+const HOME_LAYOUT_STORAGE_KEY = 'transfer-genie.home-layout';
 
 function normalizeEditorFormat(format) {
   return format === 'markdown' ? 'markdown' : 'text';
@@ -30,6 +31,25 @@ function saveDefaultEditorFormat(format) {
     window.localStorage?.setItem(DEFAULT_EDITOR_FORMAT_STORAGE_KEY, normalizeEditorFormat(format));
   } catch (error) {
     // Ignore storage failures; the in-memory setting still applies this session.
+  }
+}
+
+function loadHomeLayoutState() {
+  try {
+    const parsed = JSON.parse(window.localStorage?.getItem(HOME_LAYOUT_STORAGE_KEY) || '{}');
+    return { composerVisible: parsed.composerVisible !== false };
+  } catch (error) {
+    return { composerVisible: true };
+  }
+}
+
+function saveHomeLayoutState(state) {
+  try {
+    window.localStorage?.setItem(HOME_LAYOUT_STORAGE_KEY, JSON.stringify({
+      composerVisible: state?.composerVisible !== false,
+    }));
+  } catch (error) {
+    // Ignore storage failures; the layout still changes for this session.
   }
 }
 
@@ -547,6 +567,8 @@ const sendOptionsToggle = document.getElementById('send-options-toggle');
 const sendOptionsMenu = document.getElementById('send-options-menu');
 const quickCopyAfterSendInput = document.getElementById('quick-copy-after-send');
 const sendFileButton = document.getElementById('send-file');
+const layoutToggle = document.getElementById('layout-toggle');
+const layoutToggleLabel = document.getElementById('layout-toggle-label');
 const saveSettingsButton = document.getElementById('save-settings');
 const settingsPanel = document.querySelector('#tab-settings .settings');
 const settingsBody = document.querySelector('#tab-settings .settings-body');
@@ -1428,6 +1450,38 @@ function setComposerFullscreen(enabled) {
       }
     }, 0);
   }
+}
+
+function setComposerVisible(visible, options = {}) {
+  const nextVisible = visible !== false;
+  if (!nextVisible) {
+    setComposerFullscreen(false);
+  }
+  document.documentElement.classList.toggle('composer-hidden-active', !nextVisible);
+  document.body.classList.toggle('composer-hidden-active', !nextVisible);
+  if (layoutToggle) {
+    const label = nextVisible ? '隐藏编辑' : '显示编辑';
+    const shortLabel = label;
+    layoutToggle.classList.toggle('is-hidden', !nextVisible);
+    layoutToggle.title = label;
+    layoutToggle.setAttribute('aria-label', label);
+    layoutToggle.setAttribute('aria-pressed', nextVisible ? 'false' : 'true');
+    if (layoutToggleLabel) {
+      layoutToggleLabel.textContent = shortLabel;
+    }
+  }
+  if (options.persist !== false) {
+    saveHomeLayoutState({ composerVisible: nextVisible });
+  }
+  window.requestAnimationFrame(() => {
+    syncComposerOffset();
+    window.dispatchEvent(new CustomEvent('transfer-genie:composer-visibility-change', { detail: { visible: nextVisible } }));
+  });
+}
+
+function applyHomeLayoutState() {
+  const state = loadHomeLayoutState();
+  setComposerVisible(state.composerVisible, { persist: false });
 }
 
 function exitComposerFullscreenAfterSendSuccess() {
@@ -4145,7 +4199,8 @@ function handleTextareaLineBoundaryKey(textarea, event) {
 
 function syncComposerOffset() {
   if (!composer || !feed) return;
-  const offset = Math.round(composer.offsetHeight + 12);
+  const hidden = document.documentElement.classList.contains('composer-hidden-active') || document.body.classList.contains('composer-hidden-active');
+  const offset = hidden ? 0 : Math.round(composer.offsetHeight + 12);
   feed.style.setProperty('--composer-offset', `${offset}px`);
 }
 
@@ -9525,9 +9580,11 @@ function updateMessageDownloadStatus(filename, endpointId = activeEndpointId) {
 function setSenderNameDisplay(name) {
   if (!deviceNameLabel) return;
   const value = String(name || '').trim();
-  const text = value ? `TransferGenie（${value}）` : 'TransferGenie（未设置发送者）';
-  deviceNameLabel.textContent = text;
-  deviceNameLabel.title = text;
+  const label = value ? value.slice(0, 2).toUpperCase() : 'TG';
+  const title = value ? `发送者：${value}` : '发送者：未设置';
+  deviceNameLabel.textContent = label;
+  deviceNameLabel.title = title;
+  deviceNameLabel.setAttribute('aria-label', title);
 }
 
 async function refreshMessages(options = {}) {
@@ -10047,6 +10104,16 @@ if (composerFullscreenToggle) {
   // Ensure icon and labels reflect initial state
   setComposerFullscreen(false);
 }
+
+if (layoutToggle) {
+  layoutToggle.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const visible = !document.documentElement.classList.contains('composer-hidden-active') && !document.body.classList.contains('composer-hidden-active');
+    setComposerVisible(!visible);
+  });
+}
+
+applyHomeLayoutState();
 // R5: 暴露全屏切换给 Vue 工具栏按钮（放大按钮已合并到工作区工具栏）
 window.transferGenieLegacyFullscreen = {
   set: function (enabled) { setComposerFullscreen(enabled); },
@@ -10073,6 +10140,7 @@ if (feedContent) {
 
 syncComposerOffset();
 window.addEventListener('resize', syncComposerOffset);
+window.addEventListener('transfer-genie:composer-visibility-change', syncComposerOffset);
 
 // 使用 fixed 定位菜单，避免被 overflow 容器裁切
 function positionActionMenu(menu) {

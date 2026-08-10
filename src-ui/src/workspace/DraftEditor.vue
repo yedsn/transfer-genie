@@ -10,8 +10,21 @@ const textEl = ref<HTMLTextAreaElement | null>(null);
 const mdWrap = ref<HTMLElement | null>(null);
 const aiBusy = ref(false);
 const aiError = ref("");
-const aiMenu = ref<{ x: number; y: number } | null>(null);
+type SubmenuSide = "left" | "right";
+type SubmenuAlign = "down" | "up";
+const aiMenu = ref<{ x: number; y: number; submenuSide: SubmenuSide; submenuAlign: SubmenuAlign } | null>(null);
+const editorMenu = ref<{
+  x: number;
+  y: number;
+  selectionText: string;
+} | null>(null);
+const editorAiMenu = ref<{ x: number; y: number; side: SubmenuSide; anchorBottom: number } | null>(null);
+const editorAiActionMenu = ref<{ x: number; y: number; actions: any[]; favorite: boolean; anchorBottom: number } | null>(null);
 const aiMenuPreferSelection = ref(false);
+const aiMenuEl = ref<HTMLElement | null>(null);
+const editorMenuEl = ref<HTMLElement | null>(null);
+const editorAiMenuEl = ref<HTMLElement | null>(null);
+const editorAiActionMenuEl = ref<HTMLElement | null>(null);
 const aiLoadingReasoning = ref<HTMLElement | null>(null);
 const aiPromptDialogOpen = ref(false);
 const aiPromptText = ref("");
@@ -35,6 +48,7 @@ const aiPreview = ref<{
 let editor: any = null;
 let initRetry = 0;
 let fullscreenListener: ((event: Event) => void) | null = null;
+let visibilityListener: ((event: Event) => void) | null = null;
 let sendHotkeyListener: ((event: Event) => void) | null = null;
 let resizeListener: (() => void) | null = null;
 
@@ -197,6 +211,8 @@ function currentAiInput(preferSelection = false) {
 
 async function runAiAction(actionId?: string, preferSelection = false, temporaryPrompt?: any) {
   aiMenu.value = null;
+  editorMenu.value = null;
+  editorAiActionMenu.value = null;
   aiError.value = "";
   if (!canRunAi.value) {
     aiError.value = "请先在设置中启用并配置 AI。";
@@ -396,16 +412,183 @@ function applyAiPreview(mode?: "replace" | "insert") {
 
 function closeAiPreview() { aiPreview.value = null; }
 
+function clampMenuPosition(x: number, y: number, width: number, height: number) {
+  const gap = 8;
+  return {
+    x: Math.max(gap, Math.min(x, window.innerWidth - width - gap)),
+    y: Math.max(gap, Math.min(y, window.innerHeight - height - gap)),
+  };
+}
+
+function getSubmenuPlacement(x: number, y: number, menuWidth: number, submenuWidth: number, submenuHeight: number) {
+  const gap = 8;
+  return {
+    submenuSide: x + menuWidth + submenuWidth + gap > window.innerWidth ? "left" as SubmenuSide : "right" as SubmenuSide,
+    submenuAlign: y + submenuHeight + gap > window.innerHeight ? "up" as SubmenuAlign : "down" as SubmenuAlign,
+  };
+}
+
+async function adjustFloatingMenuPosition(kind: "ai" | "editor") {
+  await nextTick();
+  const menu = kind === "ai" ? aiMenu.value : editorMenu.value;
+  const el = kind === "ai" ? aiMenuEl.value : editorMenuEl.value;
+  if (!menu || !el) return;
+  const rect = el.getBoundingClientRect();
+  const next = clampMenuPosition(menu.x, menu.y, rect.width, rect.height);
+  const submenuWidth = kind === "ai" ? 176 : 132;
+  const submenuHeight = 320;
+  const placement = getSubmenuPlacement(next.x, next.y, rect.width, submenuWidth, submenuHeight);
+  if (kind === "ai" && aiMenu.value) aiMenu.value = { ...aiMenu.value, ...next, ...placement };
+  else if (kind === "editor" && editorMenu.value) editorMenu.value = { ...editorMenu.value, ...next };
+}
+
+async function adjustEditorAiMenuPosition() {
+  await nextTick();
+  const menu = editorAiMenu.value;
+  const el = editorAiMenuEl.value;
+  if (!menu || !el) return;
+  const rect = el.getBoundingClientRect();
+  const next = clampMenuPosition(menu.x, menu.anchorBottom - rect.height, rect.width, rect.height);
+  editorAiMenu.value = { ...menu, ...next, anchorBottom: next.y + rect.height };
+}
+
+async function adjustEditorAiActionMenuPosition() {
+  await nextTick();
+  const menu = editorAiActionMenu.value;
+  const el = editorAiActionMenuEl.value;
+  if (!menu || !el) return;
+  const rect = el.getBoundingClientRect();
+  const next = clampMenuPosition(menu.x, menu.anchorBottom - rect.height, rect.width, rect.height);
+  editorAiActionMenu.value = { ...menu, ...next };
+}
+
 function onEditorContextMenu(event: MouseEvent) {
   onActivated();
-  const input = currentAiInput(true);
-  if (!input.text.trim()) return;
   event.preventDefault();
   aiMenuPreferSelection.value = true;
-  aiMenu.value = { x: event.clientX, y: event.clientY };
+  const menuWidth = 148;
+  const menuHeight = 154;
+  const { x, y } = clampMenuPosition(event.clientX, event.clientY, menuWidth, menuHeight);
+  editorMenu.value = {
+    x,
+    y,
+    selectionText: getEditorSelectionText(),
+  };
+  editorAiMenu.value = null;
+  editorAiActionMenu.value = null;
+  adjustFloatingMenuPosition("editor");
 }
 
 function closeAiMenu() { aiMenu.value = null; }
+function closeEditorMenu() {
+  editorMenu.value = null;
+  editorAiMenu.value = null;
+  editorAiActionMenu.value = null;
+}
+
+function openEditorAiMenu(event: MouseEvent) {
+  if (!editorMenu.value || !editorMenu.value.selectionText.trim()) return;
+  const target = event.currentTarget as HTMLElement;
+  const rect = target.getBoundingClientRect();
+  const parentRect = editorMenuEl.value?.getBoundingClientRect();
+  const menuWidth = 132;
+  const menuHeight = 320;
+  const openLeft = rect.right + menuWidth + 8 > window.innerWidth;
+  const x = openLeft ? rect.left - menuWidth + 2 : rect.right - 2;
+  const anchorBottom = parentRect?.bottom || rect.bottom + menuHeight;
+  const y = Math.max(8, Math.min(anchorBottom - menuHeight, window.innerHeight - menuHeight - 8));
+  editorAiMenu.value = { x, y, side: openLeft ? "left" : "right", anchorBottom };
+  editorAiActionMenu.value = null;
+  adjustEditorAiMenuPosition();
+}
+
+function openEditorAiActionMenu(event: MouseEvent, actions: any[], favorite = false) {
+  if (!editorMenu.value || !editorAiMenu.value || !Array.isArray(actions) || !actions.length) return;
+  const target = event.currentTarget as HTMLElement;
+  const rect = target.getBoundingClientRect();
+  const parentRect = editorAiMenuEl.value?.getBoundingClientRect();
+  const menuWidth = 176;
+  const menuHeight = 320;
+  const openLeft = rect.right + menuWidth + 8 > window.innerWidth;
+  const x = openLeft ? rect.left - menuWidth + 2 : rect.right - 2;
+  const anchorBottom = parentRect?.bottom || rect.bottom + menuHeight;
+  const y = Math.max(8, Math.min(anchorBottom - menuHeight, window.innerHeight - menuHeight - 8));
+  editorAiActionMenu.value = { x, y, actions, favorite, anchorBottom };
+  adjustEditorAiActionMenuPosition();
+}
+
+function getEditorSelectionText() {
+  if (isMarkdown.value && editor?.cm && typeof editor.cm.getSelection === "function") {
+    return String(editor.cm.getSelection() || "");
+  }
+  const textarea = textEl.value;
+  if (!textarea) return "";
+  const start = textarea.selectionStart || 0;
+  const end = textarea.selectionEnd || start;
+  return (props.draft.text || "").slice(start, end);
+}
+
+function focusEditor() {
+  try {
+    if (isMarkdown.value && editor?.cm) editor.cm.focus();
+    else textEl.value?.focus();
+  } catch (e) { /* ignore */ }
+}
+
+function replaceEditorSelection(text: string) {
+  if (isMarkdown.value && editor?.cm) {
+    const cm = editor.cm;
+    cm.replaceSelection(text);
+    try { composerStore.setDraftText(props.draft.id, cm.getValue()); } catch (e) { /* ignore */ }
+    return;
+  }
+  const textarea = textEl.value;
+  const current = props.draft.text || "";
+  const start = textarea?.selectionStart || 0;
+  const end = textarea?.selectionEnd || start;
+  const next = current.slice(0, start) + text + current.slice(end);
+  composerStore.setDraftText(props.draft.id, next);
+  setTimeout(() => textarea?.setSelectionRange(start + text.length, start + text.length), 0);
+}
+
+async function copyEditorSelection() {
+  const selected = editorMenu.value?.selectionText || getEditorSelectionText();
+  if (!selected) return;
+  closeEditorMenu();
+  try { await navigator.clipboard.writeText(selected); } catch (e) { focusEditor(); document.execCommand("copy"); }
+}
+
+async function cutEditorSelection() {
+  const selected = editorMenu.value?.selectionText || getEditorSelectionText();
+  if (!selected) return;
+  closeEditorMenu();
+  try { await navigator.clipboard.writeText(selected); } catch (e) { /* ignore */ }
+  replaceEditorSelection("");
+}
+
+async function pasteIntoEditor() {
+  closeEditorMenu();
+  focusEditor();
+  try {
+    const text = await navigator.clipboard.readText();
+    replaceEditorSelection(text);
+  } catch (e) {
+    document.execCommand("paste");
+  }
+}
+
+function selectAllEditorText() {
+  closeEditorMenu();
+  if (isMarkdown.value && editor?.cm && typeof editor.cm.execCommand === "function") {
+    editor.cm.execCommand("selectAll");
+    editor.cm.focus();
+    return;
+  }
+  const textarea = textEl.value;
+  if (!textarea) return;
+  textarea.focus();
+  textarea.select();
+}
 
 function toggleAiActionFavorite(action: any) {
   const store = (window as any).transferGenieVue?.store;
@@ -422,9 +605,12 @@ function openAiActionMenu(event: MouseEvent) {
   const rect = target.getBoundingClientRect();
   aiMenuPreferSelection.value = false;
   const menuWidth = 132;
-  const x = Math.max(8, Math.min(rect.right - menuWidth, window.innerWidth - menuWidth - 8));
-  const y = Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 8));
-  aiMenu.value = { x, y };
+  const menuHeight = 260;
+  const submenuWidth = 176;
+  const submenuHeight = 320;
+  const { x, y } = clampMenuPosition(rect.right - menuWidth, rect.bottom + 4, menuWidth, menuHeight);
+  aiMenu.value = { x, y, ...getSubmenuPlacement(x, y, menuWidth, submenuWidth, submenuHeight) };
+  adjustFloatingMenuPosition("ai");
 }
 
 function onPreviewInput(event: Event) {
@@ -449,7 +635,30 @@ function shouldSendForEnter(event: KeyboardEvent) {
   return !isCtrlLike && !isAlt && !isShift;
 }
 
+function handleEscapeKeydown(event: KeyboardEvent) {
+  if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) return false;
+  if (document.querySelector(".dialog-overlay, .cw-modal-backdrop")) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  const legacy = (window as any).transferGenieLegacyFullscreen;
+  if (isComposerFullscreen()) {
+    if (legacy && typeof legacy.set === "function") legacy.set(false);
+    else {
+      document.documentElement.classList.remove("composer-fullscreen-active");
+      document.body.classList.remove("composer-fullscreen-active");
+      window.dispatchEvent(new CustomEvent("transfer-genie:composer-fullscreen-change", { detail: { enabled: false } }));
+    }
+    return true;
+  }
+  const appApi = (window as any).transferGenieApi?.app;
+  const tauriInvoke = (window as any).__TAURI__?.core?.invoke || (window as any).__TAURI__?.invoke;
+  if (appApi?.minimizeWindow) appApi.minimizeWindow().catch(() => {});
+  else if (tauriInvoke) tauriInvoke("minimize_window").catch(() => {});
+  return true;
+}
+
 function handleEditorKeydown(event: KeyboardEvent) {
+  if (handleEscapeKeydown(event)) return;
   if (!shouldSendForEnter(event)) return;
   event.preventDefault();
   event.stopPropagation();
@@ -538,9 +747,15 @@ onMounted(() => {
       refreshMarkdownLayout(fullscreen);
     });
   };
+  visibilityListener = (event: Event) => {
+    const custom = event as CustomEvent<{ visible?: boolean }>;
+    if (custom?.detail?.visible === false) return;
+    window.requestAnimationFrame(() => refreshMarkdownLayout());
+  };
   resizeListener = () => refreshMarkdownLayout();
   window.addEventListener("transfer-genie:send-hotkey-change", sendHotkeyListener as EventListener);
   window.addEventListener("transfer-genie:composer-fullscreen-change", fullscreenListener as EventListener);
+  window.addEventListener("transfer-genie:composer-visibility-change", visibilityListener as EventListener);
   window.addEventListener("resize", resizeListener);
 });
 watch(() => props.isActive, (active) => { if (active) registerFocus(); });
@@ -564,6 +779,7 @@ onBeforeUnmount(() => {
   destroyMarkdown();
   if (sendHotkeyListener) window.removeEventListener("transfer-genie:send-hotkey-change", sendHotkeyListener as EventListener);
   if (fullscreenListener) window.removeEventListener("transfer-genie:composer-fullscreen-change", fullscreenListener as EventListener);
+  if (visibilityListener) window.removeEventListener("transfer-genie:composer-visibility-change", visibilityListener as EventListener);
   if (resizeListener) window.removeEventListener("resize", resizeListener);
   const bridge = (window as any).transferGenieComposer;
   if (bridge && props.isActive) { bridge._focusActive = null; bridge._clearActive = null; }
@@ -604,13 +820,13 @@ function setFormat(format: string) {
       @contextmenu="onEditorContextMenu"
     ></textarea>
     <div v-if="aiMenu" class="cw-ai-menu-backdrop" @click="closeAiMenu" @contextmenu.prevent="closeAiMenu"></div>
-    <div v-if="aiMenu" class="cw-ai-menu" :style="{ left: aiMenu.x + 'px', top: aiMenu.y + 'px' }" @contextmenu.prevent>
+    <div v-if="aiMenu" ref="aiMenuEl" class="cw-ai-menu" :style="{ left: aiMenu.x + 'px', top: aiMenu.y + 'px' }" @contextmenu.prevent>
       <div v-if="favoriteAiActions.length" class="cw-ai-menu-group cw-ai-menu-favorite-group">
         <button type="button" class="cw-ai-menu-category-item">
           <span>收藏</span>
           <span class="cw-ai-menu-arrow" aria-hidden="true"></span>
         </button>
-        <div class="cw-ai-submenu">
+        <div class="cw-ai-submenu" :class="{ 'is-left': aiMenu.submenuSide === 'left', 'is-up': aiMenu.submenuAlign === 'up' }">
           <div v-for="action in favoriteAiActions" :key="action.id" class="cw-ai-action-row">
             <button type="button" class="cw-ai-menu-item" @click="runAiAction(action.id, aiMenuPreferSelection)">
               <span>{{ action.name || action.id }}</span>
@@ -624,7 +840,7 @@ function setFormat(format: string) {
           <span>{{ group.category }}</span>
           <span class="cw-ai-menu-arrow" aria-hidden="true"></span>
         </button>
-        <div class="cw-ai-submenu">
+        <div class="cw-ai-submenu" :class="{ 'is-left': aiMenu.submenuSide === 'left', 'is-up': aiMenu.submenuAlign === 'up' }">
           <div v-for="action in group.actions" :key="action.id" class="cw-ai-action-row">
             <button type="button" class="cw-ai-menu-item" @click="runAiAction(action.id, aiMenuPreferSelection)">
               <span>{{ action.name || action.id }}</span>
@@ -632,6 +848,60 @@ function setFormat(format: string) {
             <button type="button" class="cw-ai-favorite-button" :class="{ 'is-active': action.favorite }" :title="action.favorite ? '取消收藏' : '收藏'" @click.stop="toggleAiActionFavorite(action)"><span aria-hidden="true">★</span></button>
           </div>
         </div>
+      </div>
+    </div>
+    <div v-if="editorMenu" class="cw-ai-menu-backdrop" @click="closeEditorMenu" @contextmenu.prevent="closeEditorMenu"></div>
+    <div v-if="editorMenu" ref="editorMenuEl" class="cw-editor-menu" :style="{ left: editorMenu.x + 'px', top: editorMenu.y + 'px' }" @contextmenu.prevent>
+      <button type="button" class="cw-editor-menu-item" :disabled="!editorMenu.selectionText" @click="copyEditorSelection">复制</button>
+      <button type="button" class="cw-editor-menu-item" :disabled="!editorMenu.selectionText" @click="cutEditorSelection">剪切</button>
+      <button type="button" class="cw-editor-menu-item" @click="pasteIntoEditor">粘贴</button>
+      <button type="button" class="cw-editor-menu-item" @click="selectAllEditorText">全选</button>
+      <div class="cw-editor-menu-divider"></div>
+      <div class="cw-editor-menu-group" @mouseenter="openEditorAiMenu">
+        <button type="button" class="cw-editor-menu-item cw-editor-menu-sub-trigger" :disabled="!editorMenu.selectionText.trim()">
+          <span>AI</span>
+          <span class="cw-ai-menu-arrow" aria-hidden="true"></span>
+        </button>
+      </div>
+    </div>
+    <div
+      v-if="editorAiMenu"
+      ref="editorAiMenuEl"
+      class="cw-ai-submenu cw-editor-ai-submenu cw-editor-ai-menu-floating"
+      :style="{ left: editorAiMenu.x + 'px', top: editorAiMenu.y + 'px' }"
+      @contextmenu.prevent
+    >
+      <div v-if="favoriteAiActions.length" class="cw-ai-menu-group cw-ai-menu-favorite-group" @mouseenter="openEditorAiActionMenu($event, favoriteAiActions, true)">
+        <button type="button" class="cw-ai-menu-category-item">
+          <span>收藏</span>
+          <span class="cw-ai-menu-arrow" aria-hidden="true"></span>
+        </button>
+      </div>
+      <div v-for="group in groupedAiActions" :key="'editor-' + group.category" class="cw-ai-menu-group" @mouseenter="openEditorAiActionMenu($event, group.actions, false)">
+        <button type="button" class="cw-ai-menu-category-item">
+          <span>{{ group.category }}</span>
+          <span class="cw-ai-menu-arrow" aria-hidden="true"></span>
+        </button>
+      </div>
+    </div>
+    <div
+      v-if="editorAiActionMenu"
+      ref="editorAiActionMenuEl"
+      class="cw-ai-submenu cw-editor-ai-action-menu"
+      :style="{ left: editorAiActionMenu.x + 'px', top: editorAiActionMenu.y + 'px' }"
+      @contextmenu.prevent
+    >
+      <div v-for="action in editorAiActionMenu.actions" :key="'editor-action-' + action.id" class="cw-ai-action-row">
+        <button type="button" class="cw-ai-menu-item" @click="runAiAction(action.id, true)">
+          <span>{{ action.name || action.id }}</span>
+        </button>
+        <button
+          type="button"
+          class="cw-ai-favorite-button"
+          :class="{ 'is-active': action.favorite }"
+          :title="action.favorite ? '取消收藏' : '收藏'"
+          @click.stop="toggleAiActionFavorite(action)"
+        ><span aria-hidden="true">★</span></button>
       </div>
     </div>
     <div v-if="aiPromptDialogOpen" class="cw-modal-backdrop" @click.self="closeAiPromptDialog">

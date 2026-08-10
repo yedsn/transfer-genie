@@ -73,11 +73,9 @@
           <home-page-shell inline-template>
           <section class="feed" data-vue-page="home">
             <div class="feed-toolbar">
-              <div class="device-name-row">
-                <span id="device-name" class="device-name" title="当前发送者">TransferGenie（加载中）</span>
-              </div>
               <div class="feed-toolbar-left">
                 <div class="endpoint-switcher">
+                  <span id="device-name" class="device-name" title="当前发送者">T</span>
                   <label for="active-endpoint" class="visually-hidden">当前 WebDAV</label>
                   <select id="active-endpoint" class="endpoint-select"></select>
                 </div>
@@ -102,6 +100,14 @@
                  <span class="refresh-spinner" aria-hidden="true"></span>
                </button>
                <button id="toggle-selection" class="button ghost small" type="button">选择</button>
+                <button id="layout-toggle" class="button ghost small layout-toggle" type="button" title="隐藏编辑" aria-label="隐藏编辑" aria-pressed="false">
+                  <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <rect class="layout-icon-frame" x="4" y="4" width="16" height="16" rx="2"></rect>
+                    <rect class="layout-icon-panel-fill" x="4" y="14" width="16" height="6" rx="0 0 2 2"></rect>
+                    <path class="layout-icon-divider" d="M4 14h16"></path>
+                  </svg>
+                  <span id="layout-toggle-label">隐藏编辑</span>
+                </button>
               </div>
             </div>
             <section id="download-task-panel-legacy" class="download-task-panel" hidden>
