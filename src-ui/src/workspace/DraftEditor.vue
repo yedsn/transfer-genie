@@ -268,10 +268,7 @@ function openAiPromptDialog() {
   aiError.value = "";
   aiPromptSaveError.value = "";
   if (!canRunAi.value || aiBusy.value) return;
-  if (!aiPromptText.value.trim()) {
-    const action = aiActions.value.find((item: any) => item.id === defaultAiActionId()) || aiActions.value[0];
-    aiPromptText.value = String(action?.user_prompt || action?.userPrompt || "");
-  }
+  aiPromptText.value = "";
   aiPromptSaveName.value = "";
   aiPromptSaveCategory.value = aiPromptCategories.value[0] || "自定义";
   aiPromptLibraryOpen.value = false;
