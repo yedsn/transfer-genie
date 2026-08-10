@@ -449,6 +449,34 @@
   border-color: rgba(107, 140, 255, 0.62);
 }
 
+.cw-ai-prompt-button {
+  width: 30px;
+  height: 30px;
+  padding: 4px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cw-ai-prompt-button img {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  display: block;
+  filter: invert(54%) sepia(95%) saturate(1391%) hue-rotate(350deg) brightness(96%) contrast(94%);
+}
+
+.cw-ai-prompt-button:hover:not(:disabled),
+.cw-ai-prompt-button:focus-visible {
+  outline: none;
+}
+
+.cw-ai-prompt-button:disabled { opacity: 0.4; cursor: not-allowed; }
+
 .cw-ai-error {
   min-width: 0;
   font-size: 12px;
@@ -609,6 +637,236 @@
 
 .cw-ai-preview-title {
   margin-bottom: 10px;
+}
+
+.cw-ai-prompt-dialog {
+  width: min(620px, calc(100vw - 36px));
+  max-width: 620px;
+  padding: 12px;
+  border-color: rgba(15, 23, 42, 0.1);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 18px 48px rgba(15, 23, 42, 0.18);
+}
+
+.cw-ai-prompt-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  padding: 0 2px 0 4px;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 24px;
+  font-weight: 700;
+}
+
+.cw-ai-prompt-close {
+  width: 26px;
+  height: 26px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.cw-ai-prompt-close svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.cw-ai-prompt-close:hover { border-color: var(--border); background: var(--panel-soft); color: var(--ink); }
+
+.cw-ai-prompt-shell {
+  display: grid;
+  gap: 8px;
+}
+
+.cw-ai-prompt-composer {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 8px;
+  background: linear-gradient(180deg, #fff 0%, #fbfcff 100%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.86);
+  overflow: hidden;
+}
+
+.cw-ai-prompt-composer:focus-within {
+  border-color: rgba(107, 140, 255, 0.72);
+  box-shadow: 0 0 0 3px rgba(107, 140, 255, 0.12);
+}
+
+.cw-ai-prompt-input {
+  width: 100%;
+  min-height: 126px;
+  max-height: min(260px, 45vh);
+  box-sizing: border-box;
+  resize: vertical;
+  border: none;
+  padding: 12px;
+  color: var(--ink);
+  background: transparent;
+  font: 13px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  outline: none;
+}
+
+.cw-ai-prompt-input:focus { box-shadow: none; }
+
+.cw-ai-prompt-action-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.cw-ai-prompt-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.cw-ai-prompt-tool {
+  width: 28px;
+  height: 26px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.82);
+  color: rgba(44, 51, 68, 0.74);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.cw-ai-prompt-tool svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.cw-ai-prompt-tool:hover {
+  border-color: rgba(107, 140, 255, 0.28);
+  background: rgba(107, 140, 255, 0.08);
+  color: var(--accent-strong);
+}
+
+.cw-ai-prompt-run {
+  min-width: 64px;
+  height: 30px;
+  padding: 5px 14px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.cw-ai-prompt-run svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.cw-ai-prompt-run:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.cw-ai-prompt-library {
+  margin-top: 9px;
+  max-height: 214px;
+  overflow: auto;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 8px;
+  padding: 8px;
+  background: #f7f9ff;
+}
+
+.cw-ai-prompt-library-group + .cw-ai-prompt-library-group { margin-top: 8px; }
+
+.cw-ai-prompt-library-title {
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 700;
+}
+
+.cw-ai-prompt-chip {
+  margin: 0 5px 6px 0;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--ink);
+  cursor: pointer;
+  padding: 5px 9px;
+  font-size: 12px;
+  line-height: 16px;
+  max-width: 100%;
+}
+
+.cw-ai-prompt-chip:hover { border-color: rgba(107, 140, 255, 0.42); color: var(--accent-strong); }
+
+.cw-ai-prompt-save {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+  margin-top: 9px;
+  padding: 10px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 8px;
+  background: #fbfcff;
+}
+
+.cw-ai-prompt-save label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.cw-ai-prompt-save input {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 8px;
+  color: var(--ink);
+  background: #fff;
+  font: 13px/18px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.cw-ai-prompt-save-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.cw-ai-prompt-error {
+  margin-top: 8px;
+  color: #b84545;
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .cw-ai-loading-backdrop {

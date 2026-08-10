@@ -327,6 +327,47 @@ function makeCustomAiAction() {
   };
 }
 
+async function saveComposerAiPrompt(payload = {}) {
+  const prompt = String(payload.userPrompt || payload.user_prompt || '').trim();
+  const name = String(payload.name || '').trim();
+  const category = String(payload.category || '').trim();
+  if (!prompt) throw new Error('请先输入提示词');
+  if (!name) throw new Error('请填写提示词名称');
+  if (!category) throw new Error('请填写提示词类型');
+  const actions = normalizeAiActions(currentSettingsFormState.aiActions).map((action) => ({ ...action }));
+  const usedIds = new Set(actions.map((action) => action.id));
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'prompt';
+  let id = `custom-${slug}`;
+  let index = 2;
+  while (usedIds.has(id)) {
+    id = `custom-${slug}-${index}`;
+    index += 1;
+  }
+  const action = {
+    id,
+    name,
+    category,
+    builtin: false,
+    favorite: false,
+    enabled: true,
+    system_prompt: String(payload.systemPrompt || payload.system_prompt || '你是一个可靠的中文内容处理助手。').trim(),
+    user_prompt: prompt,
+    output_mode: String(payload.outputMode || payload.output_mode || 'preview_replace'),
+  };
+  actions.push(action);
+  currentSettingsFormState = {
+    ...currentSettingsFormState,
+    aiActions: actions,
+    activeAiActionCategory: category,
+  };
+  syncVueSettingsForm(currentSettingsFormState);
+  await saveSettings({ silent: true });
+  return action;
+}
+
 function addAiAction() {
   const actions = normalizeAiActions(currentSettingsFormState.aiActions).map((action) => ({ ...action }));
   const action = makeCustomAiAction();
@@ -10233,6 +10274,7 @@ vueBridge?.setActions?.({
   addAiAction: () => {
     addAiAction();
   },
+  saveComposerAiPrompt: (payload) => saveComposerAiPrompt(payload),
   removeAiAction: (index) => {
     removeAiAction(index);
   },

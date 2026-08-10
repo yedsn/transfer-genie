@@ -13,6 +13,14 @@ const aiError = ref("");
 const aiMenu = ref<{ x: number; y: number } | null>(null);
 const aiMenuPreferSelection = ref(false);
 const aiLoadingReasoning = ref<HTMLElement | null>(null);
+const aiPromptDialogOpen = ref(false);
+const aiPromptText = ref("");
+const aiPromptLibraryOpen = ref(false);
+const aiPromptSaveOpen = ref(false);
+const aiPromptSaveName = ref("");
+const aiPromptSaveCategory = ref("自定义");
+const aiPromptSaveBusy = ref(false);
+const aiPromptSaveError = ref("");
 let activeAiRequestId = "";
 const aiPreview = ref<{
   title: string;
@@ -127,6 +135,8 @@ const groupedAiActions = computed(() => {
 
 const favoriteAiActions = computed(() => aiActions.value.filter((action: any) => !!action.favorite));
 
+const aiPromptCategories = computed(() => groupedAiActions.value.map((group) => group.category));
+
 const canRunAi = computed(() => {
   const settings = aiSettings.value;
   return !!settings.aiEnabled && !!String(settings.aiBaseUrl || "").trim() && !!String(settings.aiApiKey || "").trim() && !!String(settings.aiModel || "").trim() && aiActions.value.length > 0;
@@ -171,7 +181,7 @@ function currentAiInput(preferSelection = false) {
   return isMarkdown.value ? getMarkdownSelection(preferSelection) : getPlainSelection();
 }
 
-async function runAiAction(actionId?: string, preferSelection = false) {
+async function runAiAction(actionId?: string, preferSelection = false, temporaryPrompt?: any) {
   aiMenu.value = null;
   aiError.value = "";
   if (!canRunAi.value) {
@@ -197,11 +207,12 @@ async function runAiAction(actionId?: string, preferSelection = false) {
   let unlisten: any = null;
   try {
     const api = (window as any).transferGenieApi;
-    const payload = {
-      actionId: actionId || defaultAiActionId(),
+    const payload: any = {
       text: input.text,
       format: props.draft.format,
     };
+    if (temporaryPrompt) payload.temporaryPrompt = temporaryPrompt;
+    else payload.actionId = actionId || defaultAiActionId();
     const tauriInvoke = (window as any).__TAURI__?.core?.invoke || (window as any).__TAURI__?.invoke;
     const streamInvoke = api?.ai?.processTextStream
       ? (requestId: string, request: any) => api.ai.processTextStream(requestId, request)
@@ -236,6 +247,103 @@ async function runAiAction(actionId?: string, preferSelection = false) {
     }
     aiBusy.value = false;
   }
+}
+
+function openAiPromptDialog() {
+  onActivated();
+  aiError.value = "";
+  aiPromptSaveError.value = "";
+  if (!canRunAi.value || aiBusy.value) return;
+  if (!aiPromptText.value.trim()) {
+    const action = aiActions.value.find((item: any) => item.id === defaultAiActionId()) || aiActions.value[0];
+    aiPromptText.value = String(action?.user_prompt || action?.userPrompt || "");
+  }
+  aiPromptSaveName.value = "";
+  aiPromptSaveCategory.value = aiPromptCategories.value[0] || "自定义";
+  aiPromptLibraryOpen.value = false;
+  aiPromptSaveOpen.value = false;
+  aiPromptDialogOpen.value = true;
+}
+
+function closeAiPromptDialog() {
+  if (aiPromptSaveBusy.value) return;
+  aiPromptDialogOpen.value = false;
+  aiPromptLibraryOpen.value = false;
+  aiPromptSaveOpen.value = false;
+  aiPromptSaveError.value = "";
+}
+
+function toggleAiPromptLibrary() {
+  aiPromptSaveOpen.value = false;
+  aiPromptSaveError.value = "";
+  aiPromptLibraryOpen.value = !aiPromptLibraryOpen.value;
+}
+
+function selectPromptLibraryAction(action: any) {
+  aiPromptText.value = String(action?.user_prompt || action?.userPrompt || "");
+  aiPromptSaveName.value = String(action?.builtin ? "" : action?.name || "").trim();
+  aiPromptSaveCategory.value = String(action?.category || aiPromptSaveCategory.value || "自定义").trim() || "自定义";
+  aiPromptLibraryOpen.value = false;
+}
+
+function openAiPromptSave() {
+  aiPromptLibraryOpen.value = false;
+  aiPromptSaveError.value = "";
+  if (!aiPromptText.value.trim()) {
+    aiPromptSaveError.value = "请先输入提示词。";
+    return;
+  }
+  aiPromptSaveOpen.value = true;
+}
+
+async function saveAiPromptToLibrary() {
+  aiPromptSaveError.value = "";
+  const prompt = aiPromptText.value.trim();
+  const name = aiPromptSaveName.value.trim();
+  const category = aiPromptSaveCategory.value.trim();
+  if (!prompt) { aiPromptSaveError.value = "请先输入提示词。"; return; }
+  if (!name) { aiPromptSaveError.value = "请填写提示词名称。"; return; }
+  if (!category) { aiPromptSaveError.value = "请填写提示词类型。"; return; }
+  aiPromptSaveBusy.value = true;
+  try {
+    const action = await (window as any).transferGenieVue?.callAction?.("saveComposerAiPrompt", {
+      name,
+      category,
+      userPrompt: prompt,
+      systemPrompt: "你是一个可靠的中文内容处理助手。",
+      outputMode: "preview_replace",
+    });
+    aiPromptSaveOpen.value = false;
+    if (action?.name) aiPromptSaveName.value = action.name;
+  } catch (error: any) {
+    aiPromptSaveError.value = String(error?.message || error || "保存提示词失败");
+  } finally {
+    aiPromptSaveBusy.value = false;
+  }
+}
+
+async function runAiPromptDialog() {
+  const prompt = aiPromptText.value.trim();
+  if (!prompt) {
+    aiError.value = "请先输入提示词。";
+    return;
+  }
+  aiPromptDialogOpen.value = false;
+  await runAiAction(undefined, false, {
+    name: "分析结果",
+    category: "临时",
+    systemPrompt: "你是一个可靠的中文内容处理助手。请严格按照用户要求处理内容，只输出最终处理结果，不输出思路、步骤、解释、分析过程或任何过程性文字。",
+    userPrompt: `${prompt}\n\n请根据以上要求处理下面的内容。只输出处理后的最终结果，不要输出处理思路、步骤、解释或分析过程。\n\n{{text}}`,
+    outputMode: "preview_replace",
+  });
+}
+
+function handleAiPromptKeydown(event: KeyboardEvent) {
+  if (!shouldSendForEnter(event)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (aiBusy.value || !aiPromptText.value.trim()) return;
+  runAiPromptDialog();
 }
 
 function applyAiPreview(mode?: "replace" | "insert") {
@@ -451,6 +559,9 @@ function setFormat(format: string) {
 <template>
   <div class="cw-editor">
     <div class="cw-ai-bar">
+      <button class="cw-ai-prompt-button" type="button" :disabled="aiBusy || !canRunAi" @click="openAiPromptDialog" title="输入提示词" aria-label="输入提示词">
+        <img src="/icons/ai.svg" alt="" aria-hidden="true" />
+      </button>
       <div class="cw-ai-split-button">
         <button class="cw-btn cw-ai-main-button" type="button" :disabled="aiBusy || !canRunAi" @click="runAiAction(defaultAiActionId(), false)" title="使用默认提示词润色">
           <span>{{ aiBusy ? '处理中...' : '一键润色' }}</span>
@@ -503,6 +614,67 @@ function setFormat(format: string) {
             <button type="button" class="cw-ai-favorite-button" :class="{ 'is-active': action.favorite }" :title="action.favorite ? '取消收藏' : '收藏'" @click.stop="toggleAiActionFavorite(action)"><span aria-hidden="true">★</span></button>
           </div>
         </div>
+      </div>
+    </div>
+    <div v-if="aiPromptDialogOpen" class="cw-modal-backdrop" @click.self="closeAiPromptDialog">
+      <div class="cw-modal cw-ai-prompt-dialog">
+        <div class="cw-modal-title cw-ai-prompt-title">
+          <span>AI 提示词</span>
+          <button class="cw-ai-prompt-close" type="button" @click="closeAiPromptDialog" aria-label="关闭">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
+          </button>
+        </div>
+        <div class="cw-ai-prompt-shell">
+          <div class="cw-ai-prompt-composer">
+            <textarea
+              class="cw-ai-prompt-input"
+              v-model="aiPromptText"
+              placeholder="输入提示词，告诉 AI 如何处理当前内容..."
+              spellcheck="false"
+              @keydown="handleAiPromptKeydown"
+            ></textarea>
+          </div>
+          <div class="cw-ai-prompt-action-row">
+            <div class="cw-ai-prompt-tools">
+              <button class="cw-ai-prompt-tool" type="button" @click="toggleAiPromptLibrary" title="提示词库" aria-label="提示词库">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5V5.25A2.25 2.25 0 0 1 6.25 3H20v15H6.25A2.25 2.25 0 0 0 4 20.25" /><path d="M8 7h8M8 11h6" /></svg>
+              </button>
+              <button class="cw-ai-prompt-tool" type="button" @click="openAiPromptSave" title="保存到提示词库" aria-label="保存到提示词库">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z" /><path d="M7 3v6h8M7 21v-7h10v7" /></svg>
+              </button>
+            </div>
+            <button class="cw-btn cw-btn-primary cw-ai-prompt-run" type="button" :disabled="aiBusy || !aiPromptText.trim()" @click="runAiPromptDialog">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.7 4.6L18 9.3l-4.3 1.7L12 16l-1.7-5L6 9.3l4.3-1.7L12 3Z" /><path d="M19 14l.8 2.2L22 17l-2.2.8L19 20l-.8-2.2L16 17l2.2-.8L19 14Z" /></svg>
+              <span>分析</span>
+            </button>
+          </div>
+        </div>
+        <div v-if="aiPromptLibraryOpen" class="cw-ai-prompt-library">
+          <div v-for="group in groupedAiActions" :key="group.category" class="cw-ai-prompt-library-group">
+            <div class="cw-ai-prompt-library-title">{{ group.category }}</div>
+            <button v-for="action in group.actions" :key="action.id" class="cw-ai-prompt-chip" type="button" @click="selectPromptLibraryAction(action)">
+              {{ action.name || action.id }}
+            </button>
+          </div>
+        </div>
+        <div v-if="aiPromptSaveOpen" class="cw-ai-prompt-save">
+          <label>
+            <span>名称</span>
+            <input v-model="aiPromptSaveName" type="text" placeholder="提示词名称" />
+          </label>
+          <label>
+            <span>类型</span>
+            <input v-model="aiPromptSaveCategory" type="text" list="cw-ai-prompt-categories" placeholder="提示词类型" />
+          </label>
+          <datalist id="cw-ai-prompt-categories">
+            <option v-for="category in aiPromptCategories" :key="category" :value="category"></option>
+          </datalist>
+          <div class="cw-ai-prompt-save-actions">
+            <button class="cw-btn" type="button" :disabled="aiPromptSaveBusy" @click="aiPromptSaveOpen = false">取消保存</button>
+            <button class="cw-btn cw-btn-primary" type="button" :disabled="aiPromptSaveBusy" @click="saveAiPromptToLibrary">{{ aiPromptSaveBusy ? '保存中...' : '确认保存' }}</button>
+          </div>
+        </div>
+        <div v-if="aiPromptSaveError" class="cw-ai-prompt-error">{{ aiPromptSaveError }}</div>
       </div>
     </div>
     <div v-if="aiBusy" class="cw-ai-loading-backdrop">

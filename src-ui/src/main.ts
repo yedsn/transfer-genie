@@ -365,6 +365,7 @@ const app = createApp({
     updateAiActionField: (...args: any[]) => callAction("updateAiActionField", ...args),
     updateAiActionFavorite: (...args: any[]) => callAction("updateAiActionFavorite", ...args),
     addAiAction: (...args: any[]) => callAction("addAiAction", ...args),
+    saveComposerAiPrompt: (...args: any[]) => callAction("saveComposerAiPrompt", ...args),
     removeAiAction: (...args: any[]) => callAction("removeAiAction", ...args),
     selectAiActionCategory: (...args: any[]) => callAction("selectAiActionCategory", ...args),
 

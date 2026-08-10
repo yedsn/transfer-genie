@@ -406,10 +406,27 @@ struct AppUpdateEventPayload {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AiTextProcessRequest {
-    action_id: String,
+    #[serde(default)]
+    action_id: Option<String>,
     text: String,
     #[serde(default)]
     format: Option<String>,
+    #[serde(default)]
+    temporary_prompt: Option<AiTemporaryPrompt>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiTemporaryPrompt {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    system_prompt: Option<String>,
+    user_prompt: String,
+    #[serde(default)]
+    output_mode: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1499,10 +1516,7 @@ async fn process_text_with_ai_stream(
     }
     let mut ai_settings = settings.ai.clone();
     normalize_ai_settings(&mut ai_settings)?;
-    let action = find_ai_action(&ai_settings, &request.action_id)?.clone();
-    if !action.enabled {
-        return Err("该 AI 动作已禁用".to_string());
-    }
+    let action = resolve_ai_request_action(&ai_settings, &request)?;
     let format = normalize_draft_format(request.format.as_deref());
     emit_ai_stream_event(
         &app,
@@ -5842,6 +5856,64 @@ fn find_ai_action<'a>(
         .ok_or_else(|| "AI 动作不存在".to_string())
 }
 
+fn resolve_ai_request_action(
+    settings: &AiSettings,
+    request: &AiTextProcessRequest,
+) -> Result<AiTextAction, String> {
+    if let Some(prompt) = &request.temporary_prompt {
+        let user_prompt = prompt.user_prompt.trim();
+        if user_prompt.is_empty() {
+            return Err("请先输入提示词".to_string());
+        }
+        let output_mode = prompt
+            .output_mode
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("preview_replace");
+        return Ok(AiTextAction {
+            id: "temporary-prompt".to_string(),
+            name: prompt
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("临时提示词")
+                .to_string(),
+            category: prompt
+                .category
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("临时")
+                .to_string(),
+            builtin: false,
+            favorite: false,
+            enabled: true,
+            system_prompt: prompt
+                .system_prompt
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string(),
+            user_prompt: user_prompt.to_string(),
+            output_mode: output_mode.to_string(),
+        });
+    }
+
+    let action_id = request
+        .action_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "AI 动作不存在".to_string())?;
+    let action = find_ai_action(settings, action_id)?.clone();
+    if !action.enabled {
+        return Err("该 AI 动作已禁用".to_string());
+    }
+    Ok(action)
+}
+
 fn validate_ai_provider(provider: &AiProviderSettings) -> Result<(), String> {
     if provider.base_url.trim().is_empty() {
         return Err("请先填写 AI Provider Base URL".to_string());
@@ -6137,10 +6209,7 @@ async fn process_text_with_ai_impl(
     }
     let mut ai_settings = settings.ai.clone();
     normalize_ai_settings(&mut ai_settings)?;
-    let action = find_ai_action(&ai_settings, &request.action_id)?.clone();
-    if !action.enabled {
-        return Err("该 AI 动作已禁用".to_string());
-    }
+    let action = resolve_ai_request_action(&ai_settings, &request)?;
     let format = normalize_draft_format(request.format.as_deref());
     let raw_output_text = match ai_settings.provider.kind.as_str() {
         "openai_compatible" => {
@@ -9919,9 +9988,10 @@ mod tests {
     async fn process_text_with_ai_rejects_disabled_ai() {
         let settings = test_settings();
         let request = AiTextProcessRequest {
-            action_id: "polish".to_string(),
+            action_id: Some("polish".to_string()),
             text: "需要润色".to_string(),
             format: Some("text".to_string()),
+            temporary_prompt: None,
         };
 
         let error = process_text_with_ai_impl(&Client::new(), &settings, request)
@@ -9936,9 +10006,10 @@ mod tests {
         let mut settings = test_settings();
         settings.ai.enabled = true;
         let request = AiTextProcessRequest {
-            action_id: "polish".to_string(),
+            action_id: Some("polish".to_string()),
             text: "需要润色".to_string(),
             format: Some("markdown".to_string()),
+            temporary_prompt: None,
         };
 
         let error = process_text_with_ai_impl(&Client::new(), &settings, request)
@@ -9946,6 +10017,58 @@ mod tests {
             .expect_err("incomplete provider should fail");
 
         assert!(error.contains("Base URL"));
+    }
+
+    #[test]
+    fn resolve_ai_request_action_uses_temporary_prompt_without_mutating_settings() {
+        let settings = test_settings();
+        let original_len = settings.ai.actions.len();
+        let request = AiTextProcessRequest {
+            action_id: None,
+            text: "需要处理".to_string(),
+            format: Some("text".to_string()),
+            temporary_prompt: Some(AiTemporaryPrompt {
+                name: Some(" 即兴处理 ".to_string()),
+                category: Some(" 临时 ".to_string()),
+                system_prompt: Some(" 你是助手 ".to_string()),
+                user_prompt: " 请处理：{{text}} ".to_string(),
+                output_mode: None,
+            }),
+        };
+
+        let action = resolve_ai_request_action(&settings.ai, &request).expect("temporary prompt");
+
+        assert_eq!(action.id, "temporary-prompt");
+        assert_eq!(action.name, "即兴处理");
+        assert_eq!(action.category, "临时");
+        assert_eq!(action.system_prompt, "你是助手");
+        assert_eq!(action.user_prompt, "请处理：{{text}}");
+        assert_eq!(action.output_mode, "preview_replace");
+        assert_eq!(settings.ai.actions.len(), original_len);
+    }
+
+    #[test]
+    fn resolve_ai_request_action_rejects_empty_temporary_prompt() {
+        let settings = test_settings();
+        let request = AiTextProcessRequest {
+            action_id: None,
+            text: "需要处理".to_string(),
+            format: Some("text".to_string()),
+            temporary_prompt: Some(AiTemporaryPrompt {
+                name: None,
+                category: None,
+                system_prompt: None,
+                user_prompt: "   ".to_string(),
+                output_mode: None,
+            }),
+        };
+
+        let error = match resolve_ai_request_action(&settings.ai, &request) {
+            Ok(_) => panic!("empty temporary prompt should fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("提示词"));
     }
 
     #[test]
