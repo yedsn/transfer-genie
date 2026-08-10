@@ -1362,6 +1362,10 @@ function normalizeSendHotkey(value) {
   return SEND_HOTKEY.ENTER;
 }
 
+function sendHotkeyLabel() {
+  return sendHotkey === SEND_HOTKEY.CTRL_ENTER ? 'Ctrl+Enter' : 'Enter';
+}
+
 function updateComposerHint() {
   if (!textInput) return;
   if (sendHotkey === SEND_HOTKEY.CTRL_ENTER) {
@@ -1369,11 +1373,15 @@ function updateComposerHint() {
   } else {
     textInput.placeholder = '输入消息...（Enter 发送，Ctrl+Enter 换行）';
   }
+  if (sendTextButton) {
+    sendTextButton.title = `发送（${sendHotkeyLabel()}）`;
+  }
 }
 
 function setSendHotkey(value) {
   sendHotkey = normalizeSendHotkey(value);
   window.transferGenieSendHotkey = sendHotkey;
+  window.dispatchEvent(new CustomEvent('transfer-genie:send-hotkey-change', { detail: { sendHotkey } }));
   if (sendHotkeyInputs && sendHotkeyInputs.length > 0) {
     sendHotkeyInputs.forEach((input) => {
       input.checked = input.value === sendHotkey;

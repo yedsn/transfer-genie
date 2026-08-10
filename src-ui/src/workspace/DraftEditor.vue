@@ -21,6 +21,7 @@ const aiPromptSaveName = ref("");
 const aiPromptSaveCategory = ref("自定义");
 const aiPromptSaveBusy = ref(false);
 const aiPromptSaveError = ref("");
+const sendHotkeyValue = ref("enter");
 let activeAiRequestId = "";
 const aiPreview = ref<{
   title: string;
@@ -34,6 +35,7 @@ const aiPreview = ref<{
 let editor: any = null;
 let initRetry = 0;
 let fullscreenListener: ((event: Event) => void) | null = null;
+let sendHotkeyListener: ((event: Event) => void) | null = null;
 let resizeListener: (() => void) | null = null;
 
 const MARKDOWN_NORMAL_HEIGHT = "180px";
@@ -81,6 +83,12 @@ async function listenAiStream(requestId: string) {
 
 function isComposerFullscreen() {
   return document.documentElement.classList.contains("composer-fullscreen-active") || document.body.classList.contains("composer-fullscreen-active");
+}
+
+function syncSendHotkey(value?: string) {
+  const bridge = (window as any).transferGenieComposer;
+  const next = value || bridge?.getSendHotkey?.() || (window as any).transferGenieSendHotkey || "enter";
+  sendHotkeyValue.value = next === "ctrl_enter" ? "ctrl_enter" : "enter";
 }
 
 function registerFocus() {
@@ -149,6 +157,12 @@ const aiPreviewRows = computed(() => {
   }, 0);
   return Math.min(14, Math.max(4, visualLines));
 });
+
+const sendHotkeyTitle = computed(() => {
+  return sendHotkeyValue.value === "ctrl_enter" ? "Ctrl+Enter" : "Enter";
+});
+
+const aiPromptRunTitle = computed(() => `分析（${sendHotkeyTitle.value}）`);
 
 function defaultAiActionId() {
   const settings = aiSettings.value;
@@ -515,6 +529,11 @@ function destroyMarkdown() {
 onMounted(() => {
   if (isMarkdown.value) initMarkdown();
   registerFocus();
+  syncSendHotkey();
+  sendHotkeyListener = (event: Event) => {
+    const custom = event as CustomEvent<{ sendHotkey?: string }>;
+    syncSendHotkey(custom.detail?.sendHotkey);
+  };
   fullscreenListener = (event: Event) => {
     const custom = event as CustomEvent<{ enabled?: boolean }>;
     const fullscreen = typeof custom?.detail?.enabled === "boolean" ? custom.detail.enabled : isComposerFullscreen();
@@ -523,6 +542,7 @@ onMounted(() => {
     });
   };
   resizeListener = () => refreshMarkdownLayout();
+  window.addEventListener("transfer-genie:send-hotkey-change", sendHotkeyListener as EventListener);
   window.addEventListener("transfer-genie:composer-fullscreen-change", fullscreenListener as EventListener);
   window.addEventListener("resize", resizeListener);
 });
@@ -545,6 +565,7 @@ watch(() => props.draft.id, () => {
 });
 onBeforeUnmount(() => {
   destroyMarkdown();
+  if (sendHotkeyListener) window.removeEventListener("transfer-genie:send-hotkey-change", sendHotkeyListener as EventListener);
   if (fullscreenListener) window.removeEventListener("transfer-genie:composer-fullscreen-change", fullscreenListener as EventListener);
   if (resizeListener) window.removeEventListener("resize", resizeListener);
   const bridge = (window as any).transferGenieComposer;
@@ -643,7 +664,7 @@ function setFormat(format: string) {
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z" /><path d="M7 3v6h8M7 21v-7h10v7" /></svg>
               </button>
             </div>
-            <button class="cw-btn cw-btn-primary cw-ai-prompt-run" type="button" :disabled="aiBusy || !aiPromptText.trim()" @click="runAiPromptDialog">
+            <button class="cw-btn cw-btn-primary cw-ai-prompt-run" type="button" :disabled="aiBusy || !aiPromptText.trim()" :title="aiPromptRunTitle" @click="runAiPromptDialog">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.7 4.6L18 9.3l-4.3 1.7L12 16l-1.7-5L6 9.3l4.3-1.7L12 3Z" /><path d="M19 14l.8 2.2L22 17l-2.2.8L19 20l-.8-2.2L16 17l2.2-.8L19 14Z" /></svg>
               <span>分析</span>
             </button>
