@@ -420,6 +420,19 @@ function clampMenuPosition(x: number, y: number, width: number, height: number) 
   };
 }
 
+function estimateAiMenuHeight() {
+  const categoryCount = groupedAiActions.value.length + (favoriteAiActions.value.length ? 1 : 0);
+  const favoriteDividerHeight = favoriteAiActions.value.length ? 5 : 0;
+  return Math.min(window.innerHeight - 16, 12 + categoryCount * 30 + favoriteDividerHeight);
+}
+
+function estimateAiSubmenuHeight() {
+  const actionCounts = groupedAiActions.value.map((group) => group.actions.length);
+  if (favoriteAiActions.value.length) actionCounts.push(favoriteAiActions.value.length);
+  const maxActions = Math.max(1, ...actionCounts);
+  return Math.min(window.innerHeight - 16, 12 + maxActions * 30);
+}
+
 function getSubmenuPlacement(x: number, y: number, menuWidth: number, submenuWidth: number, submenuHeight: number) {
   const gap = 8;
   return {
@@ -605,10 +618,12 @@ function openAiActionMenu(event: MouseEvent) {
   const rect = target.getBoundingClientRect();
   aiMenuPreferSelection.value = false;
   const menuWidth = 132;
-  const menuHeight = 260;
+  const menuHeight = estimateAiMenuHeight();
   const submenuWidth = 176;
-  const submenuHeight = 320;
-  const { x, y } = clampMenuPosition(rect.right - menuWidth, rect.bottom + 4, menuWidth, menuHeight);
+  const submenuHeight = estimateAiSubmenuHeight();
+  const openUp = window.innerHeight - rect.bottom < menuHeight + 12 && rect.top > window.innerHeight - rect.bottom;
+  const anchorY = openUp ? rect.top - menuHeight - 4 : rect.bottom + 4;
+  const { x, y } = clampMenuPosition(rect.right - menuWidth, anchorY, menuWidth, menuHeight);
   aiMenu.value = { x, y, ...getSubmenuPlacement(x, y, menuWidth, submenuWidth, submenuHeight) };
   adjustFloatingMenuPosition("ai");
 }

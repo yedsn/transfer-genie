@@ -3083,7 +3083,7 @@ input {
   gap: 6px;
   box-shadow: none;
   backdrop-filter: none;
-  z-index: 20;
+  z-index: 0;
   animation: panel-in 0.45s ease;
 }
 

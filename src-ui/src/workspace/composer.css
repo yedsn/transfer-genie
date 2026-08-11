@@ -497,7 +497,7 @@
   position: fixed;
   z-index: 10021;
   min-width: 132px;
-  max-height: min(320px, calc(100vh - 32px));
+  max-height: calc(100vh - 16px);
   overflow: visible;
   padding: 6px 0;
   background: var(--panel);
@@ -560,7 +560,7 @@
   left: calc(100% - 2px);
   top: -6px;
   min-width: 176px;
-  max-height: min(320px, calc(100vh - 32px));
+  max-height: calc(100vh - 16px);
   overflow: auto;
   padding: 6px 0;
   background: var(--panel);

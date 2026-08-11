@@ -5163,7 +5163,7 @@ async fn backup_webdav(
                 let mut stream = response.stream;
                 // Use std::fs::File (Blocking write) as tokio::fs is not enabled
                 let mut temp_file = std::fs::File::create(&temp_file_path)
-                    .map_err(|e| format!("创���临时文件失败: {}", e))?;
+                    .map_err(|e| format!("创建临时文件失败: {}", e))?;
                 while let Some(chunk) = stream.next().await {
                     let chunk = chunk.map_err(|e| format!("下载流中断: {}", e))?;
                     temp_file
@@ -9842,9 +9842,66 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.category == "影视"));
+        assert!(loaded
+            .ai
+            .actions
+            .iter()
+            .any(|action| action.category == "翻译"));
+        assert!(loaded
+            .ai
+            .actions
+            .iter()
+            .any(|action| action.category == "沟通"));
+        assert!(loaded
+            .ai
+            .actions
+            .iter()
+            .any(|action| action.category == "格式"));
 
         let _ = fs::remove_file(&settings_path);
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn default_ai_actions_include_expanded_prompt_library() {
+        let settings = AiSettings::default();
+        let expected_actions = [
+            ("summarize-points", "总结要点", "通用"),
+            ("extract-todos", "提取待办", "通用"),
+            ("make-plan", "制定执行计划", "通用"),
+            ("translate-to-chinese", "翻译成中文", "翻译"),
+            ("translate-to-english", "翻译成英文", "翻译"),
+            ("translate-keep-format", "保留格式翻译", "翻译"),
+            ("chat-tone", "改成聊天语气", "沟通"),
+            ("email-tone", "改成邮件语气", "沟通"),
+            ("draft-reply", "生成回复", "沟通"),
+            ("soften-tone", "语气更温和", "沟通"),
+            ("one-line-summary", "提炼一句话", "沟通"),
+            ("dev-error-analysis", "分析报错", "开发"),
+            ("dev-commit-message", "生成 Commit Message", "开发"),
+            ("dev-issue", "整理成 Issue", "开发"),
+            ("dev-code-review", "代码审查", "开发"),
+            ("dev-test-points", "生成测试点", "开发"),
+            ("format-markdown", "整理为 Markdown", "格式"),
+            ("format-table", "整理成表格", "格式"),
+            ("format-key-info", "提取关键信息", "格式"),
+            ("format-cleanup", "清理格式", "格式"),
+        ];
+
+        for (id, name, category) in expected_actions {
+            let action = settings
+                .actions
+                .iter()
+                .find(|action| action.id == id)
+                .unwrap_or_else(|| panic!("missing default AI action {id}"));
+
+            assert_eq!(action.name, name);
+            assert_eq!(action.category, category);
+            assert!(action.builtin);
+            assert!(action.enabled);
+            assert_eq!(action.output_mode, "preview_replace");
+            assert!(action.user_prompt.contains("{{text}}"));
+        }
     }
 
     #[test]
