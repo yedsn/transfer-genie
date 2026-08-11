@@ -562,6 +562,29 @@ body {
   margin-bottom: 10px;
 }
 
+.feed-search[hidden] {
+  display: none !important;
+}
+
+.feed-search-close {
+  flex: 0 0 auto;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  width: 14px !important;
+  height: 24px !important;
+  font-size: 20px !important;
+  font-weight: 100 !important;
+  line-height: 0.8;
+  padding: 0 !important;
+  color: var(--muted);
+  overflow: hidden;
+}
+
+.feed-search-close:hover {
+  color: var(--ink);
+}
+
 #search-input {
   width: min(100%, 420px);
   flex: 1 1 420px;
