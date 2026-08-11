@@ -51,6 +51,7 @@ let fullscreenListener: ((event: Event) => void) | null = null;
 let visibilityListener: ((event: Event) => void) | null = null;
 let sendHotkeyListener: ((event: Event) => void) | null = null;
 let resizeListener: (() => void) | null = null;
+let syncingMarkdownFromDraft = false;
 
 const MARKDOWN_NORMAL_HEIGHT = "180px";
 
@@ -120,7 +121,27 @@ function registerFocus() {
         if (isMarkdown.value && editor && typeof editor.setMarkdown === "function") editor.setMarkdown("");
       } catch (e) { /* 纯文本由响应式 :value 自动清空 */ }
     };
+    bridge._setActiveText = (text: string) => {
+      syncMarkdownTextFromDraft(text || "");
+    };
   }
+}
+
+function syncMarkdownTextFromDraft(text: string) {
+  if (!isMarkdown.value || !editor) return;
+  try {
+    const current = editor.cm && typeof editor.cm.getValue === "function"
+      ? editor.cm.getValue()
+      : typeof editor.getMarkdown === "function"
+        ? editor.getMarkdown()
+        : "";
+    if (current !== text && typeof editor.setMarkdown === "function") {
+      syncingMarkdownFromDraft = true;
+      editor.setMarkdown(text);
+      window.setTimeout(() => { syncingMarkdownFromDraft = false; }, 0);
+    }
+    window.requestAnimationFrame(() => refreshMarkdownLayout());
+  } catch (e) { /* ignore */ }
 }
 
 function onActivated() {
@@ -707,11 +728,16 @@ function initMarkdown() {
         return ["bold", "italic", "quote", "|", "h1", "h2", "h3", "|", "list-ul", "list-ol", "|", "link", "code", "code-block", "table", "datetime", "|", "watch", "preview", "clear", "help"];
       },
       onload: function () {
-        try { this.setMarkdown(props.draft.text || ""); } catch (e) { /* ignore */ }
+        try {
+          syncingMarkdownFromDraft = true;
+          this.setMarkdown(props.draft.text || "");
+          window.setTimeout(() => { syncingMarkdownFromDraft = false; }, 0);
+        } catch (e) { syncingMarkdownFromDraft = false; }
         window.requestAnimationFrame(() => refreshMarkdownLayout());
         const cm = this.cm;
         if (cm) {
           cm.on("change", () => {
+            if (syncingMarkdownFromDraft) return;
             try { composerStore.setDraftText(props.draft.id, cm.getValue()); } catch (e) { /* ignore */ }
           });
           cm.on("focus", () => { onActivated(); });
@@ -789,6 +815,9 @@ watch(() => props.draft.id, () => {
     }, 0);
   }
 });
+watch(() => props.draft.text, (text) => {
+  syncMarkdownTextFromDraft(text || "");
+});
 onBeforeUnmount(() => {
   destroyMarkdown();
   if (sendHotkeyListener) window.removeEventListener("transfer-genie:send-hotkey-change", sendHotkeyListener as EventListener);
@@ -796,7 +825,7 @@ onBeforeUnmount(() => {
   if (visibilityListener) window.removeEventListener("transfer-genie:composer-visibility-change", visibilityListener as EventListener);
   if (resizeListener) window.removeEventListener("resize", resizeListener);
   const bridge = (window as any).transferGenieComposer;
-  if (bridge && props.isActive) { bridge._focusActive = null; bridge._clearActive = null; }
+  if (bridge && props.isActive) { bridge._focusActive = null; bridge._clearActive = null; bridge._setActiveText = null; }
 });
 
 function setFormat(format: string) {

@@ -1849,6 +1849,40 @@ function closeSpeechAudioContext(context) {
   } catch (error) { /* ignore */ }
 }
 
+function waitSpeechRetryDelay(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function buildSpeechAudioConstraints(deviceId) {
+  return {
+    audio: {
+      ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+      channelCount: 1,
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
+  };
+}
+
+function isRecoverableSpeechMicError(error) {
+  const name = String(error?.name || '').toLowerCase();
+  const message = String(error?.message || error || '').toLowerCase();
+  if (name.includes('notallowed') || name.includes('security') || message.includes('permission')) return false;
+  if (name.includes('notfound') || name.includes('devicesnotfound')) return false;
+  return true;
+}
+
+function describeSpeechMicError(error) {
+  const name = String(error?.name || '');
+  const message = String(error?.message || error || '未知错误');
+  if (name === 'NotAllowedError' || message.toLowerCase().includes('permission')) return '麦克风权限被拒绝，请在系统或应用权限中允许麦克风访问';
+  if (name === 'NotFoundError' || name === 'DevicesNotFoundError') return '未找到可用麦克风，请检查输入设备连接';
+  if (name === 'NotReadableError' || name === 'TrackStartError') return '麦克风被其他应用占用或暂时不可用，请稍后重试';
+  if (name === 'OverconstrainedError' || name === 'ConstraintNotSatisfiedError') return '指定麦克风不可用，已尝试切换到系统默认麦克风';
+  return message;
+}
+
 function setSpeechState(state) {
   speechState = state || 'idle';
   syncSpeechButtonState();
@@ -2026,6 +2060,16 @@ async function updateSpeechTask(id, patch) {
   }
 }
 
+async function removeSpeechTask(id) {
+  try {
+    await runSpeechTaskStore('readwrite', (store) => store?.delete(id));
+    await renderSpeechTaskHistory();
+    showToast('转录任务已删除', 'success');
+  } catch (error) {
+    showToast(`删除转录任务失败：${error}`, 'error');
+  }
+}
+
 async function pruneSpeechTasks() {
   const tasks = await listSpeechTasks();
   const keepCount = getSpeechTaskRetentionCount();
@@ -2086,6 +2130,28 @@ async function playSpeechTask(id) {
   speechTaskAudioUrl = URL.createObjectURL(new Blob([new Uint8Array(task.audio.bytes)], { type: task.audio.mimeType || 'audio/wav' }));
   const audio = new Audio(speechTaskAudioUrl);
   await audio.play();
+}
+
+async function downloadSpeechTaskAudio(id) {
+  const task = await getSpeechTask(id);
+  if (!task?.audio?.bytes?.length) {
+    showToast('没有可下载的录音', 'error');
+    return;
+  }
+  const created = task.createdAtMs
+    ? new Date(task.createdAtMs).toISOString().replace(/[:.]/g, '-')
+    : Date.now();
+  const filename = `speech-${created}.wav`;
+  const blob = new Blob([new Uint8Array(task.audio.bytes)], { type: task.audio.mimeType || 'audio/wav' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  showToast('音频已开始下载', 'success');
 }
 
 async function retrySpeechTask(id) {
@@ -2149,15 +2215,27 @@ async function renderSpeechTaskHistory() {
     retryButton.textContent = task.status === 'failed' ? '重试' : '重新转录';
     retryButton.disabled = task.status === 'transcribing';
     retryButton.addEventListener('click', () => void retrySpeechTask(task.id));
+    const downloadButton = document.createElement('button');
+    downloadButton.className = 'button ghost small';
+    downloadButton.type = 'button';
+    downloadButton.textContent = '下载音频';
+    downloadButton.addEventListener('click', () => void downloadSpeechTaskAudio(task.id));
     const copyButton = document.createElement('button');
     copyButton.className = 'button ghost small';
     copyButton.type = 'button';
     copyButton.textContent = '复制结果';
     copyButton.disabled = !task.text;
     copyButton.addEventListener('click', () => copyTextToClipboard(task.text || ''));
+    const deleteButton = document.createElement('button');
+    deleteButton.className = 'button ghost small';
+    deleteButton.type = 'button';
+    deleteButton.textContent = '删除';
+    deleteButton.addEventListener('click', () => void removeSpeechTask(task.id));
     actions.appendChild(playButton);
     actions.appendChild(retryButton);
+    actions.appendChild(downloadButton);
     actions.appendChild(copyButton);
+    actions.appendChild(deleteButton);
     item.appendChild(main);
     item.appendChild(actions);
     speechTaskHistoryList.appendChild(item);
@@ -2281,15 +2359,18 @@ async function startSpeechRecording() {
   try {
     speechCapturedSamples = [];
     const deviceId = String(currentSettingsFormState.speechToTextMicrophoneDeviceId || '').trim();
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
-        channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-    });
+    let stream = null;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia(buildSpeechAudioConstraints(deviceId));
+    } catch (error) {
+      if (!isCurrentSpeechSession(sessionId) || speechState !== 'preparing' || !isRecoverableSpeechMicError(error)) {
+        throw error;
+      }
+      setStatus('打开麦克风失败，正在重试...');
+      await waitSpeechRetryDelay(160);
+      if (!isCurrentSpeechSession(sessionId) || speechState !== 'preparing') return;
+      stream = await navigator.mediaDevices.getUserMedia(buildSpeechAudioConstraints(''));
+    }
     if (!isCurrentSpeechSession(sessionId) || speechState !== 'preparing') {
       closeSpeechStream(stream);
       return;
@@ -2333,7 +2414,9 @@ async function startSpeechRecording() {
     if (!isCurrentSpeechSession(sessionId)) return;
     stopSpeechStream();
     setSpeechState('idle');
-    setErrorStatus(`启动录音失败：${error?.message || error}`);
+    const message = describeSpeechMicError(error);
+    setErrorStatus(`启动录音失败：${message}`);
+    showToast(`启动录音失败：${message}`, 'error');
   }
 }
 

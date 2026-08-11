@@ -249,6 +249,7 @@ onMounted(() => {
   bridge.setActiveDraftText = (text: string) => {
     const d = composerStore.activeDraft;
     if (d) composerStore.setDraftText(d.id, text);
+    if (bridge._setActiveText) bridge._setActiveText(text || "");
   };
   (window as any).transferGenieComposer = bridge;
 });

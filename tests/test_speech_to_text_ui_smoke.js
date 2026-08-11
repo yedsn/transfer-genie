@@ -92,7 +92,7 @@ function createCdpClient(socket) {
         const timer = setTimeout(() => {
           pending.delete(requestId);
           reject(new Error(`CDP command timed out: ${method}`));
-        }, 10000);
+        }, 20000);
         pending.set(requestId, {
           resolve: (value) => { clearTimeout(timer); resolve(value); },
           reject: (error) => { clearTimeout(timer); reject(error); },
@@ -156,10 +156,12 @@ function preloadScript() {
       eventHandlers,
       failTranscribe: false,
       denyMicrophone: false,
+      failNextGetUserMedia: '',
       getUserMediaDelayMs: 0,
       mediaRequests: [],
       stoppedStreams: 0,
       clipboardText: '',
+      downloads: [],
     };
     window.__speechSmoke.longText = '语音识别文本'.repeat(20);
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
@@ -202,7 +204,17 @@ function preloadScript() {
         if (window.__speechSmoke.getUserMediaDelayMs) {
           await new Promise((resolve) => setTimeout(resolve, window.__speechSmoke.getUserMediaDelayMs));
         }
-        if (window.__speechSmoke.denyMicrophone) throw new Error('Permission denied');
+        if (window.__speechSmoke.denyMicrophone) {
+          const error = new Error('Permission denied');
+          error.name = 'NotAllowedError';
+          throw error;
+        }
+        if (window.__speechSmoke.failNextGetUserMedia) {
+          const error = new Error(window.__speechSmoke.failNextGetUserMedia);
+          error.name = window.__speechSmoke.failNextGetUserMedia;
+          window.__speechSmoke.failNextGetUserMedia = '';
+          throw error;
+        }
         return { getTracks: () => [{ stop() { window.__speechSmoke.stoppedStreams += 1; } }] };
       },
       enumerateDevices: async () => ([
@@ -291,6 +303,9 @@ async function run() {
     })`);
 
     const buttonResult = await evaluate(client, `(async () => {
+      let markdownSyncCount = 0;
+      window.transferGenieComposer = window.transferGenieComposer || {};
+      window.transferGenieComposer._setActiveText = () => { markdownSyncCount += 1; };
       document.querySelector('#speech-to-text-toggle').click();
       await new Promise((resolve, reject) => {
         const start = Date.now();
@@ -325,8 +340,22 @@ async function run() {
       await new Promise((r) => setTimeout(r, 60));
       const calls = window.__speechSmoke.calls.filter((call) => call.command === 'transcribe_speech');
       const activeDraft = window.transferGenieComposerStore?.getActiveDraft?.();
+      if (!window.__speechSmoke.downloadHookInstalled) {
+        window.__speechSmoke.downloadHookInstalled = true;
+        const originalAppendChild = document.body.appendChild.bind(document.body);
+        document.body.appendChild = (node) => {
+          if (node?.tagName === 'A') {
+            node.click = () => window.__speechSmoke.downloads.push({ href: node.href, download: node.download });
+          }
+          return originalAppendChild(node);
+        };
+      }
       const taskItems = Array.from(document.querySelectorAll('.speech-task-item'));
       taskItems[0]?.querySelector('button:nth-child(3)')?.click();
+      await new Promise((r) => setTimeout(r, 20));
+      taskItems[0]?.querySelector('button:nth-child(4)')?.click();
+      await new Promise((r) => setTimeout(r, 20));
+      taskItems[0]?.querySelector('button:nth-child(5)')?.click();
       await new Promise((r) => setTimeout(r, 20));
       return {
         recording,
@@ -338,7 +367,10 @@ async function run() {
         speechTaskTitle: taskItems[0]?.querySelector('.speech-task-text')?.getAttribute('title') || '',
         speechTaskMeta: taskItems[0]?.querySelector('.speech-task-meta')?.textContent || '',
         clipboardText: window.__speechSmoke.clipboardText,
+        downloadName: window.__speechSmoke.downloads.at(-1)?.download || '',
+        speechTaskCountAfterDelete: document.querySelectorAll('.speech-task-item').length,
         longText: window.__speechSmoke.longText,
+        markdownSyncCount,
         ...liveWaveState,
         buttonClass: document.querySelector('#speech-to-text-toggle').className,
         status: document.querySelector('#sync-status')?.textContent || '',
@@ -355,6 +387,9 @@ async function run() {
     assert.equal(buttonResult.speechTaskTitle, buttonResult.longText, 'transcription task keeps full text in title');
     assert.match(buttonResult.speechTaskMeta, /\d+:\d{2}/, 'transcription task shows recording duration');
     assert.equal(buttonResult.clipboardText, buttonResult.longText, 'transcription task copy uses the full result');
+    assert.match(buttonResult.downloadName, /^speech-.*\.wav$/, 'transcription task audio can be downloaded as wav');
+    assert.equal(buttonResult.speechTaskCountAfterDelete, 0, 'transcription task can be deleted');
+    assert.ok(buttonResult.markdownSyncCount > 0, 'markdown editor is refreshed after speech insertion');
     assert.equal(buttonResult.request.format, 'wav', 'recording is transcoded to WAV before sending to backend');
     assert.equal(buttonResult.request.mimeType, 'audio/wav', 'WAV mime type is sent to backend');
     assert.equal(buttonResult.request.sampleRate, 16000, 'WAV sample rate is sent to backend');
@@ -423,6 +458,40 @@ async function run() {
     assert.equal(rapidToggleResult.idle, true, 'rapid cancel while preparing returns button to idle');
     assert.ok(rapidToggleResult.stoppedDelta >= 1, 'late microphone stream is closed after rapid cancel');
     assert.equal(rapidToggleResult.recovered, true, 'speech recording can start again after rapid cancel');
+
+    const micRetryResult = await evaluate(client, `(async () => {
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const button = document.querySelector('#speech-to-text-toggle');
+          if (!button.classList.contains('is-recording') && !button.classList.contains('is-transcribing') && !button.classList.contains('is-preparing')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('speech button did not return to idle'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const beforeRequests = window.__speechSmoke.mediaRequests.length;
+      window.__speechSmoke.failNextGetUserMedia = 'NotReadableError';
+      document.querySelector('#speech-to-text-toggle').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#speech-to-text-toggle').classList.contains('is-recording')) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('microphone retry did not enter recording state'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const requests = window.__speechSmoke.mediaRequests.slice(beforeRequests);
+      const recording = document.querySelector('#speech-to-text-toggle').classList.contains('is-recording');
+      document.querySelector('#speech-to-text-toggle').click();
+      await new Promise((r) => setTimeout(r, 60));
+      return { recording, requests };
+    })()`);
+    assert.equal(micRetryResult.recording, true, 'recording starts after recoverable microphone open failure');
+    assert.equal(micRetryResult.requests.length, 2, 'recoverable microphone open failure retries once');
+    assert.equal(micRetryResult.requests[0].audio.deviceId.exact, 'mic-1', 'first microphone attempt uses selected device');
+    assert.equal(!!micRetryResult.requests[1].audio.deviceId, false, 'retry falls back to default microphone');
 
     const rightAltResult = await evaluate(client, `(async () => {
       window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
