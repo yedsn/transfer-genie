@@ -12,7 +12,7 @@ const aiBusy = ref(false);
 const aiError = ref("");
 type SubmenuSide = "left" | "right";
 type SubmenuAlign = "down" | "up";
-const aiMenu = ref<{ x: number; y: number; submenuSide: SubmenuSide; submenuAlign: SubmenuAlign } | null>(null);
+const aiMenu = ref<{ x: number; y: number; submenuSide: SubmenuSide; submenuAlign: SubmenuAlign; anchorBottom: number } | null>(null);
 const editorMenu = ref<{
   x: number;
   y: number;
@@ -451,7 +451,7 @@ async function adjustFloatingMenuPosition(kind: "ai" | "editor") {
   const submenuWidth = kind === "ai" ? 176 : 132;
   const submenuHeight = 320;
   const placement = getSubmenuPlacement(next.x, next.y, rect.width, submenuWidth, submenuHeight);
-  if (kind === "ai" && aiMenu.value) aiMenu.value = { ...aiMenu.value, ...next, ...placement };
+  if (kind === "ai" && aiMenu.value) aiMenu.value = { ...aiMenu.value, ...next, ...placement, submenuAlign: "up" };
   else if (kind === "editor" && editorMenu.value) editorMenu.value = { ...editorMenu.value, ...next };
 }
 
@@ -621,10 +621,9 @@ function openAiActionMenu(event: MouseEvent) {
   const menuHeight = estimateAiMenuHeight();
   const submenuWidth = 176;
   const submenuHeight = estimateAiSubmenuHeight();
-  const openUp = window.innerHeight - rect.bottom < menuHeight + 12 && rect.top > window.innerHeight - rect.bottom;
-  const anchorY = openUp ? rect.top - menuHeight - 4 : rect.bottom + 4;
-  const { x, y } = clampMenuPosition(rect.right - menuWidth, anchorY, menuWidth, menuHeight);
-  aiMenu.value = { x, y, ...getSubmenuPlacement(x, y, menuWidth, submenuWidth, submenuHeight) };
+  const { x, y } = clampMenuPosition(rect.right - menuWidth, rect.bottom + 4, menuWidth, menuHeight);
+  const anchorBottom = y + menuHeight;
+  aiMenu.value = { x, y, ...getSubmenuPlacement(x, y, menuWidth, submenuWidth, submenuHeight), submenuAlign: "up", anchorBottom };
   adjustFloatingMenuPosition("ai");
 }
 
@@ -835,7 +834,7 @@ function setFormat(format: string) {
       @contextmenu="onEditorContextMenu"
     ></textarea>
     <div v-if="aiMenu" class="cw-ai-menu-backdrop" @click="closeAiMenu" @contextmenu.prevent="closeAiMenu"></div>
-    <div v-if="aiMenu" ref="aiMenuEl" class="cw-ai-menu" :style="{ left: aiMenu.x + 'px', top: aiMenu.y + 'px' }" @contextmenu.prevent>
+    <div v-if="aiMenu" ref="aiMenuEl" class="cw-ai-menu cw-ai-menu-bottom-aligned" :style="{ left: aiMenu.x + 'px', top: aiMenu.y + 'px' }" @contextmenu.prevent>
       <div v-if="favoriteAiActions.length" class="cw-ai-menu-group cw-ai-menu-favorite-group">
         <button type="button" class="cw-ai-menu-category-item">
           <span>收藏</span>
