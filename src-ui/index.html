@@ -940,6 +940,17 @@
                       最长录音（秒）
                       <input id="speech-to-text-max-duration" type="number" min="5" max="300" step="1" :value="ui.settingsForm.speechToTextMaxDurationSecs" @input="updateSettingsFormField('speechToTextMaxDurationSecs', Number($event.target.value || 60))" />
                     </label>
+                    <label>
+                      转录任务保留数量
+                      <input id="speech-to-text-task-retention" type="number" min="1" max="100" step="1" :value="ui.settingsForm.speechToTextTaskRetentionCount" @input="updateSettingsFormField('speechToTextTaskRetentionCount', Number($event.target.value || 14))" />
+                    </label>
+                  </div>
+                  <div class="speech-task-history">
+                    <div class="speech-task-history-header">
+                      <span>转录任务</span>
+                      <span id="speech-task-history-summary">保留最近 14 条</span>
+                    </div>
+                    <div id="speech-task-history-list" class="speech-task-history-list"></div>
                   </div>
                 </div>
               </div>

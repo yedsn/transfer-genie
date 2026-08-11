@@ -6841,6 +6841,7 @@ fn normalize_speech_to_text_settings(settings: &mut SpeechToTextSettings) -> Res
             normalized_shortcut.unwrap_or_else(crate::types::default_speech_to_text_shortcut);
     }
     settings.max_duration_secs = settings.max_duration_secs.clamp(5, 300);
+    settings.task_retention_count = settings.task_retention_count.clamp(1, 100);
     settings.microphone_device_id = settings.microphone_device_id.trim().to_string();
     Ok(())
 }
@@ -10004,6 +10005,7 @@ mod tests {
         settings.speech_to_text.endpoint.clear();
         settings.speech_to_text.shortcut.clear();
         settings.speech_to_text.max_duration_secs = 0;
+        settings.speech_to_text.task_retention_count = 0;
         let download_dir = std::env::temp_dir().join("transfer-genie-speech-settings-test");
 
         let normalized = normalize_settings(settings, &download_dir).unwrap();
@@ -10019,6 +10021,7 @@ mod tests {
         );
         assert_eq!(normalized.speech_to_text.shortcut, "right-alt");
         assert_eq!(normalized.speech_to_text.max_duration_secs, 5);
+        assert_eq!(normalized.speech_to_text.task_retention_count, 1);
     }
 
     #[test]

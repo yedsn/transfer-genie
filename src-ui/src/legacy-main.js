@@ -655,6 +655,9 @@ const speechToTextMicrophoneInput = document.getElementById('speech-to-text-micr
 const speechToTextShortcutEnabledInput = document.getElementById('speech-to-text-shortcut-enabled');
 const speechToTextShortcutInput = document.getElementById('speech-to-text-shortcut');
 const speechToTextMaxDurationInput = document.getElementById('speech-to-text-max-duration');
+const speechToTextTaskRetentionInput = document.getElementById('speech-to-text-task-retention');
+const speechTaskHistorySummary = document.getElementById('speech-task-history-summary');
+const speechTaskHistoryList = document.getElementById('speech-task-history-list');
 const sendHotkeyInputs = document.querySelectorAll('input[name="send-hotkey"]');
 const toggleSelectionButton = document.getElementById('toggle-selection');
 const selectionBar = document.getElementById('selection-bar');
@@ -917,6 +920,7 @@ let currentSettingsFormState = {
   speechToTextShortcutEnabled: false,
   speechToTextShortcut: 'right-alt',
   speechToTextMaxDurationSecs: 60,
+  speechToTextTaskRetentionCount: 14,
 };
 let currentAutoBackupStatusState = {
   enabled: false,
@@ -1917,9 +1921,247 @@ function buildCapturedSpeechWav() {
     sampleRate: targetSampleRate,
     channels: 1,
     bitsPerSample: 16,
+    durationMs: Math.round((samples.length / targetSampleRate) * 1000),
     mimeType: 'audio/wav',
     format: 'wav',
   };
+}
+
+const SPEECH_TASK_DB_NAME = 'transfer-genie-speech-tasks';
+const SPEECH_TASK_STORE_NAME = 'tasks';
+let speechTaskDbPromise = null;
+let speechTaskAudioUrl = '';
+
+function getSpeechTaskRetentionCount() {
+  return Math.max(1, Math.min(100, Number(currentSettingsFormState.speechToTextTaskRetentionCount) || 14));
+}
+
+function openSpeechTaskDb() {
+  if (!window.indexedDB) return Promise.resolve(null);
+  if (speechTaskDbPromise) return speechTaskDbPromise;
+  speechTaskDbPromise = new Promise((resolve, reject) => {
+    const request = window.indexedDB.open(SPEECH_TASK_DB_NAME, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(SPEECH_TASK_STORE_NAME)) {
+        db.createObjectStore(SPEECH_TASK_STORE_NAME, { keyPath: 'id' });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('打开转录任务存储失败'));
+  });
+  return speechTaskDbPromise;
+}
+
+function runSpeechTaskStore(mode, handler) {
+  return openSpeechTaskDb().then((db) => new Promise((resolve, reject) => {
+    if (!db) {
+      resolve(handler(null));
+      return;
+    }
+    const transaction = db.transaction(SPEECH_TASK_STORE_NAME, mode);
+    const store = transaction.objectStore(SPEECH_TASK_STORE_NAME);
+    let value;
+    try {
+      value = handler(store);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    transaction.oncomplete = () => resolve(value);
+    transaction.onerror = () => reject(transaction.error || new Error('访问转录任务存储失败'));
+  }));
+}
+
+function requestToPromise(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('读取转录任务失败'));
+  });
+}
+
+async function listSpeechTasks() {
+  const db = await openSpeechTaskDb();
+  if (!db) return [];
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(SPEECH_TASK_STORE_NAME, 'readonly');
+    const store = transaction.objectStore(SPEECH_TASK_STORE_NAME);
+    const request = store.getAll();
+    request.onsuccess = () => {
+      const tasks = Array.isArray(request.result) ? request.result : [];
+      resolve(tasks.sort((a, b) => Number(b.createdAtMs || 0) - Number(a.createdAtMs || 0)));
+    };
+    request.onerror = () => reject(request.error || new Error('读取转录任务失败'));
+  });
+}
+
+async function getSpeechTask(id) {
+  const db = await openSpeechTaskDb();
+  if (!db) return null;
+  const transaction = db.transaction(SPEECH_TASK_STORE_NAME, 'readonly');
+  return requestToPromise(transaction.objectStore(SPEECH_TASK_STORE_NAME).get(id));
+}
+
+async function putSpeechTask(task) {
+  try {
+    await runSpeechTaskStore('readwrite', (store) => store?.put(task));
+    await pruneSpeechTasks();
+    await renderSpeechTaskHistory();
+  } catch (error) {
+    console.warn('保存转录任务失败', error);
+  }
+}
+
+async function updateSpeechTask(id, patch) {
+  try {
+    const task = await getSpeechTask(id);
+    if (!task) return null;
+    const nextTask = { ...task, ...patch, updatedAtMs: Date.now() };
+    await runSpeechTaskStore('readwrite', (store) => store?.put(nextTask));
+    await renderSpeechTaskHistory();
+    return nextTask;
+  } catch (error) {
+    console.warn('更新转录任务失败', error);
+    return null;
+  }
+}
+
+async function pruneSpeechTasks() {
+  const tasks = await listSpeechTasks();
+  const keepCount = getSpeechTaskRetentionCount();
+  const expired = tasks.slice(keepCount);
+  if (!expired.length) return;
+  await runSpeechTaskStore('readwrite', (store) => {
+    expired.forEach((task) => store?.delete(task.id));
+  });
+}
+
+function formatSpeechTaskTime(value) {
+  if (!value) return '';
+  return new Date(value).toLocaleString('zh-CN', { hour12: false });
+}
+
+function formatSpeechTaskDuration(durationMs) {
+  const totalSeconds = Math.max(0, Math.round(Number(durationMs) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+function speechTaskStatusText(status) {
+  if (status === 'success') return '成功';
+  if (status === 'failed') return '失败';
+  if (status === 'transcribing') return '识别中';
+  return '待识别';
+}
+
+function getSpeechTaskPreviewText(value) {
+  const text = String(value || '');
+  const maxLength = 80;
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function buildSpeechTaskRequest(audio) {
+  return {
+    audioData: Array.from(audio.bytes || []),
+    mimeType: audio.mimeType,
+    format: audio.format,
+    sampleRate: audio.sampleRate,
+    channels: audio.channels,
+    bitsPerSample: audio.bitsPerSample,
+  };
+}
+
+async function transcribeSpeechAudio(audio) {
+  return invoke('transcribe_speech', { request: buildSpeechTaskRequest(audio) });
+}
+
+async function playSpeechTask(id) {
+  const task = await getSpeechTask(id);
+  if (!task?.audio?.bytes?.length) {
+    showToast('没有可重听的录音', 'error');
+    return;
+  }
+  if (speechTaskAudioUrl) URL.revokeObjectURL(speechTaskAudioUrl);
+  speechTaskAudioUrl = URL.createObjectURL(new Blob([new Uint8Array(task.audio.bytes)], { type: task.audio.mimeType || 'audio/wav' }));
+  const audio = new Audio(speechTaskAudioUrl);
+  await audio.play();
+}
+
+async function retrySpeechTask(id) {
+  const task = await getSpeechTask(id);
+  if (!task?.audio?.bytes?.length) {
+    showToast('没有可重试的录音', 'error');
+    return;
+  }
+  await updateSpeechTask(id, { status: 'transcribing', error: '' });
+  try {
+    const result = await transcribeSpeechAudio(task.audio);
+    await updateSpeechTask(id, { status: 'success', text: result?.text || '', error: '' });
+    showToast('重新转录完成', 'success');
+  } catch (error) {
+    await updateSpeechTask(id, { status: 'failed', error: String(error), text: task.text || '' });
+    showToast(`重新转录失败：${error}`, 'error');
+  }
+}
+
+async function renderSpeechTaskHistory() {
+  if (!speechTaskHistoryList) return;
+  const keepCount = getSpeechTaskRetentionCount();
+  const tasks = await listSpeechTasks();
+  if (speechTaskHistorySummary) {
+    speechTaskHistorySummary.textContent = `保留最近 ${keepCount} 条，共 ${tasks.length} 条`;
+  }
+  speechTaskHistoryList.innerHTML = '';
+  if (!tasks.length) {
+    const empty = document.createElement('div');
+    empty.className = 'speech-task-empty';
+    empty.textContent = '暂无转录任务';
+    speechTaskHistoryList.appendChild(empty);
+    return;
+  }
+  tasks.forEach((task) => {
+    const item = document.createElement('div');
+    item.className = `speech-task-item is-${task.status || 'pending'}`;
+    const main = document.createElement('div');
+    main.className = 'speech-task-main';
+    const meta = document.createElement('div');
+    meta.className = 'speech-task-meta';
+    meta.textContent = `${formatSpeechTaskTime(task.createdAtMs)} · ${speechTaskStatusText(task.status)} · ${formatSpeechTaskDuration(task.durationMs)}`;
+    const text = document.createElement('div');
+    text.className = 'speech-task-text';
+    const fullText = task.status === 'failed' ? (task.error || '转录失败') : (task.text || '暂无结果');
+    text.textContent = getSpeechTaskPreviewText(fullText);
+    text.title = fullText;
+    main.appendChild(meta);
+    main.appendChild(text);
+
+    const actions = document.createElement('div');
+    actions.className = 'speech-task-actions';
+    const playButton = document.createElement('button');
+    playButton.className = 'button ghost small';
+    playButton.type = 'button';
+    playButton.textContent = '重听';
+    playButton.addEventListener('click', () => void playSpeechTask(task.id));
+    const retryButton = document.createElement('button');
+    retryButton.className = 'button ghost small';
+    retryButton.type = 'button';
+    retryButton.textContent = task.status === 'failed' ? '重试' : '重新转录';
+    retryButton.disabled = task.status === 'transcribing';
+    retryButton.addEventListener('click', () => void retrySpeechTask(task.id));
+    const copyButton = document.createElement('button');
+    copyButton.className = 'button ghost small';
+    copyButton.type = 'button';
+    copyButton.textContent = '复制结果';
+    copyButton.disabled = !task.text;
+    copyButton.addEventListener('click', () => copyTextToClipboard(task.text || ''));
+    actions.appendChild(playButton);
+    actions.appendChild(retryButton);
+    actions.appendChild(copyButton);
+    item.appendChild(main);
+    item.appendChild(actions);
+    speechTaskHistoryList.appendChild(item);
+  });
 }
 
 function renderSpeechMicrophoneOptions(devices, selectedDeviceId) {
@@ -2118,25 +2360,32 @@ async function finishSpeechRecording() {
   }
   setSpeechState('transcribing');
   setStatus('正在识别语音...');
+  let taskId = '';
   try {
     speechCapturedSamples = chunks;
     speechCaptureSampleRate = sourceSampleRate;
     const audio = buildCapturedSpeechWav();
     speechCapturedSamples = [];
-    const result = await invoke('transcribe_speech', {
-      request: {
-        audioData: Array.from(audio.bytes),
-        mimeType: audio.mimeType,
-        format: audio.format,
-        sampleRate: audio.sampleRate,
-        channels: audio.channels,
-        bitsPerSample: audio.bitsPerSample,
-      },
+    taskId = `speech-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    await putSpeechTask({
+      id: taskId,
+      status: 'transcribing',
+      text: '',
+      error: '',
+      durationMs: audio.durationMs,
+      audio: { ...audio, bytes: Array.from(audio.bytes) },
+      createdAtMs: Date.now(),
+      updatedAtMs: Date.now(),
     });
+    const result = await transcribeSpeechAudio(audio);
+    await updateSpeechTask(taskId, { status: 'success', text: result?.text || '', error: '' });
     insertTextIntoComposer(result?.text || '');
     setSpeechState('idle');
     setSuccessStatus('语音识别完成');
   } catch (error) {
+    if (taskId) {
+      await updateSpeechTask(taskId, { status: 'failed', error: String(error) });
+    }
     setSpeechState('idle');
     setErrorStatus(`语音识别失败：${error}`);
   }
@@ -8764,6 +9013,7 @@ function applySettings(settings) {
   if (speechToTextShortcutEnabledInput) speechToTextShortcutEnabledInput.checked = !!speechToText.shortcut_enabled;
   if (speechToTextShortcutInput) speechToTextShortcutInput.value = (speechToText.shortcut || DEFAULT_SPEECH_TO_TEXT_SHORTCUT).toLowerCase();
   if (speechToTextMaxDurationInput) speechToTextMaxDurationInput.value = Number(speechToText.max_duration_secs || 60);
+  if (speechToTextTaskRetentionInput) speechToTextTaskRetentionInput.value = Number(speechToText.task_retention_count || 14);
   currentSettingsFormState = {
     senderName: settings.sender_name || '',
     refreshIntervalSecs: Number(settings.refresh_interval_secs || 5),
@@ -8806,9 +9056,11 @@ function applySettings(settings) {
     speechToTextShortcutEnabled: !!speechToText.shortcut_enabled,
     speechToTextShortcut: (speechToText.shortcut || DEFAULT_SPEECH_TO_TEXT_SHORTCUT).toLowerCase(),
     speechToTextMaxDurationSecs: Number(speechToText.max_duration_secs || 60),
+    speechToTextTaskRetentionCount: Number(speechToText.task_retention_count || 14),
   };
   syncVueSettingsForm(currentSettingsFormState);
   void refreshSpeechMicrophoneOptions();
+  void renderSpeechTaskHistory();
   syncSendOptionsMenuState();
   applyDefaultEditorFormat(currentSettingsFormState.defaultEditorFormat);
   if (telegramAutoStartInput) {
@@ -8936,6 +9188,10 @@ async function saveSettings(options = {}) {
   const speechToTextMaxDurationSecs = Math.max(
     5,
     Math.min(300, Number(currentSettingsFormState.speechToTextMaxDurationSecs) || 60),
+  );
+  const speechToTextTaskRetentionCount = Math.max(
+    1,
+    Math.min(100, Number(currentSettingsFormState.speechToTextTaskRetentionCount) || 14),
   );
   if (speechToTextEnabled && !speechToTextApiKey) {
     setErrorStatus('启用语音转文字前请先填写 API Key');
@@ -9101,6 +9357,7 @@ async function saveSettings(options = {}) {
       shortcut_enabled: speechToTextShortcutEnabled,
       shortcut: normalizedSpeechShortcut || DEFAULT_SPEECH_TO_TEXT_SHORTCUT,
       max_duration_secs: speechToTextMaxDurationSecs,
+      task_retention_count: speechToTextTaskRetentionCount,
     },
   };
 
@@ -9115,6 +9372,8 @@ async function saveSettings(options = {}) {
       setSuccessStatus('设置已保存');
     }
     applySettings(updated);
+    await pruneSpeechTasks();
+    await renderSpeechTaskHistory();
     await loadLocalHttpApiStatus({ silent: true });
     await loadAutoBackupStatus({ silent: true });
     await loadIntegrationModules({ silent: true });
@@ -10380,6 +10639,18 @@ if (speechToTextShortcutInput) {
 if (speechToTextShortcutEnabledInput) {
   speechToTextShortcutEnabledInput.addEventListener('change', () => {
     activeSideAltSpeechKey = '';
+  });
+}
+if (speechToTextTaskRetentionInput) {
+  speechToTextTaskRetentionInput.addEventListener('change', () => {
+    const nextCount = Math.max(1, Math.min(100, Number(speechToTextTaskRetentionInput.value) || 14));
+    currentSettingsFormState = {
+      ...currentSettingsFormState,
+      speechToTextTaskRetentionCount: nextCount,
+    };
+    speechToTextTaskRetentionInput.value = String(nextCount);
+    syncVueSettingsForm(currentSettingsFormState);
+    void pruneSpeechTasks().then(() => renderSpeechTaskHistory());
   });
 }
 if (navigator.mediaDevices?.addEventListener) {

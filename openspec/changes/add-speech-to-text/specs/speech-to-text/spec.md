@@ -61,3 +61,20 @@ The app SHALL enforce a bounded single-recording session so accidental long reco
 - **WHEN** an active speech recording reaches the configured maximum duration
 - **THEN** the app stops recording automatically
 - **AND** starts transcription for the captured segment or reports that no usable audio was captured
+
+### Requirement: Transcription Task History
+The app SHALL keep a configurable number of recent speech transcription tasks with their captured audio, recognition status, result text, and failure message when available. The default retention count SHALL be 14 tasks.
+
+#### Scenario: Successful task is retained
+- **WHEN** a speech recording is transcribed successfully
+- **THEN** the task appears in the settings speech section
+- **AND** the user can replay the audio and copy the recognized text
+
+#### Scenario: Failed task can be retried
+- **WHEN** a speech transcription fails after audio was captured
+- **THEN** the failed task appears in the settings speech section with the error message
+- **AND** the user can retry transcription using the retained audio
+
+#### Scenario: Retention count is enforced
+- **WHEN** the number of retained transcription tasks exceeds the configured retention count
+- **THEN** the app removes the oldest tasks and keeps the most recent tasks only

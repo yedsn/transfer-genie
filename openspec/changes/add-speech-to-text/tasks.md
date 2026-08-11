@@ -38,3 +38,10 @@
 - [x] 6.2 Run relevant frontend/runtime tests for settings form behavior if available.
 - [ ] 6.3 Manually verify: configure API key, click speech button to record and stop, confirm recognized text appears in the composer.
 - [ ] 6.4 Manually verify: configure speech shortcut, press once to record and again to stop, confirm failure states for denied microphone permission and invalid ASR credentials.
+
+## 7. Transcription Task History
+
+- [x] 7.1 Add configurable speech transcription task retention with a default of 14 recent tasks.
+- [x] 7.2 Store completed recording audio and transcription status locally for replay, copy, retry, and re-transcription actions.
+- [x] 7.3 Add the speech settings task list UI with success, failure, transcribing, empty, and retention summary states.
+- [x] 7.4 Cover task creation, copy, failed-task retry, and retention pruning in the speech UI smoke test.

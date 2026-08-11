@@ -2672,6 +2672,91 @@ input {
   gap: 8px;
 }
 
+.speech-task-history {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.speech-task-history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.speech-task-history-header span:first-child {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.speech-task-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.speech-task-empty,
+.speech-task-item {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-soft);
+}
+
+.speech-task-empty {
+  padding: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.speech-task-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 10px;
+}
+
+.speech-task-item.is-failed {
+  border-color: rgba(217, 45, 32, 0.32);
+}
+
+.speech-task-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.speech-task-meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.speech-task-text {
+  font-size: 13px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.speech-task-item.is-failed .speech-task-text {
+  color: #b42318;
+}
+
+.speech-task-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .ai-action-list {
   display: flex;
   flex-direction: column;

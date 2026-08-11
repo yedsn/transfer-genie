@@ -122,6 +122,10 @@ pub fn default_speech_to_text_max_duration_secs() -> u64 {
     60
 }
 
+pub fn default_speech_to_text_task_retention_count() -> u64 {
+    14
+}
+
 pub fn default_speech_to_text_microphone_device_id() -> String {
     String::new()
 }
@@ -664,6 +668,8 @@ pub struct SpeechToTextSettings {
     pub shortcut: String,
     #[serde(default = "default_speech_to_text_max_duration_secs")]
     pub max_duration_secs: u64,
+    #[serde(default = "default_speech_to_text_task_retention_count")]
+    pub task_retention_count: u64,
     #[serde(default = "default_speech_to_text_microphone_device_id")]
     pub microphone_device_id: String,
 }
@@ -679,6 +685,7 @@ impl Default for SpeechToTextSettings {
             shortcut_enabled: default_speech_to_text_shortcut_enabled(),
             shortcut: default_speech_to_text_shortcut(),
             max_duration_secs: default_speech_to_text_max_duration_secs(),
+            task_retention_count: default_speech_to_text_task_retention_count(),
             microphone_device_id: default_speech_to_text_microphone_device_id(),
         }
     }

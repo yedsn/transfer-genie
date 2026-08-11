@@ -142,6 +142,7 @@ function mockSettings() {
       shortcut_enabled: true,
       shortcut: 'right-alt',
       max_duration_secs: 5,
+      task_retention_count: 14,
     },
   };
 }
@@ -158,7 +159,12 @@ function preloadScript() {
       getUserMediaDelayMs: 0,
       mediaRequests: [],
       stoppedStreams: 0,
+      clipboardText: '',
     };
+    window.__speechSmoke.longText = '语音识别文本'.repeat(20);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+      writeText: async (text) => { window.__speechSmoke.clipboardText = String(text || ''); },
+    } });
     window.__TAURI__ = {
       core: {
         invoke: async (command, args) => {
@@ -167,7 +173,7 @@ function preloadScript() {
           if (command === 'save_settings') return args.settings;
           if (command === 'transcribe_speech') {
             if (window.__speechSmoke.failTranscribe) throw 'ASR 凭据无效';
-            return { text: '语音识别文本', logId: 'smoke-log' };
+            return { text: window.__speechSmoke.longText, logId: 'smoke-log' };
           }
           if (command === 'list_messages_window') return { messages: [], has_more_before: false, has_more_after: false };
           if (command === 'get_sync_status') return { state: 'idle', syncing: false, pending: false };
@@ -319,11 +325,20 @@ async function run() {
       await new Promise((r) => setTimeout(r, 60));
       const calls = window.__speechSmoke.calls.filter((call) => call.command === 'transcribe_speech');
       const activeDraft = window.transferGenieComposerStore?.getActiveDraft?.();
+      const taskItems = Array.from(document.querySelectorAll('.speech-task-item'));
+      taskItems[0]?.querySelector('button:nth-child(3)')?.click();
+      await new Promise((r) => setTimeout(r, 20));
       return {
         recording,
         text: activeDraft?.text || '',
         request: calls.at(-1)?.args?.request,
         mediaRequest: window.__speechSmoke.mediaRequests.at(-1),
+        speechTaskCount: taskItems.length,
+        speechTaskText: taskItems[0]?.querySelector('.speech-task-text')?.textContent || '',
+        speechTaskTitle: taskItems[0]?.querySelector('.speech-task-text')?.getAttribute('title') || '',
+        speechTaskMeta: taskItems[0]?.querySelector('.speech-task-meta')?.textContent || '',
+        clipboardText: window.__speechSmoke.clipboardText,
+        longText: window.__speechSmoke.longText,
         ...liveWaveState,
         buttonClass: document.querySelector('#speech-to-text-toggle').className,
         status: document.querySelector('#sync-status')?.textContent || '',
@@ -333,7 +348,13 @@ async function run() {
       };
     })()`);
     assert.equal(buttonResult.recording, true, `speech button enters recording state: ${JSON.stringify(buttonResult)}`);
-    assert.equal(buttonResult.text, '语音识别文本', 'recognized text is inserted into composer draft');
+    assert.equal(buttonResult.text, buttonResult.longText, 'recognized text is inserted into composer draft');
+    assert.equal(buttonResult.speechTaskCount, 1, 'successful transcription creates a retained task');
+    assert.ok(buttonResult.speechTaskText.length < buttonResult.longText.length, 'transcription task list shows a shortened preview');
+    assert.ok(buttonResult.speechTaskText.endsWith('...'), 'long transcription task preview is ellipsized');
+    assert.equal(buttonResult.speechTaskTitle, buttonResult.longText, 'transcription task keeps full text in title');
+    assert.match(buttonResult.speechTaskMeta, /\d+:\d{2}/, 'transcription task shows recording duration');
+    assert.equal(buttonResult.clipboardText, buttonResult.longText, 'transcription task copy uses the full result');
     assert.equal(buttonResult.request.format, 'wav', 'recording is transcoded to WAV before sending to backend');
     assert.equal(buttonResult.request.mimeType, 'audio/wav', 'WAV mime type is sent to backend');
     assert.equal(buttonResult.request.sampleRate, 16000, 'WAV sample rate is sent to backend');
@@ -433,11 +454,12 @@ async function run() {
         requestDeltaWhileHeld,
         stillRecordingAfterLeftAlt,
         text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
+        longText: window.__speechSmoke.longText,
       };
     })()`);
     assert.equal(rightAltResult.stillRecordingAfterLeftAlt, true, 'left Alt does not toggle when right Alt is configured');
     assert.equal(rightAltResult.requestDeltaWhileHeld, 1, 'holding right Alt does not start duplicate microphone requests');
-    assert.equal(rightAltResult.text, '语音识别文本', 'right Alt toggles speech recording and inserts text');
+    assert.equal(rightAltResult.text, rightAltResult.longText, 'right Alt toggles speech recording and inserts text');
 
     const shortcutResult = await evaluate(client, `(async () => {
       window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
@@ -455,10 +477,10 @@ async function run() {
       await new Promise((r) => setTimeout(r, 80));
       await window.__speechSmoke.eventHandlers['speech-to-text-toggle']({ payload: null });
       await new Promise((r) => setTimeout(r, 60));
-      return { recording, text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '' };
+      return { recording, text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '', longText: window.__speechSmoke.longText };
     })()`);
     assert.equal(shortcutResult.recording, true, 'speech shortcut event enters recording state');
-    assert.equal(shortcutResult.text, '语音识别文本', 'shortcut-triggered recognition inserts text');
+    assert.equal(shortcutResult.text, shortcutResult.longText, 'shortcut-triggered recognition inserts text');
 
     const deniedResult = await evaluate(client, `(async () => {
       await new Promise((resolve, reject) => {
@@ -496,9 +518,64 @@ async function run() {
       document.querySelector('#speech-to-text-toggle').click();
       await new Promise((r) => setTimeout(r, 60));
       window.__speechSmoke.failTranscribe = false;
-      return document.querySelector('#sync-status').textContent;
+      const failedItem = Array.from(document.querySelectorAll('.speech-task-item'))
+        .find((item) => item.classList.contains('is-failed'));
+      const failedText = failedItem?.querySelector('.speech-task-text')?.textContent || '';
+      failedItem?.querySelector('button:nth-child(2)')?.click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const item = document.querySelector('.speech-task-item');
+          const text = item?.querySelector('.speech-task-text')?.textContent || '';
+          if (text.endsWith('...')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('failed task did not retry successfully'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      return {
+        status: document.querySelector('#sync-status').textContent,
+        failedText,
+        retryText: document.querySelector('.speech-task-item .speech-task-text')?.textContent || '',
+        longText: window.__speechSmoke.longText,
+      };
     })()`);
-    assert.match(invalidCredentialResult, /语音识别失败/, 'ASR credential failure is surfaced to the user');
+    assert.match(invalidCredentialResult.status, /语音识别失败/, 'ASR credential failure is surfaced to the user');
+    assert.match(invalidCredentialResult.failedText, /ASR 凭据无效/, 'failed transcription task shows ASR error');
+    assert.ok(invalidCredentialResult.retryText.length < invalidCredentialResult.longText.length, 'failed transcription task can be retried and shows a preview');
+
+    const retentionResult = await evaluate(client, `(async () => {
+      const db = await new Promise((resolve, reject) => {
+        const request = indexedDB.open('transfer-genie-speech-tasks', 1);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      await new Promise((resolve, reject) => {
+        const transaction = db.transaction('tasks', 'readwrite');
+        const store = transaction.objectStore('tasks');
+        [0, 1, 2].forEach((index) => store.put({
+          id: 'retention-' + index,
+          status: 'success',
+          text: '保留测试 ' + index,
+          error: '',
+          durationMs: 1200 + index,
+          audio: { bytes: [82, 73, 70, 70], mimeType: 'audio/wav', format: 'wav', sampleRate: 16000, channels: 1, bitsPerSample: 16 },
+          createdAtMs: Date.now() + index,
+          updatedAtMs: Date.now() + index,
+        }));
+        transaction.oncomplete = resolve;
+        transaction.onerror = () => reject(transaction.error);
+      });
+      const input = document.querySelector('#speech-to-text-task-retention');
+      input.value = '2';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 120));
+      const items = Array.from(document.querySelectorAll('.speech-task-item .speech-task-text')).map((item) => item.textContent || '');
+      return { count: items.length, items, summary: document.querySelector('#speech-task-history-summary')?.textContent || '' };
+    })()`);
+    assert.equal(retentionResult.count, 2, `speech task retention keeps configured count: ${JSON.stringify(retentionResult)}`);
+    assert.match(retentionResult.summary, /保留最近 2 条/, 'speech task retention summary reflects configured count');
 
     console.log('speech-to-text UI smoke tests passed');
   } finally {
