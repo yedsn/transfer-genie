@@ -98,6 +98,34 @@ fn default_ai_default_action_id() -> String {
     "polish".to_string()
 }
 
+pub fn default_speech_to_text_provider_kind() -> String {
+    "volcengine_agent_plan".to_string()
+}
+
+pub fn default_speech_to_text_resource_id() -> String {
+    "volc.seedasr.sauc.duration".to_string()
+}
+
+pub fn default_speech_to_text_endpoint() -> String {
+    "wss://openspeech.bytedance.com/api/v3/plan/sauc/bigmodel_nostream".to_string()
+}
+
+pub fn default_speech_to_text_shortcut_enabled() -> bool {
+    false
+}
+
+pub fn default_speech_to_text_shortcut() -> String {
+    "right-alt".to_string()
+}
+
+pub fn default_speech_to_text_max_duration_secs() -> u64 {
+    60
+}
+
+pub fn default_speech_to_text_microphone_device_id() -> String {
+    String::new()
+}
+
 fn default_ai_actions() -> Vec<AiTextAction> {
     vec![
         AiTextAction {
@@ -619,6 +647,44 @@ impl Default for AiSettings {
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SpeechToTextSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_speech_to_text_provider_kind")]
+    pub provider_kind: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default = "default_speech_to_text_resource_id")]
+    pub resource_id: String,
+    #[serde(default = "default_speech_to_text_endpoint")]
+    pub endpoint: String,
+    #[serde(default = "default_speech_to_text_shortcut_enabled")]
+    pub shortcut_enabled: bool,
+    #[serde(default = "default_speech_to_text_shortcut")]
+    pub shortcut: String,
+    #[serde(default = "default_speech_to_text_max_duration_secs")]
+    pub max_duration_secs: u64,
+    #[serde(default = "default_speech_to_text_microphone_device_id")]
+    pub microphone_device_id: String,
+}
+
+impl Default for SpeechToTextSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider_kind: default_speech_to_text_provider_kind(),
+            api_key: String::new(),
+            resource_id: default_speech_to_text_resource_id(),
+            endpoint: default_speech_to_text_endpoint(),
+            shortcut_enabled: default_speech_to_text_shortcut_enabled(),
+            shortcut: default_speech_to_text_shortcut(),
+            max_duration_secs: default_speech_to_text_max_duration_secs(),
+            microphone_device_id: default_speech_to_text_microphone_device_id(),
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MarkedTag {
     pub id: String,
     pub name: String,
@@ -656,6 +722,8 @@ pub struct Settings {
     pub backup: BackupSettings,
     #[serde(default)]
     pub ai: AiSettings,
+    #[serde(default)]
+    pub speech_to_text: SpeechToTextSettings,
 }
 
 #[derive(Clone, Serialize)]

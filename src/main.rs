@@ -27,8 +27,8 @@ use crate::telegram_bridge_runtime::ManagedTelegramBridgeProcess;
 use crate::telegram_bridge_runtime::{TelegramBridgeManager, TelegramBridgeStatus};
 use crate::types::{
     AiProviderSettings, AiSettings, AiTextAction, BackupSettings, DownloadHistoryRecord,
-    LocalHttpApiSettings, MarkedTag, Message, SendSettings, Settings, SyncStatus,
-    TelegramBridgeSettings, UploadHistoryRecord, WebDavConflict, WebDavEndpoint,
+    LocalHttpApiSettings, MarkedTag, Message, SendSettings, Settings, SpeechToTextSettings,
+    SyncStatus, TelegramBridgeSettings, UploadHistoryRecord, WebDavConflict, WebDavEndpoint,
     DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS, DEFAULT_LOCAL_HTTP_API_BIND_PORT,
 };
 use crate::webdav_sync_runtime::WebDavSyncRuntimeAdapter;
@@ -42,6 +42,10 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
+use futures_util::{SinkExt, StreamExt};
 use log::info;
 use log::LevelFilter;
 use pbkdf2::pbkdf2_hmac;
@@ -53,6 +57,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
+use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
@@ -70,6 +75,9 @@ use tauri_plugin_opener::OpenerExt;
 #[cfg(desktop)]
 use tauri_plugin_updater::UpdaterExt;
 use tokio::sync::{oneshot, watch, Mutex as AsyncMutex};
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 struct AppState {
     settings_path: PathBuf,
@@ -83,6 +91,7 @@ struct AppState {
     sync_loop_signal: watch::Sender<u64>,
     http: Client,
     registered_hotkey: Mutex<Option<Shortcut>>,
+    registered_speech_hotkey: Mutex<Option<Shortcut>>,
     telegram_bridge: Mutex<TelegramBridgeManager>,
     local_http_api: Mutex<LocalHttpApiManager>,
     update_guard: AsyncMutex<()>,
@@ -282,6 +291,8 @@ struct ExportSettings {
     telegram: ExportTelegramSettings,
     #[serde(default)]
     ai: AiSettings,
+    #[serde(default)]
+    speech_to_text: SpeechToTextSettings,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -317,6 +328,8 @@ struct ExportSecrets {
     telegram: Option<ExportTelegramSecret>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ai: Option<ExportAiSecret>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    speech_to_text: Option<ExportSpeechToTextSecret>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -334,6 +347,11 @@ struct ExportTelegramSecret {
 
 #[derive(Serialize, Deserialize)]
 struct ExportAiSecret {
+    api_key: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ExportSpeechToTextSecret {
     api_key: String,
 }
 
@@ -456,6 +474,51 @@ struct AiTextStreamEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SpeechToTextRequest {
+    audio_data: Vec<u8>,
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
+    mime_type: Option<String>,
+    #[serde(default)]
+    sample_rate: Option<u32>,
+    #[serde(default)]
+    channels: Option<u16>,
+    #[serde(default)]
+    bits_per_sample: Option<u16>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SpeechToTextResult {
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    log_id: Option<String>,
+}
+
+#[derive(Debug)]
+struct AsrServerFrame {
+    message_type: u8,
+    flags: u8,
+    sequence: Option<i32>,
+    payload: Option<serde_json::Value>,
+    error_code: Option<i32>,
+    error_text: Option<String>,
+}
+
+const ASR_PROTOCOL_VERSION: u8 = 0b0001;
+const ASR_HEADER_SIZE_WORDS: u8 = 0b0001;
+const ASR_CLIENT_FULL_REQUEST: u8 = 0b0001;
+const ASR_CLIENT_AUDIO_ONLY_REQUEST: u8 = 0b0010;
+const ASR_SERVER_ERROR_RESPONSE: u8 = 0b1111;
+const ASR_FLAG_POS_SEQUENCE: u8 = 0b0001;
+const ASR_FLAG_NEG_WITH_SEQUENCE: u8 = 0b0011;
+const ASR_SERIALIZATION_NONE: u8 = 0b0000;
+const ASR_SERIALIZATION_JSON: u8 = 0b0001;
+const ASR_COMPRESSION_GZIP: u8 = 0b0001;
 
 #[derive(Serialize)]
 struct OpenAiCompatibleRequestMessage {
@@ -1378,7 +1441,7 @@ async fn save_settings(
     let normalized = normalize_settings(settings, &state.default_download_dir)?;
 
     #[cfg(desktop)]
-    update_global_hotkey_registration(&app, &state, &normalized)?;
+    update_hotkey_registrations(&app, &state, &normalized)?;
 
     write_settings_audited(&state.settings_path, &normalized)?;
 
@@ -1446,7 +1509,7 @@ async fn restore_settings_snapshot(
     let restored = load_settings(&state.settings_path, &state.default_download_dir)?;
 
     #[cfg(desktop)]
-    update_global_hotkey_registration(&app, &state, &restored)?;
+    update_hotkey_registrations(&app, &state, &restored)?;
 
     #[cfg(desktop)]
     if let Err(err) = set_autostart(&app, restored.auto_start) {
@@ -1580,6 +1643,15 @@ async fn process_text_with_ai_stream(
 }
 
 #[tauri::command]
+async fn transcribe_speech(
+    state: State<'_, AppState>,
+    request: SpeechToTextRequest,
+) -> Result<SpeechToTextResult, String> {
+    let settings = current_settings(&state)?;
+    transcribe_speech_impl(&settings, request).await
+}
+
+#[tauri::command]
 fn get_device_name() -> String {
     resolve_device_name()
 }
@@ -1616,12 +1688,14 @@ fn export_settings(
             poll_interval_secs: settings.telegram.poll_interval_secs,
         },
         ai: settings.ai.clone(),
+        speech_to_text: settings.speech_to_text.clone(),
     };
     for endpoint in export_settings.webdav_endpoints.iter_mut() {
         endpoint.username.clear();
         endpoint.password.clear();
     }
     export_settings.ai.provider.api_key.clear();
+    export_settings.speech_to_text.api_key.clear();
 
     let bundle = ExportBundle {
         version: EXPORT_VERSION,
@@ -1680,6 +1754,7 @@ async fn import_settings(
         send: bundle.settings.send,
         backup: existing.backup.clone(),
         ai: bundle.settings.ai,
+        speech_to_text: bundle.settings.speech_to_text,
         telegram: TelegramBridgeSettings {
             enabled: bundle.settings.telegram.enabled,
             auto_start: bundle.settings.telegram.auto_start,
@@ -1695,7 +1770,7 @@ async fn import_settings(
     let normalized = normalize_settings(settings, &state.default_download_dir)?;
 
     #[cfg(desktop)]
-    update_global_hotkey_registration(&app, &state, &normalized)?;
+    update_hotkey_registrations(&app, &state, &normalized)?;
 
     write_settings_audited(&state.settings_path, &normalized)?;
     {
@@ -5544,6 +5619,27 @@ fn normalize_global_hotkey(raw: &str) -> Option<String> {
     Some(parts.join("+"))
 }
 
+fn normalize_speech_hotkey(raw: &str) -> Option<String> {
+    let compact = raw.trim().to_lowercase().replace([' ', '_'], "");
+    if matches!(
+        compact.as_str(),
+        "rightalt" | "right-alt" | "altright" | "alt-right"
+    ) {
+        return Some("right-alt".to_string());
+    }
+    if matches!(
+        compact.as_str(),
+        "leftalt" | "left-alt" | "altleft" | "alt-left"
+    ) {
+        return Some("left-alt".to_string());
+    }
+    normalize_global_hotkey(raw)
+}
+
+fn is_side_alt_speech_hotkey(raw: &str) -> bool {
+    matches!(normalize_speech_hotkey(raw).as_deref(), Some("right-alt" | "left-alt"))
+}
+
 fn is_valid_endpoint_id(value: &str) -> bool {
     let trimmed = value.trim();
     !(trimmed.is_empty()
@@ -5759,6 +5855,7 @@ fn normalize_settings(
         .telegram
         .poll_interval_secs
         .max(DEFAULT_TELEGRAM_POLL_INTERVAL_SECS);
+    normalize_speech_to_text_settings(&mut settings.speech_to_text)?;
     settings.backup.interval_minutes = settings.backup.interval_minutes.max(5);
     settings.backup.retain_count = settings.backup.retain_count.max(1);
     settings.backup.settings_snapshot_retain_count =
@@ -6230,6 +6327,345 @@ async fn process_text_with_ai_impl(
     })
 }
 
+fn asr_header(message_type: u8, flags: u8, serialization: u8, compression: u8) -> [u8; 4] {
+    [
+        (ASR_PROTOCOL_VERSION << 4) | ASR_HEADER_SIZE_WORDS,
+        (message_type << 4) | flags,
+        (serialization << 4) | compression,
+        0,
+    ]
+}
+
+fn gzip_bytes(data: &[u8]) -> Result<Vec<u8>, String> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder
+        .write_all(data)
+        .map_err(|err| format!("压缩 ASR 数据失败: {err}"))?;
+    encoder
+        .finish()
+        .map_err(|err| format!("结束 ASR 压缩失败: {err}"))
+}
+
+fn gunzip_bytes(data: &[u8]) -> Result<Vec<u8>, String> {
+    let mut decoder = GzDecoder::new(data);
+    let mut decoded = Vec::new();
+    decoder
+        .read_to_end(&mut decoded)
+        .map_err(|err| format!("解压 ASR 响应失败: {err}"))?;
+    Ok(decoded)
+}
+
+fn build_asr_full_request(sequence: i32, payload: &serde_json::Value) -> Result<Vec<u8>, String> {
+    let payload_data =
+        serde_json::to_vec(payload).map_err(|err| format!("序列化 ASR 请求失败: {err}"))?;
+    let compressed = gzip_bytes(&payload_data)?;
+    let mut frame = Vec::with_capacity(12 + compressed.len());
+    frame.extend_from_slice(&asr_header(
+        ASR_CLIENT_FULL_REQUEST,
+        ASR_FLAG_POS_SEQUENCE,
+        ASR_SERIALIZATION_JSON,
+        ASR_COMPRESSION_GZIP,
+    ));
+    frame.extend_from_slice(&sequence.to_be_bytes());
+    frame.extend_from_slice(&(compressed.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&compressed);
+    Ok(frame)
+}
+
+fn build_asr_audio_request(sequence: i32, audio: &[u8], last: bool) -> Result<Vec<u8>, String> {
+    let compressed = gzip_bytes(audio)?;
+    let mut frame = Vec::with_capacity(12 + compressed.len());
+    frame.extend_from_slice(&asr_header(
+        ASR_CLIENT_AUDIO_ONLY_REQUEST,
+        if last {
+            ASR_FLAG_NEG_WITH_SEQUENCE
+        } else {
+            ASR_FLAG_POS_SEQUENCE
+        },
+        ASR_SERIALIZATION_NONE,
+        ASR_COMPRESSION_GZIP,
+    ));
+    let send_sequence = if last {
+        -sequence.abs()
+    } else {
+        sequence.abs()
+    };
+    frame.extend_from_slice(&send_sequence.to_be_bytes());
+    frame.extend_from_slice(&(compressed.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&compressed);
+    Ok(frame)
+}
+
+fn parse_asr_server_frame(data: &[u8]) -> Result<AsrServerFrame, String> {
+    if data.len() < 8 {
+        return Err("ASR 响应帧过短".to_string());
+    }
+    let header_size = ((data[0] & 0x0f) as usize) * 4;
+    if data.len() < header_size + 4 {
+        return Err("ASR 响应头无效".to_string());
+    }
+    let message_type = data[1] >> 4;
+    let flags = data[1] & 0x0f;
+    let serialization = data[2] >> 4;
+    let compression = data[2] & 0x0f;
+    let mut offset = header_size;
+    let sequence = if flags == ASR_FLAG_POS_SEQUENCE || flags == ASR_FLAG_NEG_WITH_SEQUENCE {
+        if data.len() < offset + 4 {
+            return Err("ASR 响应序号缺失".to_string());
+        }
+        let seq = i32::from_be_bytes(data[offset..offset + 4].try_into().unwrap());
+        offset += 4;
+        Some(seq)
+    } else {
+        None
+    };
+    let error_code = if message_type == ASR_SERVER_ERROR_RESPONSE {
+        if data.len() < offset + 4 {
+            return Err("ASR 错误响应缺少错误码".to_string());
+        }
+        let code = i32::from_be_bytes(data[offset..offset + 4].try_into().unwrap());
+        offset += 4;
+        Some(code)
+    } else {
+        None
+    };
+    if data.len() < offset + 4 {
+        return Err("ASR 响应缺少 payload 长度".to_string());
+    }
+    let payload_size = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+    offset += 4;
+    if data.len() < offset + payload_size {
+        return Err("ASR 响应 payload 不完整".to_string());
+    }
+    let mut payload = data[offset..offset + payload_size].to_vec();
+    if compression == ASR_COMPRESSION_GZIP && !payload.is_empty() {
+        payload = gunzip_bytes(&payload)?;
+    }
+    let (payload_json, error_text) =
+        if serialization == ASR_SERIALIZATION_JSON && !payload.is_empty() {
+            let json: serde_json::Value = serde_json::from_slice(&payload)
+                .map_err(|err| format!("解析 ASR JSON 响应失败: {err}"))?;
+            let text = if message_type == ASR_SERVER_ERROR_RESPONSE {
+                Some(json.to_string())
+            } else {
+                None
+            };
+            (Some(json), text)
+        } else if !payload.is_empty() {
+            (None, Some(String::from_utf8_lossy(&payload).to_string()))
+        } else {
+            (None, None)
+        };
+    Ok(AsrServerFrame {
+        message_type,
+        flags,
+        sequence,
+        payload: payload_json,
+        error_code,
+        error_text,
+    })
+}
+
+fn speech_audio_format(request: &SpeechToTextRequest) -> String {
+    if let Some(format) = request.format.as_deref() {
+        let normalized = format.trim().to_lowercase();
+        if !normalized.is_empty() {
+            return normalized;
+        }
+    }
+    let mime = request.mime_type.as_deref().unwrap_or("").to_lowercase();
+    if mime.contains("wav") {
+        "wav".to_string()
+    } else if mime.contains("mpeg") || mime.contains("mp3") {
+        "mp3".to_string()
+    } else if mime.contains("ogg") {
+        "ogg".to_string()
+    } else {
+        "webm".to_string()
+    }
+}
+
+fn speech_audio_codec(request: &SpeechToTextRequest) -> String {
+    let format = speech_audio_format(request);
+    let mime = request.mime_type.as_deref().unwrap_or("").to_lowercase();
+    if format == "ogg" || format == "webm" || mime.contains("opus") {
+        "opus".to_string()
+    } else {
+        "raw".to_string()
+    }
+}
+
+fn extract_asr_text(payload: &serde_json::Value) -> Option<String> {
+    payload
+        .get("result")
+        .and_then(|result| result.get("text"))
+        .and_then(|text| text.as_str())
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+}
+
+fn extract_asr_log_id(payload: &serde_json::Value) -> Option<String> {
+    payload
+        .get("result")
+        .and_then(|result| result.get("additions"))
+        .and_then(|additions| additions.get("log_id"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
+}
+
+fn sanitize_speech_error(err: impl ToString, settings: &SpeechToTextSettings) -> String {
+    let mut text = err.to_string();
+    if !settings.api_key.is_empty() {
+        text = text.replace(&settings.api_key, "[redacted]");
+    }
+    text
+}
+
+async fn transcribe_speech_impl(
+    settings: &Settings,
+    request: SpeechToTextRequest,
+) -> Result<SpeechToTextResult, String> {
+    let speech = &settings.speech_to_text;
+    if !speech.enabled {
+        return Err("语音转文字未启用，请先在设置中开启".to_string());
+    }
+    if request.audio_data.is_empty() {
+        return Err("没有可识别的录音数据".to_string());
+    }
+    let mut speech_config = speech.clone();
+    normalize_speech_to_text_settings(&mut speech_config)?;
+    let mut ws_request = speech_config
+        .endpoint
+        .as_str()
+        .into_client_request()
+        .map_err(|err| {
+            sanitize_speech_error(format!("创建 ASR 请求失败: {err}"), &speech_config)
+        })?;
+    let connect_id = format!("speech-{}", now_ms());
+    ws_request.headers_mut().insert(
+        "X-Api-Key",
+        speech_config
+            .api_key
+            .parse()
+            .map_err(|_| "语音 API Key 无效".to_string())?,
+    );
+    ws_request.headers_mut().insert(
+        "X-Api-Resource-Id",
+        speech_config
+            .resource_id
+            .parse()
+            .map_err(|_| "语音 Resource ID 无效".to_string())?,
+    );
+    ws_request.headers_mut().insert(
+        "X-Api-Connect-Id",
+        connect_id
+            .parse()
+            .map_err(|_| "语音连接 ID 无效".to_string())?,
+    );
+    ws_request.headers_mut().insert(
+        "X-Control-Require-Usage-Tokens-Return",
+        "*".parse().unwrap(),
+    );
+    let (mut websocket, response) = connect_async(ws_request).await.map_err(|err| {
+        sanitize_speech_error(format!("连接 ASR 服务失败: {err}"), &speech_config)
+    })?;
+    let response_log_id = response
+        .headers()
+        .get("x-tt-logid")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string());
+
+    let full_request = serde_json::json!({
+        "user": { "uid": "transfer-genie" },
+        "audio": {
+            "format": speech_audio_format(&request),
+            "codec": speech_audio_codec(&request),
+            "rate": request.sample_rate.unwrap_or(16000),
+            "bits": request.bits_per_sample.unwrap_or(16),
+            "channel": request.channels.unwrap_or(1),
+            "language": "zh-CN"
+        },
+        "request": {
+            "model_name": "bigmodel",
+            "enable_itn": true,
+            "enable_punc": true,
+            "enable_ddc": false,
+            "show_utterances": true,
+            "result_type": "full"
+        }
+    });
+    websocket
+        .send(WsMessage::Binary(build_asr_full_request(1, &full_request)?))
+        .await
+        .map_err(|err| {
+            sanitize_speech_error(format!("发送 ASR 请求失败: {err}"), &speech_config)
+        })?;
+
+    let chunk_size = 16 * 1024;
+    let mut sequence = 2_i32;
+    for (index, chunk) in request.audio_data.chunks(chunk_size).enumerate() {
+        let last = (index + 1) * chunk_size >= request.audio_data.len();
+        websocket
+            .send(WsMessage::Binary(build_asr_audio_request(
+                sequence, chunk, last,
+            )?))
+            .await
+            .map_err(|err| {
+                sanitize_speech_error(format!("发送 ASR 音频失败: {err}"), &speech_config)
+            })?;
+        sequence += 1;
+    }
+
+    let mut final_text = String::new();
+    let mut log_id = response_log_id;
+    while let Some(message) = websocket.next().await {
+        let message = message.map_err(|err| {
+            sanitize_speech_error(format!("读取 ASR 响应失败: {err}"), &speech_config)
+        })?;
+        match message {
+            WsMessage::Binary(data) => {
+                let frame = parse_asr_server_frame(&data)?;
+                if frame.message_type == ASR_SERVER_ERROR_RESPONSE {
+                    return Err(format!(
+                        "ASR 服务返回错误{}{}",
+                        frame
+                            .error_code
+                            .map(|code| format!(" {code}"))
+                            .unwrap_or_default(),
+                        frame
+                            .error_text
+                            .as_deref()
+                            .map(|text| format!(": {text}"))
+                            .unwrap_or_default()
+                    ));
+                }
+                if let Some(payload) = frame.payload.as_ref() {
+                    if log_id.is_none() {
+                        log_id = extract_asr_log_id(payload);
+                    }
+                    if let Some(text) = extract_asr_text(payload) {
+                        final_text = text;
+                    }
+                }
+                if frame.flags == ASR_FLAG_NEG_WITH_SEQUENCE
+                    || frame.sequence.is_some_and(|seq| seq < 0)
+                {
+                    break;
+                }
+            }
+            WsMessage::Close(_) => break,
+            _ => {}
+        }
+    }
+    if final_text.trim().is_empty() {
+        return Err("ASR 未返回可用文本".to_string());
+    }
+    Ok(SpeechToTextResult {
+        text: final_text,
+        log_id,
+    })
+}
+
 fn extract_export_secrets(settings: &Settings) -> ExportSecrets {
     let endpoints = settings
         .webdav_endpoints
@@ -6256,10 +6692,18 @@ fn extract_export_secrets(settings: &Settings) -> ExportSecrets {
             api_key: settings.ai.provider.api_key.clone(),
         })
     };
+    let speech_to_text = if settings.speech_to_text.api_key.is_empty() {
+        None
+    } else {
+        Some(ExportSpeechToTextSecret {
+            api_key: settings.speech_to_text.api_key.clone(),
+        })
+    };
     ExportSecrets {
         endpoints,
         telegram,
         ai,
+        speech_to_text,
     }
 }
 
@@ -6347,6 +6791,57 @@ fn apply_export_secrets(settings: &mut Settings, secrets: ExportSecrets) -> Resu
     if let Some(ai) = secrets.ai {
         settings.ai.provider.api_key = ai.api_key;
     }
+    if let Some(speech_to_text) = secrets.speech_to_text {
+        settings.speech_to_text.api_key = speech_to_text.api_key;
+    }
+    Ok(())
+}
+
+fn normalize_speech_to_text_settings(settings: &mut SpeechToTextSettings) -> Result<(), String> {
+    settings.provider_kind = match settings.provider_kind.trim() {
+        "" => "volcengine_agent_plan".to_string(),
+        value => value.to_string(),
+    };
+    if settings.provider_kind != "volcengine_agent_plan" {
+        return Err("语音转文字 Provider 类型无效".to_string());
+    }
+    settings.api_key = settings.api_key.trim().to_string();
+    settings.resource_id = if settings.resource_id.trim().is_empty() {
+        crate::types::default_speech_to_text_resource_id()
+    } else {
+        settings.resource_id.trim().to_string()
+    };
+    settings.endpoint = if settings.endpoint.trim().is_empty() {
+        crate::types::default_speech_to_text_endpoint()
+    } else {
+        settings.endpoint.trim().to_string()
+    };
+    if !settings
+        .endpoint
+        .starts_with("wss://openspeech.bytedance.com/api/v3/plan/sauc/")
+    {
+        return Err("语音转文字接口地址无效，需要使用 Agent Plan ASR WebSocket 地址".to_string());
+    }
+    if settings.enabled {
+        if settings.api_key.is_empty() {
+            return Err("启用语音转文字前请先填写 API Key".to_string());
+        }
+        if settings.resource_id.is_empty() {
+            return Err("启用语音转文字前请先填写 Resource ID".to_string());
+        }
+    }
+    let normalized_shortcut = normalize_speech_hotkey(&settings.shortcut);
+    if settings.shortcut_enabled {
+        let Some(shortcut) = normalized_shortcut else {
+            return Err("语音录制快捷键格式无效，可填写 right-alt、left-alt 或 Alt+R".to_string());
+        };
+        settings.shortcut = shortcut;
+    } else {
+        settings.shortcut =
+            normalized_shortcut.unwrap_or_else(crate::types::default_speech_to_text_shortcut);
+    }
+    settings.max_duration_secs = settings.max_duration_secs.clamp(5, 300);
+    settings.microphone_device_id = settings.microphone_device_id.trim().to_string();
     Ok(())
 }
 
@@ -6546,6 +7041,7 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
                 backup: BackupSettings::default(),
                 telegram: TelegramBridgeSettings::default(),
                 ai: AiSettings::default(),
+                speech_to_text: SpeechToTextSettings::default(),
             }
         };
         let normalized = normalize_settings(settings, fallback_download_dir)?;
@@ -6568,6 +7064,7 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
             backup: BackupSettings::default(),
             telegram: TelegramBridgeSettings::default(),
             ai: AiSettings::default(),
+            speech_to_text: SpeechToTextSettings::default(),
         };
         write_settings_audited(path, &settings)?;
         Ok(settings)
@@ -8631,6 +9128,57 @@ fn update_global_hotkey_registration(
     Ok(())
 }
 
+#[cfg(desktop)]
+fn update_speech_hotkey_registration(
+    app: &AppHandle,
+    state: &AppState,
+    settings: &Settings,
+) -> Result<(), String> {
+    let mut current = state
+        .registered_speech_hotkey
+        .lock()
+        .map_err(|_| "更新语音录制快捷键失败".to_string())?;
+    let manager = app.global_shortcut();
+
+    if let Some(active) = current.clone() {
+        if manager.is_registered(active.clone()) {
+            manager
+                .unregister(active)
+                .map_err(|err| format!("注销语音录制快捷键失败: {err}"))?;
+        }
+    }
+
+    if settings.speech_to_text.shortcut_enabled {
+        let hotkey = normalize_speech_hotkey(&settings.speech_to_text.shortcut)
+            .ok_or_else(|| "语音录制快捷键格式无效，可填写 right-alt、left-alt 或 Alt+R".to_string())?;
+        if is_side_alt_speech_hotkey(&hotkey) {
+            *current = None;
+            return Ok(());
+        }
+        let shortcut = hotkey
+            .parse::<Shortcut>()
+            .map_err(|err| format!("语音录制快捷键解析失败: {err}"))?;
+        manager
+            .register(shortcut.clone())
+            .map_err(|err| format!("注册语音录制快捷键失败: {err}"))?;
+        *current = Some(shortcut);
+    } else {
+        *current = None;
+    }
+
+    Ok(())
+}
+
+#[cfg(desktop)]
+fn update_hotkey_registrations(
+    app: &AppHandle,
+    state: &AppState,
+    settings: &Settings,
+) -> Result<(), String> {
+    update_global_hotkey_registration(app, state, settings)?;
+    update_speech_hotkey_registration(app, state, settings)
+}
+
 #[cfg(target_os = "macos")]
 fn sync_dock_visibility_webview(app: &AppHandle, window: &tauri::WebviewWindow) {
     let minimized = window.is_minimized().unwrap_or(false);
@@ -8728,6 +9276,7 @@ fn main() {
                     .build()
                     .map_err(|err| format!("创建 HTTP 客户端失败: {err}"))?,
                 registered_hotkey: Mutex::new(None),
+                registered_speech_hotkey: Mutex::new(None),
                 telegram_bridge: Mutex::new(TelegramBridgeManager::default()),
                 local_http_api: Mutex::new(LocalHttpApiManager::default()),
                 update_guard: AsyncMutex::new(()),
@@ -8856,12 +9405,29 @@ fn main() {
                                 return;
                             }
                             let state = app.state::<AppState>();
-                            let Ok(active) = state.registered_hotkey.lock() else {
+                            let window_shortcut = state
+                                .registered_hotkey
+                                .lock()
+                                .ok()
+                                .and_then(|active| active.clone());
+                            if window_shortcut
+                                .as_ref()
+                                .is_some_and(|current| *shortcut == *current)
+                            {
+                                toggle_main_window(app);
                                 return;
-                            };
-                            if let Some(current) = active.as_ref() {
-                                if *shortcut == *current {
-                                    toggle_main_window(app);
+                            }
+                            let speech_shortcut = state
+                                .registered_speech_hotkey
+                                .lock()
+                                .ok()
+                                .and_then(|active| active.clone());
+                            if speech_shortcut
+                                .as_ref()
+                                .is_some_and(|current| *shortcut == *current)
+                            {
+                                if let Some(window) = app.get_webview_window("main") {
+                                    let _ = window.emit("speech-to-text-toggle", ());
                                 }
                             }
                         })
@@ -8874,8 +9440,7 @@ fn main() {
                         Ok(guard) => guard.clone(),
                         Err(_) => return Ok(()),
                     };
-                    if let Err(err) =
-                        update_global_hotkey_registration(&app.handle(), &state, &settings)
+                    if let Err(err) = update_hotkey_registrations(&app.handle(), &state, &settings)
                     {
                         eprintln!("注册全局快捷键失败: {err}");
                     }
@@ -8992,6 +9557,7 @@ fn main() {
             save_send_hotkey,
             process_text_with_ai,
             process_text_with_ai_stream,
+            transcribe_speech,
             get_device_name,
             export_settings,
             import_settings,
@@ -9103,6 +9669,7 @@ mod tests {
             backup: BackupSettings::default(),
             telegram: TelegramBridgeSettings::default(),
             ai: AiSettings::default(),
+            speech_to_text: SpeechToTextSettings::default(),
         }
     }
 
@@ -9125,6 +9692,7 @@ mod tests {
             sync_loop_signal,
             http: Client::builder().build().expect("create http client"),
             registered_hotkey: Mutex::new(None),
+            registered_speech_hotkey: Mutex::new(None),
             telegram_bridge: Mutex::new(TelegramBridgeManager::default()),
             local_http_api: Mutex::new(LocalHttpApiManager::default()),
             update_guard: AsyncMutex::new(()),
@@ -9427,6 +9995,140 @@ mod tests {
 
         assert_eq!(normalized.local_http_api.bind_address, "127.0.0.1");
         assert_eq!(normalized.local_http_api.bind_port, 6011);
+    }
+
+    #[test]
+    fn normalize_settings_applies_speech_to_text_defaults() {
+        let mut settings = test_settings();
+        settings.speech_to_text.resource_id.clear();
+        settings.speech_to_text.endpoint.clear();
+        settings.speech_to_text.shortcut.clear();
+        settings.speech_to_text.max_duration_secs = 0;
+        let download_dir = std::env::temp_dir().join("transfer-genie-speech-settings-test");
+
+        let normalized = normalize_settings(settings, &download_dir).unwrap();
+
+        assert!(!normalized.speech_to_text.enabled);
+        assert_eq!(
+            normalized.speech_to_text.resource_id,
+            "volc.seedasr.sauc.duration"
+        );
+        assert_eq!(
+            normalized.speech_to_text.endpoint,
+            "wss://openspeech.bytedance.com/api/v3/plan/sauc/bigmodel_nostream"
+        );
+        assert_eq!(normalized.speech_to_text.shortcut, "right-alt");
+        assert_eq!(normalized.speech_to_text.max_duration_secs, 5);
+    }
+
+    #[test]
+    fn normalize_settings_accepts_side_alt_speech_shortcut() {
+        let mut settings = test_settings();
+        settings.speech_to_text.shortcut_enabled = true;
+        settings.speech_to_text.shortcut = "AltRight".to_string();
+        let download_dir = std::env::temp_dir().join("transfer-genie-speech-settings-test");
+
+        let normalized = normalize_settings(settings, &download_dir).unwrap();
+
+        assert_eq!(normalized.speech_to_text.shortcut, "right-alt");
+    }
+
+    #[test]
+    fn normalize_settings_rejects_enabled_speech_without_api_key() {
+        let mut settings = test_settings();
+        settings.speech_to_text.enabled = true;
+        settings.speech_to_text.api_key.clear();
+        let download_dir = std::env::temp_dir().join("transfer-genie-speech-settings-test");
+
+        let error = match normalize_settings(settings, &download_dir) {
+            Ok(_) => panic!("enabled speech without api key should fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("API Key"));
+    }
+
+    #[test]
+    fn build_and_parse_asr_frames() {
+        let request = serde_json::json!({"request":{"model_name":"bigmodel"}});
+        let frame = build_asr_full_request(1, &request).expect("full request frame");
+        assert_eq!(frame[0], 0x11);
+        assert_eq!(frame[1], 0x11);
+        assert_eq!(frame[2], 0x11);
+
+        let audio_frame = build_asr_audio_request(2, b"audio", true).expect("audio request frame");
+        assert_eq!(audio_frame[1], 0x23);
+        assert_eq!(
+            i32::from_be_bytes(audio_frame[4..8].try_into().unwrap()),
+            -2
+        );
+
+        let payload = gzip_bytes(
+            serde_json::json!({"result":{"text":"你好","additions":{"log_id":"log-1"}}})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
+        let mut server_frame = Vec::new();
+        server_frame.extend_from_slice(&[0x11, 0x91, 0x11, 0x00]);
+        server_frame.extend_from_slice(&1_i32.to_be_bytes());
+        server_frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        server_frame.extend_from_slice(&payload);
+
+        let parsed = parse_asr_server_frame(&server_frame).expect("parse server frame");
+        let payload = parsed.payload.expect("payload");
+        assert_eq!(extract_asr_text(&payload).as_deref(), Some("你好"));
+        assert_eq!(extract_asr_log_id(&payload).as_deref(), Some("log-1"));
+    }
+
+    #[test]
+    fn parse_asr_error_frame_keeps_json_payload_text() {
+        let payload = gzip_bytes(
+            serde_json::json!({"message":"invalid audio format","code":45000151})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
+        let mut server_frame = Vec::new();
+        server_frame.extend_from_slice(&[0x11, 0xf1, 0x11, 0x00]);
+        server_frame.extend_from_slice(&1_i32.to_be_bytes());
+        server_frame.extend_from_slice(&45000151_i32.to_be_bytes());
+        server_frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        server_frame.extend_from_slice(&payload);
+
+        let parsed = parse_asr_server_frame(&server_frame).expect("parse error frame");
+
+        assert_eq!(parsed.message_type, ASR_SERVER_ERROR_RESPONSE);
+        assert_eq!(parsed.error_code, Some(45000151));
+        assert!(parsed
+            .error_text
+            .as_deref()
+            .is_some_and(|text| text.contains("invalid audio format")));
+    }
+
+    #[test]
+    fn speech_audio_codec_matches_browser_recording_formats() {
+        let opus_request = SpeechToTextRequest {
+            audio_data: vec![1, 2, 3],
+            format: Some("ogg".to_string()),
+            mime_type: Some("audio/ogg;codecs=opus".to_string()),
+            sample_rate: None,
+            channels: None,
+            bits_per_sample: None,
+        };
+        assert_eq!(speech_audio_format(&opus_request), "ogg");
+        assert_eq!(speech_audio_codec(&opus_request), "opus");
+
+        let wav_request = SpeechToTextRequest {
+            audio_data: vec![1, 2, 3],
+            format: None,
+            mime_type: Some("audio/wav".to_string()),
+            sample_rate: None,
+            channels: None,
+            bits_per_sample: None,
+        };
+        assert_eq!(speech_audio_format(&wav_request), "wav");
+        assert_eq!(speech_audio_codec(&wav_request), "raw");
     }
 
     #[test]
@@ -10146,6 +10848,28 @@ mod tests {
         export_ai.provider.api_key.clear();
         let exported = serde_json::to_string(&export_ai).expect("serialize export ai");
         assert!(!exported.contains("sk-secret"));
+    }
+
+    #[test]
+    fn export_secrets_include_speech_key_without_plain_export_setting() {
+        let mut settings = test_settings();
+        settings.speech_to_text.enabled = true;
+        settings.speech_to_text.api_key = "speech-secret".to_string();
+        settings.speech_to_text.resource_id = "volc.seedasr.sauc.duration".to_string();
+
+        let secrets = extract_export_secrets(&settings);
+        assert_eq!(
+            secrets
+                .speech_to_text
+                .as_ref()
+                .map(|secret| secret.api_key.as_str()),
+            Some("speech-secret")
+        );
+
+        let mut export_speech = settings.speech_to_text.clone();
+        export_speech.api_key.clear();
+        let exported = serde_json::to_string(&export_speech).expect("serialize export speech");
+        assert!(!exported.contains("speech-secret"));
     }
 
     #[test]

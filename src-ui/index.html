@@ -240,6 +240,14 @@
                     <img src="icons/attachment.svg" alt="附件" style="width: 16px; height: 16px;" />
                     <span>附件</span>
                   </button>
+                  <button id="speech-to-text-toggle" class="icon-button" type="button" title="语音输入" aria-label="语音输入" aria-pressed="false">
+                    <span class="speech-wave" aria-hidden="true">
+                      <span></span>
+                      <span></span>
+                      <span></span>
+                    </span>
+                    <span id="speech-to-text-label">语音</span>
+                  </button>
                   <div class="send-action-split">
                     <button id="send-text" class="icon-button primary send-action-main" type="button">
                       <img src="icons/send.svg" alt="发送" style="width: 16px; height: 16px;" />
@@ -663,6 +671,7 @@
                   <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-send">发送设置</button>
                   <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-system">系统设置</button>
                   <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-api">API 接口</button>
+                  <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-speech">语音输入</button>
                   <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-ai">AI 助手</button>
                   <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-telegram">Telegram Bridge</button>
                   <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-data">数据管理</button>
@@ -884,6 +893,53 @@
                       <span class="local-http-api-status-label">最近错误</span>
                       <span id="local-http-api-last-error" class="local-http-api-error">无</span>
                     </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-section-anchor" id="settings-section-speech" data-settings-section aria-hidden="true"></div>
+              <div class="settings-group">
+                <h3 class="settings-group-title">语音输入</h3>
+                <div class="settings-group-content">
+                  <label class="toggle-left">
+                    <span class="toggle-label">启用语音转文字</span>
+                    <input id="speech-to-text-enabled" type="checkbox" :checked="ui.settingsForm.speechToTextEnabled" @change="updateSettingsFormField('speechToTextEnabled', $event.target.checked)" />
+                  </label>
+                  <label>
+                    API Key
+                    <input id="speech-to-text-api-key" type="password" :value="ui.settingsForm.speechToTextApiKey" @input="updateSettingsFormField('speechToTextApiKey', $event.target.value)" />
+                    <span class="field-hint">使用火山方舟 Agent Plan 专属 API Key；导出配置时会加密处理。</span>
+                  </label>
+                  <label>
+                    Resource ID
+                    <input id="speech-to-text-resource-id" type="text" placeholder="volc.seedasr.sauc.duration" :value="ui.settingsForm.speechToTextResourceId" @input="updateSettingsFormField('speechToTextResourceId', $event.target.value)" />
+                  </label>
+                  <label>
+                    ASR WebSocket 地址
+                    <input id="speech-to-text-endpoint" type="text" placeholder="wss://openspeech.bytedance.com/api/v3/plan/sauc/bigmodel_nostream" :value="ui.settingsForm.speechToTextEndpoint" @input="updateSettingsFormField('speechToTextEndpoint', $event.target.value)" />
+                    <span class="field-hint">按一次开始录音、再按一次结束的场景默认使用 bigmodel_nostream。</span>
+                  </label>
+                  <label>
+                    麦克风
+                    <select id="speech-to-text-microphone" :value="ui.settingsForm.speechToTextMicrophoneDeviceId" @change="updateSettingsFormField('speechToTextMicrophoneDeviceId', $event.target.value)">
+                      <option value="">系统默认麦克风</option>
+                    </select>
+                    <span class="field-hint">打开设置页时会尝试读取可用输入设备；浏览器可能需要先授权麦克风。</span>
+                  </label>
+                  <label class="toggle-left">
+                    <span class="toggle-label">启用语音录制快捷键</span>
+                    <input id="speech-to-text-shortcut-enabled" type="checkbox" :checked="ui.settingsForm.speechToTextShortcutEnabled" @change="updateSettingsFormField('speechToTextShortcutEnabled', $event.target.checked)" />
+                  </label>
+                  <div class="field-row">
+                    <label>
+                      语音录制快捷键
+                      <input id="speech-to-text-shortcut" type="text" placeholder="right-alt" :value="ui.settingsForm.speechToTextShortcut" @input="updateSettingsFormField('speechToTextShortcut', $event.target.value)" />
+                      <span class="field-hint">支持 right-alt / left-alt 区分左右 Alt；普通组合键可填 Alt+R。</span>
+                    </label>
+                    <label>
+                      最长录音（秒）
+                      <input id="speech-to-text-max-duration" type="number" min="5" max="300" step="1" :value="ui.settingsForm.speechToTextMaxDurationSecs" @input="updateSettingsFormField('speechToTextMaxDurationSecs', Number($event.target.value || 60))" />
+                    </label>
                   </div>
                 </div>
               </div>

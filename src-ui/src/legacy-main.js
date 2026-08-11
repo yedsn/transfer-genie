@@ -563,6 +563,8 @@ const downloadCancelSelectionButton = document.getElementById('download-cancel-s
 const textInput = document.getElementById('text-input');
 const markdownEditorContainer = document.getElementById('markdown-editor');
 const sendTextButton = document.getElementById('send-text');
+const speechToTextButton = document.getElementById('speech-to-text-toggle');
+const speechToTextLabel = document.getElementById('speech-to-text-label');
 const sendOptionsToggle = document.getElementById('send-options-toggle');
 const sendOptionsMenu = document.getElementById('send-options-menu');
 const quickCopyAfterSendInput = document.getElementById('quick-copy-after-send');
@@ -645,6 +647,14 @@ const telegramBridgeStatusLabel = document.getElementById('telegram-bridge-statu
 const telegramBridgeLastErrorLabel = document.getElementById('telegram-bridge-last-error');
 const globalHotkeyInput = document.getElementById('global-hotkey');
 const globalHotkeyEnabledInput = document.getElementById('global-hotkey-enabled');
+const speechToTextEnabledInput = document.getElementById('speech-to-text-enabled');
+const speechToTextApiKeyInput = document.getElementById('speech-to-text-api-key');
+const speechToTextResourceIdInput = document.getElementById('speech-to-text-resource-id');
+const speechToTextEndpointInput = document.getElementById('speech-to-text-endpoint');
+const speechToTextMicrophoneInput = document.getElementById('speech-to-text-microphone');
+const speechToTextShortcutEnabledInput = document.getElementById('speech-to-text-shortcut-enabled');
+const speechToTextShortcutInput = document.getElementById('speech-to-text-shortcut');
+const speechToTextMaxDurationInput = document.getElementById('speech-to-text-max-duration');
 const sendHotkeyInputs = document.querySelectorAll('input[name="send-hotkey"]');
 const toggleSelectionButton = document.getElementById('toggle-selection');
 const selectionBar = document.getElementById('selection-bar');
@@ -899,6 +909,14 @@ let currentSettingsFormState = {
   aiTimeoutSecs: 60,
   aiDefaultActionId: 'polish',
   aiActions: [],
+  speechToTextEnabled: false,
+  speechToTextApiKey: '',
+  speechToTextResourceId: 'volc.seedasr.sauc.duration',
+  speechToTextEndpoint: 'wss://openspeech.bytedance.com/api/v3/plan/sauc/bigmodel_nostream',
+  speechToTextMicrophoneDeviceId: '',
+  speechToTextShortcutEnabled: false,
+  speechToTextShortcut: 'right-alt',
+  speechToTextMaxDurationSecs: 60,
 };
 let currentAutoBackupStatusState = {
   enabled: false,
@@ -1025,6 +1043,9 @@ const SEND_STATUS = {
 };
 
 const DEFAULT_GLOBAL_HOTKEY = 'alt+t';
+const DEFAULT_SPEECH_TO_TEXT_RESOURCE_ID = 'volc.seedasr.sauc.duration';
+const DEFAULT_SPEECH_TO_TEXT_ENDPOINT = 'wss://openspeech.bytedance.com/api/v3/plan/sauc/bigmodel_nostream';
+const DEFAULT_SPEECH_TO_TEXT_SHORTCUT = 'right-alt';
 
 const SEND_HOTKEY = {
   ENTER: 'enter',
@@ -1709,6 +1730,424 @@ function normalizeGlobalHotkey(value) {
   );
   if (!hasModifier) return '';
   return parts.join('+');
+}
+
+function normalizeSpeechHotkey(value) {
+  const normalized = String(value || '').toLowerCase().trim().replace(/\s+/g, '');
+  if (['rightalt', 'right-alt', 'alt-right', 'altright', 'right_alt'].includes(normalized)) return 'right-alt';
+  if (['leftalt', 'left-alt', 'alt-left', 'altleft', 'left_alt'].includes(normalized)) return 'left-alt';
+  return normalizeGlobalHotkey(value);
+}
+
+function isSideAltSpeechHotkey(value) {
+  return ['right-alt', 'left-alt'].includes(normalizeSpeechHotkey(value));
+}
+
+let activeSideAltSpeechKey = '';
+
+function getSpeechSideAltEventCode() {
+  if (!currentSettingsFormState.speechToTextShortcutEnabled) return '';
+  const shortcut = normalizeSpeechHotkey(currentSettingsFormState.speechToTextShortcut || DEFAULT_SPEECH_TO_TEXT_SHORTCUT);
+  if (shortcut === 'right-alt') return 'AltRight';
+  if (shortcut === 'left-alt') return 'AltLeft';
+  return '';
+}
+
+function isSpeechSideAltEvent(event, targetCode) {
+  if (!targetCode || event.code === targetCode) return !!targetCode;
+  if (targetCode === 'AltRight') {
+    return event.key === 'AltGraph' || (event.key === 'Alt' && event.altKey && event.ctrlKey);
+  }
+  return false;
+}
+
+function handleSpeechSideAltKeydown(event) {
+  const targetCode = getSpeechSideAltEventCode();
+  if (!isSpeechSideAltEvent(event, targetCode) || event.repeat || activeSideAltSpeechKey === targetCode) return;
+  activeSideAltSpeechKey = targetCode;
+  event.preventDefault();
+  toggleSpeechRecording();
+}
+
+function handleSpeechSideAltKeyup(event) {
+  if (isSpeechSideAltEvent(event, activeSideAltSpeechKey)) {
+    activeSideAltSpeechKey = '';
+  }
+}
+
+let speechStream = null;
+let speechRecordingTimer = null;
+let speechAudioContext = null;
+let speechSourceNode = null;
+let speechProcessorNode = null;
+let speechSilentGainNode = null;
+let speechCapturedSamples = [];
+let speechCaptureSampleRate = 16000;
+let speechState = 'idle';
+let speechLastLevel = 0;
+let speechSessionId = 0;
+
+function setSpeechLevel(level) {
+  const normalized = Math.max(0, Math.min(1, Number(level) || 0));
+  speechLastLevel = (speechLastLevel * 0.45) + (normalized * 0.55);
+  const speechMotion = speechLastLevel < 0.04 ? 0 : Math.min(1, (speechLastLevel - 0.04) / 0.96);
+  const button = document.getElementById('speech-to-text-toggle');
+  if (!button) return;
+  button.style.setProperty('--speech-level', speechLastLevel.toFixed(3));
+  button.style.setProperty('--speech-motion', speechMotion.toFixed(3));
+  button.style.setProperty('--speech-bar-1', (0.04 + speechLastLevel * 0.78).toFixed(3));
+  button.style.setProperty('--speech-bar-2', (0.08 + speechLastLevel * 0.92).toFixed(3));
+  button.style.setProperty('--speech-bar-3', (0.03 + speechLastLevel * 0.74).toFixed(3));
+  button.style.setProperty('--speech-wave-from-1', (1 - 0.24 * speechMotion).toFixed(3));
+  button.style.setProperty('--speech-wave-to-1', (1 + 0.36 * speechMotion).toFixed(3));
+  button.style.setProperty('--speech-wave-from-2', (1 - 0.18 * speechMotion).toFixed(3));
+  button.style.setProperty('--speech-wave-to-2', (1 + 0.44 * speechMotion).toFixed(3));
+  button.style.setProperty('--speech-wave-from-3', (1 - 0.22 * speechMotion).toFixed(3));
+  button.style.setProperty('--speech-wave-to-3', (1 + 0.32 * speechMotion).toFixed(3));
+}
+
+function syncSpeechButtonState() {
+  const button = document.getElementById('speech-to-text-toggle');
+  const label = document.getElementById('speech-to-text-label');
+  if (!button) return;
+  button.classList.toggle('is-preparing', speechState === 'preparing');
+  button.classList.toggle('is-recording', speechState === 'recording');
+  button.classList.toggle('is-transcribing', speechState === 'transcribing');
+  button.disabled = speechState === 'transcribing';
+  button.setAttribute('aria-pressed', speechState === 'recording' ? 'true' : 'false');
+  if (label) {
+    label.textContent = speechState === 'preparing'
+      ? '准备中'
+      : speechState === 'recording'
+      ? '结束'
+      : speechState === 'transcribing'
+        ? '识别中'
+        : '语音';
+  }
+  if (speechState === 'idle') setSpeechLevel(0);
+}
+
+function isCurrentSpeechSession(sessionId) {
+  return sessionId === speechSessionId;
+}
+
+function closeSpeechStream(stream) {
+  if (!stream) return;
+  try {
+    stream.getTracks().forEach((track) => track.stop());
+  } catch (error) { /* ignore */ }
+}
+
+function closeSpeechAudioContext(context) {
+  if (!context?.close) return;
+  try {
+    void context.close().catch(() => {});
+  } catch (error) { /* ignore */ }
+}
+
+function setSpeechState(state) {
+  speechState = state || 'idle';
+  syncSpeechButtonState();
+}
+
+function encodeSpeechWav(samples, sampleRate) {
+  const dataLength = samples.length * 2;
+  const buffer = new ArrayBuffer(44 + dataLength);
+  const view = new DataView(buffer);
+  const writeString = (offset, value) => {
+    for (let index = 0; index < value.length; index += 1) {
+      view.setUint8(offset + index, value.charCodeAt(index));
+    }
+  };
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + dataLength, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(36, 'data');
+  view.setUint32(40, dataLength, true);
+  let offset = 44;
+  for (let index = 0; index < samples.length; index += 1) {
+    const sample = Math.max(-1, Math.min(1, samples[index] || 0));
+    view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+    offset += 2;
+  }
+  return new Uint8Array(buffer);
+}
+
+function mergeSpeechSamples(chunks) {
+  const totalLength = chunks.reduce((total, chunk) => total + chunk.length, 0);
+  const output = new Float32Array(totalLength);
+  let offset = 0;
+  chunks.forEach((chunk) => {
+    output.set(chunk, offset);
+    offset += chunk.length;
+  });
+  return output;
+}
+
+function downsampleSpeechSamples(samples, sourceRate, targetSampleRate) {
+  const sourceLength = samples.length || 0;
+  if (!sourceLength) return new Float32Array();
+  if (!sourceRate || sourceRate === targetSampleRate) return samples;
+  const targetLength = Math.max(1, Math.round(sourceLength * targetSampleRate / sourceRate));
+  const output = new Float32Array(targetLength);
+  for (let index = 0; index < targetLength; index += 1) {
+    const sourceIndex = Math.min(sourceLength - 1, Math.floor(index * sourceRate / targetSampleRate));
+    output[index] = samples[sourceIndex] || 0;
+  }
+  return output;
+}
+
+function buildCapturedSpeechWav() {
+  const targetSampleRate = 16000;
+  const samples = downsampleSpeechSamples(
+    mergeSpeechSamples(speechCapturedSamples),
+    speechCaptureSampleRate,
+    targetSampleRate,
+  );
+  return {
+    bytes: encodeSpeechWav(samples, targetSampleRate),
+    sampleRate: targetSampleRate,
+    channels: 1,
+    bitsPerSample: 16,
+    mimeType: 'audio/wav',
+    format: 'wav',
+  };
+}
+
+function renderSpeechMicrophoneOptions(devices, selectedDeviceId) {
+  if (!speechToTextMicrophoneInput) return;
+  const currentValue = selectedDeviceId || speechToTextMicrophoneInput.value || '';
+  speechToTextMicrophoneInput.innerHTML = '';
+  const defaultOption = document.createElement('option');
+  defaultOption.value = '';
+  defaultOption.textContent = '系统默认麦克风';
+  speechToTextMicrophoneInput.appendChild(defaultOption);
+  (devices || []).forEach((device, index) => {
+    const option = document.createElement('option');
+    option.value = device.deviceId;
+    option.textContent = device.label || `麦克风 ${index + 1}`;
+    speechToTextMicrophoneInput.appendChild(option);
+  });
+  speechToTextMicrophoneInput.value = Array.from(speechToTextMicrophoneInput.options)
+    .some((option) => option.value === currentValue)
+    ? currentValue
+    : '';
+}
+
+async function refreshSpeechMicrophoneOptions() {
+  if (!navigator.mediaDevices?.enumerateDevices) {
+    renderSpeechMicrophoneOptions([], currentSettingsFormState.speechToTextMicrophoneDeviceId || '');
+    return;
+  }
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const microphones = devices.filter((device) => device.kind === 'audioinput');
+    renderSpeechMicrophoneOptions(microphones, currentSettingsFormState.speechToTextMicrophoneDeviceId || '');
+  } catch (error) {
+    renderSpeechMicrophoneOptions([], currentSettingsFormState.speechToTextMicrophoneDeviceId || '');
+  }
+}
+
+function insertTextIntoComposer(text) {
+  const value = String(text || '');
+  if (!value) return;
+  const cw = window.transferGenieComposer;
+  if (cw && cw.isActive && cw.isActive() && cw.getActiveDraft && cw.setActiveDraftText) {
+    const draft = cw.getActiveDraft() || {};
+    const previous = String(draft.text || '');
+    const separator = previous && !previous.endsWith('\n') ? '\n' : '';
+    cw.setActiveDraftText(`${previous}${separator}${value}`);
+    cw.focusActiveDraft?.();
+    return;
+  }
+  if (currentFormat === 'markdown' && mdEditor) {
+    const previous = mdEditor.getMarkdown ? mdEditor.getMarkdown() : '';
+    const separator = previous && !previous.endsWith('\n') ? '\n' : '';
+    mdEditor.setMarkdown(`${previous}${separator}${value}`);
+    focusTextInput();
+    return;
+  }
+  if (!textInput) return;
+  const start = Number.isInteger(textInput.selectionStart) ? textInput.selectionStart : textInput.value.length;
+  const end = Number.isInteger(textInput.selectionEnd) ? textInput.selectionEnd : start;
+  const before = textInput.value.slice(0, start);
+  const after = textInput.value.slice(end);
+  const spacer = before && !before.endsWith('\n') && !before.endsWith(' ') ? ' ' : '';
+  textInput.value = `${before}${spacer}${value}${after}`;
+  const cursor = before.length + spacer.length + value.length;
+  textInput.focus({ preventScroll: true });
+  textInput.setSelectionRange(cursor, cursor);
+}
+
+function stopSpeechStream() {
+  if (speechRecordingTimer) {
+    window.clearTimeout(speechRecordingTimer);
+    speechRecordingTimer = null;
+  }
+  if (speechProcessorNode) {
+    speechProcessorNode.onaudioprocess = null;
+    try { speechProcessorNode.disconnect(); } catch (error) { /* ignore */ }
+    speechProcessorNode = null;
+  }
+  if (speechSourceNode) {
+    try { speechSourceNode.disconnect(); } catch (error) { /* ignore */ }
+    speechSourceNode = null;
+  }
+  if (speechSilentGainNode) {
+    try { speechSilentGainNode.disconnect(); } catch (error) { /* ignore */ }
+    speechSilentGainNode = null;
+  }
+  if (speechStream) {
+    closeSpeechStream(speechStream);
+    speechStream = null;
+  }
+  if (speechAudioContext) {
+    const context = speechAudioContext;
+    speechAudioContext = null;
+    closeSpeechAudioContext(context);
+  }
+}
+
+async function startSpeechRecording() {
+  if (!currentSettingsFormState.speechToTextEnabled) {
+    setErrorStatus('请先在设置中启用语音转文字');
+    showToast('请先在设置中启用语音转文字', 'error');
+    return;
+  }
+  if (!currentSettingsFormState.speechToTextApiKey) {
+    setErrorStatus('启用语音转文字前请先填写 API Key');
+    showToast('启用语音转文字前请先填写 API Key', 'error');
+    return;
+  }
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!navigator.mediaDevices?.getUserMedia || !AudioContextClass) {
+    setErrorStatus('当前环境不支持麦克风录音');
+    return;
+  }
+  const sessionId = speechSessionId + 1;
+  speechSessionId = sessionId;
+  setSpeechState('preparing');
+  setStatus('正在打开麦克风...');
+  try {
+    speechCapturedSamples = [];
+    const deviceId = String(currentSettingsFormState.speechToTextMicrophoneDeviceId || '').trim();
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
+    if (!isCurrentSpeechSession(sessionId) || speechState !== 'preparing') {
+      closeSpeechStream(stream);
+      return;
+    }
+    const audioContext = new AudioContextClass({ sampleRate: 16000 });
+    if (audioContext.resume) {
+      await audioContext.resume();
+    }
+    if (!isCurrentSpeechSession(sessionId) || speechState !== 'preparing') {
+      closeSpeechStream(stream);
+      closeSpeechAudioContext(audioContext);
+      return;
+    }
+    speechStream = stream;
+    speechAudioContext = audioContext;
+    speechCaptureSampleRate = speechAudioContext.sampleRate || 16000;
+    speechSourceNode = speechAudioContext.createMediaStreamSource(speechStream);
+    speechProcessorNode = speechAudioContext.createScriptProcessor(4096, 1, 1);
+    speechSilentGainNode = speechAudioContext.createGain();
+    speechSilentGainNode.gain.value = 0;
+    speechProcessorNode.onaudioprocess = (event) => {
+      if (speechState !== 'recording') return;
+      const input = event.inputBuffer.getChannelData(0);
+      speechCapturedSamples.push(new Float32Array(input));
+      let sum = 0;
+      for (let index = 0; index < input.length; index += 1) {
+        sum += input[index] * input[index];
+      }
+      setSpeechLevel(Math.min(1, Math.sqrt(sum / input.length) * 8));
+    };
+    speechSourceNode.connect(speechProcessorNode);
+    speechProcessorNode.connect(speechSilentGainNode);
+    speechSilentGainNode.connect(speechAudioContext.destination);
+    setSpeechState('recording');
+    setStatus('正在录音，再点一次结束');
+    const maxDuration = Math.max(5, Math.min(300, Number(currentSettingsFormState.speechToTextMaxDurationSecs) || 60));
+    speechRecordingTimer = window.setTimeout(() => {
+      if (isCurrentSpeechSession(sessionId) && speechState === 'recording') stopSpeechRecording();
+    }, maxDuration * 1000);
+  } catch (error) {
+    if (!isCurrentSpeechSession(sessionId)) return;
+    stopSpeechStream();
+    setSpeechState('idle');
+    setErrorStatus(`启动录音失败：${error?.message || error}`);
+  }
+}
+
+function stopSpeechRecording() {
+  if (speechState === 'recording') {
+    speechSessionId += 1;
+    void finishSpeechRecording();
+    return;
+  }
+  speechSessionId += 1;
+  stopSpeechStream();
+  setSpeechState('idle');
+}
+
+async function finishSpeechRecording() {
+  const chunks = speechCapturedSamples.slice();
+  speechCapturedSamples = [];
+  const sourceSampleRate = speechCaptureSampleRate;
+  stopSpeechStream();
+  if (!chunks.length) {
+    setSpeechState('idle');
+    setErrorStatus('没有可识别的录音数据');
+    return;
+  }
+  setSpeechState('transcribing');
+  setStatus('正在识别语音...');
+  try {
+    speechCapturedSamples = chunks;
+    speechCaptureSampleRate = sourceSampleRate;
+    const audio = buildCapturedSpeechWav();
+    speechCapturedSamples = [];
+    const result = await invoke('transcribe_speech', {
+      request: {
+        audioData: Array.from(audio.bytes),
+        mimeType: audio.mimeType,
+        format: audio.format,
+        sampleRate: audio.sampleRate,
+        channels: audio.channels,
+        bitsPerSample: audio.bitsPerSample,
+      },
+    });
+    insertTextIntoComposer(result?.text || '');
+    setSpeechState('idle');
+    setSuccessStatus('语音识别完成');
+  } catch (error) {
+    setSpeechState('idle');
+    setErrorStatus(`语音识别失败：${error}`);
+  }
+}
+
+function toggleSpeechRecording() {
+  if (speechState === 'recording' || speechState === 'preparing') {
+    stopSpeechRecording();
+  } else if (speechState === 'idle') {
+    void startSpeechRecording();
+  }
 }
 
 function isImagePath(path) {
@@ -8270,6 +8709,7 @@ function applySettings(settings) {
   }
   const telegram = settings.telegram || {};
   const ai = settings.ai || {};
+  const speechToText = settings.speech_to_text || {};
   const send = settings.send || {};
   const aiProvider = ai.provider || {};
   const aiActions = normalizeAiActions(ai.actions);
@@ -8316,6 +8756,14 @@ function applySettings(settings) {
   if (globalHotkeyEnabledInput) {
     globalHotkeyEnabledInput.checked = settings.global_hotkey_enabled !== false;
   }
+  if (speechToTextEnabledInput) speechToTextEnabledInput.checked = !!speechToText.enabled;
+  if (speechToTextApiKeyInput) speechToTextApiKeyInput.value = speechToText.api_key || '';
+  if (speechToTextResourceIdInput) speechToTextResourceIdInput.value = speechToText.resource_id || DEFAULT_SPEECH_TO_TEXT_RESOURCE_ID;
+  if (speechToTextEndpointInput) speechToTextEndpointInput.value = speechToText.endpoint || DEFAULT_SPEECH_TO_TEXT_ENDPOINT;
+  if (speechToTextMicrophoneInput) speechToTextMicrophoneInput.value = speechToText.microphone_device_id || '';
+  if (speechToTextShortcutEnabledInput) speechToTextShortcutEnabledInput.checked = !!speechToText.shortcut_enabled;
+  if (speechToTextShortcutInput) speechToTextShortcutInput.value = (speechToText.shortcut || DEFAULT_SPEECH_TO_TEXT_SHORTCUT).toLowerCase();
+  if (speechToTextMaxDurationInput) speechToTextMaxDurationInput.value = Number(speechToText.max_duration_secs || 60);
   currentSettingsFormState = {
     senderName: settings.sender_name || '',
     refreshIntervalSecs: Number(settings.refresh_interval_secs || 5),
@@ -8350,8 +8798,17 @@ function applySettings(settings) {
     aiDefaultActionId: ai.default_action_id || aiActions[0]?.id || 'polish',
     aiActions,
     activeAiActionCategory: currentSettingsFormState.activeAiActionCategory || aiActions[0]?.category || '通用',
+    speechToTextEnabled: !!speechToText.enabled,
+    speechToTextApiKey: speechToText.api_key || '',
+    speechToTextResourceId: speechToText.resource_id || DEFAULT_SPEECH_TO_TEXT_RESOURCE_ID,
+    speechToTextEndpoint: speechToText.endpoint || DEFAULT_SPEECH_TO_TEXT_ENDPOINT,
+    speechToTextMicrophoneDeviceId: speechToText.microphone_device_id || '',
+    speechToTextShortcutEnabled: !!speechToText.shortcut_enabled,
+    speechToTextShortcut: (speechToText.shortcut || DEFAULT_SPEECH_TO_TEXT_SHORTCUT).toLowerCase(),
+    speechToTextMaxDurationSecs: Number(speechToText.max_duration_secs || 60),
   };
   syncVueSettingsForm(currentSettingsFormState);
+  void refreshSpeechMicrophoneOptions();
   syncSendOptionsMenuState();
   applyDefaultEditorFormat(currentSettingsFormState.defaultEditorFormat);
   if (telegramAutoStartInput) {
@@ -8465,6 +8922,35 @@ async function saveSettings(options = {}) {
   );
   if (globalHotkeyEnabled && !normalizedGlobalHotkey) {
     setErrorStatus('全局快捷键需包含修饰键，例如 Ctrl+Alt+T');
+    return;
+  }
+  const speechToTextEnabled = !!currentSettingsFormState.speechToTextEnabled;
+  const speechToTextApiKey = (currentSettingsFormState.speechToTextApiKey || '').trim();
+  const speechToTextResourceId = (currentSettingsFormState.speechToTextResourceId || DEFAULT_SPEECH_TO_TEXT_RESOURCE_ID).trim();
+  const speechToTextEndpoint = (currentSettingsFormState.speechToTextEndpoint || DEFAULT_SPEECH_TO_TEXT_ENDPOINT).trim();
+  const speechToTextMicrophoneDeviceId = (currentSettingsFormState.speechToTextMicrophoneDeviceId || '').trim();
+  const speechToTextShortcutEnabled = !!currentSettingsFormState.speechToTextShortcutEnabled;
+  const normalizedSpeechShortcut = normalizeSpeechHotkey(
+    currentSettingsFormState.speechToTextShortcut || DEFAULT_SPEECH_TO_TEXT_SHORTCUT,
+  );
+  const speechToTextMaxDurationSecs = Math.max(
+    5,
+    Math.min(300, Number(currentSettingsFormState.speechToTextMaxDurationSecs) || 60),
+  );
+  if (speechToTextEnabled && !speechToTextApiKey) {
+    setErrorStatus('启用语音转文字前请先填写 API Key');
+    return;
+  }
+  if (speechToTextEnabled && !speechToTextResourceId) {
+    setErrorStatus('启用语音转文字前请先填写 Resource ID');
+    return;
+  }
+  if (speechToTextEnabled && !speechToTextEndpoint.startsWith('wss://openspeech.bytedance.com/api/v3/plan/sauc/')) {
+    setErrorStatus('语音转文字接口地址无效，需要使用 Agent Plan ASR WebSocket 地址');
+    return;
+  }
+  if (speechToTextShortcutEnabled && !normalizedSpeechShortcut) {
+    setErrorStatus('语音录制快捷键格式无效，可填写 right-alt、left-alt 或 Alt+R');
     return;
   }
   const telegramBotToken = (currentSettingsFormState.telegramBotToken || '').trim();
@@ -8604,6 +9090,17 @@ async function saveSettings(options = {}) {
       },
       default_action_id: aiDefaultActionId,
       actions: aiActions,
+    },
+    speech_to_text: {
+      enabled: speechToTextEnabled,
+      provider_kind: 'volcengine_agent_plan',
+      api_key: speechToTextApiKey,
+      resource_id: speechToTextResourceId,
+      endpoint: speechToTextEndpoint,
+      microphone_device_id: speechToTextMicrophoneDeviceId,
+      shortcut_enabled: speechToTextShortcutEnabled,
+      shortcut: normalizedSpeechShortcut || DEFAULT_SPEECH_TO_TEXT_SHORTCUT,
+      max_duration_secs: speechToTextMaxDurationSecs,
     },
   };
 
@@ -9796,6 +10293,10 @@ if (listen) {
     syncVueSettingsAutoBackup(currentAutoBackupStatusState);
   });
 
+  listen('speech-to-text-toggle', () => {
+    toggleSpeechRecording();
+  });
+
 }
 
 refreshButton.addEventListener('click', async () => {
@@ -9849,11 +10350,42 @@ if (transferClearButton) {
   transferClearButton.addEventListener('click', clearCurrentTransferList);
 }
 sendTextButton.addEventListener('click', sendText);
+window.addEventListener('keydown', handleSpeechSideAltKeydown, true);
+window.addEventListener('keyup', handleSpeechSideAltKeyup, true);
+document.addEventListener('click', (event) => {
+  if (event.target?.closest?.('#speech-to-text-toggle')) {
+    toggleSpeechRecording();
+  }
+});
 if (sendOptionsToggle) {
   sendOptionsToggle.addEventListener('click', toggleSendOptionsMenu);
 }
 if (sendOptionsMenu) {
   sendOptionsMenu.addEventListener('click', (event) => event.stopPropagation());
+}
+if (speechToTextMicrophoneInput) {
+  speechToTextMicrophoneInput.addEventListener('change', (event) => {
+    currentSettingsFormState = {
+      ...currentSettingsFormState,
+      speechToTextMicrophoneDeviceId: event.target.value || '',
+    };
+    syncVueSettingsForm(currentSettingsFormState);
+  });
+}
+if (speechToTextShortcutInput) {
+  speechToTextShortcutInput.addEventListener('input', () => {
+    activeSideAltSpeechKey = '';
+  });
+}
+if (speechToTextShortcutEnabledInput) {
+  speechToTextShortcutEnabledInput.addEventListener('change', () => {
+    activeSideAltSpeechKey = '';
+  });
+}
+if (navigator.mediaDevices?.addEventListener) {
+  navigator.mediaDevices.addEventListener('devicechange', () => {
+    void refreshSpeechMicrophoneOptions();
+  });
 }
 if (quickCopyAfterSendInput) {
   quickCopyAfterSendInput.addEventListener('change', (event) => {
