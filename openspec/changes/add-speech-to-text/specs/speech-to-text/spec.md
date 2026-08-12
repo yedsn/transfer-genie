@@ -37,7 +37,7 @@ The app SHALL submit completed speech recordings to the configured Volcengine Ag
 - **AND** any API key value is not exposed in logs, UI, or error text
 
 ### Requirement: Speech State Feedback
-The app SHALL expose user-visible states for idle, recording, transcribing, success, and failure during speech-to-text use.
+The app SHALL expose user-visible states for idle, recording, transcribing, success, and failure during speech-to-text use. The app SHALL play the configured cue sound immediately when the user triggers speech recording on or off with the composer button or speech shortcut, unless cue sounds are disabled in settings.
 
 #### Scenario: Transcribing state
 - **WHEN** recording has stopped and the ASR request is in progress
@@ -53,6 +53,18 @@ The app SHALL expose user-visible states for idle, recording, transcribing, succ
 - **WHEN** transcription fails after recording stops
 - **THEN** the composer returns to idle state
 - **AND** the user can start a new recording attempt
+
+#### Scenario: Recording cue sounds
+- **WHEN** the user clicks the composer speech button or presses the speech shortcut while idle
+- **THEN** the app immediately plays the configured start cue sound
+- **WHEN** the user clicks the composer speech button or presses the speech shortcut while recording or preparing
+- **THEN** the app immediately plays the configured stop cue sound
+- **WHEN** an active recording reaches the maximum duration
+- **THEN** the app plays the configured stop cue sound when the automatic stop is triggered
+
+#### Scenario: Cue sounds disabled
+- **WHEN** speech cue sounds are disabled in settings
+- **THEN** starting and stopping speech recording produces no cue sound
 
 ### Requirement: Recording Limits
 The app SHALL enforce a bounded single-recording session so accidental long recordings do not run indefinitely or create excessive ASR requests.

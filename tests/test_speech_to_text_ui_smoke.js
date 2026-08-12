@@ -143,6 +143,8 @@ function mockSettings() {
       shortcut: 'right-alt',
       max_duration_secs: 5,
       task_retention_count: 14,
+      cue_sound_enabled: true,
+      cue_sound_kind: 'system',
     },
   };
 }
@@ -161,6 +163,7 @@ function preloadScript() {
       getUserMediaDelayMs: 0,
       mediaRequests: [],
       stoppedStreams: 0,
+      cueSounds: [],
       clipboardText: '',
       downloads: [],
     };
@@ -232,9 +235,22 @@ function preloadScript() {
       },
     });
     class FakeAudioContext {
-      constructor(options = {}) { this.sampleRate = options.sampleRate || 16000; this.destination = {}; }
-      async resume() {}
+      constructor(options = {}) { this.sampleRate = options.sampleRate || 16000; this.destination = {}; this.currentTime = 0; this.state = 'suspended'; }
+      async resume() { this.state = 'running'; }
       createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+      createOscillator() {
+        const oscillator = {
+          type: 'sine',
+          frequency: {
+            setValueAtTime(value) { oscillator.frequencyValue = value; },
+            exponentialRampToValueAtTime(value) { oscillator.frequencyRampValue = value; },
+          },
+          connect() {},
+          start() { window.__speechSmoke.cueSounds.push({ type: oscillator.type, frequency: oscillator.frequencyValue || 0 }); },
+          stop() {},
+        };
+        return oscillator;
+      }
       createScriptProcessor() {
         const processor = {
           onaudioprocess: null,
@@ -250,8 +266,8 @@ function preloadScript() {
         };
         return processor;
       }
-      createGain() { return { gain: { value: 1 }, connect() {}, disconnect() {} }; }
-      async close() {}
+      createGain() { return { gain: { value: 1, setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect() {}, disconnect() {} }; }
+      async close() { this.state = 'closed'; }
     }
     window.AudioContext = FakeAudioContext;
   })();`;
@@ -324,16 +340,10 @@ async function run() {
       let markdownSyncCount = 0;
       window.transferGenieComposer = window.transferGenieComposer || {};
       window.transferGenieComposer._setActiveText = () => { markdownSyncCount += 1; };
+      const cueCountBeforeToggle = window.__speechSmoke.cueSounds.length;
       document.querySelector('#speech-to-text-toggle').click();
-      await new Promise((resolve, reject) => {
-        const start = Date.now();
-        const tick = () => {
-          if (document.querySelector('#speech-to-text-toggle').classList.contains('is-preparing')) resolve();
-          else if (Date.now() - start > 1000) reject(new Error('button did not enter preparing state'));
-          else setTimeout(tick, 20);
-        };
-        tick();
-      });
+      await new Promise((r) => setTimeout(r, 20));
+      const cueCountImmediatelyAfterStartClick = window.__speechSmoke.cueSounds.length;
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
@@ -354,7 +364,10 @@ async function run() {
         waveHeights: waveBars.map((bar) => getComputedStyle(bar).height),
         waveAnimations: waveBars.map((bar) => getComputedStyle(bar).animationName),
       };
+      const cueCountBeforeStopClick = window.__speechSmoke.cueSounds.length;
       document.querySelector('#speech-to-text-toggle').click();
+      await new Promise((r) => setTimeout(r, 20));
+      const cueCountImmediatelyAfterStopClick = window.__speechSmoke.cueSounds.length;
       await new Promise((r) => setTimeout(r, 60));
       const calls = window.__speechSmoke.calls.filter((call) => call.command === 'transcribe_speech');
       const activeDraft = window.transferGenieComposerStore?.getActiveDraft?.();
@@ -387,13 +400,17 @@ async function run() {
         clipboardText: window.__speechSmoke.clipboardText,
         downloadName: window.__speechSmoke.downloads.at(-1)?.download || '',
         speechTaskCountAfterDelete: document.querySelectorAll('.speech-task-item').length,
+        cueSoundCount: window.__speechSmoke.cueSounds.length,
+        startClickCueDelta: cueCountImmediatelyAfterStartClick - cueCountBeforeToggle,
+        stopClickCueDelta: cueCountImmediatelyAfterStopClick - cueCountBeforeStopClick,
         longText: window.__speechSmoke.longText,
         markdownSyncCount,
         ...liveWaveState,
         buttonClass: document.querySelector('#speech-to-text-toggle').className,
         status: document.querySelector('#sync-status')?.textContent || '',
         mediaDevices: !!navigator.mediaDevices?.getUserMedia,
-        formState: window.transferGenieVue?.state?.settingsForm,
+        cueEnabledChecked: document.querySelector('#speech-to-text-cue-sound-enabled')?.checked,
+        cueKindValue: document.querySelector('#speech-to-text-cue-sound-kind')?.value,
         calls: window.__speechSmoke.calls.map((call) => call.command),
       };
     })()`);
@@ -407,6 +424,11 @@ async function run() {
     assert.equal(buttonResult.clipboardText, buttonResult.longText, 'transcription task copy uses the full result');
     assert.match(buttonResult.downloadName, /^speech-.*\.wav$/, 'transcription task audio can be downloaded as wav');
     assert.equal(buttonResult.speechTaskCountAfterDelete, 0, 'transcription task can be deleted');
+    assert.equal(buttonResult.cueEnabledChecked, true, 'speech cue sounds default to enabled');
+    assert.equal(buttonResult.cueKindValue, 'system', 'speech cue sound defaults to system');
+    assert.ok(buttonResult.cueSoundCount >= 2, 'speech recording plays start and stop cue sounds by default');
+    assert.equal(buttonResult.startClickCueDelta, 1, 'speech button immediately plays cue when opening recording');
+    assert.equal(buttonResult.stopClickCueDelta, 1, 'speech button immediately plays cue when closing recording');
     assert.ok(buttonResult.markdownSyncCount > 0, 'markdown editor is refreshed after speech insertion');
     assert.equal(buttonResult.request.format, 'wav', 'recording is transcoded to WAV before sending to backend');
     assert.equal(buttonResult.request.mimeType, 'audio/wav', 'WAV mime type is sent to backend');
@@ -511,7 +533,76 @@ async function run() {
     assert.equal(micRetryResult.requests[0].audio.deviceId.exact, 'mic-1', 'first microphone attempt uses selected device');
     assert.equal(!!micRetryResult.requests[1].audio.deviceId, false, 'retry falls back to default microphone');
 
+    const disabledCueResult = await evaluate(client, `(async () => {
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const button = document.querySelector('#speech-to-text-toggle');
+          if (!button.classList.contains('is-recording') && !button.classList.contains('is-transcribing') && !button.classList.contains('is-preparing')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('speech button did not return to idle'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      document.querySelector('#speech-to-text-cue-sound-enabled').checked = false;
+      document.querySelector('#speech-to-text-cue-sound-enabled').dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#speech-to-text-cue-sound-kind').value = 'soft';
+      document.querySelector('#speech-to-text-cue-sound-kind').dispatchEvent(new Event('change', { bubbles: true }));
+      const beforeCues = window.__speechSmoke.cueSounds.length;
+      document.querySelector('#speech-to-text-toggle').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#speech-to-text-toggle').classList.contains('is-recording')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('recording did not start with disabled cues'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      document.querySelector('#speech-to-text-toggle').click();
+      await new Promise((r) => setTimeout(r, 80));
+      document.querySelector('#save-settings').click();
+      await new Promise((r) => setTimeout(r, 120));
+      const saved = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.speech_to_text || {};
+      return {
+        cueDelta: window.__speechSmoke.cueSounds.length - beforeCues,
+        kindDisabled: document.querySelector('#speech-to-text-cue-sound-kind').disabled,
+        saved,
+      };
+    })()`);
+    assert.equal(disabledCueResult.cueDelta, 0, 'disabled cue setting suppresses start and stop cue sounds');
+    assert.equal(disabledCueResult.kindDisabled, true, 'cue sound selector is disabled when cue sounds are disabled');
+    assert.equal(disabledCueResult.saved.cue_sound_enabled, false, 'cue sound enabled flag is saved');
+    assert.equal(disabledCueResult.saved.cue_sound_kind, 'soft', 'cue sound kind is saved');
+
+    const cuePreviewResult = await evaluate(client, `(async () => {
+      document.querySelector('#speech-to-text-cue-sound-enabled').checked = true;
+      document.querySelector('#speech-to-text-cue-sound-enabled').dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#speech-to-text-cue-sound-kind').value = 'soft';
+      document.querySelector('#speech-to-text-cue-sound-kind').dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 40));
+      const beforeCues = window.__speechSmoke.cueSounds.length;
+      const beforeRequests = window.__speechSmoke.mediaRequests.length;
+      const beforeSaves = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').length;
+      document.querySelector('#speech-to-text-cue-sound-preview').click();
+      await new Promise((r) => setTimeout(r, 40));
+      const cue = window.__speechSmoke.cueSounds.at(-1) || {};
+      return {
+        cueDelta: window.__speechSmoke.cueSounds.length - beforeCues,
+        requestDelta: window.__speechSmoke.mediaRequests.length - beforeRequests,
+        saveDelta: window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').length - beforeSaves,
+        previewDisabled: document.querySelector('#speech-to-text-cue-sound-preview').disabled,
+        cue,
+      };
+    })()`);
+    assert.equal(cuePreviewResult.cueDelta, 1, 'cue preview plays one cue sound');
+    assert.equal(cuePreviewResult.previewDisabled, false, 'cue preview button is enabled when cue sounds are enabled');
+    assert.equal(cuePreviewResult.requestDelta, 0, 'cue preview does not start microphone recording');
+    assert.equal(cuePreviewResult.saveDelta, 0, 'cue preview does not save settings');
+    assert.equal(cuePreviewResult.cue.type, 'sine', 'cue preview uses the current unsaved selected cue kind');
+
     const rightAltResult = await evaluate(client, `(async () => {
+      window.transferGenieActions?.updateSettingsFormField?.('speechToTextCueSoundEnabled', true);
       window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
       const beforeRequests = window.__speechSmoke.mediaRequests.length;
       const editor = document.querySelector('#text-input');

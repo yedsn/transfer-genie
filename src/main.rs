@@ -6842,6 +6842,13 @@ fn normalize_speech_to_text_settings(settings: &mut SpeechToTextSettings) -> Res
     }
     settings.max_duration_secs = settings.max_duration_secs.clamp(5, 300);
     settings.task_retention_count = settings.task_retention_count.clamp(1, 100);
+    settings.cue_sound_kind = match settings.cue_sound_kind.trim() {
+        "" => crate::types::default_speech_to_text_cue_sound_kind(),
+        value => match value {
+            "system" | "soft" | "none" => value.to_string(),
+            _ => crate::types::default_speech_to_text_cue_sound_kind(),
+        },
+    };
     settings.microphone_device_id = settings.microphone_device_id.trim().to_string();
     Ok(())
 }
@@ -10022,6 +10029,8 @@ mod tests {
         assert_eq!(normalized.speech_to_text.shortcut, "right-alt");
         assert_eq!(normalized.speech_to_text.max_duration_secs, 5);
         assert_eq!(normalized.speech_to_text.task_retention_count, 1);
+        assert!(normalized.speech_to_text.cue_sound_enabled);
+        assert_eq!(normalized.speech_to_text.cue_sound_kind, "system");
     }
 
     #[test]

@@ -13,6 +13,7 @@ const settingsOpsRuntime = window.transferGenieSettingsOpsRuntime || null;
 const settingsRuntimeStatus = window.transferGenieSettingsRuntimeStatus || null;
 const DEFAULT_EDITOR_FORMAT_STORAGE_KEY = 'transfer-genie.default-editor-format';
 const HOME_LAYOUT_STORAGE_KEY = 'transfer-genie.home-layout';
+const DEFAULT_SPEECH_CUE_SOUND_KIND = 'system';
 
 function normalizeEditorFormat(format) {
   return format === 'markdown' ? 'markdown' : 'text';
@@ -159,6 +160,9 @@ function updateSettingsFormField(field, value) {
   if (field === 'defaultEditorFormat') {
     saveDefaultEditorFormat(value);
     applyDefaultEditorFormat(value);
+  }
+  if (field === 'speechToTextCueSoundEnabled' || field === 'speechToTextCueSoundKind') {
+    syncSpeechCueSoundControls();
   }
   syncVueSettingsForm(currentSettingsFormState);
   syncSendOptionsMenuState();
@@ -656,6 +660,9 @@ const speechToTextShortcutEnabledInput = document.getElementById('speech-to-text
 const speechToTextShortcutInput = document.getElementById('speech-to-text-shortcut');
 const speechToTextMaxDurationInput = document.getElementById('speech-to-text-max-duration');
 const speechToTextTaskRetentionInput = document.getElementById('speech-to-text-task-retention');
+const speechToTextCueSoundEnabledInput = document.getElementById('speech-to-text-cue-sound-enabled');
+const speechToTextCueSoundKindInput = document.getElementById('speech-to-text-cue-sound-kind');
+const speechToTextCueSoundPreviewButton = document.getElementById('speech-to-text-cue-sound-preview');
 const speechTaskHistorySummary = document.getElementById('speech-task-history-summary');
 const speechTaskHistoryList = document.getElementById('speech-task-history-list');
 const sendHotkeyInputs = document.querySelectorAll('input[name="send-hotkey"]');
@@ -921,6 +928,8 @@ let currentSettingsFormState = {
   speechToTextShortcut: 'right-alt',
   speechToTextMaxDurationSecs: 60,
   speechToTextTaskRetentionCount: 14,
+  speechToTextCueSoundEnabled: true,
+  speechToTextCueSoundKind: DEFAULT_SPEECH_CUE_SOUND_KIND,
 };
 let currentAutoBackupStatusState = {
   enabled: false,
@@ -1782,6 +1791,7 @@ function handleSpeechSideAltKeyup(event) {
 let speechStream = null;
 let speechRecordingTimer = null;
 let speechAudioContext = null;
+let speechCueAudioContext = null;
 let speechSourceNode = null;
 let speechProcessorNode = null;
 let speechSilentGainNode = null;
@@ -1894,6 +1904,82 @@ function describeSpeechRecordingUnsupported() {
     return '当前环境缺少音频处理能力 AudioContext，无法录制麦克风音频';
   }
   return '当前环境不支持麦克风录音';
+}
+
+function normalizeSpeechCueSoundKind(value) {
+  return ['system', 'soft', 'none'].includes(String(value || '').trim())
+    ? String(value || '').trim()
+    : DEFAULT_SPEECH_CUE_SOUND_KIND;
+}
+
+function syncSpeechCueSoundControls() {
+  const enabled = currentSettingsFormState.speechToTextCueSoundEnabled !== false;
+  if (speechToTextCueSoundEnabledInput) speechToTextCueSoundEnabledInput.checked = enabled;
+  if (speechToTextCueSoundKindInput) {
+    speechToTextCueSoundKindInput.value = normalizeSpeechCueSoundKind(currentSettingsFormState.speechToTextCueSoundKind);
+    speechToTextCueSoundKindInput.disabled = !enabled;
+  }
+  if (speechToTextCueSoundPreviewButton) {
+    speechToTextCueSoundPreviewButton.disabled = !enabled;
+  }
+}
+
+async function getSpeechCueAudioContext() {
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return null;
+  if (!speechCueAudioContext || speechCueAudioContext.state === 'closed') {
+    speechCueAudioContext = new AudioContextClass();
+  }
+  if (speechCueAudioContext.state === 'suspended' && speechCueAudioContext.resume) {
+    await speechCueAudioContext.resume();
+  }
+  return speechCueAudioContext;
+}
+
+async function playSpeechCueSound(phase, options = {}) {
+  const enabled = options.enabled ?? currentSettingsFormState.speechToTextCueSoundEnabled;
+  if (enabled === false) return;
+  const kind = normalizeSpeechCueSoundKind(options.kind ?? currentSettingsFormState.speechToTextCueSoundKind);
+  if (kind === 'none') return;
+  try {
+    const context = await getSpeechCueAudioContext();
+    if (!context || context.state === 'suspended') return;
+    const now = context.currentTime || 0;
+    const gain = context.createGain();
+    const oscillator = context.createOscillator();
+    const isStop = phase === 'stop';
+    const profile = kind === 'soft'
+      ? { start: 660, stop: 440, volume: 0.14, duration: 0.14, type: 'sine' }
+      : { start: 880, stop: 520, volume: 0.18, duration: 0.12, type: 'triangle' };
+    oscillator.type = profile.type;
+    oscillator.frequency.setValueAtTime(isStop ? profile.stop : profile.start, now);
+    if (oscillator.frequency.exponentialRampToValueAtTime) {
+      oscillator.frequency.exponentialRampToValueAtTime(isStop ? profile.stop * 0.8 : profile.start * 1.18, now + profile.duration);
+    }
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(profile.volume, now + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + profile.duration);
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start(now);
+    oscillator.stop(now + profile.duration + 0.02);
+    oscillator.onended = () => {
+      try { oscillator.disconnect(); } catch (error) { /* ignore */ }
+      try { gain.disconnect(); } catch (error) { /* ignore */ }
+    };
+  } catch (error) {
+    // Audio cues are non-critical; recording should continue if playback is blocked.
+  }
+}
+
+function previewSpeechCueSound() {
+  const enabled = speechToTextCueSoundEnabledInput
+    ? !!speechToTextCueSoundEnabledInput.checked
+    : currentSettingsFormState.speechToTextCueSoundEnabled !== false;
+  const kind = normalizeSpeechCueSoundKind(
+    speechToTextCueSoundKindInput?.value || currentSettingsFormState.speechToTextCueSoundKind || DEFAULT_SPEECH_CUE_SOUND_KIND,
+  );
+  void playSpeechCueSound('start', { enabled, kind });
 }
 
 function setSpeechState(state) {
@@ -2423,7 +2509,7 @@ async function startSpeechRecording() {
     setStatus('正在录音，再点一次结束');
     const maxDuration = Math.max(5, Math.min(300, Number(currentSettingsFormState.speechToTextMaxDurationSecs) || 60));
     speechRecordingTimer = window.setTimeout(() => {
-      if (isCurrentSpeechSession(sessionId) && speechState === 'recording') stopSpeechRecording();
+      if (isCurrentSpeechSession(sessionId) && speechState === 'recording') stopSpeechRecording({ playCue: true });
     }, maxDuration * 1000);
   } catch (error) {
     if (!isCurrentSpeechSession(sessionId)) return;
@@ -2435,8 +2521,11 @@ async function startSpeechRecording() {
   }
 }
 
-function stopSpeechRecording() {
+function stopSpeechRecording(options = {}) {
   if (speechState === 'recording') {
+    if (options.playCue) {
+      void playSpeechCueSound('stop');
+    }
     speechSessionId += 1;
     void finishSpeechRecording();
     return;
@@ -2491,8 +2580,10 @@ async function finishSpeechRecording() {
 
 function toggleSpeechRecording() {
   if (speechState === 'recording' || speechState === 'preparing') {
+    void playSpeechCueSound('stop');
     stopSpeechRecording();
   } else if (speechState === 'idle') {
+    void playSpeechCueSound('start');
     void startSpeechRecording();
   }
 }
@@ -9112,6 +9203,8 @@ function applySettings(settings) {
   if (speechToTextShortcutInput) speechToTextShortcutInput.value = (speechToText.shortcut || DEFAULT_SPEECH_TO_TEXT_SHORTCUT).toLowerCase();
   if (speechToTextMaxDurationInput) speechToTextMaxDurationInput.value = Number(speechToText.max_duration_secs || 60);
   if (speechToTextTaskRetentionInput) speechToTextTaskRetentionInput.value = Number(speechToText.task_retention_count || 14);
+  if (speechToTextCueSoundEnabledInput) speechToTextCueSoundEnabledInput.checked = speechToText.cue_sound_enabled !== false;
+  if (speechToTextCueSoundKindInput) speechToTextCueSoundKindInput.value = normalizeSpeechCueSoundKind(speechToText.cue_sound_kind || DEFAULT_SPEECH_CUE_SOUND_KIND);
   currentSettingsFormState = {
     senderName: settings.sender_name || '',
     refreshIntervalSecs: Number(settings.refresh_interval_secs || 5),
@@ -9155,8 +9248,11 @@ function applySettings(settings) {
     speechToTextShortcut: (speechToText.shortcut || DEFAULT_SPEECH_TO_TEXT_SHORTCUT).toLowerCase(),
     speechToTextMaxDurationSecs: Number(speechToText.max_duration_secs || 60),
     speechToTextTaskRetentionCount: Number(speechToText.task_retention_count || 14),
+    speechToTextCueSoundEnabled: speechToText.cue_sound_enabled !== false,
+    speechToTextCueSoundKind: normalizeSpeechCueSoundKind(speechToText.cue_sound_kind || DEFAULT_SPEECH_CUE_SOUND_KIND),
   };
   syncVueSettingsForm(currentSettingsFormState);
+  syncSpeechCueSoundControls();
   void refreshSpeechMicrophoneOptions();
   void renderSpeechTaskHistory();
   syncSendOptionsMenuState();
@@ -9283,6 +9379,8 @@ async function saveSettings(options = {}) {
   const normalizedSpeechShortcut = normalizeSpeechHotkey(
     currentSettingsFormState.speechToTextShortcut || DEFAULT_SPEECH_TO_TEXT_SHORTCUT,
   );
+  const speechToTextCueSoundEnabled = !!currentSettingsFormState.speechToTextCueSoundEnabled;
+  const speechToTextCueSoundKind = normalizeSpeechCueSoundKind(currentSettingsFormState.speechToTextCueSoundKind || DEFAULT_SPEECH_CUE_SOUND_KIND);
   const speechToTextMaxDurationSecs = Math.max(
     5,
     Math.min(300, Number(currentSettingsFormState.speechToTextMaxDurationSecs) || 60),
@@ -9456,6 +9554,8 @@ async function saveSettings(options = {}) {
       shortcut: normalizedSpeechShortcut || DEFAULT_SPEECH_TO_TEXT_SHORTCUT,
       max_duration_secs: speechToTextMaxDurationSecs,
       task_retention_count: speechToTextTaskRetentionCount,
+      cue_sound_enabled: speechToTextCueSoundEnabled,
+      cue_sound_kind: speechToTextCueSoundKind,
     },
   };
 
@@ -10750,6 +10850,29 @@ if (speechToTextTaskRetentionInput) {
     syncVueSettingsForm(currentSettingsFormState);
     void pruneSpeechTasks().then(() => renderSpeechTaskHistory());
   });
+}
+if (speechToTextCueSoundEnabledInput) {
+  speechToTextCueSoundEnabledInput.addEventListener('change', (event) => {
+    currentSettingsFormState = {
+      ...currentSettingsFormState,
+      speechToTextCueSoundEnabled: !!event.target.checked,
+    };
+    syncVueSettingsForm(currentSettingsFormState);
+    syncSpeechCueSoundControls();
+  });
+}
+if (speechToTextCueSoundKindInput) {
+  speechToTextCueSoundKindInput.addEventListener('change', (event) => {
+    currentSettingsFormState = {
+      ...currentSettingsFormState,
+      speechToTextCueSoundKind: normalizeSpeechCueSoundKind(event.target.value || DEFAULT_SPEECH_CUE_SOUND_KIND),
+    };
+    syncVueSettingsForm(currentSettingsFormState);
+    syncSpeechCueSoundControls();
+  });
+}
+if (speechToTextCueSoundPreviewButton) {
+  speechToTextCueSoundPreviewButton.addEventListener('click', previewSpeechCueSound);
 }
 if (navigator.mediaDevices?.addEventListener) {
   navigator.mediaDevices.addEventListener('devicechange', () => {

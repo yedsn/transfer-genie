@@ -104,6 +104,8 @@ export const transferGenieState = reactive<TransferGenieState>({
     speechToTextShortcut: "right-alt",
     speechToTextMaxDurationSecs: 60,
     speechToTextTaskRetentionCount: 14,
+    speechToTextCueSoundEnabled: true,
+    speechToTextCueSoundKind: "system",
   },
   settingsSnapshots: [],
   settingsSnapshotsLoading: false,

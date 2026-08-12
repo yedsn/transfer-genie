@@ -945,6 +945,22 @@
                       <input id="speech-to-text-task-retention" type="number" min="1" max="100" step="1" :value="ui.settingsForm.speechToTextTaskRetentionCount" @input="updateSettingsFormField('speechToTextTaskRetentionCount', Number($event.target.value || 14))" />
                     </label>
                   </div>
+                  <label class="toggle-left">
+                    <span class="toggle-label">启用录音提示音</span>
+                    <input id="speech-to-text-cue-sound-enabled" type="checkbox" :checked="ui.settingsForm.speechToTextCueSoundEnabled !== false" @change="updateSettingsFormField('speechToTextCueSoundEnabled', $event.target.checked)" />
+                  </label>
+                  <label>
+                    录音提示音
+                    <div class="field-inline-actions">
+                      <select id="speech-to-text-cue-sound-kind" :value="ui.settingsForm.speechToTextCueSoundKind || 'system'" :disabled="ui.settingsForm.speechToTextCueSoundEnabled === false" @change="updateSettingsFormField('speechToTextCueSoundKind', $event.target.value)">
+                        <option value="system">系统默认</option>
+                        <option value="soft">轻柔提示</option>
+                        <option value="none">无提示音</option>
+                      </select>
+                      <button id="speech-to-text-cue-sound-preview" class="button ghost small" type="button" :disabled="ui.settingsForm.speechToTextCueSoundEnabled === false">试听</button>
+                    </div>
+                    <span class="field-hint">录音真正开始和结束时播放；关闭后快捷键和按钮都不会响。</span>
+                  </label>
                   <div class="speech-task-history">
                     <div class="speech-task-history-header">
                       <span>转录任务</span>

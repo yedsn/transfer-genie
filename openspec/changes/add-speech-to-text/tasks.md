@@ -45,3 +45,11 @@
 - [x] 7.2 Store completed recording audio and transcription status locally for replay, copy, retry, and re-transcription actions.
 - [x] 7.3 Add the speech settings task list UI with success, failure, transcribing, empty, and retention summary states.
 - [x] 7.4 Cover task creation, copy, failed-task retry, and retention pruning in the speech UI smoke test.
+
+## 8. Recording Cue Sounds
+
+- [x] 8.1 Add persisted speech cue sound settings with defaults for enabled system cue sounds.
+- [x] 8.2 Add settings UI controls to enable/disable cue sounds and choose an internal cue sound.
+- [x] 8.3 Play the configured cue immediately when the user toggles recording on or off, including automatic stop, without double-playing during later recording state transitions.
+- [x] 8.4 Cover cue defaults, disabling, and save payload behavior in the speech UI smoke test.
+- [x] 8.5 Add settings cue preview playback using the current unsaved form selection and cover it in the speech UI smoke test.

@@ -126,6 +126,14 @@ pub fn default_speech_to_text_task_retention_count() -> u64 {
     14
 }
 
+pub fn default_speech_to_text_cue_sound_enabled() -> bool {
+    true
+}
+
+pub fn default_speech_to_text_cue_sound_kind() -> String {
+    "system".to_string()
+}
+
 pub fn default_speech_to_text_microphone_device_id() -> String {
     String::new()
 }
@@ -670,6 +678,10 @@ pub struct SpeechToTextSettings {
     pub max_duration_secs: u64,
     #[serde(default = "default_speech_to_text_task_retention_count")]
     pub task_retention_count: u64,
+    #[serde(default = "default_speech_to_text_cue_sound_enabled")]
+    pub cue_sound_enabled: bool,
+    #[serde(default = "default_speech_to_text_cue_sound_kind")]
+    pub cue_sound_kind: String,
     #[serde(default = "default_speech_to_text_microphone_device_id")]
     pub microphone_device_id: String,
 }
@@ -686,6 +698,8 @@ impl Default for SpeechToTextSettings {
             shortcut: default_speech_to_text_shortcut(),
             max_duration_secs: default_speech_to_text_max_duration_secs(),
             task_retention_count: default_speech_to_text_task_retention_count(),
+            cue_sound_enabled: default_speech_to_text_cue_sound_enabled(),
+            cue_sound_kind: default_speech_to_text_cue_sound_kind(),
             microphone_device_id: default_speech_to_text_microphone_device_id(),
         }
     }
