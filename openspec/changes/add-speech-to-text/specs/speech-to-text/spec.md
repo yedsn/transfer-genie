@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Explicit Speech Recording Control
-The app SHALL provide a speech-to-text control in the message composer that toggles between idle and recording states. Recording SHALL start only after an explicit button click or speech shortcut activation, and recording SHALL stop when the same control or shortcut is activated again.
+The app SHALL provide a speech-to-text control in the message composer that toggles between idle and recording states. Recording SHALL start only after an explicit button click or speech shortcut activation, and recording SHALL stop when the same control or shortcut is activated again. When computer audio recording is enabled, the app SHALL record from the selected microphone device and the selected computer-audio input device at the same time, mix both sources into one transcription segment, and SHALL NOT invoke screen, window, display, or desktop capture APIs.
 
 #### Scenario: Start recording from composer
 - **WHEN** speech-to-text is enabled and the user clicks the composer speech button while idle
@@ -17,6 +17,13 @@ The app SHALL provide a speech-to-text control in the message composer that togg
 - **WHEN** the user starts speech recording and microphone access is denied or unavailable
 - **THEN** the app remains idle
 - **AND** the user sees a clear error message
+
+#### Scenario: Computer audio recording via separate input device
+- **WHEN** speech-to-text is enabled and the user starts recording with computer audio recording enabled
+- **THEN** the app requests audio input using the selected microphone device
+- **AND** requests audio input using the selected computer-audio device
+- **AND** mixes both audio inputs into the captured speech segment
+- **AND** does not request screen, window, display, or desktop capture
 
 ### Requirement: ASR Transcription Request
 The app SHALL submit completed speech recordings to the configured Volcengine Agent Plan ASR endpoint and convert successful responses into text. The default endpoint SHALL be `wss://openspeech.bytedance.com/api/v3/plan/sauc/bigmodel_nostream`, and the default Resource ID SHALL be `volc.seedasr.sauc.duration`.

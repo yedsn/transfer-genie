@@ -927,6 +927,17 @@
                     <span class="field-hint">打开设置页时会尝试读取可用输入设备；浏览器可能需要先授权麦克风。</span>
                   </label>
                   <label class="toggle-left">
+                    <span class="toggle-label">录制电脑内部声音</span>
+                    <input id="speech-to-text-capture-system-audio" type="checkbox" :checked="ui.settingsForm.speechToTextCaptureSystemAudio" @change="updateSettingsFormField('speechToTextCaptureSystemAudio', $event.target.checked)" />
+                  </label>
+                  <label>
+                    电脑内部声音设备
+                    <select id="speech-to-text-system-audio-device" :value="ui.settingsForm.speechToTextSystemAudioDeviceId" :disabled="!ui.settingsForm.speechToTextCaptureSystemAudio" @change="updateSettingsFormField('speechToTextSystemAudioDeviceId', $event.target.value)">
+                      <option value="">选择 BlackHole / Loopback 等输入设备</option>
+                    </select>
+                    <span class="field-hint">需要 macOS 原生采集支持或虚拟音频输入设备。安装 BlackHole、Loopback 等虚拟声卡后在这里选择，录音时会与麦克风同时录制。</span>
+                  </label>
+                  <label class="toggle-left">
                     <span class="toggle-label">启用语音录制快捷键</span>
                     <input id="speech-to-text-shortcut-enabled" type="checkbox" :checked="ui.settingsForm.speechToTextShortcutEnabled" @change="updateSettingsFormField('speechToTextShortcutEnabled', $event.target.checked)" />
                   </label>

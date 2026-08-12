@@ -6850,6 +6850,7 @@ fn normalize_speech_to_text_settings(settings: &mut SpeechToTextSettings) -> Res
         },
     };
     settings.microphone_device_id = settings.microphone_device_id.trim().to_string();
+    settings.system_audio_device_id = settings.system_audio_device_id.trim().to_string();
     Ok(())
 }
 
@@ -10031,6 +10032,8 @@ mod tests {
         assert_eq!(normalized.speech_to_text.task_retention_count, 1);
         assert!(normalized.speech_to_text.cue_sound_enabled);
         assert_eq!(normalized.speech_to_text.cue_sound_kind, "system");
+        assert!(!normalized.speech_to_text.capture_system_audio);
+        assert_eq!(normalized.speech_to_text.system_audio_device_id, "");
     }
 
     #[test]

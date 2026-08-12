@@ -53,3 +53,11 @@
 - [x] 8.3 Play the configured cue immediately when the user toggles recording on or off, including automatic stop, without double-playing during later recording state transitions.
 - [x] 8.4 Cover cue defaults, disabling, and save payload behavior in the speech UI smoke test.
 - [x] 8.5 Add settings cue preview playback using the current unsaved form selection and cover it in the speech UI smoke test.
+
+## 9. System Audio Capture
+
+- [x] 9.1 Add persisted setting for optional computer/internal audio capture with a default of disabled.
+- [x] 9.2 Add a separate persisted computer-audio input device setting and independent settings dropdown.
+- [x] 9.3 Mix selected microphone input and selected computer-audio input when computer audio recording is enabled.
+- [x] 9.4 Keep screen/window/display capture disabled and document BlackHole/Loopback input-device usage in settings copy.
+- [x] 9.5 Cover dual input capture, setting persistence, and no display capture request in speech UI smoke tests.

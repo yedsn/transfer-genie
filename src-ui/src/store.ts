@@ -100,6 +100,8 @@ export const transferGenieState = reactive<TransferGenieState>({
     speechToTextResourceId: "volc.seedasr.sauc.duration",
     speechToTextEndpoint: "wss://openspeech.bytedance.com/api/v3/plan/sauc/bigmodel_nostream",
     speechToTextMicrophoneDeviceId: "",
+    speechToTextCaptureSystemAudio: false,
+    speechToTextSystemAudioDeviceId: "",
     speechToTextShortcutEnabled: false,
     speechToTextShortcut: "right-alt",
     speechToTextMaxDurationSecs: 60,

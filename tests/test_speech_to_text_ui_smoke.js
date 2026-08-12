@@ -139,6 +139,8 @@ function mockSettings() {
       resource_id: 'volc.seedasr.sauc.duration',
       endpoint: 'wss://openspeech.bytedance.com/api/v3/plan/sauc/bigmodel_nostream',
       microphone_device_id: 'mic-1',
+      capture_system_audio: false,
+      system_audio_device_id: '',
       shortcut_enabled: true,
       shortcut: 'right-alt',
       max_duration_secs: 5,
@@ -206,6 +208,7 @@ function preloadScript() {
       enumerateDevices: async () => ([
         { kind: 'audioinput', deviceId: 'mic-1', label: 'Desk Mic' },
         { kind: 'audioinput', deviceId: 'mic-2', label: 'Backup Mic' },
+        { kind: 'audioinput', deviceId: 'blackhole-1', label: 'BlackHole 2ch' },
       ]),
       addEventListener() {},
     } });
@@ -238,6 +241,7 @@ function preloadScript() {
       constructor(options = {}) { this.sampleRate = options.sampleRate || 16000; this.destination = {}; this.currentTime = 0; this.state = 'suspended'; }
       async resume() { this.state = 'running'; }
       createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+      createMediaStreamDestination() { return { stream: {}, connect() {}, disconnect() {} }; }
       createOscillator() {
         const oscillator = {
           type: 'sine',
@@ -411,6 +415,7 @@ async function run() {
         mediaDevices: !!navigator.mediaDevices?.getUserMedia,
         cueEnabledChecked: document.querySelector('#speech-to-text-cue-sound-enabled')?.checked,
         cueKindValue: document.querySelector('#speech-to-text-cue-sound-kind')?.value,
+        systemAudioChecked: document.querySelector('#speech-to-text-capture-system-audio')?.checked,
         calls: window.__speechSmoke.calls.map((call) => call.command),
       };
     })()`);
@@ -426,6 +431,7 @@ async function run() {
     assert.equal(buttonResult.speechTaskCountAfterDelete, 0, 'transcription task can be deleted');
     assert.equal(buttonResult.cueEnabledChecked, true, 'speech cue sounds default to enabled');
     assert.equal(buttonResult.cueKindValue, 'system', 'speech cue sound defaults to system');
+    assert.equal(buttonResult.systemAudioChecked, false, 'system audio capture defaults to disabled');
     assert.ok(buttonResult.cueSoundCount >= 2, 'speech recording plays start and stop cue sounds by default');
     assert.equal(buttonResult.startClickCueDelta, 1, 'speech button immediately plays cue when opening recording');
     assert.equal(buttonResult.stopClickCueDelta, 1, 'speech button immediately plays cue when closing recording');
@@ -575,6 +581,63 @@ async function run() {
     assert.equal(disabledCueResult.saved.cue_sound_enabled, false, 'cue sound enabled flag is saved');
     assert.equal(disabledCueResult.saved.cue_sound_kind, 'soft', 'cue sound kind is saved');
 
+    const systemAudioResult = await evaluate(client, `(async () => {
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const button = document.querySelector('#speech-to-text-toggle');
+          if (!button.classList.contains('is-recording') && !button.classList.contains('is-transcribing') && !button.classList.contains('is-preparing')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('speech button did not return to idle'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      document.querySelector('#speech-to-text-capture-system-audio').checked = true;
+      document.querySelector('#speech-to-text-capture-system-audio').dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const select = document.querySelector('#speech-to-text-system-audio-device');
+          if (Array.from(select?.options || []).some((option) => option.value === 'blackhole-1')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('BlackHole option did not appear'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      document.querySelector('#speech-to-text-system-audio-device').value = 'blackhole-1';
+      document.querySelector('#speech-to-text-system-audio-device').dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#save-settings').click();
+      await new Promise((r) => setTimeout(r, 100));
+      const beforeMic = window.__speechSmoke.mediaRequests.length;
+      document.querySelector('#speech-to-text-toggle').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#speech-to-text-toggle').classList.contains('is-recording')) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('system audio recording did not start'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      document.querySelector('#speech-to-text-toggle').click();
+      await new Promise((r) => setTimeout(r, 80));
+      const saved = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.speech_to_text || {};
+      return {
+        micDelta: window.__speechSmoke.mediaRequests.length - beforeMic,
+        micRequests: window.__speechSmoke.mediaRequests.slice(beforeMic),
+        hasDisplayMedia: !!navigator.mediaDevices.getDisplayMedia,
+        systemAudioSelectValue: document.querySelector('#speech-to-text-system-audio-device')?.value,
+        saved,
+      };
+    })()`);
+    assert.equal(systemAudioResult.saved.capture_system_audio, true, 'system audio capture setting is saved');
+    assert.equal(systemAudioResult.saved.system_audio_device_id, 'blackhole-1', 'computer audio device is saved');
+    assert.equal(systemAudioResult.systemAudioSelectValue, 'blackhole-1', 'computer audio device selection stays visible');
+    assert.equal(systemAudioResult.micDelta, 2, 'computer audio setting records mic and internal audio as two input requests');
+    assert.equal(systemAudioResult.micRequests[0].audio.deviceId.exact, 'mic-1', 'first request uses the selected microphone device');
+    assert.equal(systemAudioResult.micRequests[1].audio.deviceId.exact, 'blackhole-1', 'second request uses the selected computer-audio device');
+    assert.equal(systemAudioResult.hasDisplayMedia, false, 'computer audio setting does not expose or call display capture in the smoke harness');
+
     const cuePreviewResult = await evaluate(client, `(async () => {
       document.querySelector('#speech-to-text-cue-sound-enabled').checked = true;
       document.querySelector('#speech-to-text-cue-sound-enabled').dispatchEvent(new Event('change', { bubbles: true }));
@@ -603,6 +666,8 @@ async function run() {
 
     const rightAltResult = await evaluate(client, `(async () => {
       window.transferGenieActions?.updateSettingsFormField?.('speechToTextCueSoundEnabled', true);
+      document.querySelector('#speech-to-text-capture-system-audio').checked = false;
+      document.querySelector('#speech-to-text-capture-system-audio').dispatchEvent(new Event('change', { bubbles: true }));
       window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
       const beforeRequests = window.__speechSmoke.mediaRequests.length;
       const editor = document.querySelector('#text-input');

@@ -134,7 +134,15 @@ pub fn default_speech_to_text_cue_sound_kind() -> String {
     "system".to_string()
 }
 
+pub fn default_speech_to_text_capture_system_audio() -> bool {
+    false
+}
+
 pub fn default_speech_to_text_microphone_device_id() -> String {
+    String::new()
+}
+
+pub fn default_speech_to_text_system_audio_device_id() -> String {
     String::new()
 }
 
@@ -682,8 +690,12 @@ pub struct SpeechToTextSettings {
     pub cue_sound_enabled: bool,
     #[serde(default = "default_speech_to_text_cue_sound_kind")]
     pub cue_sound_kind: String,
+    #[serde(default = "default_speech_to_text_capture_system_audio")]
+    pub capture_system_audio: bool,
     #[serde(default = "default_speech_to_text_microphone_device_id")]
     pub microphone_device_id: String,
+    #[serde(default = "default_speech_to_text_system_audio_device_id")]
+    pub system_audio_device_id: String,
 }
 
 impl Default for SpeechToTextSettings {
@@ -700,7 +712,9 @@ impl Default for SpeechToTextSettings {
             task_retention_count: default_speech_to_text_task_retention_count(),
             cue_sound_enabled: default_speech_to_text_cue_sound_enabled(),
             cue_sound_kind: default_speech_to_text_cue_sound_kind(),
+            capture_system_audio: default_speech_to_text_capture_system_audio(),
             microphone_device_id: default_speech_to_text_microphone_device_id(),
+            system_audio_device_id: default_speech_to_text_system_audio_device_id(),
         }
     }
 }

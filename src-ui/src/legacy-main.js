@@ -656,6 +656,8 @@ const speechToTextApiKeyInput = document.getElementById('speech-to-text-api-key'
 const speechToTextResourceIdInput = document.getElementById('speech-to-text-resource-id');
 const speechToTextEndpointInput = document.getElementById('speech-to-text-endpoint');
 const speechToTextMicrophoneInput = document.getElementById('speech-to-text-microphone');
+const speechToTextCaptureSystemAudioInput = document.getElementById('speech-to-text-capture-system-audio');
+const speechToTextSystemAudioDeviceInput = document.getElementById('speech-to-text-system-audio-device');
 const speechToTextShortcutEnabledInput = document.getElementById('speech-to-text-shortcut-enabled');
 const speechToTextShortcutInput = document.getElementById('speech-to-text-shortcut');
 const speechToTextMaxDurationInput = document.getElementById('speech-to-text-max-duration');
@@ -924,6 +926,8 @@ let currentSettingsFormState = {
   speechToTextResourceId: 'volc.seedasr.sauc.duration',
   speechToTextEndpoint: 'wss://openspeech.bytedance.com/api/v3/plan/sauc/bigmodel_nostream',
   speechToTextMicrophoneDeviceId: '',
+  speechToTextCaptureSystemAudio: false,
+  speechToTextSystemAudioDeviceId: '',
   speechToTextShortcutEnabled: false,
   speechToTextShortcut: 'right-alt',
   speechToTextMaxDurationSecs: 60,
@@ -1789,10 +1793,13 @@ function handleSpeechSideAltKeyup(event) {
 }
 
 let speechStream = null;
+let speechSystemAudioStream = null;
 let speechRecordingTimer = null;
 let speechAudioContext = null;
 let speechCueAudioContext = null;
 let speechSourceNode = null;
+let speechSystemAudioSourceNode = null;
+let speechMixDestinationNode = null;
 let speechProcessorNode = null;
 let speechSilentGainNode = null;
 let speechCapturedSamples = [];
@@ -1873,6 +1880,34 @@ function buildSpeechAudioConstraints(deviceId) {
       autoGainControl: true,
     },
   };
+}
+
+async function openSpeechSystemAudioInput() {
+  if (!currentSettingsFormState.speechToTextCaptureSystemAudio) return null;
+  const deviceId = String(currentSettingsFormState.speechToTextSystemAudioDeviceId || '').trim();
+  if (!deviceId) {
+    showToast('请先在设置中选择电脑内部声音设备，例如 BlackHole 或 Loopback', 'warning');
+    return null;
+  }
+  try {
+    return await navigator.mediaDevices.getUserMedia(buildSpeechAudioConstraints(deviceId));
+  } catch (error) {
+    showToast(`电脑内部声音设备打开失败，已继续录制麦克风：${describeSpeechMicError(error)}`, 'warning');
+    return null;
+  }
+}
+
+function connectSpeechInputSources(audioContext, micStream, systemAudioStream) {
+  speechSourceNode = audioContext.createMediaStreamSource(micStream);
+  if (systemAudioStream) {
+    speechMixDestinationNode = audioContext.createMediaStreamDestination();
+    speechSourceNode.connect(speechMixDestinationNode);
+    speechSystemAudioSourceNode = audioContext.createMediaStreamSource(systemAudioStream);
+    speechSystemAudioSourceNode.connect(speechMixDestinationNode);
+    const mixedSourceNode = audioContext.createMediaStreamSource(speechMixDestinationNode.stream);
+    speechSourceNode = mixedSourceNode;
+  }
+  speechSourceNode.connect(speechProcessorNode);
 }
 
 function isRecoverableSpeechMicError(error) {
@@ -2342,37 +2377,63 @@ async function renderSpeechTaskHistory() {
   });
 }
 
-function renderSpeechMicrophoneOptions(devices, selectedDeviceId) {
-  if (!speechToTextMicrophoneInput) return;
-  const currentValue = selectedDeviceId || speechToTextMicrophoneInput.value || '';
-  speechToTextMicrophoneInput.innerHTML = '';
+function renderSpeechInputDeviceOptions(select, devices, selectedDeviceId, defaultLabel, fallbackLabelPrefix) {
+  if (!select) return;
+  const currentValue = selectedDeviceId || select.value || '';
+  select.innerHTML = '';
   const defaultOption = document.createElement('option');
   defaultOption.value = '';
-  defaultOption.textContent = '系统默认麦克风';
-  speechToTextMicrophoneInput.appendChild(defaultOption);
+  defaultOption.textContent = defaultLabel;
+  select.appendChild(defaultOption);
   (devices || []).forEach((device, index) => {
     const option = document.createElement('option');
     option.value = device.deviceId;
-    option.textContent = device.label || `麦克风 ${index + 1}`;
-    speechToTextMicrophoneInput.appendChild(option);
+    option.textContent = device.label || `${fallbackLabelPrefix} ${index + 1}`;
+    select.appendChild(option);
   });
-  speechToTextMicrophoneInput.value = Array.from(speechToTextMicrophoneInput.options)
+  select.value = Array.from(select.options)
     .some((option) => option.value === currentValue)
     ? currentValue
     : '';
 }
 
+function renderSpeechMicrophoneOptions(devices, selectedDeviceId) {
+  renderSpeechInputDeviceOptions(
+    speechToTextMicrophoneInput,
+    devices,
+    selectedDeviceId,
+    '系统默认麦克风',
+    '麦克风',
+  );
+}
+
+function renderSpeechSystemAudioDeviceOptions(devices, selectedDeviceId) {
+  renderSpeechInputDeviceOptions(
+    speechToTextSystemAudioDeviceInput,
+    devices,
+    selectedDeviceId,
+    '选择 BlackHole / Loopback 等输入设备',
+    '输入设备',
+  );
+  if (speechToTextSystemAudioDeviceInput) {
+    speechToTextSystemAudioDeviceInput.disabled = !currentSettingsFormState.speechToTextCaptureSystemAudio;
+  }
+}
+
 async function refreshSpeechMicrophoneOptions() {
   if (!navigator.mediaDevices?.enumerateDevices) {
     renderSpeechMicrophoneOptions([], currentSettingsFormState.speechToTextMicrophoneDeviceId || '');
+    renderSpeechSystemAudioDeviceOptions([], currentSettingsFormState.speechToTextSystemAudioDeviceId || '');
     return;
   }
   try {
     const devices = await navigator.mediaDevices.enumerateDevices();
     const microphones = devices.filter((device) => device.kind === 'audioinput');
     renderSpeechMicrophoneOptions(microphones, currentSettingsFormState.speechToTextMicrophoneDeviceId || '');
+    renderSpeechSystemAudioDeviceOptions(microphones, currentSettingsFormState.speechToTextSystemAudioDeviceId || '');
   } catch (error) {
     renderSpeechMicrophoneOptions([], currentSettingsFormState.speechToTextMicrophoneDeviceId || '');
+    renderSpeechSystemAudioDeviceOptions([], currentSettingsFormState.speechToTextSystemAudioDeviceId || '');
   }
 }
 
@@ -2421,6 +2482,14 @@ function stopSpeechStream() {
     try { speechSourceNode.disconnect(); } catch (error) { /* ignore */ }
     speechSourceNode = null;
   }
+  if (speechSystemAudioSourceNode) {
+    try { speechSystemAudioSourceNode.disconnect(); } catch (error) { /* ignore */ }
+    speechSystemAudioSourceNode = null;
+  }
+  if (speechMixDestinationNode) {
+    try { speechMixDestinationNode.disconnect(); } catch (error) { /* ignore */ }
+    speechMixDestinationNode = null;
+  }
   if (speechSilentGainNode) {
     try { speechSilentGainNode.disconnect(); } catch (error) { /* ignore */ }
     speechSilentGainNode = null;
@@ -2428,6 +2497,10 @@ function stopSpeechStream() {
   if (speechStream) {
     closeSpeechStream(speechStream);
     speechStream = null;
+  }
+  if (speechSystemAudioStream) {
+    closeSpeechStream(speechSystemAudioStream);
+    speechSystemAudioStream = null;
   }
   if (speechAudioContext) {
     const context = speechAudioContext;
@@ -2487,9 +2560,14 @@ async function startSpeechRecording() {
       return;
     }
     speechStream = stream;
+    speechSystemAudioStream = await openSpeechSystemAudioInput();
+    if (!isCurrentSpeechSession(sessionId) || speechState !== 'preparing') {
+      stopSpeechStream();
+      closeSpeechAudioContext(audioContext);
+      return;
+    }
     speechAudioContext = audioContext;
     speechCaptureSampleRate = speechAudioContext.sampleRate || 16000;
-    speechSourceNode = speechAudioContext.createMediaStreamSource(speechStream);
     speechProcessorNode = speechAudioContext.createScriptProcessor(4096, 1, 1);
     speechSilentGainNode = speechAudioContext.createGain();
     speechSilentGainNode.gain.value = 0;
@@ -2503,7 +2581,7 @@ async function startSpeechRecording() {
       }
       setSpeechLevel(Math.min(1, Math.sqrt(sum / input.length) * 8));
     };
-    speechSourceNode.connect(speechProcessorNode);
+    connectSpeechInputSources(speechAudioContext, speechStream, speechSystemAudioStream);
     speechProcessorNode.connect(speechSilentGainNode);
     speechSilentGainNode.connect(speechAudioContext.destination);
     setSpeechState('recording');
@@ -9200,6 +9278,8 @@ function applySettings(settings) {
   if (speechToTextResourceIdInput) speechToTextResourceIdInput.value = speechToText.resource_id || DEFAULT_SPEECH_TO_TEXT_RESOURCE_ID;
   if (speechToTextEndpointInput) speechToTextEndpointInput.value = speechToText.endpoint || DEFAULT_SPEECH_TO_TEXT_ENDPOINT;
   if (speechToTextMicrophoneInput) speechToTextMicrophoneInput.value = speechToText.microphone_device_id || '';
+  if (speechToTextCaptureSystemAudioInput) speechToTextCaptureSystemAudioInput.checked = !!speechToText.capture_system_audio;
+  if (speechToTextSystemAudioDeviceInput) speechToTextSystemAudioDeviceInput.value = speechToText.system_audio_device_id || '';
   if (speechToTextShortcutEnabledInput) speechToTextShortcutEnabledInput.checked = !!speechToText.shortcut_enabled;
   if (speechToTextShortcutInput) speechToTextShortcutInput.value = (speechToText.shortcut || DEFAULT_SPEECH_TO_TEXT_SHORTCUT).toLowerCase();
   if (speechToTextMaxDurationInput) speechToTextMaxDurationInput.value = Number(speechToText.max_duration_secs || 60);
@@ -9245,6 +9325,8 @@ function applySettings(settings) {
     speechToTextResourceId: speechToText.resource_id || DEFAULT_SPEECH_TO_TEXT_RESOURCE_ID,
     speechToTextEndpoint: speechToText.endpoint || DEFAULT_SPEECH_TO_TEXT_ENDPOINT,
     speechToTextMicrophoneDeviceId: speechToText.microphone_device_id || '',
+    speechToTextCaptureSystemAudio: !!speechToText.capture_system_audio,
+    speechToTextSystemAudioDeviceId: speechToText.system_audio_device_id || '',
     speechToTextShortcutEnabled: !!speechToText.shortcut_enabled,
     speechToTextShortcut: (speechToText.shortcut || DEFAULT_SPEECH_TO_TEXT_SHORTCUT).toLowerCase(),
     speechToTextMaxDurationSecs: Number(speechToText.max_duration_secs || 60),
@@ -9376,6 +9458,8 @@ async function saveSettings(options = {}) {
   const speechToTextResourceId = (currentSettingsFormState.speechToTextResourceId || DEFAULT_SPEECH_TO_TEXT_RESOURCE_ID).trim();
   const speechToTextEndpoint = (currentSettingsFormState.speechToTextEndpoint || DEFAULT_SPEECH_TO_TEXT_ENDPOINT).trim();
   const speechToTextMicrophoneDeviceId = (currentSettingsFormState.speechToTextMicrophoneDeviceId || '').trim();
+  const speechToTextCaptureSystemAudio = !!currentSettingsFormState.speechToTextCaptureSystemAudio;
+  const speechToTextSystemAudioDeviceId = (currentSettingsFormState.speechToTextSystemAudioDeviceId || '').trim();
   const speechToTextShortcutEnabled = !!currentSettingsFormState.speechToTextShortcutEnabled;
   const normalizedSpeechShortcut = normalizeSpeechHotkey(
     currentSettingsFormState.speechToTextShortcut || DEFAULT_SPEECH_TO_TEXT_SHORTCUT,
@@ -9551,6 +9635,8 @@ async function saveSettings(options = {}) {
       resource_id: speechToTextResourceId,
       endpoint: speechToTextEndpoint,
       microphone_device_id: speechToTextMicrophoneDeviceId,
+      capture_system_audio: speechToTextCaptureSystemAudio,
+      system_audio_device_id: speechToTextSystemAudioDeviceId,
       shortcut_enabled: speechToTextShortcutEnabled,
       shortcut: normalizedSpeechShortcut || DEFAULT_SPEECH_TO_TEXT_SHORTCUT,
       max_duration_secs: speechToTextMaxDurationSecs,
@@ -10826,6 +10912,26 @@ if (speechToTextMicrophoneInput) {
     currentSettingsFormState = {
       ...currentSettingsFormState,
       speechToTextMicrophoneDeviceId: event.target.value || '',
+    };
+    syncVueSettingsForm(currentSettingsFormState);
+  });
+}
+if (speechToTextCaptureSystemAudioInput) {
+  speechToTextCaptureSystemAudioInput.addEventListener('change', (event) => {
+    currentSettingsFormState = {
+      ...currentSettingsFormState,
+      speechToTextCaptureSystemAudio: !!event.target.checked,
+    };
+    syncVueSettingsForm(currentSettingsFormState);
+    renderSpeechSystemAudioDeviceOptions([], currentSettingsFormState.speechToTextSystemAudioDeviceId || '');
+    void refreshSpeechMicrophoneOptions();
+  });
+}
+if (speechToTextSystemAudioDeviceInput) {
+  speechToTextSystemAudioDeviceInput.addEventListener('change', (event) => {
+    currentSettingsFormState = {
+      ...currentSettingsFormState,
+      speechToTextSystemAudioDeviceId: event.target.value || '',
     };
     syncVueSettingsForm(currentSettingsFormState);
   });
