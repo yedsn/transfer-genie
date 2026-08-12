@@ -1883,6 +1883,19 @@ function describeSpeechMicError(error) {
   return message;
 }
 
+function describeSpeechRecordingUnsupported() {
+  const hasMediaDevices = !!navigator.mediaDevices;
+  const hasGetUserMedia = !!navigator.mediaDevices?.getUserMedia;
+  const hasAudioContext = !!(window.AudioContext || window.webkitAudioContext);
+  if (!hasMediaDevices || !hasGetUserMedia) {
+    return '当前环境没有暴露麦克风 API；macOS 上请确认应用已包含麦克风权限声明，并在系统设置中允许 Transfer Genie 使用麦克风';
+  }
+  if (!hasAudioContext) {
+    return '当前环境缺少音频处理能力 AudioContext，无法录制麦克风音频';
+  }
+  return '当前环境不支持麦克风录音';
+}
+
 function setSpeechState(state) {
   speechState = state || 'idle';
   syncSpeechButtonState();
@@ -2349,7 +2362,9 @@ async function startSpeechRecording() {
   }
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
   if (!navigator.mediaDevices?.getUserMedia || !AudioContextClass) {
-    setErrorStatus('当前环境不支持麦克风录音');
+    const message = describeSpeechRecordingUnsupported();
+    setErrorStatus(message);
+    showToast(message, 'error');
     return;
   }
   const sessionId = speechSessionId + 1;

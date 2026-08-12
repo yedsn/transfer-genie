@@ -47,6 +47,7 @@
                                  "frameworks":  [
 
                                                 ],
+                                 "infoPlist":  "Info.plist",
                                  "providerShortName":  null,
                                  "signingIdentity":  "-",
                                  "hardenedRuntime":  true,

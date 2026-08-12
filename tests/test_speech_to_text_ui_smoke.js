@@ -157,6 +157,7 @@ function preloadScript() {
       failTranscribe: false,
       denyMicrophone: false,
       failNextGetUserMedia: '',
+      hideGetUserMedia: false,
       getUserMediaDelayMs: 0,
       mediaRequests: [],
       stoppedStreams: 0,
@@ -199,30 +200,37 @@ function preloadScript() {
       dialog: { open: async () => null, save: async () => null }
     };
     Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: {
-      getUserMedia: async (constraints) => {
-        window.__speechSmoke.mediaRequests.push(constraints);
-        if (window.__speechSmoke.getUserMediaDelayMs) {
-          await new Promise((resolve) => setTimeout(resolve, window.__speechSmoke.getUserMediaDelayMs));
-        }
-        if (window.__speechSmoke.denyMicrophone) {
-          const error = new Error('Permission denied');
-          error.name = 'NotAllowedError';
-          throw error;
-        }
-        if (window.__speechSmoke.failNextGetUserMedia) {
-          const error = new Error(window.__speechSmoke.failNextGetUserMedia);
-          error.name = window.__speechSmoke.failNextGetUserMedia;
-          window.__speechSmoke.failNextGetUserMedia = '';
-          throw error;
-        }
-        return { getTracks: () => [{ stop() { window.__speechSmoke.stoppedStreams += 1; } }] };
-      },
       enumerateDevices: async () => ([
         { kind: 'audioinput', deviceId: 'mic-1', label: 'Desk Mic' },
         { kind: 'audioinput', deviceId: 'mic-2', label: 'Backup Mic' },
       ]),
       addEventListener() {},
     } });
+    const mediaDevicesValue = navigator.mediaDevices;
+    Object.defineProperty(mediaDevicesValue, 'getUserMedia', {
+      configurable: true,
+      get() {
+        if (window.__speechSmoke.hideGetUserMedia) return undefined;
+        return async (constraints) => {
+          window.__speechSmoke.mediaRequests.push(constraints);
+          if (window.__speechSmoke.getUserMediaDelayMs) {
+            await new Promise((resolve) => setTimeout(resolve, window.__speechSmoke.getUserMediaDelayMs));
+          }
+          if (window.__speechSmoke.denyMicrophone) {
+            const error = new Error('Permission denied');
+            error.name = 'NotAllowedError';
+            throw error;
+          }
+          if (window.__speechSmoke.failNextGetUserMedia) {
+            const error = new Error(window.__speechSmoke.failNextGetUserMedia);
+            error.name = window.__speechSmoke.failNextGetUserMedia;
+            window.__speechSmoke.failNextGetUserMedia = '';
+            throw error;
+          }
+          return { getTracks: () => [{ stop() { window.__speechSmoke.stoppedStreams += 1; } }] };
+        };
+      },
+    });
     class FakeAudioContext {
       constructor(options = {}) { this.sampleRate = options.sampleRate || 16000; this.destination = {}; }
       async resume() {}
@@ -301,6 +309,16 @@ async function run() {
       };
       tick();
     })`);
+
+    const unsupportedResult = await evaluate(client, `(async () => {
+      window.__speechSmoke.hideGetUserMedia = true;
+      document.querySelector('#speech-to-text-toggle').click();
+      await new Promise((r) => setTimeout(r, 80));
+      const status = document.querySelector('#sync-status')?.textContent || '';
+      window.__speechSmoke.hideGetUserMedia = false;
+      return status;
+    })()`);
+    assert.match(unsupportedResult, /麦克风 API|macOS|系统设置/, 'missing getUserMedia shows actionable macOS microphone guidance');
 
     const buttonResult = await evaluate(client, `(async () => {
       let markdownSyncCount = 0;
