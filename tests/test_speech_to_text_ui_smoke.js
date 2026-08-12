@@ -263,7 +263,7 @@ function preloadScript() {
               if (!processor.onaudioprocess) return;
               const samples = new Float32Array(1600);
               for (let index = 0; index < samples.length; index += 1) samples[index] = Math.sin(index / 8) * 0.25;
-              processor.onaudioprocess({ inputBuffer: { getChannelData: () => samples } });
+              processor.onaudioprocess({ inputBuffer: { numberOfChannels: 2, getChannelData: () => samples } });
             }, 20);
           },
           disconnect() {},
@@ -636,6 +636,9 @@ async function run() {
     assert.equal(systemAudioResult.micDelta, 2, 'computer audio setting records mic and internal audio as two input requests');
     assert.equal(systemAudioResult.micRequests[0].audio.deviceId.exact, 'mic-1', 'first request uses the selected microphone device');
     assert.equal(systemAudioResult.micRequests[1].audio.deviceId.exact, 'blackhole-1', 'second request uses the selected computer-audio device');
+    assert.equal(systemAudioResult.micRequests[1].audio.echoCancellation, false, 'computer audio input keeps raw audio without echo cancellation');
+    assert.equal(systemAudioResult.micRequests[1].audio.noiseSuppression, false, 'computer audio input keeps raw audio without noise suppression');
+    assert.equal(systemAudioResult.micRequests[1].audio.autoGainControl, false, 'computer audio input keeps raw audio without auto gain control');
     assert.equal(systemAudioResult.hasDisplayMedia, false, 'computer audio setting does not expose or call display capture in the smoke harness');
 
     const cuePreviewResult = await evaluate(client, `(async () => {

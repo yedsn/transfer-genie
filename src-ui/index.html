@@ -935,7 +935,7 @@
                     <select id="speech-to-text-system-audio-device" :value="ui.settingsForm.speechToTextSystemAudioDeviceId" :disabled="!ui.settingsForm.speechToTextCaptureSystemAudio" @change="updateSettingsFormField('speechToTextSystemAudioDeviceId', $event.target.value)">
                       <option value="">选择 BlackHole / Loopback 等输入设备</option>
                     </select>
-                    <span class="field-hint">需要 macOS 原生采集支持或虚拟音频输入设备。安装 BlackHole、Loopback 等虚拟声卡后在这里选择，录音时会与麦克风同时录制。</span>
+                    <span class="field-hint">需要先在 macOS 音频 MIDI 设置或系统声音输出中，把电脑声音路由到 BlackHole、Loopback 等虚拟输入设备；这里只选择设备不会自动改变系统输出。录音时会与麦克风同时录制。</span>
                   </label>
                   <label class="toggle-left">
                     <span class="toggle-label">启用语音录制快捷键</span>

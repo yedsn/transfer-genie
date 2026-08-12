@@ -1870,14 +1870,15 @@ function waitSpeechRetryDelay(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-function buildSpeechAudioConstraints(deviceId) {
+function buildSpeechAudioConstraints(deviceId, options = {}) {
+  const processed = options.processed !== false;
   return {
     audio: {
       ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
-      channelCount: 1,
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
+      ...(processed ? { channelCount: 1 } : {}),
+      echoCancellation: processed,
+      noiseSuppression: processed,
+      autoGainControl: processed,
     },
   };
 }
@@ -1890,11 +1891,25 @@ async function openSpeechSystemAudioInput() {
     return null;
   }
   try {
-    return await navigator.mediaDevices.getUserMedia(buildSpeechAudioConstraints(deviceId));
+    return await navigator.mediaDevices.getUserMedia(buildSpeechAudioConstraints(deviceId, { processed: false }));
   } catch (error) {
     showToast(`电脑内部声音设备打开失败，已继续录制麦克风：${describeSpeechMicError(error)}`, 'warning');
     return null;
   }
+}
+
+function readSpeechInputSamples(inputBuffer) {
+  const channelCount = Math.max(1, Number(inputBuffer?.numberOfChannels || 1));
+  const firstChannel = inputBuffer.getChannelData(0);
+  if (channelCount === 1) return firstChannel;
+  const mixed = new Float32Array(firstChannel.length);
+  for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
+    const channel = inputBuffer.getChannelData(channelIndex);
+    for (let sampleIndex = 0; sampleIndex < channel.length; sampleIndex += 1) {
+      mixed[sampleIndex] += channel[sampleIndex] / channelCount;
+    }
+  }
+  return mixed;
 }
 
 function connectSpeechInputSources(audioContext, micStream, systemAudioStream) {
@@ -2573,7 +2588,7 @@ async function startSpeechRecording() {
     speechSilentGainNode.gain.value = 0;
     speechProcessorNode.onaudioprocess = (event) => {
       if (speechState !== 'recording') return;
-      const input = event.inputBuffer.getChannelData(0);
+      const input = readSpeechInputSamples(event.inputBuffer);
       speechCapturedSamples.push(new Float32Array(input));
       let sum = 0;
       for (let index = 0; index < input.length; index += 1) {
