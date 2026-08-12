@@ -1886,7 +1886,8 @@ function isRecoverableSpeechMicError(error) {
 function describeSpeechMicError(error) {
   const name = String(error?.name || '');
   const message = String(error?.message || error || '未知错误');
-  if (name === 'NotAllowedError' || message.toLowerCase().includes('permission')) return '麦克风权限被拒绝，请在系统或应用权限中允许麦克风访问';
+  if (name === 'NotAllowedError' || message.toLowerCase().includes('permission')) return '麦克风权限被拒绝；macOS 上请在系统设置 > 隐私与安全性 > 麦克风中允许 Transfer Genie，必要时执行 tccutil reset Microphone com.transfergenie 后重试';
+  if (name === 'SecurityError') return '麦克风权限不可用，请确认 macOS 打包包含 NSMicrophoneUsageDescription 和 com.apple.security.device.audio-input 权限声明';
   if (name === 'NotFoundError' || name === 'DevicesNotFoundError') return '未找到可用麦克风，请检查输入设备连接';
   if (name === 'NotReadableError' || name === 'TrackStartError') return '麦克风被其他应用占用或暂时不可用，请稍后重试';
   if (name === 'OverconstrainedError' || name === 'ConstraintNotSatisfiedError') return '指定麦克风不可用，已尝试切换到系统默认麦克风';
