@@ -14,6 +14,7 @@ pub struct PendingMarkedSync {
     pub marked: bool,
     pub marked_tag_ids: Vec<String>,
     pub marked_pinned: bool,
+    pub marked_due_date: Option<String>,
     pub updated_at_ms: i64,
 }
 
@@ -35,6 +36,7 @@ pub struct DbMessage {
     pub marked: bool,
     pub marked_tag_ids: Vec<String>,
     pub marked_pinned: bool,
+    pub marked_due_date: Option<String>,
     pub format: String,
 }
 
@@ -111,7 +113,7 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
 
     if table_exists.is_none() {
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS messages (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        sender TEXT NOT NULL,        timestamp_ms INTEGER NOT NULL,        size INTEGER NOT NULL,        kind TEXT NOT NULL,        original_name TEXT NOT NULL,        etag TEXT,        mtime TEXT,        content TEXT,        local_path TEXT,        remote_path TEXT,        file_hash TEXT,        marked BOOLEAN NOT NULL DEFAULT 0,        marked_tag_ids TEXT NOT NULL DEFAULT '[]',        marked_pinned BOOLEAN NOT NULL DEFAULT 0,        format TEXT NOT NULL DEFAULT 'text',        PRIMARY KEY(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS marked_tags (        endpoint_id TEXT NOT NULL,        id TEXT NOT NULL,        name TEXT NOT NULL,        PRIMARY KEY(endpoint_id, id)      );      CREATE TABLE IF NOT EXISTS download_history (        id INTEGER PRIMARY KEY AUTOINCREMENT,        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        saved_path TEXT,        status TEXT NOT NULL,        error TEXT,        file_size INTEGER NOT NULL DEFAULT 0,        created_at_ms INTEGER NOT NULL,        updated_at_ms INTEGER NOT NULL,        UNIQUE(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS upload_history (        id INTEGER PRIMARY KEY AUTOINCREMENT,        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        local_path TEXT,        status TEXT NOT NULL,        error TEXT,        file_size INTEGER NOT NULL DEFAULT 0,        created_at_ms INTEGER NOT NULL,        updated_at_ms INTEGER NOT NULL,        UNIQUE(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS partial_downloads (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        final_path TEXT NOT NULL,        temp_path TEXT NOT NULL,        downloaded_bytes INTEGER NOT NULL DEFAULT 0,        total_bytes INTEGER NOT NULL DEFAULT 0,        etag TEXT,        mtime TEXT,        updated_at_ms INTEGER NOT NULL,        PRIMARY KEY(endpoint_id, filename)      );",
+            "CREATE TABLE IF NOT EXISTS messages (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        sender TEXT NOT NULL,        timestamp_ms INTEGER NOT NULL,        size INTEGER NOT NULL,        kind TEXT NOT NULL,        original_name TEXT NOT NULL,        etag TEXT,        mtime TEXT,        content TEXT,        local_path TEXT,        remote_path TEXT,        file_hash TEXT,        marked BOOLEAN NOT NULL DEFAULT 0,        marked_tag_ids TEXT NOT NULL DEFAULT '[]',        marked_pinned BOOLEAN NOT NULL DEFAULT 0,        marked_due_date TEXT,        format TEXT NOT NULL DEFAULT 'text',        PRIMARY KEY(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS marked_tags (        endpoint_id TEXT NOT NULL,        id TEXT NOT NULL,        name TEXT NOT NULL,        PRIMARY KEY(endpoint_id, id)      );      CREATE TABLE IF NOT EXISTS download_history (        id INTEGER PRIMARY KEY AUTOINCREMENT,        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        saved_path TEXT,        status TEXT NOT NULL,        error TEXT,        file_size INTEGER NOT NULL DEFAULT 0,        created_at_ms INTEGER NOT NULL,        updated_at_ms INTEGER NOT NULL,        UNIQUE(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS upload_history (        id INTEGER PRIMARY KEY AUTOINCREMENT,        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        local_path TEXT,        status TEXT NOT NULL,        error TEXT,        file_size INTEGER NOT NULL DEFAULT 0,        created_at_ms INTEGER NOT NULL,        updated_at_ms INTEGER NOT NULL,        UNIQUE(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS partial_downloads (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        final_path TEXT NOT NULL,        temp_path TEXT NOT NULL,        downloaded_bytes INTEGER NOT NULL DEFAULT 0,        total_bytes INTEGER NOT NULL DEFAULT 0,        etag TEXT,        mtime TEXT,        updated_at_ms INTEGER NOT NULL,        PRIMARY KEY(endpoint_id, filename)      );",
         )
         .map_err(|err| format!("初始化数据库表失败: {err}"))?;
         ensure_pending_marked_sync_schema(&conn)
@@ -147,7 +149,7 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
             .transaction()
             .map_err(|err| format!("迁移消息表失败: {err}"))?;
         tx.execute_batch(
-            "CREATE TABLE messages_new (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        sender TEXT NOT NULL,        timestamp_ms INTEGER NOT NULL,        size INTEGER NOT NULL,        kind TEXT NOT NULL,        original_name TEXT NOT NULL,        etag TEXT,        mtime TEXT,        content TEXT,        local_path TEXT,        remote_path TEXT,        file_hash TEXT,        marked BOOLEAN NOT NULL DEFAULT 0,        marked_tag_ids TEXT NOT NULL DEFAULT '[]',        marked_pinned BOOLEAN NOT NULL DEFAULT 0,        format TEXT NOT NULL DEFAULT 'text',        PRIMARY KEY(endpoint_id, filename)      );",
+            "CREATE TABLE messages_new (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        sender TEXT NOT NULL,        timestamp_ms INTEGER NOT NULL,        size INTEGER NOT NULL,        kind TEXT NOT NULL,        original_name TEXT NOT NULL,        etag TEXT,        mtime TEXT,        content TEXT,        local_path TEXT,        remote_path TEXT,        file_hash TEXT,        marked BOOLEAN NOT NULL DEFAULT 0,        marked_tag_ids TEXT NOT NULL DEFAULT '[]',        marked_pinned BOOLEAN NOT NULL DEFAULT 0,        marked_due_date TEXT,        format TEXT NOT NULL DEFAULT 'text',        PRIMARY KEY(endpoint_id, filename)      );",
         )
         .map_err(|err| format!("迁移消息表失败: {err}"))?;
         tx.execute(
@@ -280,6 +282,28 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
         .map_err(|err| format!("补充 marked_pinned 列失败：{err}"))?;
     }
 
+    let mut has_marked_due_date = false;
+    {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(messages)")
+            .map_err(|err| format!("读取消息表结构失败: {err}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|err| format!("读取消息表结构失败: {err}"))?;
+        for row in rows {
+            if row.map_err(|err| format!("读取消息表结构失败: {err}"))? == "marked_due_date"
+            {
+                has_marked_due_date = true;
+                break;
+            }
+        }
+    }
+
+    if !has_marked_due_date {
+        conn.execute("ALTER TABLE messages ADD COLUMN marked_due_date TEXT", [])
+            .map_err(|err| format!("补充 marked_due_date 列失败: {err}"))?;
+    }
+
     let mut has_format = false;
     {
         let mut stmt = conn
@@ -325,16 +349,31 @@ fn ensure_pending_marked_sync_schema(conn: &Connection) -> rusqlite::Result<()> 
             marked BOOLEAN NOT NULL,
             marked_tag_ids TEXT NOT NULL DEFAULT '[]',
             marked_pinned BOOLEAN NOT NULL DEFAULT 0,
+            marked_due_date TEXT,
             updated_at_ms INTEGER NOT NULL,
             PRIMARY KEY(endpoint_id, filename)
         );",
-    )
+    )?;
+    let has_due_date = conn
+        .prepare("PRAGMA table_info(pending_marked_sync)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .any(|name| name == "marked_due_date");
+    if !has_due_date {
+        conn.execute(
+            "ALTER TABLE pending_marked_sync ADD COLUMN marked_due_date TEXT",
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 fn ensure_indexes(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_messages_endpoint_timestamp_filename ON messages(endpoint_id, timestamp_ms, filename);
          CREATE INDEX IF NOT EXISTS idx_messages_endpoint_marked_pinned_timestamp ON messages(endpoint_id, marked, marked_pinned, timestamp_ms);
+         CREATE INDEX IF NOT EXISTS idx_messages_endpoint_marked_due_date ON messages(endpoint_id, marked, marked_due_date);
          CREATE INDEX IF NOT EXISTS idx_pending_marked_sync_endpoint_updated ON pending_marked_sync(endpoint_id, updated_at_ms);
          CREATE INDEX IF NOT EXISTS idx_download_history_updated_at ON download_history(updated_at_ms DESC);
          CREATE INDEX IF NOT EXISTS idx_upload_history_updated_at ON upload_history(updated_at_ms DESC);",
@@ -349,7 +388,7 @@ pub fn get_message(
     let conn = Connection::open(path)?;
     conn
     .query_row(
-      "SELECT endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, format \
+      "SELECT endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, marked_due_date, format \
        FROM messages WHERE endpoint_id = ?1 AND filename = ?2",
       params![endpoint_id, filename],
       |row| {
@@ -371,7 +410,8 @@ pub fn get_message(
           marked: row.get(13)?,
           marked_tag_ids: parse_tag_ids(marked_tag_ids),
           marked_pinned: row.get(15)?,
-          format: row.get(16)?,
+          marked_due_date: row.get(16)?,
+          format: row.get(17)?,
         })
       },
     )
@@ -382,8 +422,8 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
     let conn = Connection::open(path)?;
     conn.execute(
     "INSERT INTO messages\
-      (endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, format)\
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)\
+      (endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, marked_due_date, format)\
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)\
       ON CONFLICT(endpoint_id, filename) DO UPDATE SET \
         sender=excluded.sender,\
         timestamp_ms=excluded.timestamp_ms,\
@@ -399,6 +439,7 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
         marked=excluded.marked,\
         marked_tag_ids=excluded.marked_tag_ids,\
         marked_pinned=excluded.marked_pinned,\
+        marked_due_date=excluded.marked_due_date,\
         format=excluded.format",
     params![
       message.endpoint_id,
@@ -417,6 +458,7 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
       message.marked,
       serialize_tag_ids(&message.marked_tag_ids)?,
       message.marked_pinned,
+      message.marked_due_date,
       message.format,
     ],
   )?;
@@ -430,13 +472,14 @@ pub fn upsert_pending_marked_sync(
     let conn = Connection::open(path)?;
     conn.execute(
         "INSERT INTO pending_marked_sync
-          (endpoint_id, filename, timestamp_ms, marked, marked_tag_ids, marked_pinned, updated_at_ms)
-          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+          (endpoint_id, filename, timestamp_ms, marked, marked_tag_ids, marked_pinned, marked_due_date, updated_at_ms)
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
           ON CONFLICT(endpoint_id, filename) DO UPDATE SET
             timestamp_ms=excluded.timestamp_ms,
             marked=excluded.marked,
             marked_tag_ids=excluded.marked_tag_ids,
             marked_pinned=excluded.marked_pinned,
+            marked_due_date=excluded.marked_due_date,
             updated_at_ms=excluded.updated_at_ms",
         params![
             pending.endpoint_id,
@@ -445,6 +488,7 @@ pub fn upsert_pending_marked_sync(
             pending.marked,
             serialize_tag_ids(&pending.marked_tag_ids)?,
             pending.marked_pinned,
+            pending.marked_due_date,
             pending.updated_at_ms,
         ],
     )?;
@@ -457,7 +501,7 @@ pub fn list_pending_marked_sync(
 ) -> rusqlite::Result<Vec<PendingMarkedSync>> {
     let conn = Connection::open(path)?;
     let mut stmt = conn.prepare(
-        "SELECT endpoint_id, filename, timestamp_ms, marked, marked_tag_ids, marked_pinned, updated_at_ms
+        "SELECT endpoint_id, filename, timestamp_ms, marked, marked_tag_ids, marked_pinned, marked_due_date, updated_at_ms
          FROM pending_marked_sync
          WHERE endpoint_id = ?1
          ORDER BY updated_at_ms ASC",
@@ -471,7 +515,8 @@ pub fn list_pending_marked_sync(
             marked: row.get(3)?,
             marked_tag_ids: parse_tag_ids(marked_tag_ids),
             marked_pinned: row.get(5)?,
-            updated_at_ms: row.get(6)?,
+            marked_due_date: row.get(6)?,
+            updated_at_ms: row.get(7)?,
         })
     })?;
     rows.collect()
@@ -505,7 +550,7 @@ pub fn list_messages(
 }
 
 fn message_row_select_sql() -> &'static str {
-    "filename, sender, timestamp_ms, size, kind, original_name, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, format"
+    "filename, sender, timestamp_ms, size, kind, original_name, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, marked_due_date, format"
 }
 
 fn map_message_row(row: &Row<'_>) -> rusqlite::Result<Message> {
@@ -525,7 +570,8 @@ fn map_message_row(row: &Row<'_>) -> rusqlite::Result<Message> {
         marked: row.get(10)?,
         marked_tag_ids: parse_tag_ids(marked_tag_ids),
         marked_pinned: row.get(12)?,
-        format: row.get(13)?,
+        marked_due_date: row.get(13)?,
+        format: row.get(14)?,
     })
 }
 
@@ -711,7 +757,7 @@ pub fn list_marked_messages(
     tag_id: Option<&str>,
     search_query: Option<&str>,
 ) -> rusqlite::Result<Vec<Message>> {
-    list_marked_messages_paged(path, endpoint_id, tag_id, search_query, None, None)
+    list_marked_messages_paged(path, endpoint_id, tag_id, search_query, None, None, None)
 }
 
 pub fn list_marked_messages_paged(
@@ -721,6 +767,7 @@ pub fn list_marked_messages_paged(
     search_query: Option<&str>,
     limit: Option<i64>,
     offset: Option<i64>,
+    pending_due_date: Option<&str>,
 ) -> rusqlite::Result<Vec<Message>> {
     let conn = Connection::open(path)?;
     let normalized_search = search_query
@@ -734,10 +781,11 @@ pub fn list_marked_messages_paged(
         .transpose()
         .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?
         .map(|tag_id| format!("%{tag_id}%"));
-    let mut sql =
-        "SELECT filename, sender, timestamp_ms, size, kind, original_name, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, format \
-         FROM messages WHERE endpoint_id = ?1 AND marked = 1"
-            .to_string();
+    let mut sql = format!(
+        "SELECT {} FROM messages WHERE endpoint_id = ?1 AND marked = 1",
+        message_row_select_sql()
+    )
+    .to_string();
     if normalized_search.is_some() {
         sql.push_str(
             " AND (LOWER(COALESCE(content, '')) LIKE ?2 OR LOWER(COALESCE(original_name, '')) LIKE ?2 OR LOWER(filename) LIKE ?2)",
@@ -754,6 +802,15 @@ pub fn list_marked_messages_paged(
     } else if untagged_filter {
         sql.push_str(" AND marked_tag_ids = '[]'");
     }
+    if pending_due_date.is_some() {
+        sql.push_str(
+            " AND (marked_due_date IS NULL OR marked_due_date = '' OR marked_due_date <= ?",
+        );
+        sql.push_str(
+            &(params_count(normalized_search.is_some(), tag_pattern.is_some()) + 1).to_string(),
+        );
+        sql.push(')');
+    }
     sql.push_str(" ORDER BY marked_pinned DESC, timestamp_ms DESC");
     if let Some(limit) = limit {
         sql.push_str(" LIMIT ");
@@ -765,26 +822,6 @@ pub fn list_marked_messages_paged(
     }
 
     let mut stmt = conn.prepare(&sql)?;
-    let map_row = |row: &Row<'_>| -> rusqlite::Result<Message> {
-        let marked_tag_ids: String = row.get(11)?;
-        Ok(Message {
-            filename: row.get(0)?,
-            sender: row.get(1)?,
-            timestamp_ms: row.get(2)?,
-            size: row.get(3)?,
-            kind: row.get(4)?,
-            original_name: row.get(5)?,
-            content: row.get(6)?,
-            local_path: row.get(7)?,
-            remote_path: row.get(8)?,
-            file_hash: row.get(9)?,
-            download_exists: false,
-            marked: row.get(10)?,
-            marked_tag_ids: parse_tag_ids(marked_tag_ids),
-            marked_pinned: row.get(12)?,
-            format: row.get(13)?,
-        })
-    };
     let mut params: Vec<&dyn ToSql> = vec![&endpoint_id];
     if let Some(ref search_term) = normalized_search {
         params.push(search_term);
@@ -792,7 +829,10 @@ pub fn list_marked_messages_paged(
     if let Some(ref tag_pattern) = tag_pattern {
         params.push(tag_pattern);
     }
-    let rows = stmt.query_map(params_from_iter(params), map_row)?;
+    if let Some(ref due_date) = pending_due_date {
+        params.push(due_date);
+    }
+    let rows = stmt.query_map(params_from_iter(params), map_message_row)?;
 
     let mut messages = Vec::new();
     for row in rows {
@@ -801,11 +841,16 @@ pub fn list_marked_messages_paged(
     Ok(messages)
 }
 
+fn params_count(has_search: bool, has_tag: bool) -> usize {
+    1 + usize::from(has_search) + usize::from(has_tag)
+}
+
 pub fn count_marked_messages(
     path: &Path,
     endpoint_id: &str,
     tag_id: Option<&str>,
     search_query: Option<&str>,
+    pending_due_date: Option<&str>,
 ) -> rusqlite::Result<i64> {
     let conn = Connection::open(path)?;
     let normalized_search = search_query
@@ -836,6 +881,15 @@ pub fn count_marked_messages(
     } else if untagged_filter {
         sql.push_str(" AND marked_tag_ids = '[]'");
     }
+    if pending_due_date.is_some() {
+        sql.push_str(
+            " AND (marked_due_date IS NULL OR marked_due_date = '' OR marked_due_date <= ?",
+        );
+        sql.push_str(
+            &(params_count(normalized_search.is_some(), tag_pattern.is_some()) + 1).to_string(),
+        );
+        sql.push(')');
+    }
     let mut params: Vec<&dyn ToSql> = vec![&endpoint_id];
     if let Some(ref search_term) = normalized_search {
         params.push(search_term);
@@ -843,7 +897,26 @@ pub fn count_marked_messages(
     if let Some(ref tag_pattern) = tag_pattern {
         params.push(tag_pattern);
     }
+    if let Some(ref due_date) = pending_due_date {
+        params.push(due_date);
+    }
     conn.query_row(&sql, params_from_iter(params), |row| row.get(0))
+}
+
+pub fn count_unfinished_marked_messages(
+    path: &Path,
+    endpoint_id: &str,
+    today: &str,
+) -> rusqlite::Result<i64> {
+    let conn = Connection::open(path)?;
+    conn.query_row(
+        "SELECT COUNT(*) FROM messages
+         WHERE endpoint_id = ?1
+           AND marked = 1
+           AND (marked_due_date IS NULL OR marked_due_date = '' OR marked_due_date <= ?2)",
+        params![endpoint_id, today],
+        |row| row.get(0),
+    )
 }
 
 pub fn replace_marked_tags(
@@ -1344,6 +1417,7 @@ mod tests {
             marked: true,
             marked_tag_ids: tag_ids.iter().map(|tag_id| (*tag_id).to_string()).collect(),
             marked_pinned,
+            marked_due_date: None,
             format: "text".to_string(),
         }
     }
@@ -1401,6 +1475,7 @@ mod tests {
         assert!(message.marked);
         assert!(message.marked_tag_ids.is_empty());
         assert!(!message.marked_pinned);
+        assert_eq!(message.marked_due_date, None);
         assert!(list_marked_tags(&path, "endpoint-1")
             .expect("list marked tags after migration")
             .is_empty());
@@ -1513,15 +1588,61 @@ mod tests {
         upsert_message(&path, &sample_message("pinned.txt", 300, &["tag-a"], true))
             .expect("insert pinned message");
 
-        let total = count_marked_messages(&path, "endpoint-1", Some("tag-a"), None)
+        let total = count_marked_messages(&path, "endpoint-1", Some("tag-a"), None, None)
             .expect("count marked messages");
-        let page =
-            list_marked_messages_paged(&path, "endpoint-1", Some("tag-a"), None, Some(1), Some(1))
-                .expect("list marked page");
+        let page = list_marked_messages_paged(
+            &path,
+            "endpoint-1",
+            Some("tag-a"),
+            None,
+            Some(1),
+            Some(1),
+            None,
+        )
+        .expect("list marked page");
 
         assert_eq!(total, 3);
         assert_eq!(page.len(), 1);
         assert_eq!(page[0].filename, "middle.txt");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn count_unfinished_marked_messages_uses_due_date_rules() {
+        let path = temp_db_path("marked-unfinished-count");
+        init_db(&path, None).expect("initialize database");
+
+        let mut no_due = sample_message("no-due.txt", 100, &[], false);
+        no_due.marked_due_date = None;
+        upsert_message(&path, &no_due).expect("insert no due");
+
+        let mut past_due = sample_message("past-due.txt", 200, &[], false);
+        past_due.marked_due_date = Some("2026-08-26".to_string());
+        upsert_message(&path, &past_due).expect("insert past due");
+
+        let mut future_due = sample_message("future-due.txt", 300, &[], false);
+        future_due.marked_due_date = Some("2026-08-28".to_string());
+        upsert_message(&path, &future_due).expect("insert future due");
+
+        let count = count_unfinished_marked_messages(&path, "endpoint-1", "2026-08-27")
+            .expect("count unfinished");
+        assert_eq!(count, 2);
+
+        let page = list_marked_messages_paged(
+            &path,
+            "endpoint-1",
+            None,
+            None,
+            None,
+            None,
+            Some("2026-08-27"),
+        )
+        .expect("list pending marked page");
+        assert_eq!(page.len(), 2);
+        assert!(page
+            .iter()
+            .all(|message| message.filename != "future-due.txt"));
 
         let _ = std::fs::remove_file(path);
     }
@@ -1963,6 +2084,7 @@ mod tests {
             marked: true,
             marked_tag_ids: vec!["tag-b".to_string(), "tag-a".to_string()],
             marked_pinned: false,
+            marked_due_date: Some("2026-08-27".to_string()),
             updated_at_ms: 10,
         };
         upsert_pending_marked_sync(&path, &first).expect("insert pending marked sync");
@@ -1971,6 +2093,7 @@ mod tests {
             marked: false,
             marked_tag_ids: Vec::new(),
             marked_pinned: false,
+            marked_due_date: None,
             updated_at_ms: 20,
             ..first.clone()
         };

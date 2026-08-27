@@ -782,6 +782,8 @@ pub struct Message {
     #[serde(default)]
     pub marked_pinned: bool,
     #[serde(default)]
+    pub marked_due_date: Option<String>,
+    #[serde(default)]
     pub format: String,
 }
 

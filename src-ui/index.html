@@ -289,6 +289,7 @@
             <div class="marked-search">
               <label for="marked-search-input" class="visually-hidden">搜索标记消息</label>
               <input type="search" id="marked-search-input" placeholder="搜索标记消息..." />
+              <button id="marked-pending-filter" class="button ghost small marked-pending-filter" type="button" aria-pressed="false">待处理</button>
               <button id="marked-search-button" class="button ghost small" type="button">搜索</button>
             </div>
             <section id="marked-tag-filter-panel" class="marked-tag-filter-panel" hidden>
@@ -339,6 +340,9 @@
                     {{ message.expandLabel }}
                   </button>
                   <div class="marked-message-tags">
+                    <span v-if="message.dueDateText" class="marked-message-due-chip" :class="{ 'is-pending': message.isPending }">
+                      {{ message.dueDateText }}
+                    </span>
                     <span
                       v-for="tagName in message.tags"
                       :key="tagName"
@@ -1454,9 +1458,27 @@
             </div>
             <div id="mark-message-tag-list" class="mark-message-tag-list"></div>
           </div>
-          <div class="dialog-actions">
-            <button id="mark-message-cancel" class="button ghost small" type="button">取消</button>
-            <button id="mark-message-confirm" class="button primary small" type="button">确认标记</button>
+          <div class="mark-message-footer">
+            <div class="mark-message-footer-bar">
+              <div class="mark-message-extra-tools" aria-label="标记选项">
+                <button id="mark-message-due-toggle" class="mark-message-tool-button" type="button" title="处理日期" aria-label="处理日期">
+                  <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="4" y="5" width="16" height="15" rx="3"></rect>
+                    <path d="M8 3v4M16 3v4M4 10h16"></path>
+                    <path d="M8 14h.01M12 14h.01M16 14h.01M8 17h.01M12 17h.01"></path>
+                  </svg>
+                </button>
+                <input id="mark-message-due-date" class="mark-message-due-native-input" type="date" aria-label="处理日期" />
+                <span id="mark-message-due-value" class="mark-message-due-value" hidden>
+                  <span id="mark-message-due-value-text" class="mark-message-due-value-text"></span>
+                  <button id="mark-message-due-clear" class="mark-message-due-clear" type="button" title="清除处理日期" aria-label="清除处理日期">×</button>
+                </span>
+              </div>
+              <div class="dialog-actions mark-message-actions">
+                <button id="mark-message-cancel" class="button ghost small" type="button">取消</button>
+                <button id="mark-message-confirm" class="button primary small" type="button">确认标记</button>
+              </div>
+            </div>
           </div>
         </div>
       </div>

@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change add-message-controls. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: 托盘常驻与菜单
 应用 SHALL 在运行期间常驻系统托盘，点击托盘图标时显示主窗口，并提供“显示窗口”“禁用快捷键/启用快捷键”“退出”菜单项；快捷键菜单项 SHALL 反映当前状态。
 
@@ -62,3 +64,20 @@ TBD - created by archiving change add-message-controls. Update Purpose after arc
 - **那么** 消息列表应更新以显示所有消息
 - **并且** 筛选控件应返回其默认状态。
 
+### Requirement: Marked unfinished badge
+The app shell SHALL show a red numeric badge on the marked tab when the active endpoint has unfinished marked messages. A marked message SHALL count as unfinished when it is marked and either has no due date or its due date is today or earlier. The badge SHALL be hidden when the unfinished count is zero and SHALL display `99+` when the count exceeds 99.
+
+#### Scenario: Badge count visible
+- **GIVEN** the active endpoint has one marked message with no due date and one marked message due today
+- **WHEN** the app loads message counts
+- **THEN** the marked tab badge displays `2`
+
+#### Scenario: Future due dates excluded
+- **GIVEN** the active endpoint has only marked messages with future due dates
+- **WHEN** the app loads message counts
+- **THEN** the marked tab badge is hidden
+
+#### Scenario: Badge count cap
+- **GIVEN** the active endpoint has more than 99 unfinished marked messages
+- **WHEN** the app loads message counts
+- **THEN** the marked tab badge displays `99+`

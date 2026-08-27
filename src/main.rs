@@ -74,6 +74,7 @@ use tauri_plugin_log::{Target, TargetKind};
 use tauri_plugin_opener::OpenerExt;
 #[cfg(desktop)]
 use tauri_plugin_updater::UpdaterExt;
+use time::OffsetDateTime;
 use tokio::sync::{oneshot, watch, Mutex as AsyncMutex};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -618,6 +619,8 @@ struct LocalHttpApiMarkedOptionsInput {
     marked: bool,
     #[serde(default)]
     tag_names: Vec<String>,
+    #[serde(default)]
+    due_date: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -689,6 +692,8 @@ struct SendMarkedOptionsInput {
     #[serde(default)]
     selected_tag_ids: Vec<String>,
     #[serde(default)]
+    due_date: Option<String>,
+    #[serde(default)]
     created_tags: Vec<PendingCreatedTagInput>,
     #[serde(default)]
     deleted_tag_ids: Vec<String>,
@@ -697,6 +702,7 @@ struct SendMarkedOptionsInput {
 struct AppliedSendMarkedOptions {
     marked: bool,
     tag_ids: Vec<String>,
+    due_date: Option<String>,
     tags: Vec<MarkedTag>,
     tags_changed: bool,
     cleanup_targets: Vec<crate::history::HistoryEntryTarget>,
@@ -1883,6 +1889,50 @@ fn sanitize_deleted_marked_tag_ids(tags: &[MarkedTag], tag_ids: Vec<String>) -> 
     sanitize_marked_tag_ids(tags, tag_ids)
 }
 
+fn normalize_marked_due_date(value: Option<String>) -> Result<Option<String>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if is_valid_marked_due_date(&value) {
+        Ok(Some(value))
+    } else {
+        Err("处理日期格式必须为 YYYY-MM-DD".to_string())
+    }
+}
+
+fn is_valid_marked_due_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit())
+}
+
+fn today_due_date_string() -> String {
+    let date = OffsetDateTime::now_local()
+        .unwrap_or_else(|_| OffsetDateTime::now_utc())
+        .date();
+    format!(
+        "{:04}-{:02}-{:02}",
+        date.year(),
+        u8::from(date.month()),
+        date.day()
+    )
+}
+
+fn count_unfinished_marked_messages(state: &AppState, endpoint_id: &str) -> Result<i64, String> {
+    let today = today_due_date_string();
+    db::count_unfinished_marked_messages(&state.db_path, endpoint_id, &today)
+        .map_err(|err| err.to_string())
+}
+
 async fn load_and_apply_send_marked_options(
     state: &AppState,
     endpoint: &WebDavEndpoint,
@@ -1939,10 +1989,16 @@ async fn load_and_apply_send_marked_options(
     if !options.marked {
         final_tag_ids.clear();
     }
+    let due_date = if options.marked {
+        normalize_marked_due_date(options.due_date)?
+    } else {
+        None
+    };
 
     Ok(AppliedSendMarkedOptions {
         marked: options.marked,
         tag_ids: final_tag_ids,
+        due_date,
         tags,
         tags_changed,
         cleanup_targets,
@@ -1963,6 +2019,7 @@ async fn persist_sent_message_with_marked_options(
     message.marked = applied_options.marked;
     message.marked_tag_ids = applied_options.tag_ids.clone();
     message.marked_pinned = false;
+    message.marked_due_date = applied_options.due_date.clone();
 
     db::upsert_message(&state.db_path, message).map_err(|err| err.to_string())?;
     let history_result = crate::history::upsert_history_entries(
@@ -2038,15 +2095,19 @@ fn apply_marked_state(
     marked_flag: &mut bool,
     marked_tag_ids: &mut Vec<String>,
     marked_pinned: &mut bool,
+    marked_due_date: &mut Option<String>,
     marked: bool,
     tag_ids: &[String],
+    due_date: Option<String>,
 ) {
     *marked_flag = marked;
     if marked {
         *marked_tag_ids = tag_ids.to_vec();
+        *marked_due_date = due_date;
     } else {
         marked_tag_ids.clear();
         *marked_pinned = false;
+        *marked_due_date = None;
     }
 }
 
@@ -2055,13 +2116,21 @@ async fn mark_message(
     state: State<'_, AppState>,
     filename: String,
     tag_ids: Option<Vec<String>>,
+    due_date: Option<String>,
 ) -> Result<(), String> {
-    set_message_marked(&state, filename, true, tag_ids.unwrap_or_default()).await
+    set_message_marked(
+        &state,
+        filename,
+        true,
+        tag_ids.unwrap_or_default(),
+        due_date,
+    )
+    .await
 }
 
 #[tauri::command]
 async fn unmark_message(state: State<'_, AppState>, filename: String) -> Result<(), String> {
-    set_message_marked(&state, filename, false, Vec::new()).await
+    set_message_marked(&state, filename, false, Vec::new(), None).await
 }
 
 async fn set_message_marked(
@@ -2069,12 +2138,18 @@ async fn set_message_marked(
     filename: String,
     marked: bool,
     tag_ids: Vec<String>,
+    due_date: Option<String>,
 ) -> Result<(), String> {
     let settings = current_settings(state)?;
     let endpoint = resolve_active_endpoint(&settings)?;
     let _guard = state.sync_guard.lock().await;
     let tags = db::list_marked_tags(&state.db_path, &endpoint.id).map_err(|err| err.to_string())?;
     let valid_tag_ids = sanitize_marked_tag_ids(&tags, tag_ids);
+    let valid_due_date = if marked {
+        normalize_marked_due_date(due_date)?
+    } else {
+        None
+    };
 
     let mut changed = false;
     let existing =
@@ -2089,13 +2164,16 @@ async fn set_message_marked(
             } else {
                 false
             })
+        || local_message.marked_due_date != valid_due_date
     {
         apply_marked_state(
             &mut local_message.marked,
             &mut local_message.marked_tag_ids,
             &mut local_message.marked_pinned,
+            &mut local_message.marked_due_date,
             marked,
             &valid_tag_ids,
+            valid_due_date,
         );
         db::upsert_message(&state.db_path, &local_message).map_err(|err| err.to_string())?;
         changed = true;
@@ -2109,6 +2187,7 @@ async fn set_message_marked(
             marked: local_message.marked,
             marked_tag_ids: local_message.marked_tag_ids.clone(),
             marked_pinned: local_message.marked_pinned,
+            marked_due_date: local_message.marked_due_date.clone(),
             updated_at_ms: now_ms(),
         };
         db::upsert_pending_marked_sync(&state.db_path, &pending).map_err(|err| err.to_string())?;
@@ -2172,16 +2251,19 @@ async fn flush_marked_history_entries(
                 entry.marked,
                 entry.marked_tag_ids.clone(),
                 entry.marked_pinned,
+                entry.marked_due_date.clone(),
             );
             entry.marked = pending.marked;
             entry.marked_tag_ids = pending.marked_tag_ids.clone();
             entry.marked_tag_ids.sort();
             entry.marked_pinned = pending.marked_pinned;
+            entry.marked_due_date = pending.marked_due_date.clone();
             before
                 != (
                     entry.marked,
                     entry.marked_tag_ids.clone(),
                     entry.marked_pinned,
+                    entry.marked_due_date.clone(),
                 )
         })
         .await?;
@@ -2204,6 +2286,7 @@ fn apply_pending_marked_sync_to_message(message: &mut DbMessage, pending: &Pendi
     message.marked = pending.marked;
     message.marked_tag_ids = pending.marked_tag_ids.clone();
     message.marked_pinned = pending.marked_pinned;
+    message.marked_due_date = pending.marked_due_date.clone();
 }
 
 fn apply_pending_marked_sync_to_history(history: &mut HistoryEntry, pending: &PendingMarkedSync) {
@@ -2211,6 +2294,7 @@ fn apply_pending_marked_sync_to_history(history: &mut HistoryEntry, pending: &Pe
     history.marked_tag_ids = pending.marked_tag_ids.clone();
     history.marked_tag_ids.sort();
     history.marked_pinned = pending.marked_pinned;
+    history.marked_due_date = pending.marked_due_date.clone();
 }
 
 fn pending_marked_sync_map(pending: &[PendingMarkedSync]) -> HashMap<String, PendingMarkedSync> {
@@ -2261,6 +2345,7 @@ async fn set_marked_messages_tags(
                 marked: message.marked,
                 marked_tag_ids: message.marked_tag_ids.clone(),
                 marked_pinned: message.marked_pinned,
+                marked_due_date: message.marked_due_date.clone(),
                 updated_at_ms: now_ms(),
             };
             db::upsert_pending_marked_sync(&state.db_path, &pending)
@@ -2427,6 +2512,7 @@ async fn toggle_marked_message_pin(
         marked: message.marked,
         marked_tag_ids: message.marked_tag_ids.clone(),
         marked_pinned: message.marked_pinned,
+        marked_due_date: message.marked_due_date.clone(),
         updated_at_ms: now_ms(),
     };
     db::upsert_pending_marked_sync(&state.db_path, &pending).map_err(|err| err.to_string())?;
@@ -2441,16 +2527,19 @@ fn list_marked_messages(
     search_query: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
+    pending_only: Option<bool>,
 ) -> Result<MessagesResult, String> {
     let settings = current_settings(&state)?;
     let endpoint = resolve_active_endpoint(&settings)?;
-    let marked_count =
-        db::count_messages(&state.db_path, &endpoint.id, true).map_err(|err| err.to_string())?;
+    let marked_count = count_unfinished_marked_messages(&state, &endpoint.id)?;
+    let today = today_due_date_string();
+    let pending_due_date = pending_only.unwrap_or(false).then_some(today.as_str());
     let total = db::count_marked_messages(
         &state.db_path,
         &endpoint.id,
         tag_id.as_deref(),
         search_query.as_deref(),
+        pending_due_date,
     )
     .map_err(|err| err.to_string())?;
     let messages = db::list_marked_messages_paged(
@@ -2460,6 +2549,7 @@ fn list_marked_messages(
         search_query.as_deref(),
         limit,
         offset,
+        pending_due_date,
     )
     .map_err(|err| err.to_string())?;
     let current_offset = offset.unwrap_or(0).max(0);
@@ -2487,12 +2577,7 @@ fn list_messages(
     let total = db::count_messages(&state.db_path, &endpoint.id, marked_filter)
         .map_err(|err| err.to_string())?;
 
-    // Always get the total count of marked messages for the badge
-    let marked_count = if marked_filter {
-        total
-    } else {
-        db::count_messages(&state.db_path, &endpoint.id, true).map_err(|err| err.to_string())?
-    };
+    let marked_count = count_unfinished_marked_messages(&state, &endpoint.id)?;
 
     let messages = db::list_messages_paged(
         &state.db_path,
@@ -2529,11 +2614,7 @@ fn list_messages_window(
 
     let total = db::count_messages(&state.db_path, &endpoint.id, marked_filter)
         .map_err(|err| err.to_string())?;
-    let marked_count = if marked_filter {
-        total
-    } else {
-        db::count_messages(&state.db_path, &endpoint.id, true).map_err(|err| err.to_string())?
-    };
+    let marked_count = count_unfinished_marked_messages(&state, &endpoint.id)?;
 
     let messages = if let (Some(after_timestamp_ms), Some(after_filename)) =
         (input.after_timestamp_ms, input.after_filename.as_deref())
@@ -2642,6 +2723,7 @@ fn build_local_http_marked_options(
     options: LocalHttpApiMarkedOptionsInput,
 ) -> Result<SendMarkedOptionsInput, String> {
     let normalized_tag_names = normalize_local_http_tag_names(options.tag_names)?;
+    let due_date = normalize_marked_due_date(options.due_date)?;
     let marked = options.marked || !normalized_tag_names.is_empty();
     let mut selected_tag_ids = Vec::new();
     let mut created_tags = Vec::new();
@@ -2663,6 +2745,7 @@ fn build_local_http_marked_options(
     Ok(SendMarkedOptionsInput {
         marked,
         selected_tag_ids,
+        due_date: marked.then_some(due_date).flatten(),
         created_tags,
         deleted_tag_ids: Vec::new(),
     })
@@ -2748,6 +2831,7 @@ async fn send_text_impl(
         marked: false,
         marked_tag_ids: Vec::new(),
         marked_pinned: false,
+        marked_due_date: None,
         format,
     };
 
@@ -3006,6 +3090,7 @@ async fn send_file_path_impl(
         marked: false,
         marked_tag_ids: Vec::new(),
         marked_pinned: false,
+        marked_due_date: None,
         format: "text".to_string(),
     };
 
@@ -5637,7 +5722,10 @@ fn normalize_speech_hotkey(raw: &str) -> Option<String> {
 }
 
 fn is_side_alt_speech_hotkey(raw: &str) -> bool {
-    matches!(normalize_speech_hotkey(raw).as_deref(), Some("right-alt" | "left-alt"))
+    matches!(
+        normalize_speech_hotkey(raw).as_deref(),
+        Some("right-alt" | "left-alt")
+    )
 }
 
 fn is_valid_endpoint_id(value: &str) -> bool {
@@ -8696,6 +8784,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
             marked,
             marked_tag_ids,
             marked_pinned,
+            marked_due_date,
             format,
         ) = if let Some(history) = history_entry {
             (
@@ -8708,6 +8797,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
                 history.marked,
                 history.marked_tag_ids.clone(),
                 history.marked_pinned,
+                history.marked_due_date.clone(),
                 history.format.clone(),
             )
         } else if let Some(parsed) = parsed.as_ref() {
@@ -8726,6 +8816,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
                 false,
                 Vec::new(),
                 false,
+                None,
                 format,
             )
         } else {
@@ -8759,6 +8850,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
             marked,
             marked_tag_ids,
             marked_pinned,
+            marked_due_date,
             format,
         });
 
@@ -8774,6 +8866,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
             message.marked = history.marked;
             message.marked_tag_ids = history.marked_tag_ids.clone();
             message.marked_pinned = history.marked_pinned;
+            message.marked_due_date = history.marked_due_date.clone();
             message.format = history.format.clone();
         }
         if let Some(pending) = pending_marked_sync_by_filename.get(&filename) {
@@ -8849,6 +8942,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
                 || existing.marked != message.marked
                 || existing.marked_tag_ids != message.marked_tag_ids
                 || existing.marked_pinned != message.marked_pinned
+                || existing.marked_due_date != message.marked_due_date
                 || existing.etag != message.etag
                 || existing.mtime != message.mtime
                 || existing.format != message.format
@@ -8905,6 +8999,7 @@ fn message_to_history(message: &DbMessage) -> HistoryEntry {
         marked: message.marked,
         marked_tag_ids: message.marked_tag_ids.clone(),
         marked_pinned: message.marked_pinned,
+        marked_due_date: message.marked_due_date.clone(),
         format: message.format.clone(),
     }
 }
@@ -9158,8 +9253,10 @@ fn update_speech_hotkey_registration(
     }
 
     if settings.speech_to_text.shortcut_enabled {
-        let hotkey = normalize_speech_hotkey(&settings.speech_to_text.shortcut)
-            .ok_or_else(|| "语音录制快捷键格式无效，可填写 right-alt、left-alt 或 Alt+R".to_string())?;
+        let hotkey =
+            normalize_speech_hotkey(&settings.speech_to_text.shortcut).ok_or_else(|| {
+                "语音录制快捷键格式无效，可填写 right-alt、left-alt 或 Alt+R".to_string()
+            })?;
         if is_side_alt_speech_hotkey(&hotkey) {
             *current = None;
             return Ok(());
@@ -9755,6 +9852,7 @@ mod tests {
             marked: true,
             marked_tag_ids: Vec::new(),
             marked_pinned: false,
+            marked_due_date: None,
             format: "text".to_string(),
         };
 
@@ -9790,6 +9888,7 @@ mod tests {
                 marked: false,
                 marked_tag_ids: Vec::new(),
                 marked_pinned: false,
+                marked_due_date: None,
                 format: "text".to_string(),
             },
             Message {
@@ -9807,6 +9906,7 @@ mod tests {
                 marked: true,
                 marked_tag_ids: Vec::new(),
                 marked_pinned: false,
+                marked_due_date: None,
                 format: "text".to_string(),
             },
             Message {
@@ -9824,6 +9924,7 @@ mod tests {
                 marked: false,
                 marked_tag_ids: Vec::new(),
                 marked_pinned: false,
+                marked_due_date: None,
                 format: "text".to_string(),
             },
         ];
@@ -9838,18 +9939,22 @@ mod tests {
         let mut marked = true;
         let mut marked_tag_ids = vec!["tag-1".to_string(), "tag-2".to_string()];
         let mut marked_pinned = true;
+        let mut marked_due_date = Some("2026-08-27".to_string());
 
         apply_marked_state(
             &mut marked,
             &mut marked_tag_ids,
             &mut marked_pinned,
+            &mut marked_due_date,
             false,
             &[],
+            None,
         );
 
         assert!(!marked);
         assert!(marked_tag_ids.is_empty());
         assert!(!marked_pinned);
+        assert_eq!(marked_due_date, None);
     }
 
     #[test]
@@ -9892,6 +9997,7 @@ mod tests {
                 marked: true,
                 marked_tag_ids: vec!["old".to_string()],
                 marked_pinned: false,
+                marked_due_date: None,
                 format: "text".to_string(),
             },
             HistoryEntry {
@@ -9905,6 +10011,7 @@ mod tests {
                 marked: true,
                 marked_tag_ids: vec!["keep".to_string()],
                 marked_pinned: false,
+                marked_due_date: None,
                 format: "text".to_string(),
             },
             HistoryEntry {
@@ -9918,6 +10025,7 @@ mod tests {
                 marked: false,
                 marked_tag_ids: vec!["keep".to_string()],
                 marked_pinned: false,
+                marked_due_date: None,
                 format: "text".to_string(),
             },
         ];
@@ -9950,6 +10058,7 @@ mod tests {
             marked: true,
             marked_tag_ids: vec!["old".to_string()],
             marked_pinned: false,
+            marked_due_date: None,
             format: "text".to_string(),
         }];
 
@@ -10246,11 +10355,13 @@ mod tests {
                     "Follow-Up".to_string(),
                     "follow-up".to_string(),
                 ],
+                due_date: Some("2026-08-27".to_string()),
             },
         )
         .unwrap();
 
         assert!(options.marked);
+        assert_eq!(options.due_date.as_deref(), Some("2026-08-27"));
         assert_eq!(options.selected_tag_ids, vec!["tag-1".to_string()]);
         assert_eq!(
             options.created_tags,
@@ -10354,6 +10465,7 @@ mod tests {
             Some(LocalHttpApiMarkedOptionsInput {
                 marked: true,
                 tag_names: vec!["urgent".to_string(), "follow-up".to_string()],
+                due_date: None,
             })
         );
     }
@@ -11259,6 +11371,7 @@ mod tests {
             marked: false,
             marked_tag_ids: Vec::new(),
             marked_pinned: false,
+            marked_due_date: None,
             format: "text".to_string(),
         };
         let remote = crate::types::DavEntry {

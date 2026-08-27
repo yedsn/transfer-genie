@@ -576,6 +576,7 @@ async fn import_into_webdav(
                     marked: false,
                     marked_tag_ids: Vec::new(),
                     marked_pinned: false,
+                    marked_due_date: None,
                     format: "text".to_string(),
                 },
             )
@@ -640,6 +641,7 @@ async fn import_into_webdav(
                     marked: false,
                     marked_tag_ids: Vec::new(),
                     marked_pinned: false,
+                    marked_due_date: None,
                     format: "text".to_string(),
                 },
             )
@@ -770,6 +772,7 @@ async fn collect_remote_messages(
                     marked: false,
                     marked_tag_ids: Vec::new(),
                     marked_pinned: false,
+                    marked_due_date: None,
                     format: if parsed.original_name.to_lowercase().ends_with(".md") {
                         "markdown".to_string()
                     } else {
@@ -1327,6 +1330,7 @@ mod tests {
             marked: false,
             marked_tag_ids: Vec::new(),
             marked_pinned: false,
+            marked_due_date: None,
             format: "text".to_string(),
         };
         let sent = HistoryEntry {

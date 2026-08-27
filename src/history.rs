@@ -31,6 +31,8 @@ pub struct HistoryEntry {
     #[serde(default)]
     pub marked_pinned: bool,
     #[serde(default)]
+    pub marked_due_date: Option<String>,
+    #[serde(default)]
     pub format: String,
 }
 
@@ -750,6 +752,8 @@ fn normalize_legacy_entry(mut entry: HistoryEntry) -> HistoryEntry {
         entry.format = "text".to_string();
     }
     entry.marked_tag_ids.sort();
+    entry.marked_tag_ids.dedup();
+    entry.marked_due_date = normalize_history_due_date(entry.marked_due_date);
     entry
 }
 
@@ -761,7 +765,26 @@ fn normalize_manifest_entry(mut entry: HistoryEntry) -> HistoryEntry {
         entry.format = "text".to_string();
     }
     entry.marked_tag_ids.sort();
+    entry.marked_tag_ids.dedup();
+    entry.marked_due_date = normalize_history_due_date(entry.marked_due_date);
     entry
+}
+
+fn normalize_history_due_date(value: Option<String>) -> Option<String> {
+    value
+        .map(|item| item.trim().to_string())
+        .filter(|item| is_valid_due_date(item))
+}
+
+fn is_valid_due_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit())
 }
 
 fn dedupe_and_sort(entries: Vec<HistoryEntry>) -> Vec<HistoryEntry> {
@@ -900,6 +923,7 @@ mod tests {
             marked: false,
             marked_tag_ids: Vec::new(),
             marked_pinned: false,
+            marked_due_date: None,
             format: "text".to_string(),
         }];
 
@@ -944,6 +968,7 @@ mod tests {
             marked: false,
             marked_tag_ids: Vec::new(),
             marked_pinned: false,
+            marked_due_date: None,
             format: "text".to_string(),
         }
     }

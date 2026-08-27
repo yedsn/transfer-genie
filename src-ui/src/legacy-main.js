@@ -692,6 +692,7 @@ const markedRefreshButton = document.getElementById('marked-refresh-btn');
 const markedRefreshLabel = markedRefreshButton ? markedRefreshButton.querySelector('.refresh-label') : null;
 const markedSearchInput = document.getElementById('marked-search-input');
 const markedSearchButton = document.getElementById('marked-search-button');
+const markedPendingFilterButton = document.getElementById('marked-pending-filter');
 const toggleMarkedTagFilterButton = document.getElementById('toggle-marked-tag-filter');
 const markedTagFilterPanel = document.getElementById('marked-tag-filter-panel');
 const markedTagFilterList = document.getElementById('marked-tag-filter-list');
@@ -711,6 +712,11 @@ const markMessageConfirmButton = document.getElementById('mark-message-confirm')
 const markMessageNewTagInput = document.getElementById('mark-message-new-tag-input');
 const markMessageAddTagButton = document.getElementById('mark-message-add-tag');
 const markMessageTagList = document.getElementById('mark-message-tag-list');
+const markMessageDueToggle = document.getElementById('mark-message-due-toggle');
+const markMessageDueDateInput = document.getElementById('mark-message-due-date');
+const markMessageDueValue = document.getElementById('mark-message-due-value');
+const markMessageDueValueText = document.getElementById('mark-message-due-value-text');
+const markMessageDueClearButton = document.getElementById('mark-message-due-clear');
 const markMessageSubtitle = document.getElementById('mark-message-subtitle');
 const messagePreview = document.getElementById('message-preview');
 const messagePreviewBody = document.getElementById('message-preview-body');
@@ -1010,6 +1016,7 @@ let composerMarkPanelRefreshPromise = null;
 // 标记列表分页
 let markedMessagesPage = 1;
 let markedMessagesTotal = 0;
+let markedPendingOnly = false;
 const MARKED_MESSAGES_PER_PAGE = 10;
 const UNTAGGED_MARKED_TAG_FILTER_ID = '__untagged__';
 let currentMarkedPageState = {
@@ -1287,6 +1294,29 @@ function formatBytes(bytes) {
 function formatTime(timestampMs) {
   if (!timestampMs) return '';
   return new Date(timestampMs).toLocaleString('zh-CN');
+}
+
+function todayDateString() {
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
+function normalizeMarkedDueDate(value) {
+  const normalized = String(value || '').trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(normalized) ? normalized : '';
+}
+
+function isMarkedMessagePending(message) {
+  if (!message?.marked) return false;
+  const dueDate = normalizeMarkedDueDate(message.marked_due_date);
+  return !dueDate || dueDate <= todayDateString();
+}
+
+function formatMarkedDueDateText(value) {
+  const dueDate = normalizeMarkedDueDate(value);
+  return dueDate ? `处理 ${dueDate}` : '';
 }
 
 function setStatus(text) {
@@ -4632,11 +4662,17 @@ function buildPatchedMarkedMessage(message, patch = {}) {
   if (patch.marked_pinned !== undefined) {
     next.marked_pinned = !!patch.marked_pinned;
   }
+  if (patch.marked_due_date !== undefined) {
+    next.marked_due_date = normalizeMarkedDueDate(patch.marked_due_date) || null;
+  }
   return next;
 }
 
 function markedMessageMatchesCurrentView(message) {
   if (!message?.marked) {
+    return false;
+  }
+  if (markedPendingOnly && !isMarkedMessagePending(message)) {
     return false;
   }
   const tagIds = Array.isArray(message.marked_tag_ids) ? message.marked_tag_ids : [];
@@ -4744,6 +4780,7 @@ function applyLocalMarkedPatch(filenames, patch, options = {}) {
       markedMessagesTotal = Math.max(0, Number(markedMessagesTotal || 0) + markedTotalDelta);
     }
   }
+  updateMarkedBadgeFromLocalMessages();
 
   if (currentPreviewMessage?.filename && targetSet.has(currentPreviewMessage.filename)) {
     currentPreviewMessage = updated.get(currentPreviewMessage.filename)
@@ -4822,6 +4859,14 @@ function patchMessageCardElement(card, message, patch = {}) {
   const tagRow = card.querySelector('.marked-message-tags');
   if (tagRow) {
     tagRow.innerHTML = '';
+    const dueDateText = formatMarkedDueDateText(next.marked_due_date);
+    if (dueDateText) {
+      const dueChip = document.createElement('span');
+      dueChip.className = 'marked-message-due-chip';
+      dueChip.classList.toggle('is-pending', isMarkedMessagePending(next));
+      dueChip.textContent = dueDateText;
+      tagRow.appendChild(dueChip);
+    }
     const resolvedTags = (next.marked_tag_ids || [])
       .map((tagId) => markedTags.find((tag) => tag.id === tagId))
       .filter(Boolean);
@@ -4896,6 +4941,8 @@ function buildMarkedMessageViewModel(message) {
     isFile: message?.kind === 'file',
     isText: message?.kind !== 'file',
     isPinned: !!message?.marked_pinned,
+    isPending: isMarkedMessagePending(message),
+    dueDateText: formatMarkedDueDateText(message?.marked_due_date),
     tags: resolvedTags,
     isSelected: selectedMarkedMessages.has(message?.filename),
     selectionMode: markedSelectionMode,
@@ -11162,6 +11209,10 @@ if (markedDeleteSelectedButton) {
 if (markedCancelSelectionButton) {
   markedCancelSelectionButton.addEventListener('click', () => setMarkedSelectionMode(false));
 }
+if (markedPendingFilterButton) {
+  markedPendingFilterButton.addEventListener('click', toggleMarkedPendingFilter);
+  updateMarkedPendingFilterButton();
+}
 if (downloadToggleSelectionButton) {
   downloadToggleSelectionButton.addEventListener('click', toggleDownloadSelectionMode);
 }
@@ -11239,6 +11290,29 @@ if (markMessageAddTagButton) {
     } catch (error) {
       showToast(`新增标签失败: ${error}`, 'error');
     }
+  });
+}
+if (markMessageDueToggle) {
+  markMessageDueToggle.addEventListener('click', () => {
+    if (markMessageDueToggle.disabled) return;
+    if (typeof markMessageDueDateInput?.showPicker === 'function') {
+      markMessageDueDateInput.showPicker();
+    } else {
+      markMessageDueDateInput?.focus();
+      markMessageDueDateInput?.click();
+    }
+  });
+}
+if (markMessageDueDateInput) {
+  markMessageDueDateInput.addEventListener('change', updateMarkMessageDueValue);
+}
+if (markMessageDueClearButton) {
+  markMessageDueClearButton.addEventListener('click', () => {
+    if (markMessageDueDateInput?.disabled) return;
+    if (markMessageDueDateInput) {
+      markMessageDueDateInput.value = '';
+    }
+    updateMarkMessageDueValue();
   });
 }
 if (markMessageConfirmButton) {
@@ -11865,10 +11939,53 @@ document.addEventListener('paste', async (event) => {
 });
 
 function updateMarkedBadge(count) {
-  // 标记tab图标不显示数量
   if (markedTabBadge) {
-    markedTabBadge.hidden = true;
+    const value = Math.max(0, Number(count || 0));
+    markedTabBadge.textContent = value > 99 ? '99+' : String(value);
+    markedTabBadge.hidden = value === 0;
   }
+}
+
+function updateMarkedBadgeFromLocalMessages() {
+  const seen = new Set();
+  let count = 0;
+  [...lastMessages, ...markedMessages].forEach((message) => {
+    if (!message?.filename || seen.has(message.filename)) return;
+    seen.add(message.filename);
+    if (isMarkedMessagePending(message)) {
+      count += 1;
+    }
+  });
+  updateMarkedBadge(count);
+}
+
+function updateMarkMessageDueValue() {
+  const dueDate = normalizeMarkedDueDate(markMessageDueDateInput?.value);
+  if (markMessageDueValueText) {
+    markMessageDueValueText.textContent = dueDate;
+  }
+  if (markMessageDueValue) {
+    markMessageDueValue.hidden = false;
+    markMessageDueValue.classList.toggle('is-visible', !!dueDate);
+    markMessageDueValue.setAttribute('aria-hidden', dueDate ? 'false' : 'true');
+  }
+  markMessageDueToggle?.closest('.mark-message-extra-tools')?.classList.toggle('has-due-date', !!dueDate);
+  if (markMessageDueToggle) {
+    markMessageDueToggle.classList.toggle('is-active', !!dueDate);
+  }
+}
+
+function setMarkMessageDueToolDisabled(disabled) {
+  if (markMessageDueToggle) {
+    markMessageDueToggle.disabled = disabled;
+  }
+  if (markMessageDueDateInput) {
+    markMessageDueDateInput.disabled = disabled;
+  }
+  if (markMessageDueValue) {
+    markMessageDueValue.classList.toggle('is-disabled', disabled);
+  }
+  updateMarkMessageDueValue();
 }
 
 function renderMarkMessageTagList() {
@@ -11934,6 +12051,11 @@ function closeMarkMessageModal() {
   if (markMessageNewTagInput) {
     markMessageNewTagInput.value = '';
   }
+  if (markMessageDueDateInput) {
+    markMessageDueDateInput.value = '';
+  }
+  setMarkMessageDueToolDisabled(false);
+  updateMarkMessageDueValue();
 }
 
 async function loadMarkedTags() {
@@ -12135,6 +12257,17 @@ async function openMarkMessageModal(messageOrMessages, options = {}) {
   selectedMarkTagIds.clear();
   if (currentMarkingMode !== 'batch') {
     (messages[0].marked_tag_ids || []).forEach((tagId) => selectedMarkTagIds.add(tagId));
+    const existingDueDate = normalizeMarkedDueDate(messages[0].marked_due_date);
+    if (markMessageDueDateInput) {
+      markMessageDueDateInput.value = existingDueDate;
+    }
+    setMarkMessageDueToolDisabled(false);
+    updateMarkMessageDueValue();
+  } else {
+    if (markMessageDueDateInput) {
+      markMessageDueDateInput.value = '';
+    }
+    setMarkMessageDueToolDisabled(true);
   }
   await loadMarkedTags();
   if (markMessageSubtitle) {
@@ -12158,6 +12291,9 @@ async function confirmMarkMessage() {
     markMessageConfirmButton.classList.add('is-loading');
   }
   const filenames = currentMarkingMessages.map((message) => message.filename).filter(Boolean);
+  const dueDate = currentMarkingMode === 'batch'
+    ? ''
+    : normalizeMarkedDueDate(markMessageDueDateInput?.value);
   const previousState = new Map(
     currentMarkingMessages
       .filter((message) => message?.filename)
@@ -12165,7 +12301,7 @@ async function confirmMarkMessage() {
   );
   const nextPatch = currentMarkingMode === 'batch'
     ? { marked_tag_ids: Array.from(selectedMarkTagIds) }
-    : { marked: true, marked_tag_ids: Array.from(selectedMarkTagIds) };
+    : { marked: true, marked_tag_ids: Array.from(selectedMarkTagIds), marked_due_date: dueDate || null };
   applyLocalMarkedPatch(filenames, nextPatch, {
     sourceMessages: currentMarkingMessages,
     renderHome: true,
@@ -12183,6 +12319,7 @@ async function confirmMarkMessage() {
       await invoke('mark_message', {
         filename: currentMarkingMessages[0].filename,
         tagIds: Array.from(selectedMarkTagIds),
+        dueDate: dueDate || null,
       });
       closeMarkMessageModal();
     }
@@ -12192,6 +12329,7 @@ async function confirmMarkMessage() {
         marked: message.marked,
         marked_tag_ids: message.marked_tag_ids,
         marked_pinned: message.marked_pinned,
+        marked_due_date: message.marked_due_date,
       }, {
         sourceMessages: currentMarkingMessages,
         renderHome: true,
@@ -12327,7 +12465,7 @@ async function toggleMessageMarked(message) {
   }
 
   const previous = buildPatchedMarkedMessage(message);
-  applyLocalMarkedPatch(message.filename, { marked: false, marked_tag_ids: [], marked_pinned: false }, {
+  applyLocalMarkedPatch(message.filename, { marked: false, marked_tag_ids: [], marked_pinned: false, marked_due_date: null }, {
     sourceMessages: [message],
     renderHome: true,
     renderMarked: true,
@@ -12343,6 +12481,7 @@ async function toggleMessageMarked(message) {
       marked: previous.marked,
       marked_tag_ids: previous.marked_tag_ids,
       marked_pinned: previous.marked_pinned,
+      marked_due_date: previous.marked_due_date,
     }, {
       sourceMessages: [message],
       renderHome: true,
@@ -12359,6 +12498,19 @@ function getAppliedMarkedSearchQuery() {
 async function executeMarkedSearch() {
   appliedMarkedSearchQuery = markedSearchInput ? markedSearchInput.value.trim() : '';
   markedMessagesPage = 1;
+  await loadMarkedMessages();
+}
+
+function updateMarkedPendingFilterButton() {
+  if (!markedPendingFilterButton) return;
+  markedPendingFilterButton.classList.toggle('is-active', markedPendingOnly);
+  markedPendingFilterButton.setAttribute('aria-pressed', markedPendingOnly ? 'true' : 'false');
+}
+
+async function toggleMarkedPendingFilter() {
+  markedPendingOnly = !markedPendingOnly;
+  markedMessagesPage = 1;
+  updateMarkedPendingFilterButton();
   await loadMarkedMessages();
 }
 
@@ -12483,6 +12635,14 @@ function renderMarkedMessages(messages = [], options = {}) {
 
     const tagRow = document.createElement('div');
     tagRow.className = 'marked-message-tags';
+    const dueDateText = formatMarkedDueDateText(message.marked_due_date);
+    if (dueDateText) {
+      const dueChip = document.createElement('span');
+      dueChip.className = 'marked-message-due-chip';
+      dueChip.classList.toggle('is-pending', isMarkedMessagePending(message));
+      dueChip.textContent = dueDateText;
+      tagRow.appendChild(dueChip);
+    }
     const resolvedTags = (message.marked_tag_ids || [])
       .map((tagId) => markedTags.find((tag) => tag.id === tagId))
       .filter(Boolean);
@@ -12731,6 +12891,7 @@ async function loadMarkedMessages(options = {}) {
       searchQuery: getAppliedMarkedSearchQuery() || null,
       limit: MARKED_MESSAGES_PER_PAGE,
       offset,
+      pendingOnly: markedPendingOnly,
     });
     markedMessages = result.messages || [];
     markedMessagesTotal = result.total || 0;
