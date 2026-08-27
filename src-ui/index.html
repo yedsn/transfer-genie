@@ -1150,9 +1150,6 @@
                   </div>
                 </div>
               </div>
-
-              <button id="save-settings" class="button primary">保存设置</button>
-
               <div class="settings-group">
                 <h3 class="settings-group-title">数据管理</h3>
                 <div class="settings-group-content">
@@ -1284,7 +1281,7 @@
                           :value="ui.settingsAutoBackup.settingsSnapshotRetainCount"
                           @input="updateSettingsAutoBackupField('settingsSnapshotRetainCount', Number($event.target.value || 7))"
                         />
-                        <span class="field-hint">保存配置时会自动清理旧设置快照，默认保留 7 个。</span>
+                        <span class="field-hint">配置变更会自动生效，并清理旧设置快照，默认保留 7 个。</span>
                       </label>
                     </div>
                   </div>

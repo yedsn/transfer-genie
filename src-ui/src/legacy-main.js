@@ -138,7 +138,45 @@ function syncVueSettingsAutoBackup(autoBackupState) {
   vueBridge?.syncSettingsAutoBackup?.(autoBackupState);
 }
 
-function updateSettingsAutoBackupField(field, value) {
+let settingsAutoSaveTimer = null;
+let settingsAutoSaveRunning = false;
+let settingsAutoSavePending = false;
+const SETTINGS_AUTO_SAVE_DELAY_MS = 650;
+
+function queueSettingsAutoSave(options = {}) {
+  if (options.skipAutoSave) {
+    return;
+  }
+  settingsAutoSavePending = true;
+  if (settingsAutoSaveTimer) {
+    window.clearTimeout(settingsAutoSaveTimer);
+  }
+  settingsAutoSaveTimer = window.setTimeout(() => {
+    settingsAutoSaveTimer = null;
+    void flushSettingsAutoSave();
+  }, Number(options.delayMs ?? SETTINGS_AUTO_SAVE_DELAY_MS));
+}
+
+async function flushSettingsAutoSave() {
+  if (settingsAutoSaveRunning || !settingsAutoSavePending) {
+    return;
+  }
+  settingsAutoSavePending = false;
+  settingsAutoSaveRunning = true;
+  try {
+    await saveSettings({ silent: true, source: 'auto' });
+    setSuccessStatus('设置已自动生效');
+  } catch (error) {
+    setErrorStatus(`自动应用设置失败：${error}`);
+  } finally {
+    settingsAutoSaveRunning = false;
+    if (settingsAutoSavePending) {
+      queueSettingsAutoSave({ delayMs: 120 });
+    }
+  }
+}
+
+function updateSettingsAutoBackupField(field, value, options = {}) {
   if (!field) {
     return;
   }
@@ -147,9 +185,10 @@ function updateSettingsAutoBackupField(field, value) {
     [field]: value,
   };
   syncVueSettingsAutoBackup(currentAutoBackupStatusState);
+  queueSettingsAutoSave(options);
 }
 
-function updateSettingsFormField(field, value) {
+function updateSettingsFormField(field, value, options = {}) {
   if (!field) {
     return;
   }
@@ -166,6 +205,7 @@ function updateSettingsFormField(field, value) {
   }
   syncVueSettingsForm(currentSettingsFormState);
   syncSendOptionsMenuState();
+  queueSettingsAutoSave(options);
 }
 
 function defaultAiActions() {
@@ -313,7 +353,7 @@ function normalizeAiActions(actions) {
   return normalized;
 }
 
-function updateAiActionField(index, field, value) {
+function updateAiActionField(index, field, value, options = {}) {
   const actions = normalizeAiActions(currentSettingsFormState.aiActions).map((action) => ({ ...action }));
   if (!actions[index]) return;
   actions[index][field] = value;
@@ -324,9 +364,10 @@ function updateAiActionField(index, field, value) {
       activeAiActionCategory: String(value || '通用').trim() || '通用',
     };
     syncVueSettingsForm(currentSettingsFormState);
+    queueSettingsAutoSave(options);
     return;
   }
-  updateSettingsFormField('aiActions', actions);
+  updateSettingsFormField('aiActions', actions, options);
 }
 
 function makeCustomAiAction() {
@@ -402,6 +443,7 @@ function addAiAction() {
     activeAiActionCategory: action.category,
   };
   syncVueSettingsForm(currentSettingsFormState);
+  queueSettingsAutoSave();
 }
 
 function removeAiAction(index) {
@@ -418,6 +460,7 @@ function removeAiAction(index) {
     aiDefaultActionId: nextDefault,
   };
   syncVueSettingsForm(currentSettingsFormState);
+  queueSettingsAutoSave();
 }
 
 function selectAiActionCategory(category) {
@@ -425,7 +468,7 @@ function selectAiActionCategory(category) {
 }
 
 async function updateAiActionFavorite(index, value, options = {}) {
-  updateAiActionField(index, 'favorite', !!value);
+  updateAiActionField(index, 'favorite', !!value, { skipAutoSave: !!options.save });
   if (options.save) {
     await saveSettings({ silent: true });
   }
@@ -3069,6 +3112,7 @@ function renderWebdavEndpoints() {
       endpoint.name = nameInput.value;
       title.textContent = getEndpointLabel(endpoint);
       renderEndpointSelect();
+      queueSettingsAutoSave();
     });
     urlInput.addEventListener('input', () => {
       endpoint.url = urlInput.value;
@@ -3079,12 +3123,15 @@ function renderWebdavEndpoints() {
         activeInput.checked = false;
       }
       renderEndpointSelect();
+      queueSettingsAutoSave();
     });
     userInput.addEventListener('input', () => {
       endpoint.username = userInput.value;
+      queueSettingsAutoSave();
     });
     passInput.addEventListener('input', () => {
       endpoint.password = passInput.value;
+      queueSettingsAutoSave();
     });
     enabledInput.addEventListener('change', () => {
       endpoint.enabled = enabledInput.checked;
@@ -3095,11 +3142,13 @@ function renderWebdavEndpoints() {
         activeInput.checked = false;
       }
       renderEndpointSelect();
+      queueSettingsAutoSave({ delayMs: 0 });
     });
     activeInput.addEventListener('change', () => {
       if (activeInput.checked) {
         activeEndpointId = endpoint.id;
         renderEndpointSelect();
+        queueSettingsAutoSave({ delayMs: 0 });
       }
     });
     removeButton.addEventListener('click', () => {
@@ -3109,6 +3158,7 @@ function renderWebdavEndpoints() {
       }
       renderWebdavEndpoints();
       renderEndpointSelect();
+      queueSettingsAutoSave({ delayMs: 0 });
     });
 
     speedTestButton.addEventListener('click', async () => {
@@ -6366,7 +6416,7 @@ function toggleSendOptionsMenu(event) {
 }
 
 async function updateQuickSendOption(field, checked) {
-  updateSettingsFormField(field, !!checked);
+  updateSettingsFormField(field, !!checked, { skipAutoSave: true });
   try {
     await saveSettings({ silent: true });
     showToast('发送设置已更新', 'success');
@@ -9500,6 +9550,7 @@ async function loadSettings() {
 async function saveSettings(options = {}) {
   const requireTelegramBridgeConfig = !!options.requireTelegramBridgeConfig;
   const silent = !!options.silent;
+  const isAutoSave = options.source === 'auto';
   const endpoints = collectEndpointPayload();
   for (const endpoint of endpoints) {
     if (endpoint.enabled && !endpoint.url) {
@@ -9726,7 +9777,7 @@ async function saveSettings(options = {}) {
     await loadIntegrationModules({ silent: true });
     await loadSettingsSnapshots({ silent: true });
     await loadTelegramBridgeStatus({ silent: true });
-    if (!silent) {
+    if (!silent || isAutoSave) {
       setHint(downloadDirHint, '下载目录已保存');
     }
     if (previousActive !== activeEndpointId && getActiveEndpoint()) {
@@ -9742,7 +9793,7 @@ async function saveSettings(options = {}) {
     if (!silent) {
       setErrorStatus(`保存设置失败：${error}`);
     }
-    if (silent) {
+    if (silent || isAutoSave) {
       throw error;
     }
   }
@@ -10418,7 +10469,7 @@ async function chooseDownloadDir() {
     }
     downloadDirInput.value = path;
     updateSettingsFormField('downloadDir', path);
-    setHint(downloadDirHint, '已选择下载目录，保存后生效');
+    setHint(downloadDirHint, '已选择下载目录，正在自动生效');
   } catch (error) {
     setErrorStatus(`选择下载目录失败：${error}`);
   }
@@ -10472,6 +10523,7 @@ function addWebdavEndpoint() {
     speedTestResult: null,
   });
   renderWebdavEndpoints();
+  queueSettingsAutoSave({ delayMs: 0 });
 }
 
 function updateVueWebdavEndpointField(endpointMeta, field, value) {
@@ -10488,6 +10540,7 @@ function updateVueWebdavEndpointField(endpointMeta, field, value) {
   }
   renderEndpointSelect();
   refreshWebdavEndpointViews();
+  queueSettingsAutoSave();
 }
 
 function toggleVueWebdavEndpointEnabled(endpointMeta, checked) {
@@ -10501,6 +10554,7 @@ function toggleVueWebdavEndpointEnabled(endpointMeta, checked) {
   }
   renderEndpointSelect();
   refreshWebdavEndpointViews();
+  queueSettingsAutoSave({ delayMs: 0 });
 }
 
 function activateVueWebdavEndpoint(endpointMeta, checked) {
@@ -10514,6 +10568,7 @@ function activateVueWebdavEndpoint(endpointMeta, checked) {
   activeEndpointId = endpoint.id;
   renderEndpointSelect();
   refreshWebdavEndpointViews();
+  queueSettingsAutoSave({ delayMs: 0 });
 }
 
 function removeVueWebdavEndpoint(endpointMeta) {
@@ -10526,6 +10581,7 @@ function removeVueWebdavEndpoint(endpointMeta) {
   }
   renderEndpointSelect();
   refreshWebdavEndpointViews();
+  queueSettingsAutoSave({ delayMs: 0 });
 }
 
 async function batchSpeedTest() {
@@ -11102,7 +11158,9 @@ if (composerMarkPanel) {
   composerMarkPanel.addEventListener('mouseenter', openComposerMarkPanel);
   composerMarkPanel.addEventListener('mouseleave', scheduleComposerMarkPanelHide);
 }
-saveSettingsButton.addEventListener('click', saveSettingsWithFeedback);
+if (saveSettingsButton) {
+  saveSettingsButton.addEventListener('click', saveSettingsWithFeedback);
+}
 if (checkUpdateButton) {
   checkUpdateButton.addEventListener('click', () => {
     checkForAppUpdate({ source: 'manual' });
@@ -11123,7 +11181,7 @@ if (globalHotkeyEnabledInput) {
 if (localHttpApiEnabledInput) {
   localHttpApiEnabledInput.addEventListener('change', () => {
     if (localHttpApiStatusText) {
-      localHttpApiStatusText.textContent = '状态：更改将在保存后生效';
+      localHttpApiStatusText.textContent = '状态：正在自动应用...';
     }
   });
 }

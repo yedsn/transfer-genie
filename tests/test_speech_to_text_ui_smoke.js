@@ -567,8 +567,16 @@ async function run() {
       });
       document.querySelector('#speech-to-text-toggle').click();
       await new Promise((r) => setTimeout(r, 80));
-      document.querySelector('#save-settings').click();
-      await new Promise((r) => setTimeout(r, 120));
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const saved = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.speech_to_text || {};
+          if (saved.cue_sound_enabled === false && saved.cue_sound_kind === 'soft') resolve();
+          else if (Date.now() - start > 2500) reject(new Error('cue sound settings were not auto-saved'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
       const saved = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.speech_to_text || {};
       return {
         cueDelta: window.__speechSmoke.cueSounds.length - beforeCues,
@@ -606,8 +614,16 @@ async function run() {
       });
       document.querySelector('#speech-to-text-system-audio-device').value = 'blackhole-1';
       document.querySelector('#speech-to-text-system-audio-device').dispatchEvent(new Event('change', { bubbles: true }));
-      document.querySelector('#save-settings').click();
-      await new Promise((r) => setTimeout(r, 100));
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const saved = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.speech_to_text || {};
+          if (saved.capture_system_audio === true && saved.system_audio_device_id === 'blackhole-1') resolve();
+          else if (Date.now() - start > 2500) reject(new Error('system audio settings were not auto-saved'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
       const beforeMic = window.__speechSmoke.mediaRequests.length;
       document.querySelector('#speech-to-text-toggle').click();
       await new Promise((resolve, reject) => {
