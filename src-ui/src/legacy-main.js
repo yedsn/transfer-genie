@@ -12464,6 +12464,15 @@ async function toggleMessageMarked(message) {
     return;
   }
 
+  const confirmed = await showConfirmationDialog({
+    title: '取消标记',
+    message: '取消标记后，这条消息会从标记列表中移除，已设置的标签、置顶和到期时间也会清空。确定继续吗？',
+    confirmLabel: '取消标记',
+  });
+  if (!confirmed) {
+    return;
+  }
+
   const previous = buildPatchedMarkedMessage(message);
   applyLocalMarkedPatch(message.filename, { marked: false, marked_tag_ids: [], marked_pinned: false, marked_due_date: null }, {
     sourceMessages: [message],
