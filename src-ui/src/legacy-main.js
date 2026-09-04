@@ -1914,14 +1914,16 @@ let speechSystemAudioSourceNode = null;
 let speechMixDestinationNode = null;
 let speechProcessorNode = null;
 let speechSilentGainNode = null;
-let speechCapturedSamples = [];
+let speechCapturedSegments = [];
 let speechPendingAsrSamples = [];
 let speechPendingAsrSampleCount = 0;
 let speechLiveTranscriptionChain = Promise.resolve();
 let speechLiveTranscriptionTexts = [];
 let speechLiveTranscriptionError = null;
 let speechLiveTranscriptionChunkCount = 0;
+let speechLiveTranscriptionStarted = false;
 let speechLiveTranscriptionGeneration = 0;
+let speechLiveTaskId = '';
 let speechCaptureSampleRate = 16000;
 let speechState = 'idle';
 let speechLastLevel = 0;
@@ -2212,13 +2214,9 @@ function downsampleSpeechSamples(samples, sourceRate, targetSampleRate) {
   return output;
 }
 
-function buildCapturedSpeechWav() {
+function buildCapturedSpeechWav(segments = speechCapturedSegments) {
   const targetSampleRate = 16000;
-  const samples = downsampleSpeechSamples(
-    mergeSpeechSamples(speechCapturedSamples),
-    speechCaptureSampleRate,
-    targetSampleRate,
-  );
+  const samples = mergeSpeechSamples(segments);
   return {
     bytes: encodeSpeechWav(samples, targetSampleRate),
     sampleRate: targetSampleRate,
@@ -2230,7 +2228,7 @@ function buildCapturedSpeechWav() {
   };
 }
 
-const SPEECH_ASR_CHUNK_DURATION_MS = 60 * 1000;
+const SPEECH_ASR_CHUNK_DURATION_MS = 20 * 1000;
 
 function getSpeechAsrChunkDurationMs() {
   const testValue = Number(window.__speechSmoke?.chunkDurationMs || 0);
@@ -2258,6 +2256,8 @@ function resetLiveSpeechTranscription() {
   speechLiveTranscriptionTexts = [];
   speechLiveTranscriptionError = null;
   speechLiveTranscriptionChunkCount = 0;
+  speechLiveTranscriptionStarted = false;
+  speechLiveTaskId = '';
 }
 
 function takeSpeechPendingSamples(sampleCount) {
@@ -2283,14 +2283,27 @@ function enqueueLiveSpeechTranscription(samples, sampleRate) {
   if (!samples?.length || speechLiveTranscriptionError) return;
   const audio = buildSpeechWavFromSamples(samples, sampleRate);
   speechLiveTranscriptionChunkCount += 1;
+  speechLiveTranscriptionStarted = true;
   const chunkNumber = speechLiveTranscriptionChunkCount;
   const generation = speechLiveTranscriptionGeneration;
   speechLiveTranscriptionChain = speechLiveTranscriptionChain.then(async () => {
     if (generation !== speechLiveTranscriptionGeneration) return;
     setStatus(`正在识别语音 ${chunkNumber}...`);
-    const result = await transcribeSpeechAudio(audio);
+    const result = await transcribeSpeechAudioAllowBlank(audio);
     if (generation !== speechLiveTranscriptionGeneration) return;
-    if (result?.text) speechLiveTranscriptionTexts.push(String(result.text));
+    if (result?.text) {
+      const text = String(result.text);
+      speechLiveTranscriptionTexts.push(text);
+      appendTextAfterSpeechChunk(text);
+      reportSpeechTiming(result.timing, `chunk ${chunkNumber}`);
+      if (speechLiveTaskId) {
+        void updateSpeechTask(speechLiveTaskId, {
+          text: speechLiveTranscriptionTexts.join('\n').trim(),
+          chunkCount: speechLiveTranscriptionChunkCount,
+        });
+      }
+      void copySpeechTranscriptToClipboard(speechLiveTranscriptionTexts.join('\n'));
+    }
   }).catch((error) => {
     if (generation === speechLiveTranscriptionGeneration) {
       speechLiveTranscriptionError = error;
@@ -2298,10 +2311,10 @@ function enqueueLiveSpeechTranscription(samples, sampleRate) {
   });
 }
 
-function appendLiveSpeechSamples(input) {
+function appendLiveSpeechSamples(input, sampleRate = speechCaptureSampleRate) {
   if (!input?.length || speechLiveTranscriptionError) return;
   const targetSampleRate = 16000;
-  const samples = downsampleSpeechSamples(input, speechCaptureSampleRate, targetSampleRate);
+  const samples = downsampleSpeechSamples(input, sampleRate, targetSampleRate);
   if (!samples.length) return;
   speechPendingAsrSamples.push(samples);
   speechPendingAsrSampleCount += samples.length;
@@ -2320,7 +2333,6 @@ async function finishLiveSpeechTranscription() {
   if (generation !== speechLiveTranscriptionGeneration) throw new Error('语音录制已取消');
   if (speechLiveTranscriptionError) throw speechLiveTranscriptionError;
   const text = speechLiveTranscriptionTexts.join('\n').trim();
-  if (!text) throw new Error('ASR 未返回可用文本');
   return { text, logId: null, chunkCount: speechLiveTranscriptionChunkCount || 1 };
 }
 
@@ -2537,21 +2549,128 @@ async function transcribeSpeechAudio(audio) {
   return invoke('transcribe_speech', { request: buildSpeechTaskRequest(audio) });
 }
 
+function formatSpeechTimingMs(value) {
+  const ms = Math.max(0, Math.round(Number(value) || 0));
+  if (ms >= 1000) return `${(ms / 1000).toFixed(ms >= 10000 ? 1 : 2)}s`;
+  return `${ms}ms`;
+}
+
+function formatSpeechTimingBytes(value) {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(2)}MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${Math.round(bytes)}B`;
+}
+
+function summarizeSpeechTiming(timing) {
+  if (!timing) return '';
+  return `语音耗时：总 ${formatSpeechTimingMs(timing.totalMs)}，连接 ${formatSpeechTimingMs(timing.connectMs)}，上传 ${formatSpeechTimingMs((timing.sendConfigMs || 0) + (timing.sendAudioMs || 0))}，等待 ${formatSpeechTimingMs(timing.waitResultMs)}，音频 ${formatSpeechTimingBytes(timing.audioBytes)}`;
+}
+
+function mergeSpeechTimings(timings) {
+  const values = (timings || []).filter(Boolean);
+  if (!values.length) return null;
+  return values.reduce((merged, timing) => ({
+    totalMs: merged.totalMs + (Number(timing.totalMs) || 0),
+    connectMs: merged.connectMs + (Number(timing.connectMs) || 0),
+    sendConfigMs: merged.sendConfigMs + (Number(timing.sendConfigMs) || 0),
+    sendAudioMs: merged.sendAudioMs + (Number(timing.sendAudioMs) || 0),
+    waitResultMs: merged.waitResultMs + (Number(timing.waitResultMs) || 0),
+    audioBytes: merged.audioBytes + (Number(timing.audioBytes) || 0),
+  }), { totalMs: 0, connectMs: 0, sendConfigMs: 0, sendAudioMs: 0, waitResultMs: 0, audioBytes: 0 });
+}
+
+function reportSpeechTiming(timing, context = '') {
+  const summary = summarizeSpeechTiming(timing);
+  if (!summary) return;
+  console.info(`[speech-to-text]${context ? ` ${context}` : ''} ${summary}`, timing);
+  setStatus(summary);
+}
+
+function summarizeSpeechLocalTiming(timing) {
+  if (!timing) return '';
+  return `本地耗时：总 ${formatSpeechTimingMs(timing.totalMs)}，停止 ${formatSpeechTimingMs(timing.stopMs)}，构建音频 ${formatSpeechTimingMs(timing.buildAudioMs)}，存任务 ${formatSpeechTimingMs(timing.saveTaskMs)}，调用ASR ${formatSpeechTimingMs(timing.transcribeMs)}，更新任务 ${formatSpeechTimingMs(timing.updateTaskMs)}，写入 ${formatSpeechTimingMs(timing.insertMs)}，复制 ${formatSpeechTimingMs(timing.copyMs)}`;
+}
+
+function reportSpeechLocalTiming(timing, asrTiming, context = '') {
+  const localSummary = summarizeSpeechLocalTiming(timing);
+  if (!localSummary) return;
+  const asrSummary = summarizeSpeechTiming(asrTiming);
+  console.info(`[speech-to-text]${context ? ` ${context}` : ''} ${localSummary}`, timing);
+  setStatus(asrSummary ? `${localSummary}；${asrSummary}` : localSummary);
+}
+
+function saveSpeechTaskInBackground(task, label = '保存任务') {
+  const startedAt = performance.now();
+  void putSpeechTask(task).then(() => {
+    console.info(`[speech-to-text] history ${label} ${formatSpeechTimingMs(performance.now() - startedAt)}`);
+  }).catch((error) => {
+    console.warn(`[speech-to-text] history ${label} 失败`, error);
+  });
+}
+
+function updateSpeechTaskInBackground(id, patch, label = '更新任务') {
+  const startedAt = performance.now();
+  void updateSpeechTask(id, patch).then(() => {
+    console.info(`[speech-to-text] history ${label} ${formatSpeechTimingMs(performance.now() - startedAt)}`);
+  }).catch((error) => {
+    console.warn(`[speech-to-text] history ${label} 失败`, error);
+  });
+}
+
+function copySpeechTranscriptInBackground(text) {
+  const startedAt = performance.now();
+  void copySpeechTranscriptToClipboard(text).then((copied) => {
+    if (copied) {
+      console.info(`[speech-to-text] clipboard 复制结果 ${formatSpeechTimingMs(performance.now() - startedAt)}`);
+    }
+  }).catch((error) => {
+    console.warn('[speech-to-text] clipboard 复制结果失败', error);
+  });
+}
+
+async function transcribeSpeechAudioAllowBlank(audio) {
+  try {
+    const result = await transcribeSpeechAudio(audio);
+    const text = String(result?.text || '').trim();
+    if (!text) return null;
+    return { ...result, text };
+  } catch (error) {
+    if (String(error || '').includes('ASR 未返回可用文本')) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+function appendTextAfterSpeechChunk(text) {
+  const value = String(text || '').trim();
+  if (!value) return;
+  insertTextIntoComposer(value);
+}
+
 async function transcribeSpeechAudioInChunks(audio) {
   const chunks = splitSpeechAudioForAsr(audio);
   const texts = [];
+  const timings = [];
   let logId = null;
   for (let index = 0; index < chunks.length; index += 1) {
     if (chunks.length > 1) {
       setStatus(`正在识别语音 ${index + 1}/${chunks.length}...`);
     }
-    const result = await transcribeSpeechAudio(chunks[index]);
+    const result = await transcribeSpeechAudioAllowBlank(chunks[index]);
     if (result?.text) texts.push(String(result.text));
     if (!logId && result?.logId) logId = result.logId;
+    if (result?.timing) timings.push(result.timing);
   }
-  const text = texts.join('\n').trim();
-  if (!text) throw new Error('ASR 未返回可用文本');
-  return { text, logId, chunkCount: chunks.length };
+  return { text: texts.join('\n').trim(), logId, chunkCount: chunks.length, timing: mergeSpeechTimings(timings) };
+}
+
+async function copySpeechTranscriptToClipboard(text) {
+  const value = String(text || '').trim();
+  if (!value) return false;
+  await copyTextToClipboard(value);
+  return true;
 }
 
 async function playSpeechTask(id) {
@@ -2598,6 +2717,7 @@ async function retrySpeechTask(id) {
   try {
     const result = await transcribeSpeechAudioInChunks(task.audio);
     await updateSpeechTask(id, { status: 'success', text: result?.text || '', error: '', chunkCount: result?.chunkCount || 1 });
+    await copySpeechTranscriptToClipboard(result?.text || '');
     showToast('重新转录完成', 'success');
   } catch (error) {
     await updateSpeechTask(id, { status: 'failed', error: String(error), text: task.text || '' });
@@ -2827,7 +2947,7 @@ async function startSpeechRecording() {
   setSpeechState('preparing');
   setStatus('正在打开麦克风...');
   try {
-    speechCapturedSamples = [];
+    speechCapturedSegments = [];
     resetLiveSpeechTranscription();
     const deviceId = String(currentSettingsFormState.speechToTextMicrophoneDeviceId || '').trim();
     let stream = null;
@@ -2870,8 +2990,11 @@ async function startSpeechRecording() {
     speechProcessorNode.onaudioprocess = (event) => {
       if (speechState !== 'recording') return;
       const input = readSpeechInputSamples(event.inputBuffer);
-      speechCapturedSamples.push(new Float32Array(input));
-      appendLiveSpeechSamples(input);
+      const downsampled = downsampleSpeechSamples(input, speechCaptureSampleRate, 16000);
+      if (downsampled.length) {
+        speechCapturedSegments.push(new Float32Array(downsampled));
+        appendLiveSpeechSamples(downsampled, 16000);
+      }
       let sum = 0;
       for (let index = 0; index < input.length; index += 1) {
         sum += input[index] * input[index];
@@ -2910,10 +3033,13 @@ function stopSpeechRecording(options = {}) {
 }
 
 async function finishSpeechRecording() {
-  const chunks = speechCapturedSamples.slice();
-  speechCapturedSamples = [];
+  const localStartedAt = performance.now();
+  const chunks = speechCapturedSegments.slice();
+  speechCapturedSegments = [];
   const sourceSampleRate = speechCaptureSampleRate;
+  const stopStartedAt = performance.now();
   stopSpeechStream();
+  const stopMs = performance.now() - stopStartedAt;
   if (!chunks.length) {
     resetLiveSpeechTranscription();
     setSpeechState('idle');
@@ -2923,31 +3049,76 @@ async function finishSpeechRecording() {
   setSpeechState('transcribing');
   setStatus('正在识别语音...');
   let taskId = '';
+  let pendingSpeechTask = null;
   try {
-    speechCapturedSamples = chunks;
     speechCaptureSampleRate = sourceSampleRate;
-    const audio = buildCapturedSpeechWav();
-    speechCapturedSamples = [];
+    const buildAudioStartedAt = performance.now();
+    const audio = buildCapturedSpeechWav(chunks);
+    const buildAudioMs = performance.now() - buildAudioStartedAt;
     taskId = `speech-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    await putSpeechTask({
+    speechLiveTaskId = taskId;
+    const taskBase = {
       id: taskId,
-      status: 'transcribing',
       text: '',
       error: '',
       durationMs: audio.durationMs,
       audio: { ...audio, bytes: Array.from(audio.bytes) },
       createdAtMs: Date.now(),
       updatedAtMs: Date.now(),
-    });
-    const result = await finishLiveSpeechTranscription();
-    await updateSpeechTask(taskId, { status: 'success', text: result?.text || '', error: '', chunkCount: result?.chunkCount || 1 });
-    insertTextIntoComposer(result?.text || '');
+    };
+    pendingSpeechTask = taskBase;
+    let saveTaskMs = 0;
+    const saveTaskStartedAt = performance.now();
+    if (speechLiveTranscriptionStarted) {
+      await putSpeechTask({ ...taskBase, status: 'transcribing' });
+      saveTaskMs = performance.now() - saveTaskStartedAt;
+    }
+    const transcribeStartedAt = performance.now();
+    const result = speechLiveTranscriptionStarted
+      ? await finishLiveSpeechTranscription()
+      : await transcribeSpeechAudioAllowBlank(audio);
+    const transcribeMs = performance.now() - transcribeStartedAt;
+    const insertStartedAt = performance.now();
+    if (!speechLiveTranscriptionStarted) {
+      insertTextIntoComposer(result?.text || '');
+    }
+    const insertMs = performance.now() - insertStartedAt;
+    const copyStartedAt = performance.now();
+    copySpeechTranscriptInBackground(result?.text || '');
+    const copyMs = performance.now() - copyStartedAt;
+    const updateTaskStartedAt = performance.now();
+    if (speechLiveTranscriptionStarted) {
+      updateSpeechTaskInBackground(taskId, { status: 'success', text: result?.text || '', error: '', chunkCount: result?.chunkCount || 1 }, '更新长录音任务');
+    } else {
+      saveSpeechTaskInBackground({
+        ...taskBase,
+        status: 'success',
+        text: result?.text || '',
+        error: '',
+        chunkCount: result?.chunkCount || 1,
+        updatedAtMs: Date.now(),
+      }, '保存短录音任务');
+    }
+    const updateTaskMs = performance.now() - updateTaskStartedAt;
+    const localTiming = {
+      totalMs: performance.now() - localStartedAt,
+      stopMs,
+      buildAudioMs,
+      saveTaskMs,
+      transcribeMs,
+      updateTaskMs,
+      insertMs,
+      copyMs,
+    };
     setSpeechState('idle');
     setSuccessStatus('语音识别完成');
+    reportSpeechLocalTiming(localTiming, result?.timing, speechLiveTranscriptionStarted ? 'session' : 'short');
     resetLiveSpeechTranscription();
   } catch (error) {
-    if (taskId) {
-      await updateSpeechTask(taskId, { status: 'failed', error: String(error) });
+    if (taskId && pendingSpeechTask) {
+      saveSpeechTaskInBackground({ ...pendingSpeechTask, status: 'failed', error: String(error), updatedAtMs: Date.now() }, '保存失败任务');
+    } else if (taskId) {
+      updateSpeechTaskInBackground(taskId, { status: 'failed', error: String(error) }, '更新失败任务');
     }
     resetLiveSpeechTranscription();
     setSpeechState('idle');

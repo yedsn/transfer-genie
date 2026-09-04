@@ -500,6 +500,18 @@ struct SpeechToTextResult {
     text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     log_id: Option<String>,
+    timing: SpeechToTextTiming,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SpeechToTextTiming {
+    total_ms: u128,
+    connect_ms: u128,
+    send_config_ms: u128,
+    send_audio_ms: u128,
+    wait_result_ms: u128,
+    audio_bytes: usize,
 }
 
 #[derive(Debug)]
@@ -6644,6 +6656,7 @@ async fn transcribe_speech_impl(
     settings: &Settings,
     request: SpeechToTextRequest,
 ) -> Result<SpeechToTextResult, String> {
+    let total_started_at = std::time::Instant::now();
     let speech = &settings.speech_to_text;
     if !speech.enabled {
         return Err("语音转文字未启用，请先在设置中开启".to_string());
@@ -6685,9 +6698,11 @@ async fn transcribe_speech_impl(
         "X-Control-Require-Usage-Tokens-Return",
         "*".parse().unwrap(),
     );
+    let connect_started_at = std::time::Instant::now();
     let (mut websocket, response) = connect_async(ws_request).await.map_err(|err| {
         sanitize_speech_error(format!("连接 ASR 服务失败: {err}"), &speech_config)
     })?;
+    let connect_ms = connect_started_at.elapsed().as_millis();
     let response_log_id = response
         .headers()
         .get("x-tt-logid")
@@ -6713,15 +6728,19 @@ async fn transcribe_speech_impl(
             "result_type": "full"
         }
     });
+    let send_config_started_at = std::time::Instant::now();
     websocket
         .send(WsMessage::Binary(build_asr_full_request(1, &full_request)?))
         .await
         .map_err(|err| {
             sanitize_speech_error(format!("发送 ASR 请求失败: {err}"), &speech_config)
         })?;
+    let send_config_ms = send_config_started_at.elapsed().as_millis();
 
     let chunk_size = 16 * 1024;
     let mut sequence = 2_i32;
+    let audio_bytes = request.audio_data.len();
+    let send_audio_started_at = std::time::Instant::now();
     for (index, chunk) in request.audio_data.chunks(chunk_size).enumerate() {
         let last = (index + 1) * chunk_size >= request.audio_data.len();
         websocket
@@ -6731,12 +6750,14 @@ async fn transcribe_speech_impl(
             .await
             .map_err(|err| {
                 sanitize_speech_error(format!("发送 ASR 音频失败: {err}"), &speech_config)
-            })?;
+        })?;
         sequence += 1;
     }
+    let send_audio_ms = send_audio_started_at.elapsed().as_millis();
 
     let mut final_text = String::new();
     let mut log_id = response_log_id;
+    let wait_result_started_at = std::time::Instant::now();
     while let Some(message) = websocket.next().await {
         let message = message.map_err(|err| {
             sanitize_speech_error(format!("读取 ASR 响应失败: {err}"), &speech_config)
@@ -6776,12 +6797,21 @@ async fn transcribe_speech_impl(
             _ => {}
         }
     }
+    let wait_result_ms = wait_result_started_at.elapsed().as_millis();
     if final_text.trim().is_empty() {
         return Err("ASR 未返回可用文本".to_string());
     }
     Ok(SpeechToTextResult {
         text: final_text,
         log_id,
+        timing: SpeechToTextTiming {
+            total_ms: total_started_at.elapsed().as_millis(),
+            connect_ms,
+            send_config_ms,
+            send_audio_ms,
+            wait_result_ms,
+            audio_bytes,
+        },
     })
 }
 
@@ -10318,6 +10348,20 @@ mod tests {
         };
 
         assert!(error.contains("API Key"));
+    }
+
+    #[test]
+    fn sanitize_speech_error_redacts_api_key() {
+        let mut settings = SpeechToTextSettings::default();
+        settings.api_key = "speech-secret-key".to_string();
+
+        let error = sanitize_speech_error(
+            "connection failed with speech-secret-key in transport log",
+            &settings,
+        );
+
+        assert!(!error.contains("speech-secret-key"));
+        assert!(error.contains("[redacted]"));
     }
 
     #[test]

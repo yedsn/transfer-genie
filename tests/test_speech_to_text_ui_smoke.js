@@ -171,6 +171,7 @@ function preloadScript() {
       chunkDurationMs: 0,
       nextSampleCount: 0,
       chunkTextPrefix: '',
+      blankChunkNumbers: [],
       transcribeChunkCallCount: 0,
     };
     window.__speechSmoke.longText = '语音识别文本'.repeat(20);
@@ -187,9 +188,12 @@ function preloadScript() {
             if (window.__speechSmoke.failTranscribe) throw 'ASR 凭据无效';
             if (window.__speechSmoke.chunkTextPrefix) {
               window.__speechSmoke.transcribeChunkCallCount += 1;
-              return { text: window.__speechSmoke.chunkTextPrefix + window.__speechSmoke.transcribeChunkCallCount, logId: 'smoke-log' };
+              if (window.__speechSmoke.blankChunkNumbers.includes(window.__speechSmoke.transcribeChunkCallCount)) {
+                throw 'ASR 未返回可用文本';
+              }
+              return { text: window.__speechSmoke.chunkTextPrefix + window.__speechSmoke.transcribeChunkCallCount, logId: 'smoke-log', timing: { totalMs: 1200, connectMs: 200, sendConfigMs: 30, sendAudioMs: 70, waitResultMs: 900, audioBytes: 32000 } };
             }
-            return { text: window.__speechSmoke.longText, logId: 'smoke-log' };
+            return { text: window.__speechSmoke.longText, logId: 'smoke-log', timing: { totalMs: 1500, connectMs: 250, sendConfigMs: 40, sendAudioMs: 80, waitResultMs: 1130, audioBytes: 64000 } };
           }
           if (command === 'list_messages_window') return { messages: [], has_more_before: false, has_more_after: false };
           if (command === 'get_sync_status') return { state: 'idle', syncing: false, pending: false };
@@ -382,9 +386,21 @@ async function run() {
       document.querySelector('#speech-to-text-toggle').click();
       await new Promise((r) => setTimeout(r, 20));
       const cueCountImmediatelyAfterStopClick = window.__speechSmoke.cueSounds.length;
-      await new Promise((r) => setTimeout(r, 60));
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const text = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
+          const status = document.querySelector('#sync-status')?.textContent || '';
+          if (text) resolve();
+          else if (/语音识别失败/.test(status)) reject(new Error(status));
+          else if (Date.now() - start > 2500) reject(new Error('recognized text was not inserted'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
       const calls = window.__speechSmoke.calls.filter((call) => call.command === 'transcribe_speech');
       const activeDraft = window.transferGenieComposerStore?.getActiveDraft?.();
+      const autoClipboardText = window.__speechSmoke.clipboardText;
       if (!window.__speechSmoke.downloadHookInstalled) {
         window.__speechSmoke.downloadHookInstalled = true;
         const originalAppendChild = document.body.appendChild.bind(document.body);
@@ -395,6 +411,15 @@ async function run() {
           return originalAppendChild(node);
         };
       }
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelectorAll('.speech-task-item').length > 0) resolve();
+          else if (Date.now() - start > 4000) reject(new Error('background speech task was not saved'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
       const taskItems = Array.from(document.querySelectorAll('.speech-task-item'));
       taskItems[0]?.querySelector('button:nth-child(3)')?.click();
       await new Promise((r) => setTimeout(r, 20));
@@ -411,6 +436,7 @@ async function run() {
         speechTaskText: taskItems[0]?.querySelector('.speech-task-text')?.textContent || '',
         speechTaskTitle: taskItems[0]?.querySelector('.speech-task-text')?.getAttribute('title') || '',
         speechTaskMeta: taskItems[0]?.querySelector('.speech-task-meta')?.textContent || '',
+        autoClipboardText,
         clipboardText: window.__speechSmoke.clipboardText,
         downloadName: window.__speechSmoke.downloads.at(-1)?.download || '',
         speechTaskCountAfterDelete: document.querySelectorAll('.speech-task-item').length,
@@ -431,13 +457,16 @@ async function run() {
     })()`);
     assert.equal(buttonResult.recording, true, `speech button enters recording state: ${JSON.stringify(buttonResult)}`);
     assert.equal(buttonResult.text, buttonResult.longText, 'recognized text is inserted into composer draft');
+    assert.equal(buttonResult.clipboardText, buttonResult.longText, 'recognized text is copied to clipboard after transcription');
     assert.equal(buttonResult.speechTaskCount, 1, 'successful transcription creates a retained task');
     assert.ok(buttonResult.speechTaskText.length < buttonResult.longText.length, 'transcription task list shows a shortened preview');
     assert.ok(buttonResult.speechTaskText.endsWith('...'), 'long transcription task preview is ellipsized');
     assert.equal(buttonResult.speechTaskTitle, buttonResult.longText, 'transcription task keeps full text in title');
     assert.match(buttonResult.speechTaskMeta, /\d+:\d{2}/, 'transcription task shows recording duration');
+    assert.equal(buttonResult.autoClipboardText, buttonResult.longText, 'recognized text is copied to clipboard after transcription');
     assert.equal(buttonResult.clipboardText, buttonResult.longText, 'transcription task copy uses the full result');
     assert.match(buttonResult.downloadName, /^speech-.*\.wav$/, 'transcription task audio can be downloaded as wav');
+    assert.match(buttonResult.status, /本地耗时.*语音耗时/, 'local and ASR timing diagnostics are visible after transcription');
     assert.equal(buttonResult.speechTaskCountAfterDelete, 0, 'transcription task can be deleted');
     assert.equal(buttonResult.cueEnabledChecked, true, 'speech cue sounds default to enabled');
     assert.equal(buttonResult.cueKindValue, 'system', 'speech cue sound defaults to system');
@@ -484,12 +513,14 @@ async function run() {
       });
       await new Promise((r) => setTimeout(r, 80));
       const callsWhileRecording = window.__speechSmoke.calls.filter((call) => call.command === 'transcribe_speech').length - beforeCalls;
+      const textWhileRecording = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
       document.querySelector('#speech-to-text-toggle').click();
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
           const text = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
-          if (text.includes('分片1') && text.includes('分片2') && text.includes('分片3')) resolve();
+          const hasTask = document.querySelectorAll('.speech-task-item').length > 0;
+          if (text.includes('分片1') && text.includes('分片2') && text.includes('分片3') && hasTask) resolve();
           else if (Date.now() - start > 2500) reject(new Error('long recording chunks were not transcribed'));
           else setTimeout(tick, 20);
         };
@@ -513,6 +544,7 @@ async function run() {
       window.__speechSmoke.chunkTextPrefix = '';
       return {
         callsWhileRecording,
+        textWhileRecording,
         chunkCalls: calls.length,
         chunkTexts: calls.map((call) => call.args?.request?.audioData?.length || 0),
         text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
@@ -524,6 +556,7 @@ async function run() {
       };
     })()`);
     assert.ok(longRecordingResult.callsWhileRecording > 0, 'long recording transcribes completed chunks while recording continues');
+    assert.ok(longRecordingResult.textWhileRecording.includes('分片1'), 'first chunk is written during recording');
     assert.ok(longRecordingResult.chunkCalls >= 3, `long recording is submitted as multiple ASR chunks: ${JSON.stringify(longRecordingResult)}`);
     assert.equal(longRecordingResult.text, '分片1\n分片2\n分片3', 'long recording chunk text is merged in chronological order');
     assert.equal(longRecordingResult.taskCount, 1, 'long recording still creates one visible speech task');
@@ -531,6 +564,59 @@ async function run() {
     assert.equal(longRecordingResult.fullTaskText, '分片1\n分片2\n分片3', 'retained long recording task stores combined transcript');
     assert.ok(longRecordingResult.taskAudioBytes > Math.max(...longRecordingResult.chunkTexts), 'retained long recording task keeps the complete audio, not a chunk');
     assert.equal(longRecordingResult.chunkCount, longRecordingResult.chunkCalls, 'retained task records the internal chunk count without creating chunk tasks');
+
+    const blankChunkResult = await evaluate(client, `(async () => {
+      window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
+      window.__speechSmoke.chunkDurationMs = 100;
+      window.__speechSmoke.chunkTextPrefix = '有效';
+      window.__speechSmoke.blankChunkNumbers = [2];
+      window.__speechSmoke.transcribeChunkCallCount = 0;
+      window.__speechSmoke.nextSampleCount = 4800;
+      const beforeCalls = window.__speechSmoke.calls.filter((call) => call.command === 'transcribe_speech').length;
+      const beforeTaskCount = document.querySelectorAll('.speech-task-item').length;
+      document.querySelector('#speech-to-text-toggle').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#speech-to-text-toggle').classList.contains('is-recording')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('blank chunk recording did not enter recording state'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      await new Promise((r) => setTimeout(r, 80));
+      document.querySelector('#speech-to-text-toggle').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const status = document.querySelector('#sync-status')?.textContent || '';
+          const text = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
+          if (/(语音识别完成|本地耗时)/.test(status) && text.includes('有效1') && text.includes('有效3')) resolve();
+          else if (/语音识别失败/.test(status)) reject(new Error(status));
+          else if (Date.now() - start > 2500) reject(new Error('blank chunk recording did not complete'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const calls = window.__speechSmoke.calls.filter((call) => call.command === 'transcribe_speech').slice(beforeCalls);
+      const taskItems = Array.from(document.querySelectorAll('.speech-task-item'));
+      const result = {
+        chunkCalls: calls.length,
+        status: document.querySelector('#sync-status')?.textContent || '',
+        text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
+        beforeTaskCount,
+        taskCount: taskItems.length,
+        taskTitle: taskItems[0]?.querySelector('.speech-task-text')?.getAttribute('title') || '',
+      };
+      window.__speechSmoke.chunkDurationMs = 0;
+      window.__speechSmoke.chunkTextPrefix = '';
+      window.__speechSmoke.blankChunkNumbers = [];
+      return result;
+    })()`);
+    assert.equal(blankChunkResult.chunkCalls, 3, 'blank middle chunk is still counted as one internal ASR chunk');
+    assert.equal(blankChunkResult.text, '有效1\n有效3', 'blank middle chunk is skipped while surrounding chunk text is preserved');
+    assert.equal(blankChunkResult.taskCount, blankChunkResult.beforeTaskCount + 1, 'blank middle chunk still adds only one visible speech task');
+    assert.equal(blankChunkResult.taskTitle, '有效1\n有效3', 'speech task stores the combined nonblank transcript');
 
     const rapidToggleResult = await evaluate(client, `(async () => {
       await new Promise((resolve, reject) => {
@@ -815,7 +901,18 @@ async function run() {
       const recording = document.querySelector('#speech-to-text-toggle').classList.contains('is-recording');
       await new Promise((r) => setTimeout(r, 80));
       await window.__speechSmoke.eventHandlers['speech-to-text-toggle']({ payload: null });
-      await new Promise((r) => setTimeout(r, 60));
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const text = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
+          const status = document.querySelector('#sync-status')?.textContent || '';
+          if (text) resolve();
+          else if (/语音识别失败/.test(status)) reject(new Error(status));
+          else if (Date.now() - start > 2500) reject(new Error('shortcut recognition did not insert text'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
       return { recording, text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '', longText: window.__speechSmoke.longText };
     })()`);
     assert.equal(shortcutResult.recording, true, 'speech shortcut event enters recording state');
@@ -886,11 +983,12 @@ async function run() {
       return {
         status: document.querySelector('#sync-status').textContent,
         failedText,
+        failedTaskFound: !!failedItem,
         retryText: document.querySelector('.speech-task-item .speech-task-text')?.textContent || '',
         longText: window.__speechSmoke.longText,
       };
     })()`);
-    assert.match(invalidCredentialResult.status, /语音识别失败/, 'ASR credential failure is surfaced to the user');
+    assert.equal(invalidCredentialResult.failedTaskFound, true, 'ASR credential failure creates a failed speech task');
     assert.match(invalidCredentialResult.failedText, /ASR 凭据无效/, 'failed transcription task shows ASR error');
     assert.ok(invalidCredentialResult.retryText.length < invalidCredentialResult.longText.length, 'failed transcription task can be retried and shows a preview');
 
