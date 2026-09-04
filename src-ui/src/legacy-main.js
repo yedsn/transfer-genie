@@ -6649,13 +6649,37 @@ function buildTextMessageFilename(message) {
   return `${safeSender}-${timestamp}.${extension}`;
 }
 
+function stripMarkdownForFilename(value) {
+  const source = String(value || '');
+  const underscoreToken = 'TRANSFER_GENIE_FILENAME_UNDERSCORE';
+  const protectedSource = source.replaceAll('_', underscoreToken);
+  const markedRuntime = window.marked || window.marked?.marked;
+  if (markedRuntime?.parseInline) {
+    const holder = document.createElement('div');
+    holder.innerHTML = markedRuntime.parseInline(protectedSource);
+    return (holder.textContent || holder.innerText || '').replaceAll(underscoreToken, '_');
+  }
+  return protectedSource
+    .replace(/^\s{0,3}#{1,6}\s+/g, '')
+    .replace(/^\s{0,3}>\s?/g, '')
+    .replace(/^\s*[-*+]\s+/g, '')
+    .replace(/^\s*\d+[.)]\s+/g, '')
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/[`*~]/g, '')
+    .replaceAll(underscoreToken, '_');
+}
+
 function buildTextDownloadFilename(message) {
   const extension = message?.format === 'markdown' ? 'md' : 'txt';
   const firstLine = String(message?.content || '')
     .split(/\r?\n/)
     .find((line) => line.trim())
     ?.trim();
-  const title = String(firstLine || 'message')
+  const titleSource = message?.format === 'markdown'
+    ? stripMarkdownForFilename(firstLine)
+    : firstLine;
+  const title = String(titleSource || 'message')
     .replace(/[\/:*?"<>|]+/g, '_')
     .replace(/\s+/g, '')
     .slice(0, 80);
