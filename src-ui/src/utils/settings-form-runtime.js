@@ -55,6 +55,12 @@
     };
   }
 
+  function normalizeSaveFilenameRule(value, defaultRule) {
+    var fallback = String(defaultRule || '{filename}.{file_suffix}');
+    var normalized = String(value || '').trim();
+    return normalized || fallback;
+  }
+
   function getManualBackupDialogState(currentState, patch) {
     var current = currentState || {};
     var next = patch || {};
@@ -83,6 +89,7 @@
     getLocalHttpApiConfiguredUrl: getLocalHttpApiConfiguredUrl,
     getCurrentSenderName: getCurrentSenderName,
     getSendSettingsPayload: getSendSettingsPayload,
+    normalizeSaveFilenameRule: normalizeSaveFilenameRule,
     getManualBackupDialogState: getManualBackupDialogState,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

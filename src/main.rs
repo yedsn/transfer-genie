@@ -276,6 +276,8 @@ struct ExportSettings {
     active_webdav_id: Option<String>,
     #[serde(default)]
     refresh_interval_secs: u64,
+    #[serde(default = "crate::types::default_save_filename_rule")]
+    save_filename_rule: String,
     #[serde(default = "default_export_global_hotkey_enabled")]
     global_hotkey_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1679,6 +1681,7 @@ fn export_settings(
         webdav_endpoints: settings.webdav_endpoints.clone(),
         active_webdav_id: settings.active_webdav_id.clone(),
         refresh_interval_secs: settings.refresh_interval_secs,
+        save_filename_rule: settings.save_filename_rule.clone(),
         global_hotkey_enabled: settings.global_hotkey_enabled,
         global_hotkey: Some(settings.global_hotkey.clone()),
         send_hotkey: Some(settings.send_hotkey.clone()),
@@ -1744,6 +1747,7 @@ async fn import_settings(
         active_webdav_id: bundle.settings.active_webdav_id,
         sender_name: existing.sender_name,
         refresh_interval_secs: bundle.settings.refresh_interval_secs,
+        save_filename_rule: bundle.settings.save_filename_rule,
         global_hotkey_enabled: bundle.settings.global_hotkey_enabled,
         global_hotkey: bundle
             .settings
@@ -3226,8 +3230,17 @@ async fn download_message_file(
     fs::create_dir_all(&base_dir)
         .map_err(|err| format!("Failed to create download directory: {err}"))?;
 
-    let file_name = sanitize_filename(&original_name);
-    let target_path = base_dir.join(file_name);
+    let message = db::get_message(&state.db_path, &endpoint.id, &filename)
+        .map_err(|err| format!("Failed to read message: {err}"))?;
+    let target_path = build_download_target_path(
+        &state,
+        &settings,
+        &original_name,
+        message
+            .as_ref()
+            .map(|item| item.timestamp_ms)
+            .unwrap_or_else(now_ms),
+    );
     let action = parse_conflict_action(conflict_action);
     let final_path = match resolve_download_target(&target_path, action)? {
         DownloadDecision::Conflict { suggested } => {
@@ -3241,8 +3254,6 @@ async fn download_message_file(
         DownloadDecision::Ready(path) => path,
     };
 
-    let message = db::get_message(&state.db_path, &endpoint.id, &filename)
-        .map_err(|err| format!("Failed to read message: {err}"))?;
     let remote_path = resolved_remote_path(
         message
             .as_ref()
@@ -3924,7 +3935,12 @@ async fn redownload_download_history(
         let base_dir = resolve_download_dir(&state, &settings);
         fs::create_dir_all(&base_dir)
             .map_err(|err| format!("Failed to create download directory: {err}"))?;
-        base_dir.join(sanitize_filename(&record.original_name))
+        build_download_target_path(
+            &state,
+            &settings,
+            &record.original_name,
+            record.created_at_ms,
+        )
     };
 
     if final_path.is_dir() {
@@ -4081,8 +4097,16 @@ async fn open_message_file(
     let settings = current_settings(&state)?;
     let endpoint = resolve_active_endpoint(&settings)?;
     let base_dir = resolve_download_dir(&state, &settings);
-    let sanitized_name = sanitize_filename(&original_name);
-    let download_path = base_dir.join(&sanitized_name);
+    let message = db::get_message(&state.db_path, &endpoint.id, &filename)
+        .map_err(|err| format!("读取消息失败: {err}"))?;
+    let download_path = base_dir.join(build_save_filename(
+        &settings.save_filename_rule,
+        &original_name,
+        message
+            .as_ref()
+            .map(|entry| entry.timestamp_ms)
+            .unwrap_or_else(now_ms),
+    ));
     if download_path.is_file() {
         app.opener()
             .open_path(download_path.to_string_lossy().to_string(), None::<&str>)
@@ -4090,8 +4114,6 @@ async fn open_message_file(
         return Ok(());
     }
 
-    let message = db::get_message(&state.db_path, &endpoint.id, &filename)
-        .map_err(|err| format!("读取消息失败: {err}"))?;
     let local_path = message
         .and_then(|entry| entry.local_path)
         .filter(|path| !path.trim().is_empty())
@@ -4100,7 +4122,7 @@ async fn open_message_file(
     if let Some(local_path) = local_path {
         if local_path.is_file() {
             let local_has_ext = local_path.extension().is_some();
-            let wanted_has_ext = Path::new(&sanitized_name).extension().is_some();
+            let wanted_has_ext = download_path.extension().is_some();
             if local_has_ext || !wanted_has_ext {
                 app.opener()
                     .open_path(local_path.to_string_lossy().to_string(), None::<&str>)
@@ -4111,7 +4133,11 @@ async fn open_message_file(
             let open_dir = endpoint_files_dir(&state, &endpoint.id).join("open");
             fs::create_dir_all(&open_dir).map_err(|err| format!("创建打开目录失败: {err}"))?;
             let safe_prefix = filename.replace('%', "_");
-            let safe_name = sanitized_name.replace('%', "_");
+            let safe_name = download_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("download.bin")
+                .replace('%', "_");
             let open_path = open_dir.join(format!("{}__{}", safe_prefix, safe_name));
             if !open_path.is_file() {
                 fs::copy(&local_path, &open_path)
@@ -4331,6 +4357,7 @@ async fn delete_messages(
                 &settings,
                 &message.kind,
                 &message.original_name,
+                message.timestamp_ms,
                 message.local_path.as_deref(),
             )?;
         }
@@ -4355,6 +4382,7 @@ async fn delete_messages(
                 &settings,
                 &message.kind,
                 &message.original_name,
+                message.timestamp_ms,
                 message.local_path.as_deref(),
             )?;
             clear_message_local_path(&state.db_path, &endpoint.id, &message.filename)?;
@@ -4398,6 +4426,7 @@ async fn cleanup_messages(
                     &settings,
                     &message.kind,
                     &message.original_name,
+                    message.timestamp_ms,
                     message.local_path.as_deref(),
                 )?;
             }
@@ -4455,6 +4484,7 @@ async fn cleanup_messages(
                     &settings,
                     &message.kind,
                     &message.original_name,
+                    message.timestamp_ms,
                     message.local_path.as_deref(),
                 )?;
             }
@@ -5889,6 +5919,7 @@ fn normalize_settings(
         _ => DEFAULT_SEND_HOTKEY.to_string(),
     };
     settings.download_dir = normalize_download_dir(&settings.download_dir, default_download_dir);
+    settings.save_filename_rule = normalize_save_filename_rule(&settings.save_filename_rule);
 
     let mut seen_ids = HashSet::new();
     for endpoint in settings.webdav_endpoints.iter_mut() {
@@ -6928,7 +6959,9 @@ fn normalize_speech_to_text_settings(settings: &mut SpeechToTextSettings) -> Res
         settings.shortcut =
             normalized_shortcut.unwrap_or_else(crate::types::default_speech_to_text_shortcut);
     }
-    settings.max_duration_secs = settings.max_duration_secs.clamp(5, 300);
+    if settings.max_duration_secs == 0 {
+        settings.max_duration_secs = crate::types::default_speech_to_text_max_duration_secs();
+    }
     settings.task_retention_count = settings.task_retention_count.clamp(1, 100);
     settings.cue_sound_kind = match settings.cue_sound_kind.trim() {
         "" => crate::types::default_speech_to_text_cue_sound_kind(),
@@ -7047,6 +7080,15 @@ fn normalize_download_dir(raw: &str, fallback: &Path) -> String {
     }
 }
 
+fn normalize_save_filename_rule(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        crate::types::default_save_filename_rule()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 fn endpoint_files_dir(state: &AppState, endpoint_id: &str) -> PathBuf {
     state.files_base_dir.join(endpoint_id)
 }
@@ -7128,6 +7170,7 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
                 sender_name,
                 refresh_interval_secs: legacy.refresh_interval_secs,
                 download_dir: legacy.download_dir,
+                save_filename_rule: crate::types::default_save_filename_rule(),
                 global_hotkey_enabled: true,
                 global_hotkey: DEFAULT_GLOBAL_HOTKEY.to_string(),
                 send_hotkey: DEFAULT_SEND_HOTKEY.to_string(),
@@ -7151,6 +7194,7 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
             sender_name: random_sender_name(),
             refresh_interval_secs: 5,
             download_dir: normalize_download_dir("", fallback_download_dir),
+            save_filename_rule: crate::types::default_save_filename_rule(),
             global_hotkey_enabled: true,
             global_hotkey: DEFAULT_GLOBAL_HOTKEY.to_string(),
             send_hotkey: DEFAULT_SEND_HOTKEY.to_string(),
@@ -8197,6 +8241,64 @@ fn resolve_download_dir(state: &AppState, settings: &Settings) -> PathBuf {
     }
 }
 
+fn split_filename_parts(original_name: &str) -> (String, String) {
+    let sanitized = sanitize_filename(original_name);
+    let path = Path::new(&sanitized);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("download")
+        .to_string();
+    let suffix = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_string();
+    (stem, suffix)
+}
+
+fn format_yyyymmdd(timestamp_ms: i64) -> String {
+    let datetime = OffsetDateTime::from_unix_timestamp_nanos((timestamp_ms as i128) * 1_000_000)
+        .unwrap_or_else(|_| OffsetDateTime::now_utc());
+    format!(
+        "{:04}{:02}{:02}",
+        datetime.year(),
+        u8::from(datetime.month()),
+        datetime.day()
+    )
+}
+
+fn build_save_filename(rule: &str, original_name: &str, timestamp_ms: i64) -> String {
+    let normalized_rule = normalize_save_filename_rule(rule);
+    let (name, suffix) = split_filename_parts(original_name);
+    let rule_with_suffix = if suffix.is_empty() {
+        normalized_rule.replace(".{file_suffix}", "")
+    } else {
+        normalized_rule
+    };
+    let rendered = rule_with_suffix
+        .replace("{yyyymmdd}", &format_yyyymmdd(timestamp_ms))
+        .replace("{filename}", &name)
+        .replace("{file_suffix}", &suffix);
+
+    sanitize_filename(&rendered)
+}
+
+fn build_download_target_path(
+    state: &AppState,
+    settings: &Settings,
+    original_name: &str,
+    timestamp_ms: i64,
+) -> PathBuf {
+    let base_dir = resolve_download_dir(state, settings);
+    base_dir.join(build_save_filename(
+        &settings.save_filename_rule,
+        original_name,
+        timestamp_ms,
+    ))
+}
+
 fn sanitize_filename(name: &str) -> String {
     Path::new(name)
         .file_name()
@@ -8250,6 +8352,7 @@ fn delete_local_files_for_entry(
     settings: &Settings,
     kind: &str,
     original_name: &str,
+    timestamp_ms: i64,
     local_path: Option<&str>,
 ) -> Result<(), String> {
     if kind != MessageKind::File.as_str() {
@@ -8262,7 +8365,11 @@ fn delete_local_files_for_entry(
             candidates.push(PathBuf::from(path));
         }
     }
-    let default_path = base_dir.join(sanitize_filename(original_name));
+    let default_path = base_dir.join(build_save_filename(
+        &settings.save_filename_rule,
+        original_name,
+        timestamp_ms,
+    ));
     candidates.push(default_path);
 
     let mut seen: HashSet<PathBuf> = HashSet::new();
@@ -9765,6 +9872,7 @@ mod tests {
             sender_name: "tester".to_string(),
             refresh_interval_secs: 5,
             download_dir: String::new(),
+            save_filename_rule: crate::types::default_save_filename_rule(),
             send_hotkey: DEFAULT_SEND_HOTKEY.to_string(),
             global_hotkey_enabled: false,
             global_hotkey: DEFAULT_GLOBAL_HOTKEY.to_string(),
@@ -10116,6 +10224,46 @@ mod tests {
     }
 
     #[test]
+    fn normalize_settings_applies_save_filename_rule_default() {
+        let mut settings = test_settings();
+        settings.save_filename_rule = "   ".to_string();
+        let download_dir = std::env::temp_dir().join("transfer-genie-settings-test");
+
+        let normalized = normalize_settings(settings, &download_dir).unwrap();
+
+        assert_eq!(
+            normalized.save_filename_rule,
+            crate::types::default_save_filename_rule()
+        );
+    }
+
+    #[test]
+    fn build_save_filename_expands_supported_placeholders() {
+        let timestamp_ms = 1_704_067_200_000i64;
+
+        let name = build_save_filename(
+            "{yyyymmdd}_{filename}.{file_suffix}",
+            "report.final.pdf",
+            timestamp_ms,
+        );
+
+        assert_eq!(name, "20240101_report.final.pdf");
+    }
+
+    #[test]
+    fn build_save_filename_keeps_dots_when_suffix_is_empty() {
+        let timestamp_ms = 1_704_067_200_000i64;
+
+        let name = build_save_filename(
+            "{yyyymmdd}_{filename}.{file_suffix}",
+            "report.final",
+            timestamp_ms,
+        );
+
+        assert_eq!(name, "20240101_report.final");
+    }
+
+    #[test]
     fn normalize_settings_applies_speech_to_text_defaults() {
         let mut settings = test_settings();
         settings.speech_to_text.resource_id.clear();
@@ -10137,7 +10285,7 @@ mod tests {
             "wss://openspeech.bytedance.com/api/v3/plan/sauc/bigmodel_nostream"
         );
         assert_eq!(normalized.speech_to_text.shortcut, "right-alt");
-        assert_eq!(normalized.speech_to_text.max_duration_secs, 5);
+        assert_eq!(normalized.speech_to_text.max_duration_secs, 60);
         assert_eq!(normalized.speech_to_text.task_retention_count, 1);
         assert!(normalized.speech_to_text.cue_sound_enabled);
         assert_eq!(normalized.speech_to_text.cue_sound_kind, "system");

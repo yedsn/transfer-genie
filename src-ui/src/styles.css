@@ -1928,6 +1928,64 @@ body {
   color: var(--accent-strong);
 }
 
+.composer-mark-due-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fffdfb;
+}
+
+.composer-mark-due-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.composer-mark-due-date {
+  min-width: 0;
+  height: 30px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+  padding: 0 6px;
+}
+
+.composer-mark-due-date:hover,
+.composer-mark-due-date:focus {
+  border-color: #f2d1bb;
+  background: #fff;
+  outline: none;
+}
+
+.composer-mark-due-date.has-value {
+  color: var(--ink);
+}
+
+.composer-mark-due-clear {
+  height: 28px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 0 8px;
+  cursor: pointer;
+}
+
+.composer-mark-due-clear:hover,
+.composer-mark-due-clear:focus {
+  background: var(--panel-soft);
+  color: var(--ink);
+  outline: none;
+}
+
 .composer-mark-create-row {
   margin: 0;
 }

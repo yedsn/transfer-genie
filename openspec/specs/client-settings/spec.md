@@ -56,6 +56,19 @@ TBD - created by archiving change add-webdav-transfer-client. Update Purpose aft
 - **WHEN** 用户修改下载目录设置并保存
 - **THEN** 后续下载使用新的目录
 
+### Requirement: Save filename rule configuration
+客户端 SHALL 在设置中提供保存文件名规则配置，默认规则为 `{filename}.{file_suffix}`。
+规则 SHALL 支持 `{yyyymmdd}`、`{filename}`、`{file_suffix}` 通配符，其中 `{yyyymmdd}` 使用消息时间生成日期，`{filename}` 使用原文件名去扩展名部分，`{file_suffix}` 使用原文件扩展名。
+客户端下载消息文件时 SHALL 使用该规则生成默认保存文件名。
+
+#### Scenario: Configure date-prefixed filename rule
+- **WHEN** 用户将保存文件名规则设置为 `{yyyymmdd}_{filename}.{file_suffix}` 并保存
+- **THEN** 后续下载文件使用消息日期加原文件名生成默认保存文件名
+
+#### Scenario: Empty filename rule uses default
+- **WHEN** 用户清空保存文件名规则并保存
+- **THEN** 客户端使用默认规则 `{filename}.{file_suffix}`
+
 ### Requirement: Download conflict handling
 客户端下载时若目标目录存在同名文件，客户端 SHALL 提示用户选择覆盖或改名。
 选择改名时客户端 SHALL 自动追加序号并保存。

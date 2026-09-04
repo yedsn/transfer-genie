@@ -91,6 +91,17 @@ function testSendSettingsPayload() {
   });
 }
 
+function testNormalizeSaveFilenameRule() {
+  assert.equal(
+    runtime.normalizeSaveFilenameRule(' {yyyymmdd}_{filename}.{file_suffix} ', '{filename}.{file_suffix}'),
+    '{yyyymmdd}_{filename}.{file_suffix}'
+  );
+  assert.equal(
+    runtime.normalizeSaveFilenameRule('   ', '{filename}.{file_suffix}'),
+    '{filename}.{file_suffix}'
+  );
+}
+
 function testManualBackupDialogState() {
   const opened = runtime.getManualBackupDialogState({}, {
     open: true,
@@ -123,6 +134,7 @@ testNormalizeLocalHttpApiBindPort();
 testGetLocalHttpApiConfiguredUrl();
 testGetCurrentSenderName();
 testSendSettingsPayload();
+testNormalizeSaveFilenameRule();
 testManualBackupDialogState();
 
 console.log('settings-form-runtime tests passed');

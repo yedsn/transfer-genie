@@ -631,6 +631,8 @@ const composerMarkToggle = document.getElementById('composer-mark-toggle');
 const composerMarkPanel = document.getElementById('composer-mark-panel');
 const composerMarkSummary = document.getElementById('composer-mark-summary');
 const composerMarkTagList = document.getElementById('composer-mark-tag-list');
+const composerMarkDueDateInput = document.getElementById('composer-mark-due-date');
+const composerMarkDueClearButton = document.getElementById('composer-mark-due-clear');
 const composerMarkNewTagInput = document.getElementById('composer-mark-new-tag-input');
 const composerMarkAddTagButton = document.getElementById('composer-mark-add-tag');
 const feed = document.querySelector('.feed');
@@ -668,6 +670,7 @@ const senderNameInput = document.getElementById('sender-name');
 const telegramSenderNameInput = document.getElementById('telegram-sender-name');
 const refreshIntervalInput = document.getElementById('refresh-interval');
 const downloadDirInput = document.getElementById('download-dir');
+const saveFilenameRuleInput = document.getElementById('save-filename-rule');
 const chooseDownloadDirButton = document.getElementById('choose-download-dir');
 const downloadDirHint = document.getElementById('download-dir-hint');
 const autoStartInput = document.getElementById('auto-start');
@@ -703,7 +706,6 @@ const speechToTextCaptureSystemAudioInput = document.getElementById('speech-to-t
 const speechToTextSystemAudioDeviceInput = document.getElementById('speech-to-text-system-audio-device');
 const speechToTextShortcutEnabledInput = document.getElementById('speech-to-text-shortcut-enabled');
 const speechToTextShortcutInput = document.getElementById('speech-to-text-shortcut');
-const speechToTextMaxDurationInput = document.getElementById('speech-to-text-max-duration');
 const speechToTextTaskRetentionInput = document.getElementById('speech-to-text-task-retention');
 const speechToTextCueSoundEnabledInput = document.getElementById('speech-to-text-cue-sound-enabled');
 const speechToTextCueSoundKindInput = document.getElementById('speech-to-text-cue-sound-kind');
@@ -979,7 +981,6 @@ let currentSettingsFormState = {
   speechToTextSystemAudioDeviceId: '',
   speechToTextShortcutEnabled: false,
   speechToTextShortcut: 'right-alt',
-  speechToTextMaxDurationSecs: 60,
   speechToTextTaskRetentionCount: 14,
   speechToTextCueSoundEnabled: true,
   speechToTextCueSoundKind: DEFAULT_SPEECH_CUE_SOUND_KIND,
@@ -1098,6 +1099,7 @@ const MANUAL_REFRESH_TIMEOUT_MS = 45_000;
 const DEFAULT_TELEGRAM_POLL_INTERVAL_SECS = 5;
 const DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS = '127.0.0.1';
 const DEFAULT_LOCAL_HTTP_API_BIND_PORT = 6011;
+const DEFAULT_SAVE_FILENAME_RULE = '{filename}.{file_suffix}';
 const TELEGRAM_BRIDGE_STATUS_POLL_MS = 5000;
 const MAX_RECENT_DOWNLOAD_TASKS = 8;
 const MAX_RECENT_UPLOAD_TASKS = 8;
@@ -1666,8 +1668,28 @@ function pruneComposerSelectedTagIds() {
   });
 }
 
+function getComposerMarkDueDate() {
+  return normalizeMarkedDueDate(composerMarkDueDateInput?.value);
+}
+
+function hasActiveComposerMarkDetails() {
+  const selectedCount = getComposerDraftTags().filter(
+    (tag) => !tag.pendingDelete && composerSelectedTagIds.has(tag.id),
+  ).length;
+  return selectedCount > 0 || !!getComposerMarkDueDate();
+}
+
+function syncComposerMarkDueState() {
+  const dueDate = getComposerMarkDueDate();
+  composerMarkDueDateInput?.classList.toggle('has-value', !!dueDate);
+  if (composerMarkDueClearButton) {
+    composerMarkDueClearButton.hidden = !dueDate;
+  }
+}
+
 function syncComposerMarkToggleState() {
   if (!composerMarkToggle) return;
+  syncComposerMarkDueState();
   composerMarkToggle.classList.toggle('is-marked', composerMarkEnabled);
   composerMarkToggle.setAttribute('aria-pressed', composerMarkEnabled ? 'true' : 'false');
   composerMarkToggle.title = composerMarkEnabled ? '取消标记' : '标记';
@@ -1676,9 +1698,17 @@ function syncComposerMarkToggleState() {
     const selectedCount = getComposerDraftTags().filter(
       (tag) => !tag.pendingDelete && composerSelectedTagIds.has(tag.id),
     ).length;
+    const dueDate = getComposerMarkDueDate();
+    const summaryParts = [];
+    if (selectedCount > 0) {
+      summaryParts.push(`${selectedCount} 个标签`);
+    }
+    if (dueDate) {
+      summaryParts.push(dueDate);
+    }
     composerMarkSummary.textContent = composerMarkEnabled
-      ? selectedCount > 0
-        ? `已标记 · ${selectedCount} 个标签`
+      ? summaryParts.length > 0
+        ? `已标记 · ${summaryParts.join(' · ')}`
         : '已标记 · 无标签'
       : '未标记';
     composerMarkSummary.classList.toggle('is-active', composerMarkEnabled);
@@ -1754,6 +1784,9 @@ function resetComposerMarkDraft() {
   composerSelectedTagIds.clear();
   composerDeletedTagIds.clear();
   composerCreatedTags = [];
+  if (composerMarkDueDateInput) {
+    composerMarkDueDateInput.value = '';
+  }
   if (composerMarkNewTagInput) {
     composerMarkNewTagInput.value = '';
   }
@@ -1766,6 +1799,9 @@ function normalizeComposerDraftAfterSuccessfulSend(result) {
   composerDeletedTagIds.clear();
   composerSelectedTagIds.clear();
   resolvedTagIds.forEach((tagId) => composerSelectedTagIds.add(tagId));
+  if (composerMarkDueDateInput) {
+    composerMarkDueDateInput.value = '';
+  }
   renderComposerMarkTagList();
 }
 
@@ -1778,8 +1814,11 @@ function hasComposerDraftTagName(name) {
 }
 
 function getComposerMarkedOptions() {
+  const dueDate = getComposerMarkDueDate();
+  const marked = composerMarkEnabled;
   return {
-    marked: composerMarkEnabled,
+    marked,
+    dueDate: marked ? dueDate || null : null,
     selectedTagIds: Array.from(composerSelectedTagIds).filter(
       (tagId) =>
         !composerDeletedTagIds.has(tagId)
@@ -1796,6 +1835,7 @@ function getComposerMarkedOptions() {
 function cloneComposerMarkedOptions(options) {
   return {
     marked: !!options?.marked,
+    dueDate: normalizeMarkedDueDate(options?.dueDate) || null,
     selectedTagIds: Array.isArray(options?.selectedTagIds) ? [...options.selectedTagIds] : [],
     createdTags: Array.isArray(options?.createdTags)
       ? options.createdTags.map((tag) => ({
@@ -1867,7 +1907,6 @@ function handleSpeechSideAltKeyup(event) {
 
 let speechStream = null;
 let speechSystemAudioStream = null;
-let speechRecordingTimer = null;
 let speechAudioContext = null;
 let speechCueAudioContext = null;
 let speechSourceNode = null;
@@ -1876,6 +1915,13 @@ let speechMixDestinationNode = null;
 let speechProcessorNode = null;
 let speechSilentGainNode = null;
 let speechCapturedSamples = [];
+let speechPendingAsrSamples = [];
+let speechPendingAsrSampleCount = 0;
+let speechLiveTranscriptionChain = Promise.resolve();
+let speechLiveTranscriptionTexts = [];
+let speechLiveTranscriptionError = null;
+let speechLiveTranscriptionChunkCount = 0;
+let speechLiveTranscriptionGeneration = 0;
 let speechCaptureSampleRate = 16000;
 let speechState = 'idle';
 let speechLastLevel = 0;
@@ -2184,6 +2230,154 @@ function buildCapturedSpeechWav() {
   };
 }
 
+const SPEECH_ASR_CHUNK_DURATION_MS = 60 * 1000;
+
+function getSpeechAsrChunkDurationMs() {
+  const testValue = Number(window.__speechSmoke?.chunkDurationMs || 0);
+  if (testValue > 0) return Math.max(100, testValue);
+  return SPEECH_ASR_CHUNK_DURATION_MS;
+}
+
+function buildSpeechWavFromSamples(samples, sampleRate) {
+  return {
+    bytes: encodeSpeechWav(samples, sampleRate),
+    sampleRate,
+    channels: 1,
+    bitsPerSample: 16,
+    durationMs: Math.round((samples.length / sampleRate) * 1000),
+    mimeType: 'audio/wav',
+    format: 'wav',
+  };
+}
+
+function resetLiveSpeechTranscription() {
+  speechLiveTranscriptionGeneration += 1;
+  speechPendingAsrSamples = [];
+  speechPendingAsrSampleCount = 0;
+  speechLiveTranscriptionChain = Promise.resolve();
+  speechLiveTranscriptionTexts = [];
+  speechLiveTranscriptionError = null;
+  speechLiveTranscriptionChunkCount = 0;
+}
+
+function takeSpeechPendingSamples(sampleCount) {
+  let remaining = sampleCount;
+  const taken = [];
+  while (remaining > 0 && speechPendingAsrSamples.length) {
+    const chunk = speechPendingAsrSamples[0];
+    if (chunk.length <= remaining) {
+      taken.push(chunk);
+      speechPendingAsrSamples.shift();
+      remaining -= chunk.length;
+      continue;
+    }
+    taken.push(chunk.slice(0, remaining));
+    speechPendingAsrSamples[0] = chunk.slice(remaining);
+    remaining = 0;
+  }
+  speechPendingAsrSampleCount = Math.max(0, speechPendingAsrSampleCount - sampleCount + remaining);
+  return mergeSpeechSamples(taken);
+}
+
+function enqueueLiveSpeechTranscription(samples, sampleRate) {
+  if (!samples?.length || speechLiveTranscriptionError) return;
+  const audio = buildSpeechWavFromSamples(samples, sampleRate);
+  speechLiveTranscriptionChunkCount += 1;
+  const chunkNumber = speechLiveTranscriptionChunkCount;
+  const generation = speechLiveTranscriptionGeneration;
+  speechLiveTranscriptionChain = speechLiveTranscriptionChain.then(async () => {
+    if (generation !== speechLiveTranscriptionGeneration) return;
+    setStatus(`正在识别语音 ${chunkNumber}...`);
+    const result = await transcribeSpeechAudio(audio);
+    if (generation !== speechLiveTranscriptionGeneration) return;
+    if (result?.text) speechLiveTranscriptionTexts.push(String(result.text));
+  }).catch((error) => {
+    if (generation === speechLiveTranscriptionGeneration) {
+      speechLiveTranscriptionError = error;
+    }
+  });
+}
+
+function appendLiveSpeechSamples(input) {
+  if (!input?.length || speechLiveTranscriptionError) return;
+  const targetSampleRate = 16000;
+  const samples = downsampleSpeechSamples(input, speechCaptureSampleRate, targetSampleRate);
+  if (!samples.length) return;
+  speechPendingAsrSamples.push(samples);
+  speechPendingAsrSampleCount += samples.length;
+  const chunkSampleCount = Math.max(1, Math.floor(targetSampleRate * getSpeechAsrChunkDurationMs() / 1000));
+  while (speechPendingAsrSampleCount >= chunkSampleCount) {
+    enqueueLiveSpeechTranscription(takeSpeechPendingSamples(chunkSampleCount), targetSampleRate);
+  }
+}
+
+async function finishLiveSpeechTranscription() {
+  if (speechPendingAsrSampleCount > 0) {
+    enqueueLiveSpeechTranscription(takeSpeechPendingSamples(speechPendingAsrSampleCount), 16000);
+  }
+  const generation = speechLiveTranscriptionGeneration;
+  await speechLiveTranscriptionChain;
+  if (generation !== speechLiveTranscriptionGeneration) throw new Error('语音录制已取消');
+  if (speechLiveTranscriptionError) throw speechLiveTranscriptionError;
+  const text = speechLiveTranscriptionTexts.join('\n').trim();
+  if (!text) throw new Error('ASR 未返回可用文本');
+  return { text, logId: null, chunkCount: speechLiveTranscriptionChunkCount || 1 };
+}
+
+function decodeSpeechWavPcm16(audio) {
+  const bytes = audio?.bytes instanceof Uint8Array ? audio.bytes : new Uint8Array(audio?.bytes || []);
+  if (bytes.length < 44) return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const readString = (offset, length) => String.fromCharCode(...bytes.slice(offset, offset + length));
+  if (readString(0, 4) !== 'RIFF' || readString(8, 4) !== 'WAVE') return null;
+  let offset = 12;
+  let format = null;
+  let dataOffset = 0;
+  let dataLength = 0;
+  while (offset + 8 <= bytes.length) {
+    const chunkId = readString(offset, 4);
+    const chunkLength = view.getUint32(offset + 4, true);
+    const chunkDataOffset = offset + 8;
+    if (chunkId === 'fmt ' && chunkLength >= 16) {
+      format = {
+        audioFormat: view.getUint16(chunkDataOffset, true),
+        channels: view.getUint16(chunkDataOffset + 2, true),
+        sampleRate: view.getUint32(chunkDataOffset + 4, true),
+        bitsPerSample: view.getUint16(chunkDataOffset + 14, true),
+      };
+    } else if (chunkId === 'data') {
+      dataOffset = chunkDataOffset;
+      dataLength = Math.min(chunkLength, bytes.length - chunkDataOffset);
+      break;
+    }
+    offset = chunkDataOffset + chunkLength + (chunkLength % 2);
+  }
+  if (!format || !dataOffset || format.audioFormat !== 1 || format.channels !== 1 || format.bitsPerSample !== 16) {
+    return null;
+  }
+  const sampleCount = Math.floor(dataLength / 2);
+  const samples = new Float32Array(sampleCount);
+  for (let index = 0; index < sampleCount; index += 1) {
+    samples[index] = view.getInt16(dataOffset + index * 2, true) / 0x8000;
+  }
+  return { samples, sampleRate: format.sampleRate };
+}
+
+function splitSpeechAudioForAsr(audio) {
+  const decoded = decodeSpeechWavPcm16(audio);
+  if (!decoded?.samples?.length) return [audio];
+  const chunkSampleCount = Math.max(
+    decoded.sampleRate,
+    Math.floor(decoded.sampleRate * getSpeechAsrChunkDurationMs() / 1000),
+  );
+  if (decoded.samples.length <= chunkSampleCount) return [audio];
+  const chunks = [];
+  for (let start = 0; start < decoded.samples.length; start += chunkSampleCount) {
+    chunks.push(buildSpeechWavFromSamples(decoded.samples.slice(start, start + chunkSampleCount), decoded.sampleRate));
+  }
+  return chunks;
+}
+
 const SPEECH_TASK_DB_NAME = 'transfer-genie-speech-tasks';
 const SPEECH_TASK_STORE_NAME = 'tasks';
 let speechTaskDbPromise = null;
@@ -2343,6 +2537,23 @@ async function transcribeSpeechAudio(audio) {
   return invoke('transcribe_speech', { request: buildSpeechTaskRequest(audio) });
 }
 
+async function transcribeSpeechAudioInChunks(audio) {
+  const chunks = splitSpeechAudioForAsr(audio);
+  const texts = [];
+  let logId = null;
+  for (let index = 0; index < chunks.length; index += 1) {
+    if (chunks.length > 1) {
+      setStatus(`正在识别语音 ${index + 1}/${chunks.length}...`);
+    }
+    const result = await transcribeSpeechAudio(chunks[index]);
+    if (result?.text) texts.push(String(result.text));
+    if (!logId && result?.logId) logId = result.logId;
+  }
+  const text = texts.join('\n').trim();
+  if (!text) throw new Error('ASR 未返回可用文本');
+  return { text, logId, chunkCount: chunks.length };
+}
+
 async function playSpeechTask(id) {
   const task = await getSpeechTask(id);
   if (!task?.audio?.bytes?.length) {
@@ -2385,8 +2596,8 @@ async function retrySpeechTask(id) {
   }
   await updateSpeechTask(id, { status: 'transcribing', error: '' });
   try {
-    const result = await transcribeSpeechAudio(task.audio);
-    await updateSpeechTask(id, { status: 'success', text: result?.text || '', error: '' });
+    const result = await transcribeSpeechAudioInChunks(task.audio);
+    await updateSpeechTask(id, { status: 'success', text: result?.text || '', error: '', chunkCount: result?.chunkCount || 1 });
     showToast('重新转录完成', 'success');
   } catch (error) {
     await updateSpeechTask(id, { status: 'failed', error: String(error), text: task.text || '' });
@@ -2557,10 +2768,6 @@ function insertTextIntoComposer(text) {
 }
 
 function stopSpeechStream() {
-  if (speechRecordingTimer) {
-    window.clearTimeout(speechRecordingTimer);
-    speechRecordingTimer = null;
-  }
   if (speechProcessorNode) {
     speechProcessorNode.onaudioprocess = null;
     try { speechProcessorNode.disconnect(); } catch (error) { /* ignore */ }
@@ -2621,6 +2828,7 @@ async function startSpeechRecording() {
   setStatus('正在打开麦克风...');
   try {
     speechCapturedSamples = [];
+    resetLiveSpeechTranscription();
     const deviceId = String(currentSettingsFormState.speechToTextMicrophoneDeviceId || '').trim();
     let stream = null;
     try {
@@ -2663,6 +2871,7 @@ async function startSpeechRecording() {
       if (speechState !== 'recording') return;
       const input = readSpeechInputSamples(event.inputBuffer);
       speechCapturedSamples.push(new Float32Array(input));
+      appendLiveSpeechSamples(input);
       let sum = 0;
       for (let index = 0; index < input.length; index += 1) {
         sum += input[index] * input[index];
@@ -2674,13 +2883,10 @@ async function startSpeechRecording() {
     speechSilentGainNode.connect(speechAudioContext.destination);
     setSpeechState('recording');
     setStatus('正在录音，再点一次结束');
-    const maxDuration = Math.max(5, Math.min(300, Number(currentSettingsFormState.speechToTextMaxDurationSecs) || 60));
-    speechRecordingTimer = window.setTimeout(() => {
-      if (isCurrentSpeechSession(sessionId) && speechState === 'recording') stopSpeechRecording({ playCue: true });
-    }, maxDuration * 1000);
   } catch (error) {
     if (!isCurrentSpeechSession(sessionId)) return;
     stopSpeechStream();
+    resetLiveSpeechTranscription();
     setSpeechState('idle');
     const message = describeSpeechMicError(error);
     setErrorStatus(`启动录音失败：${message}`);
@@ -2699,6 +2905,7 @@ function stopSpeechRecording(options = {}) {
   }
   speechSessionId += 1;
   stopSpeechStream();
+  resetLiveSpeechTranscription();
   setSpeechState('idle');
 }
 
@@ -2708,6 +2915,7 @@ async function finishSpeechRecording() {
   const sourceSampleRate = speechCaptureSampleRate;
   stopSpeechStream();
   if (!chunks.length) {
+    resetLiveSpeechTranscription();
     setSpeechState('idle');
     setErrorStatus('没有可识别的录音数据');
     return;
@@ -2731,15 +2939,17 @@ async function finishSpeechRecording() {
       createdAtMs: Date.now(),
       updatedAtMs: Date.now(),
     });
-    const result = await transcribeSpeechAudio(audio);
-    await updateSpeechTask(taskId, { status: 'success', text: result?.text || '', error: '' });
+    const result = await finishLiveSpeechTranscription();
+    await updateSpeechTask(taskId, { status: 'success', text: result?.text || '', error: '', chunkCount: result?.chunkCount || 1 });
     insertTextIntoComposer(result?.text || '');
     setSpeechState('idle');
     setSuccessStatus('语音识别完成');
+    resetLiveSpeechTranscription();
   } catch (error) {
     if (taskId) {
       await updateSpeechTask(taskId, { status: 'failed', error: String(error) });
     }
+    resetLiveSpeechTranscription();
     setSpeechState('idle');
     setErrorStatus(`语音识别失败：${error}`);
   }
@@ -6439,6 +6649,59 @@ function buildTextMessageFilename(message) {
   return `${safeSender}-${timestamp}.${extension}`;
 }
 
+function buildTextDownloadFilename(message) {
+  const extension = message?.format === 'markdown' ? 'md' : 'txt';
+  const firstLine = String(message?.content || '')
+    .split(/\r?\n/)
+    .find((line) => line.trim())
+    ?.trim();
+  const title = String(firstLine || 'message')
+    .replace(/[\/:*?"<>|]+/g, '_')
+    .replace(/\s+/g, '')
+    .slice(0, 80);
+  return `${title || 'message'}.${extension}`;
+}
+
+function splitDownloadFilenameParts(originalName) {
+  const safeName = String(originalName || 'download.bin').split(/[/\\]/).pop() || 'download.bin';
+  const dotIndex = safeName.lastIndexOf('.');
+  if (dotIndex <= 0 || dotIndex === safeName.length - 1) {
+    return { filename: safeName, fileSuffix: '' };
+  }
+  return {
+    filename: safeName.slice(0, dotIndex),
+    fileSuffix: safeName.slice(dotIndex + 1),
+  };
+}
+
+function formatDownloadDate(timestampMs) {
+  const date = new Date(Number(timestampMs) || Date.now());
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+  const year = String(date.getFullYear()).padStart(4, '0');
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}${month}${day}`;
+}
+
+function buildDownloadFilenameFromRule(message, fallbackName) {
+  const originalName = message?.original_name || fallbackName || 'download.bin';
+  const rule = settingsFormRuntime?.normalizeSaveFilenameRule
+    ? settingsFormRuntime.normalizeSaveFilenameRule(
+        currentSettingsFormState.saveFilenameRule,
+        DEFAULT_SAVE_FILENAME_RULE,
+      )
+    : String(currentSettingsFormState.saveFilenameRule || DEFAULT_SAVE_FILENAME_RULE).trim();
+  const parts = splitDownloadFilenameParts(originalName);
+  const ruleWithSuffix = parts.fileSuffix ? rule : rule.replaceAll('.{file_suffix}', '');
+  const rendered = ruleWithSuffix
+    .replaceAll('{yyyymmdd}', formatDownloadDate(message?.timestamp_ms))
+    .replaceAll('{filename}', parts.filename)
+    .replaceAll('{file_suffix}', parts.fileSuffix);
+  return String(rendered || originalName).split(/[/\\]/).pop() || originalName;
+}
+
 async function downloadTextMessageAsFile(message) {
   try {
     const content = message?.content || '';
@@ -6447,7 +6710,11 @@ async function downloadTextMessageAsFile(message) {
       return;
     }
 
-    const defaultPath = message?.original_name || buildTextMessageFilename(message);
+    const textFilename = buildTextDownloadFilename(message);
+    const defaultPath = buildDownloadFilenameFromRule(
+      { ...message, original_name: textFilename },
+      textFilename,
+    );
     if (saveDialog && invoke) {
       const target = await saveDialog({ defaultPath });
       if (!target) return;
@@ -9353,6 +9620,9 @@ function applySettings(settings) {
     downloadDirInput.value = settings.download_dir || '';
     setHint(downloadDirHint, '');
   }
+  if (saveFilenameRuleInput) {
+    saveFilenameRuleInput.value = settings.save_filename_rule || DEFAULT_SAVE_FILENAME_RULE;
+  }
   if (autoStartInput) {
     autoStartInput.checked = settings.auto_start || false;
   }
@@ -9394,7 +9664,6 @@ function applySettings(settings) {
   if (speechToTextSystemAudioDeviceInput) speechToTextSystemAudioDeviceInput.value = speechToText.system_audio_device_id || '';
   if (speechToTextShortcutEnabledInput) speechToTextShortcutEnabledInput.checked = !!speechToText.shortcut_enabled;
   if (speechToTextShortcutInput) speechToTextShortcutInput.value = (speechToText.shortcut || DEFAULT_SPEECH_TO_TEXT_SHORTCUT).toLowerCase();
-  if (speechToTextMaxDurationInput) speechToTextMaxDurationInput.value = Number(speechToText.max_duration_secs || 60);
   if (speechToTextTaskRetentionInput) speechToTextTaskRetentionInput.value = Number(speechToText.task_retention_count || 14);
   if (speechToTextCueSoundEnabledInput) speechToTextCueSoundEnabledInput.checked = speechToText.cue_sound_enabled !== false;
   if (speechToTextCueSoundKindInput) speechToTextCueSoundKindInput.value = normalizeSpeechCueSoundKind(speechToText.cue_sound_kind || DEFAULT_SPEECH_CUE_SOUND_KIND);
@@ -9405,6 +9674,7 @@ function applySettings(settings) {
       settings.default_editor_format || loadDefaultEditorFormat() || currentSettingsFormState.defaultEditorFormat,
     ),
     downloadDir: settings.download_dir || '',
+    saveFilenameRule: settings.save_filename_rule || DEFAULT_SAVE_FILENAME_RULE,
     autoStart: !!settings.auto_start,
     autoUpdateEnabled: !!settings.auto_update_enabled,
     globalHotkeyEnabled: settings.global_hotkey_enabled !== false,
@@ -9441,7 +9711,6 @@ function applySettings(settings) {
     speechToTextSystemAudioDeviceId: speechToText.system_audio_device_id || '',
     speechToTextShortcutEnabled: !!speechToText.shortcut_enabled,
     speechToTextShortcut: (speechToText.shortcut || DEFAULT_SPEECH_TO_TEXT_SHORTCUT).toLowerCase(),
-    speechToTextMaxDurationSecs: Number(speechToText.max_duration_secs || 60),
     speechToTextTaskRetentionCount: Number(speechToText.task_retention_count || 14),
     speechToTextCueSoundEnabled: speechToText.cue_sound_enabled !== false,
     speechToTextCueSoundKind: normalizeSpeechCueSoundKind(speechToText.cue_sound_kind || DEFAULT_SPEECH_CUE_SOUND_KIND),
@@ -9579,10 +9848,7 @@ async function saveSettings(options = {}) {
   );
   const speechToTextCueSoundEnabled = !!currentSettingsFormState.speechToTextCueSoundEnabled;
   const speechToTextCueSoundKind = normalizeSpeechCueSoundKind(currentSettingsFormState.speechToTextCueSoundKind || DEFAULT_SPEECH_CUE_SOUND_KIND);
-  const speechToTextMaxDurationSecs = Math.max(
-    5,
-    Math.min(300, Number(currentSettingsFormState.speechToTextMaxDurationSecs) || 60),
-  );
+  const speechToTextMaxDurationSecs = 60;
   const speechToTextTaskRetentionCount = Math.max(
     1,
     Math.min(100, Number(currentSettingsFormState.speechToTextTaskRetentionCount) || 14),
@@ -9696,6 +9962,12 @@ async function saveSettings(options = {}) {
     refresh_interval_secs: Number(currentSettingsFormState.refreshIntervalSecs) || 5,
     default_editor_format: currentSettingsFormState.defaultEditorFormat === 'markdown' ? 'markdown' : 'text',
     download_dir: (currentSettingsFormState.downloadDir || '').trim(),
+    save_filename_rule: settingsFormRuntime?.normalizeSaveFilenameRule
+      ? settingsFormRuntime.normalizeSaveFilenameRule(
+          currentSettingsFormState.saveFilenameRule,
+          DEFAULT_SAVE_FILENAME_RULE,
+        )
+      : (currentSettingsFormState.saveFilenameRule || DEFAULT_SAVE_FILENAME_RULE).trim(),
     global_hotkey_enabled: globalHotkeyEnabled,
     global_hotkey: normalizedGlobalHotkey || DEFAULT_GLOBAL_HOTKEY,
     send_hotkey: sendHotkey,
@@ -10218,6 +10490,7 @@ async function sendText() {
     normalizeComposerDraftAfterSuccessfulSend(result);
     activeMarkedOptions = {
       marked: !!activeMarkedOptions.marked,
+      dueDate: activeMarkedOptions.dueDate || null,
       selectedTagIds: Array.isArray(result?.markedTagIds) ? [...result.markedTagIds] : [],
       createdTags: [],
       deletedTagIds: [],
@@ -10240,6 +10513,7 @@ async function sendText() {
         format: currentFormat,
         marked: activeMarkedOptions.marked,
         marked_tag_ids: [...activeMarkedOptions.selectedTagIds],
+        marked_due_date: activeMarkedOptions.dueDate || null,
       });
 
       if (currentFormat === 'markdown' && mdEditor) {
@@ -11140,6 +11414,29 @@ if (composerMarkAddTagButton) {
       composerMarkNewTagInput.value = '';
     }
     renderComposerMarkTagList();
+  });
+}
+if (composerMarkDueDateInput) {
+  composerMarkDueDateInput.addEventListener('change', () => {
+    const dueDate = getComposerMarkDueDate();
+    if (dueDate) {
+      composerMarkEnabled = true;
+    } else if (!hasActiveComposerMarkDetails()) {
+      composerMarkEnabled = false;
+    }
+    syncComposerMarkToggleState();
+  });
+}
+if (composerMarkDueClearButton) {
+  composerMarkDueClearButton.addEventListener('click', () => {
+    if (composerMarkDueDateInput) {
+      composerMarkDueDateInput.value = '';
+    }
+    if (!hasActiveComposerMarkDetails()) {
+      composerMarkEnabled = false;
+    }
+    syncComposerMarkToggleState();
+    composerMarkDueDateInput?.focus();
   });
 }
 if (composerMarkNewTagInput) {

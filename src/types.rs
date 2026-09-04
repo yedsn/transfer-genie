@@ -27,6 +27,10 @@ fn default_telegram_poll_interval_secs() -> u64 {
     5
 }
 
+pub fn default_save_filename_rule() -> String {
+    "{filename}.{file_suffix}".to_string()
+}
+
 fn default_telegram_proxy_url() -> String {
     "http://127.0.0.1:7890".to_string()
 }
@@ -737,6 +741,8 @@ pub struct Settings {
     pub refresh_interval_secs: u64,
     #[serde(default)]
     pub download_dir: String,
+    #[serde(default = "default_save_filename_rule")]
+    pub save_filename_rule: String,
     #[serde(default = "default_send_hotkey")]
     pub send_hotkey: String,
     #[serde(default = "default_global_hotkey_enabled")]
