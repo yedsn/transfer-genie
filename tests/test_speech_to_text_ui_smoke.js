@@ -657,6 +657,75 @@ async function run() {
     assert.ok(longRecordingResult.taskAudioBytes > Math.max(...longRecordingResult.chunkTexts), 'retained long recording task keeps the complete audio, not a chunk');
     assert.equal(longRecordingResult.chunkCount, longRecordingResult.chunkCalls, 'retained task records the internal chunk count without creating chunk tasks');
 
+    const polishedLongRecordingResult = await evaluate(client, `(async () => {
+      window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
+      window.__speechSmoke.aiRequests = [];
+      window.__speechSmoke.failAiPolish = false;
+      window.__speechSmoke.chunkDurationMs = 100;
+      window.__speechSmoke.chunkTextPrefix = '润色分片';
+      window.__speechSmoke.transcribeChunkCallCount = 0;
+      window.__speechSmoke.nextSampleCount = 4800;
+      document.querySelector('#speech-to-text-polish-enabled').checked = true;
+      document.querySelector('#speech-to-text-polish-enabled').dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#speech-to-text-polish-action').value = 'polish';
+      document.querySelector('#speech-to-text-polish-action').dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#save-settings')?.click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const saved = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.speech_to_text || {};
+          if (saved.polish_enabled === true && saved.polish_action_id === 'polish') resolve();
+          else if (Date.now() - start > 2500) reject(new Error('long speech polish setting was not saved'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const beforeCalls = window.__speechSmoke.calls.filter((call) => call.command === 'transcribe_speech').length;
+      document.querySelector('#speech-to-text-toggle').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#speech-to-text-toggle').classList.contains('is-recording')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('polished long recording did not enter recording state'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      await new Promise((r) => setTimeout(r, 80));
+      const callsWhileRecording = window.__speechSmoke.calls.filter((call) => call.command === 'transcribe_speech').length - beforeCalls;
+      const textWhileRecording = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
+      document.querySelector('#speech-to-text-toggle').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const text = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
+          if (text === '润色：润色分片1\\n润色分片2\\n润色分片3') resolve();
+          else if (Date.now() - start > 3500) reject(new Error('polished long recording did not insert final polished text: ' + text));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const aiRequest = window.__speechSmoke.aiRequests.at(-1) || null;
+      document.querySelector('#speech-to-text-polish-enabled').checked = false;
+      document.querySelector('#speech-to-text-polish-enabled').dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#save-settings')?.click();
+      window.__speechSmoke.chunkDurationMs = 0;
+      window.__speechSmoke.chunkTextPrefix = '';
+      window.__speechSmoke.transcribeChunkCallCount = 0;
+      return {
+        callsWhileRecording,
+        textWhileRecording,
+        text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
+        aiRequest,
+        aiRequestCount: window.__speechSmoke.aiRequests.length,
+      };
+    })()`);
+    assert.ok(polishedLongRecordingResult.callsWhileRecording > 0, 'polished long recording still transcribes chunks during recording');
+    assert.equal(polishedLongRecordingResult.textWhileRecording, '', 'polished long recording does not write chunk text during recording');
+    assert.equal(polishedLongRecordingResult.aiRequestCount, 1, 'polished long recording runs polish once after all chunks are complete');
+    assert.equal(polishedLongRecordingResult.aiRequest.text, '润色分片1\n润色分片2\n润色分片3', 'polished long recording sends the complete transcript to AI');
+    assert.equal(polishedLongRecordingResult.text, '润色：润色分片1\n润色分片2\n润色分片3', 'polished long recording inserts one final polished transcript');
+
     const blankAllChunkFallbackResult = await evaluate(client, `(async () => {
       window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
       window.__speechSmoke.chunkDurationMs = 100;
@@ -1068,7 +1137,7 @@ async function run() {
     const cuePreviewResult = await evaluate(client, `(async () => {
       document.querySelector('#speech-to-text-cue-sound-enabled').checked = true;
       document.querySelector('#speech-to-text-cue-sound-enabled').dispatchEvent(new Event('change', { bubbles: true }));
-      document.querySelector('#speech-to-text-cue-sound-kind').value = 'soft';
+      document.querySelector('#speech-to-text-cue-sound-kind').value = 'double';
       document.querySelector('#speech-to-text-cue-sound-kind').dispatchEvent(new Event('change', { bubbles: true }));
       await new Promise((r) => setTimeout(r, 40));
       const beforeCues = window.__speechSmoke.cueSounds.length;
@@ -1076,20 +1145,57 @@ async function run() {
       const beforeSaves = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').length;
       document.querySelector('#speech-to-text-cue-sound-preview').click();
       await new Promise((r) => setTimeout(r, 40));
-      const cue = window.__speechSmoke.cueSounds.at(-1) || {};
+      const cues = window.__speechSmoke.cueSounds.slice(beforeCues);
+      const optionValues = Array.from(document.querySelector('#speech-to-text-cue-sound-kind')?.options || []).map((option) => option.value);
       return {
         cueDelta: window.__speechSmoke.cueSounds.length - beforeCues,
         requestDelta: window.__speechSmoke.mediaRequests.length - beforeRequests,
         saveDelta: window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').length - beforeSaves,
         previewDisabled: document.querySelector('#speech-to-text-cue-sound-preview').disabled,
-        cue,
+        selectedKind: document.querySelector('#speech-to-text-cue-sound-kind').value,
+        optionValues,
+        cues,
       };
     })()`);
-    assert.equal(cuePreviewResult.cueDelta, 1, 'cue preview plays one cue sound');
+    assert.equal(cuePreviewResult.cueDelta, 2, 'double-beat cue preview plays two cue tones');
     assert.equal(cuePreviewResult.previewDisabled, false, 'cue preview button is enabled when cue sounds are enabled');
     assert.equal(cuePreviewResult.requestDelta, 0, 'cue preview does not start microphone recording');
     assert.equal(cuePreviewResult.saveDelta, 0, 'cue preview does not save settings');
-    assert.equal(cuePreviewResult.cue.type, 'sine', 'cue preview uses the current unsaved selected cue kind');
+    assert.equal(cuePreviewResult.selectedKind, 'double', 'cue settings include the new double-beat cue option');
+    assert.ok(cuePreviewResult.optionValues.includes('double-bright'), 'cue settings include the bright double-beat option');
+    assert.ok(cuePreviewResult.optionValues.includes('double-soft'), 'cue settings include the soft double-beat option');
+    assert.deepEqual(cuePreviewResult.cues.map((cue) => cue.type), ['sine', 'sine'], 'double-beat cue uses two short sine tones');
+    assert.deepEqual(cuePreviewResult.cues.map((cue) => cue.frequency), [720, 980], 'double-beat cue preview uses the two-tone start profile');
+
+    const brightCuePreviewResult = await evaluate(client, `(async () => {
+      document.querySelector('#speech-to-text-cue-sound-kind').value = 'double-bright';
+      document.querySelector('#speech-to-text-cue-sound-kind').dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 40));
+      const beforeCues = window.__speechSmoke.cueSounds.length;
+      document.querySelector('#speech-to-text-cue-sound-preview').click();
+      await new Promise((r) => setTimeout(r, 40));
+      return { cues: window.__speechSmoke.cueSounds.slice(beforeCues) };
+    })()`);
+    assert.deepEqual(brightCuePreviewResult.cues.map((cue) => cue.frequency), [880, 1180], 'bright double-beat cue preview uses its own two-tone profile');
+
+    const cueSaveResult = await evaluate(client, `(async () => {
+      document.querySelector('#speech-to-text-cue-sound-kind').value = 'double-soft';
+      document.querySelector('#speech-to-text-cue-sound-kind').dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#save-settings')?.click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const saved = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.speech_to_text || {};
+          if (saved.cue_sound_kind === 'double-soft') resolve();
+          else if (Date.now() - start > 2500) reject(new Error('new cue sound kind was not saved'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const saved = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.speech_to_text || {};
+      return { saved };
+    })()`);
+    assert.equal(cueSaveResult.saved.cue_sound_kind, 'double-soft', 'another double-beat cue sound kind is saved');
 
     const removedShortcutUiResult = await evaluate(client, `(async () => {
       return {
@@ -1308,6 +1414,7 @@ async function run() {
       window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
       window.__speechSmoke.pastedText = '';
       window.__speechSmoke.clipboardText = '';
+      const cueCountBeforeToggle = window.__speechSmoke.cueSounds.length;
       document.activeElement?.blur?.();
       document.querySelector('.tab-button[data-tab-target="home"]')?.focus();
       await new Promise((r) => setTimeout(r, 30));
@@ -1340,6 +1447,7 @@ async function run() {
       return {
         text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
         pastedText: window.__speechSmoke.pastedText,
+        cueDelta: window.__speechSmoke.cueSounds.length - cueCountBeforeToggle,
         showCount: calls.filter((command) => command === 'show_system_dictation_window').length,
         hideCount: calls.filter((command) => command === 'hide_system_dictation_window').length,
         levelCount: calls.filter((command) => command === 'set_system_dictation_level').length,
@@ -1348,6 +1456,7 @@ async function run() {
     })()`);
     assert.equal(systemDictationResult.text, systemDictationResult.longText, 'system dictation appends recognized text to composer');
     assert.equal(systemDictationResult.pastedText, systemDictationResult.longText, 'system dictation sends recognized text through paste command');
+    assert.equal(systemDictationResult.cueDelta, 4, 'system dictation plays the selected double-beat start and stop cue sounds');
     assert.ok(systemDictationResult.showCount >= 1, 'system dictation shows the capsule window');
     assert.ok(systemDictationResult.hideCount >= 1, 'system dictation hides the capsule window after confirm');
     assert.ok(systemDictationResult.levelCount >= 1, 'system dictation updates waveform level');

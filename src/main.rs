@@ -7542,7 +7542,8 @@ fn normalize_speech_to_text_settings(settings: &mut SpeechToTextSettings) -> Res
     settings.cue_sound_kind = match settings.cue_sound_kind.trim() {
         "" => crate::types::default_speech_to_text_cue_sound_kind(),
         value => match value {
-            "system" | "soft" | "none" => value.to_string(),
+            "system" | "soft" | "typeless" | "pulse" | "double" | "double-bright"
+            | "double-soft" | "none" => value.to_string(),
             _ => crate::types::default_speech_to_text_cue_sound_kind(),
         },
     };

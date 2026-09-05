@@ -989,6 +989,11 @@
                       <select id="speech-to-text-cue-sound-kind" :value="ui.settingsForm.speechToTextCueSoundKind || 'system'" :disabled="ui.settingsForm.speechToTextCueSoundEnabled === false" @change="updateSettingsFormField('speechToTextCueSoundKind', $event.target.value)">
                         <option value="system">系统默认</option>
                         <option value="soft">轻柔提示</option>
+                        <option value="typeless">清脆反馈</option>
+                        <option value="pulse">柔和双音</option>
+                        <option value="double">两音反馈</option>
+                        <option value="double-bright">轻快双音</option>
+                        <option value="double-soft">低调双音</option>
                         <option value="none">无提示音</option>
                       </select>
                       <button id="speech-to-text-cue-sound-preview" class="button ghost small" type="button" :disabled="ui.settingsForm.speechToTextCueSoundEnabled === false">试听</button>

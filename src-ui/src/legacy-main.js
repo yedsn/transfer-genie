@@ -2272,9 +2272,75 @@ function describeSpeechRecordingUnsupported() {
 }
 
 function normalizeSpeechCueSoundKind(value) {
-  return ['system', 'soft', 'none'].includes(String(value || '').trim())
+  return ['system', 'soft', 'typeless', 'pulse', 'double', 'double-bright', 'double-soft', 'none'].includes(String(value || '').trim())
     ? String(value || '').trim()
     : DEFAULT_SPEECH_CUE_SOUND_KIND;
+}
+
+function getSpeechCueSoundProfile(kind, isStop) {
+  if (kind === 'soft') {
+    return { start: 660, stop: 440, volume: 0.14, duration: 0.14, type: 'sine', ramp: isStop ? 0.8 : 1.18 };
+  }
+  if (kind === 'typeless') {
+    return { start: 1040, stop: 620, volume: 0.13, duration: 0.085, type: 'sine', ramp: isStop ? 0.72 : 1.26 };
+  }
+  if (kind === 'pulse') {
+    return { start: 760, stop: 520, volume: 0.12, duration: 0.16, type: 'triangle', ramp: isStop ? 0.86 : 1.12 };
+  }
+  if (kind === 'double') {
+    return {
+      type: 'sine',
+      volume: 0.12,
+      tones: isStop
+        ? [{ frequency: 620, duration: 0.075 }, { frequency: 460, duration: 0.085, delay: 0.092 }]
+        : [{ frequency: 720, duration: 0.075 }, { frequency: 980, duration: 0.085, delay: 0.092 }],
+    };
+  }
+  if (kind === 'double-bright') {
+    return {
+      type: 'triangle',
+      volume: 0.11,
+      tones: isStop
+        ? [{ frequency: 780, duration: 0.06 }, { frequency: 560, duration: 0.07, delay: 0.078 }]
+        : [{ frequency: 880, duration: 0.06 }, { frequency: 1180, duration: 0.07, delay: 0.078 }],
+    };
+  }
+  if (kind === 'double-soft') {
+    return {
+      type: 'sine',
+      volume: 0.085,
+      tones: isStop
+        ? [{ frequency: 520, duration: 0.09 }, { frequency: 410, duration: 0.1, delay: 0.115 }]
+        : [{ frequency: 560, duration: 0.09 }, { frequency: 700, duration: 0.1, delay: 0.115 }],
+    };
+  }
+  return { start: 880, stop: 520, volume: 0.18, duration: 0.12, type: 'triangle', ramp: isStop ? 0.8 : 1.18 };
+}
+
+function playSpeechCueTone(context, profile, tone, startedAt) {
+  const delay = Number(tone.delay || 0);
+  const duration = Number(tone.duration || profile.duration || 0.1);
+  const frequency = Number(tone.frequency || profile.start || 880);
+  const when = startedAt + delay;
+  const gain = context.createGain();
+  const oscillator = context.createOscillator();
+  oscillator.type = tone.type || profile.type || 'sine';
+  oscillator.frequency.setValueAtTime(frequency, when);
+  const ramp = Number(tone.ramp || profile.ramp || 1);
+  if (oscillator.frequency.exponentialRampToValueAtTime && ramp > 0) {
+    oscillator.frequency.exponentialRampToValueAtTime(frequency * ramp, when + duration);
+  }
+  gain.gain.setValueAtTime(0.0001, when);
+  gain.gain.exponentialRampToValueAtTime(Number(tone.volume || profile.volume || 0.12), when + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, when + duration);
+  oscillator.connect(gain);
+  gain.connect(context.destination);
+  oscillator.start(when);
+  oscillator.stop(when + duration + 0.02);
+  oscillator.onended = () => {
+    try { oscillator.disconnect(); } catch (error) { /* ignore */ }
+    try { gain.disconnect(); } catch (error) { /* ignore */ }
+  };
 }
 
 function syncSpeechCueSoundControls() {
@@ -2310,28 +2376,12 @@ async function playSpeechCueSound(phase, options = {}) {
     const context = await getSpeechCueAudioContext();
     if (!context || context.state === 'suspended') return;
     const now = context.currentTime || 0;
-    const gain = context.createGain();
-    const oscillator = context.createOscillator();
     const isStop = phase === 'stop';
-    const profile = kind === 'soft'
-      ? { start: 660, stop: 440, volume: 0.14, duration: 0.14, type: 'sine' }
-      : { start: 880, stop: 520, volume: 0.18, duration: 0.12, type: 'triangle' };
-    oscillator.type = profile.type;
-    oscillator.frequency.setValueAtTime(isStop ? profile.stop : profile.start, now);
-    if (oscillator.frequency.exponentialRampToValueAtTime) {
-      oscillator.frequency.exponentialRampToValueAtTime(isStop ? profile.stop * 0.8 : profile.start * 1.18, now + profile.duration);
-    }
-    gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.exponentialRampToValueAtTime(profile.volume, now + 0.012);
-    gain.gain.exponentialRampToValueAtTime(0.0001, now + profile.duration);
-    oscillator.connect(gain);
-    gain.connect(context.destination);
-    oscillator.start(now);
-    oscillator.stop(now + profile.duration + 0.02);
-    oscillator.onended = () => {
-      try { oscillator.disconnect(); } catch (error) { /* ignore */ }
-      try { gain.disconnect(); } catch (error) { /* ignore */ }
-    };
+    const profile = getSpeechCueSoundProfile(kind, isStop);
+    const tones = Array.isArray(profile.tones) && profile.tones.length
+      ? profile.tones
+      : [{ frequency: isStop ? profile.stop : profile.start, duration: profile.duration, ramp: profile.ramp }];
+    tones.forEach((tone) => playSpeechCueTone(context, profile, tone, now));
   } catch (error) {
     // Audio cues are non-critical; recording should continue if playback is blocked.
   }
@@ -3692,11 +3742,13 @@ function toggleSystemDictationRecording() {
     }
     systemDictationStopRequested = true;
     logSystemDictation('toggle deferred until recording starts');
+    void playSpeechCueSound('stop');
     return;
   }
   if (speechState === 'recording') {
     systemDictationMode = true;
     systemDictationStopRequested = true;
+    void playSpeechCueSound('stop');
     stopSpeechRecording();
     return;
   }
@@ -3708,6 +3760,7 @@ function toggleSystemDictationRecording() {
     systemDictationStartedInTransferGenieComposer = isTransferGenieComposerFocused();
     logSystemDictation('start target captured', { transferGenieComposerFocused: systemDictationStartedInTransferGenieComposer });
     systemDictationLastStartAt = performance.now();
+    void playSpeechCueSound('start');
     void startSpeechRecording();
     return;
   }
