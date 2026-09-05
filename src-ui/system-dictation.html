@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Transfer Genie Dictation</title>
+  </head>
+  <body class="dictation-body">
+    <main class="dictation-capsule" aria-label="系统听写">
+      <div class="dictation-wave" aria-hidden="true">
+        <span></span>
+        <span></span>
+        <span></span>
+        <span></span>
+        <span></span>
+      </div>
+      <button id="dictation-confirm" class="dictation-action confirm" type="button" aria-label="确认">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M20 6 9 17l-5-5"></path>
+        </svg>
+      </button>
+      <button id="dictation-cancel" class="dictation-action cancel" type="button" aria-label="取消">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M18 6 6 18M6 6l12 12"></path>
+        </svg>
+      </button>
+    </main>
+    <script type="module" src="/src/system-dictation.ts"></script>
+  </body>
+</html>

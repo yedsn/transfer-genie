@@ -952,15 +952,17 @@
                     <span class="field-hint">需要先在 macOS 音频 MIDI 设置或系统声音输出中，把电脑声音路由到 BlackHole、Loopback 等虚拟输入设备；这里只选择设备不会自动改变系统输出。录音时会与麦克风同时录制。</span>
                   </label>
                   <label class="toggle-left">
-                    <span class="toggle-label">启用语音录制快捷键</span>
-                    <input id="speech-to-text-shortcut-enabled" type="checkbox" :checked="ui.settingsForm.speechToTextShortcutEnabled" @change="updateSettingsFormField('speechToTextShortcutEnabled', $event.target.checked)" />
+                    <span class="toggle-label">启用系统听写</span>
+                    <input id="system-dictation-enabled" type="checkbox" :checked="ui.settingsForm.systemDictationEnabled" @change="updateSettingsFormField('systemDictationEnabled', $event.target.checked)" />
                   </label>
                   <div class="field-row">
                     <label>
-                      语音录制快捷键
-                      <input id="speech-to-text-shortcut" type="text" placeholder="right-alt" :value="ui.settingsForm.speechToTextShortcut" @input="updateSettingsFormField('speechToTextShortcut', $event.target.value)" />
-                      <span class="field-hint">支持 right-alt / left-alt 区分左右 Alt；普通组合键可填 Alt+R。</span>
+                      系统听写快捷键
+                      <input id="system-dictation-shortcut" type="text" placeholder="点击后按下快捷键" :value="ui.settingsForm.systemDictationShortcut" :disabled="!ui.settingsForm.systemDictationEnabled" readonly />
+                      <span class="field-hint">点击输入框后按下快捷键；支持 right-alt / left-alt 或 Alt+D。</span>
                     </label>
+                  </div>
+                  <div class="field-row">
                     <label>
                       转录任务保留数量
                       <input id="speech-to-text-task-retention" type="number" min="1" max="100" step="1" :value="ui.settingsForm.speechToTextTaskRetentionCount" @input="updateSettingsFormField('speechToTextTaskRetentionCount', Number($event.target.value || 14))" />

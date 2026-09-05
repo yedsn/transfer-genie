@@ -141,8 +141,10 @@ function mockSettings() {
       microphone_device_id: 'mic-1',
       capture_system_audio: false,
       system_audio_device_id: '',
-      shortcut_enabled: true,
+      shortcut_enabled: false,
       shortcut: 'right-alt',
+      system_dictation_enabled: true,
+      system_dictation_shortcut: 'right-alt',
       max_duration_secs: 5,
       task_retention_count: 14,
       cue_sound_enabled: true,
@@ -157,16 +159,19 @@ function preloadScript() {
     const settings = ${JSON.stringify(mockSettings())};
     window.__speechSmoke = {
       calls: [],
+      emittedEvents: [],
       eventHandlers,
       failTranscribe: false,
       denyMicrophone: false,
       failNextGetUserMedia: '',
+      hangOverlayInvokes: false,
       hideGetUserMedia: false,
       getUserMediaDelayMs: 0,
       mediaRequests: [],
       stoppedStreams: 0,
       cueSounds: [],
       clipboardText: '',
+      pastedText: '',
       downloads: [],
       chunkDurationMs: 0,
       nextSampleCount: 0,
@@ -188,6 +193,16 @@ function preloadScript() {
           window.__speechSmoke.calls.push({ command, args });
           if (command === 'get_settings') return structuredClone(settings);
           if (command === 'save_settings') return args.settings;
+          if (command === 'paste_dictation_text') {
+            window.__speechSmoke.pastedText = String(args?.text || '');
+            window.__speechSmoke.clipboardText = String(args?.text || '');
+            return null;
+          }
+          if (command === 'show_system_dictation_window' || command === 'hide_system_dictation_window') {
+            if (window.__speechSmoke.hangOverlayInvokes) return new Promise(() => {});
+            return null;
+          }
+          if (command === 'set_system_dictation_level') return null;
           if (command === 'transcribe_speech') {
             if (window.__speechSmoke.failTranscribe) throw 'ASR 凭据无效';
             if (window.__speechSmoke.chunkTextPrefix) {
@@ -224,7 +239,11 @@ function preloadScript() {
         listen: async (name, handler) => {
           eventHandlers[name] = handler;
           return () => { delete eventHandlers[name]; };
-        }
+        },
+        emit: async (name, payload) => {
+          window.__speechSmoke.emittedEvents.push({ name, payload });
+          if (eventHandlers[name]) await eventHandlers[name]({ payload });
+        },
       },
       path: { convertFileSrc: (value) => value },
       dialog: { open: async () => null, save: async () => null }
@@ -351,7 +370,7 @@ async function run() {
           document.querySelector('#speech-to-text-enabled')?.checked &&
           document.querySelector('#speech-to-text-api-key')?.value === 'saved-for-smoke' &&
           document.querySelector('#speech-to-text-microphone')?.value === 'mic-1' &&
-          window.__speechSmoke?.eventHandlers?.['speech-to-text-toggle']
+          window.__speechSmoke?.eventHandlers?.['system-dictation-toggle']
         ) resolve(true);
         else if (Date.now() - start > 15000) reject(new Error('speech UI did not initialize'));
         else setTimeout(tick, 100);
@@ -1014,61 +1033,90 @@ async function run() {
     assert.equal(cuePreviewResult.saveDelta, 0, 'cue preview does not save settings');
     assert.equal(cuePreviewResult.cue.type, 'sine', 'cue preview uses the current unsaved selected cue kind');
 
-    const rightAltResult = await evaluate(client, `(async () => {
+    const removedShortcutUiResult = await evaluate(client, `(async () => {
+      return {
+        shortcutToggleExists: !!document.querySelector('#speech-to-text-shortcut-enabled'),
+        shortcutInputExists: !!document.querySelector('#speech-to-text-shortcut'),
+        systemShortcutValue: document.querySelector('#system-dictation-shortcut')?.value || '',
+      };
+    })()`);
+    assert.equal(removedShortcutUiResult.shortcutToggleExists, false, 'ordinary speech shortcut toggle is removed');
+    assert.equal(removedShortcutUiResult.shortcutInputExists, false, 'ordinary speech shortcut input is removed');
+    assert.equal(removedShortcutUiResult.systemShortcutValue, 'right-alt', 'system dictation accepts right Alt as its shortcut');
+
+    const systemShortcutSaveResult = await evaluate(client, `(async () => {
+      document.querySelector('#system-dictation-enabled').checked = true;
+      document.querySelector('#system-dictation-enabled').dispatchEvent(new Event('change', { bubbles: true }));
+      const beforeSaves = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').length;
+      const shortcutInput = document.querySelector('#system-dictation-shortcut');
+      shortcutInput.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      shortcutInput.focus();
+      shortcutInput.click();
+      const captureValue = shortcutInput.value;
+      const captureClass = shortcutInput.classList.contains('is-capturing-shortcut');
+      shortcutInput.dispatchEvent(new KeyboardEvent('keydown', { code: 'AltRight', key: 'Alt', altKey: true, bubbles: true }));
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const saveCalls = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings');
+          if (saveCalls.length > beforeSaves) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('right Alt system dictation shortcut was not saved'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const saved = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.speech_to_text || {};
+      return { captureValue, captureClass, inputValue: shortcutInput.value, saved };
+    })()`);
+    assert.equal(systemShortcutSaveResult.captureValue, '请按下快捷键...', 'shortcut input enters capture mode on focus');
+    assert.equal(systemShortcutSaveResult.captureClass, true, 'shortcut input shows capture state');
+    assert.equal(systemShortcutSaveResult.inputValue, 'right-alt', 'captured right Alt is shown in shortcut input');
+    assert.equal(systemShortcutSaveResult.saved.shortcut_enabled, false, 'ordinary speech shortcut remains disabled when settings are saved');
+    assert.equal(systemShortcutSaveResult.saved.system_dictation_enabled, true, 'system dictation enabled flag is saved');
+    assert.equal(systemShortcutSaveResult.saved.system_dictation_shortcut, 'right-alt', 'right Alt is saved as the system dictation shortcut');
+
+    const comboShortcutCaptureResult = await evaluate(client, `(async () => {
+      const beforeSaves = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').length;
+      const shortcutInput = document.querySelector('#system-dictation-shortcut');
+      shortcutInput.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      shortcutInput.focus();
+      shortcutInput.click();
+      shortcutInput.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyD', key: 'd', altKey: true, bubbles: true }));
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const saveCalls = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings');
+          if (saveCalls.length > beforeSaves) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('combo system dictation shortcut was not saved'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const saved = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.speech_to_text || {};
+      return { inputValue: shortcutInput.value, saved };
+    })()`);
+    assert.equal(comboShortcutCaptureResult.inputValue, 'alt+d', 'captured Alt+D is shown in shortcut input');
+    assert.equal(comboShortcutCaptureResult.saved.system_dictation_shortcut, 'alt+d', 'Alt+D is saved as the system dictation shortcut');
+
+    const buttonRecordingResult = await evaluate(client, `(async () => {
       window.transferGenieActions?.updateSettingsFormField?.('speechToTextCueSoundEnabled', true);
       document.querySelector('#speech-to-text-capture-system-audio').checked = false;
       document.querySelector('#speech-to-text-capture-system-audio').dispatchEvent(new Event('change', { bubbles: true }));
       window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
       const beforeRequests = window.__speechSmoke.mediaRequests.length;
-      const editor = document.querySelector('#text-input');
-      editor.addEventListener('keydown', (event) => event.stopPropagation(), { once: true });
-      editor.focus();
-      editor.dispatchEvent(new KeyboardEvent('keydown', { code: 'AltRight', key: 'Alt', altKey: true, bubbles: true }));
-      editor.dispatchEvent(new KeyboardEvent('keydown', { code: 'AltRight', key: 'Alt', altKey: true, repeat: true, bubbles: true }));
+      document.querySelector('#speech-to-text-toggle').click();
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
           if (document.querySelector('#speech-to-text-toggle').classList.contains('is-recording')) resolve();
-          else if (Date.now() - start > 2000) reject(new Error('right Alt did not enter recording state'));
+          else if (Date.now() - start > 2000) reject(new Error('speech button did not enter recording state'));
           else setTimeout(tick, 20);
         };
         tick();
       });
-      const requestDeltaWhileHeld = window.__speechSmoke.mediaRequests.length - beforeRequests;
-      editor.dispatchEvent(new KeyboardEvent('keyup', { code: 'AltRight', key: 'Alt', altKey: false, bubbles: true }));
-      editor.dispatchEvent(new KeyboardEvent('keydown', { code: 'AltLeft', key: 'Alt', altKey: true, bubbles: true }));
-      await new Promise((r) => setTimeout(r, 40));
-      const stillRecordingAfterLeftAlt = document.querySelector('#speech-to-text-toggle').classList.contains('is-recording');
-      editor.dispatchEvent(new KeyboardEvent('keyup', { code: 'AltLeft', key: 'Alt', altKey: false, bubbles: true }));
-      editor.dispatchEvent(new KeyboardEvent('keydown', { code: '', key: 'AltGraph', altKey: true, ctrlKey: true, bubbles: true }));
+      const requestDelta = window.__speechSmoke.mediaRequests.length - beforeRequests;
       await new Promise((r) => setTimeout(r, 80));
-      editor.dispatchEvent(new KeyboardEvent('keyup', { code: '', key: 'AltGraph', altKey: false, ctrlKey: false, bubbles: true }));
-      return {
-        requestDeltaWhileHeld,
-        stillRecordingAfterLeftAlt,
-        text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
-        longText: window.__speechSmoke.longText,
-      };
-    })()`);
-    assert.equal(rightAltResult.stillRecordingAfterLeftAlt, true, 'left Alt does not toggle when right Alt is configured');
-    assert.equal(rightAltResult.requestDeltaWhileHeld, 1, 'holding right Alt does not start duplicate microphone requests');
-    assert.equal(rightAltResult.text, rightAltResult.longText, 'right Alt toggles speech recording and inserts text');
-
-    const shortcutResult = await evaluate(client, `(async () => {
-      window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
-      await window.__speechSmoke.eventHandlers['speech-to-text-toggle']({ payload: null });
-      await new Promise((resolve, reject) => {
-        const start = Date.now();
-        const tick = () => {
-          if (document.querySelector('#speech-to-text-toggle').classList.contains('is-recording')) resolve();
-          else if (Date.now() - start > 2000) reject(new Error('shortcut did not enter recording state'));
-          else setTimeout(tick, 20);
-        };
-        tick();
-      });
-      const recording = document.querySelector('#speech-to-text-toggle').classList.contains('is-recording');
-      await new Promise((r) => setTimeout(r, 80));
-      await window.__speechSmoke.eventHandlers['speech-to-text-toggle']({ payload: null });
+      document.querySelector('#speech-to-text-toggle').click();
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
@@ -1076,15 +1124,178 @@ async function run() {
           const status = document.querySelector('#sync-status')?.textContent || '';
           if (text) resolve();
           else if (/语音识别失败/.test(status)) reject(new Error(status));
-          else if (Date.now() - start > 2500) reject(new Error('shortcut recognition did not insert text'));
+          else if (Date.now() - start > 2500) reject(new Error('button recognition did not insert text'));
           else setTimeout(tick, 20);
         };
         tick();
       });
-      return { recording, text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '', longText: window.__speechSmoke.longText };
+      return {
+        requestDelta,
+        text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
+        longText: window.__speechSmoke.longText,
+      };
     })()`);
-    assert.equal(shortcutResult.recording, true, 'speech shortcut event enters recording state');
-    assert.equal(shortcutResult.text, shortcutResult.longText, 'shortcut-triggered recognition inserts text');
+    assert.equal(buttonRecordingResult.requestDelta, 1, 'speech button starts one microphone request');
+    assert.equal(buttonRecordingResult.text, buttonRecordingResult.longText, 'speech button still inserts recognized text');
+
+    const systemDictationResult = await evaluate(client, `(async () => {
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const button = document.querySelector('#speech-to-text-toggle');
+          if (!button.classList.contains('is-recording') && !button.classList.contains('is-transcribing')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('speech button did not return to idle'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
+      window.__speechSmoke.pastedText = '';
+      window.__speechSmoke.clipboardText = '';
+      document.querySelector('#system-dictation-enabled').checked = true;
+      document.querySelector('#system-dictation-enabled').dispatchEvent(new Event('change', { bubbles: true }));
+      await window.__speechSmoke.eventHandlers['system-dictation-toggle']({ payload: null });
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#speech-to-text-toggle').classList.contains('is-recording')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('system dictation did not start recording'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      await new Promise((r) => setTimeout(r, 80));
+      await window.__speechSmoke.eventHandlers['system-dictation-toggle']({ payload: null });
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const pasted = window.__speechSmoke.pastedText || '';
+          const text = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
+          if (pasted && text) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('system dictation did not paste and append'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const calls = window.__speechSmoke.calls.map((call) => call.command);
+      return {
+        text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
+        pastedText: window.__speechSmoke.pastedText,
+        showCount: calls.filter((command) => command === 'show_system_dictation_window').length,
+        hideCount: calls.filter((command) => command === 'hide_system_dictation_window').length,
+        levelCount: window.__speechSmoke.emittedEvents.filter((event) => event.name === 'system-dictation-level').length,
+        longText: window.__speechSmoke.longText,
+      };
+    })()`);
+    assert.equal(systemDictationResult.text, systemDictationResult.longText, 'system dictation appends recognized text to composer');
+    assert.equal(systemDictationResult.pastedText, systemDictationResult.longText, 'system dictation sends recognized text through paste command');
+    assert.ok(systemDictationResult.showCount >= 1, 'system dictation shows the capsule window');
+    assert.ok(systemDictationResult.hideCount >= 1, 'system dictation hides the capsule window after confirm');
+    assert.ok(systemDictationResult.levelCount >= 1, 'system dictation updates waveform level');
+
+    const stalledOverlayDictationResult = await evaluate(client, `(async () => {
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const button = document.querySelector('#speech-to-text-toggle');
+          if (!button.classList.contains('is-recording') && !button.classList.contains('is-transcribing') && !button.classList.contains('is-preparing')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('speech button did not return to idle before stalled overlay test'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
+      window.__speechSmoke.pastedText = '';
+      window.__speechSmoke.clipboardText = '';
+      window.__speechSmoke.longText = '卡住窗口后的识别结果';
+      window.__speechSmoke.hangOverlayInvokes = true;
+      const beforeTranscribeCalls = window.__speechSmoke.calls.filter((call) => call.command === 'transcribe_speech').length;
+      await window.__speechSmoke.eventHandlers['system-dictation-toggle']({ payload: null });
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#speech-to-text-toggle').classList.contains('is-recording')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('system dictation did not start while overlay invoke is stalled'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      await new Promise((r) => setTimeout(r, 80));
+      await window.__speechSmoke.eventHandlers['system-dictation-toggle']({ payload: null });
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const pasted = window.__speechSmoke.pastedText || '';
+          const text = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
+          const button = document.querySelector('#speech-to-text-toggle');
+          const idle = !button.classList.contains('is-recording') && !button.classList.contains('is-transcribing') && !button.classList.contains('is-preparing');
+          if (pasted && text && idle) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('stalled overlay system dictation did not paste and append'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const result = {
+        text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
+        pastedText: window.__speechSmoke.pastedText,
+        transcribeDelta: window.__speechSmoke.calls.filter((call) => call.command === 'transcribe_speech').length - beforeTranscribeCalls,
+      };
+      window.__speechSmoke.hangOverlayInvokes = false;
+      window.__speechSmoke.longText = '语音识别文本'.repeat(20);
+      return result;
+    })()`);
+    assert.equal(stalledOverlayDictationResult.text, '卡住窗口后的识别结果', 'system dictation appends text even when overlay command is stalled');
+    assert.equal(stalledOverlayDictationResult.pastedText, '卡住窗口后的识别结果', 'system dictation pastes text even when overlay command is stalled');
+    assert.equal(stalledOverlayDictationResult.transcribeDelta, 1, 'stalled overlay does not block transcription invoke');
+
+    const systemDictationCancelResult = await evaluate(client, `(async () => {
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const button = document.querySelector('#speech-to-text-toggle');
+          if (!button.classList.contains('is-recording') && !button.classList.contains('is-transcribing')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('speech button did not return to idle before cancel test'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
+      window.__speechSmoke.pastedText = '';
+      const beforePasteCalls = window.__speechSmoke.calls.filter((call) => call.command === 'paste_dictation_text').length;
+      await window.__speechSmoke.eventHandlers['system-dictation-toggle']({ payload: null });
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#speech-to-text-toggle').classList.contains('is-recording')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('system dictation did not start before cancel'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      await window.__speechSmoke.eventHandlers['system-dictation-cancel']({ payload: null });
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const button = document.querySelector('#speech-to-text-toggle');
+          if (!button.classList.contains('is-recording') && !button.classList.contains('is-transcribing')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('system dictation cancel did not return to idle'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const afterPasteCalls = window.__speechSmoke.calls.filter((call) => call.command === 'paste_dictation_text').length;
+      const calls = window.__speechSmoke.calls.map((call) => call.command);
+      return {
+        text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
+        pastedText: window.__speechSmoke.pastedText,
+        pasteDelta: afterPasteCalls - beforePasteCalls,
+        hideCount: calls.filter((command) => command === 'hide_system_dictation_window').length,
+      };
+    })()`);
+    assert.equal(systemDictationCancelResult.text, '', 'system dictation cancel does not append text');
+    assert.equal(systemDictationCancelResult.pastedText, '', 'system dictation cancel does not paste');
+    assert.equal(systemDictationCancelResult.pasteDelta, 0, 'system dictation cancel does not call paste command');
+    assert.ok(systemDictationCancelResult.hideCount >= 1, 'system dictation cancel hides the capsule window');
 
     const deniedResult = await evaluate(client, `(async () => {
       await new Promise((resolve, reject) => {

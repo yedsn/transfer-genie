@@ -3,6 +3,7 @@ const invoke = tauri.core?.invoke || tauri.invoke;
 const openDialog = tauri.dialog?.open;
 const saveDialog = tauri.dialog?.save;
 const listen = tauri.event?.listen;
+const emit = tauri.event?.emit;
 const convertFileSrc = tauri.path?.convertFileSrc;
 const vueBridge = window.transferGenieVue || null;
 const hasVueAppShell = true;
@@ -14,6 +15,7 @@ const settingsRuntimeStatus = window.transferGenieSettingsRuntimeStatus || null;
 const DEFAULT_EDITOR_FORMAT_STORAGE_KEY = 'transfer-genie.default-editor-format';
 const HOME_LAYOUT_STORAGE_KEY = 'transfer-genie.home-layout';
 const DEFAULT_SPEECH_CUE_SOUND_KIND = 'system';
+const DEFAULT_SYSTEM_DICTATION_SHORTCUT = 'alt+d';
 
 function normalizeEditorFormat(format) {
   return format === 'markdown' ? 'markdown' : 'text';
@@ -704,8 +706,8 @@ const speechToTextEndpointInput = document.getElementById('speech-to-text-endpoi
 const speechToTextMicrophoneInput = document.getElementById('speech-to-text-microphone');
 const speechToTextCaptureSystemAudioInput = document.getElementById('speech-to-text-capture-system-audio');
 const speechToTextSystemAudioDeviceInput = document.getElementById('speech-to-text-system-audio-device');
-const speechToTextShortcutEnabledInput = document.getElementById('speech-to-text-shortcut-enabled');
-const speechToTextShortcutInput = document.getElementById('speech-to-text-shortcut');
+const systemDictationEnabledInput = document.getElementById('system-dictation-enabled');
+const systemDictationShortcutInput = document.getElementById('system-dictation-shortcut');
 const speechToTextTaskRetentionInput = document.getElementById('speech-to-text-task-retention');
 const speechToTextCueSoundEnabledInput = document.getElementById('speech-to-text-cue-sound-enabled');
 const speechToTextCueSoundKindInput = document.getElementById('speech-to-text-cue-sound-kind');
@@ -979,8 +981,8 @@ let currentSettingsFormState = {
   speechToTextMicrophoneDeviceId: '',
   speechToTextCaptureSystemAudio: false,
   speechToTextSystemAudioDeviceId: '',
-  speechToTextShortcutEnabled: false,
-  speechToTextShortcut: 'right-alt',
+  systemDictationEnabled: false,
+  systemDictationShortcut: DEFAULT_SYSTEM_DICTATION_SHORTCUT,
   speechToTextTaskRetentionCount: 14,
   speechToTextCueSoundEnabled: true,
   speechToTextCueSoundKind: DEFAULT_SPEECH_CUE_SOUND_KIND,
@@ -1114,7 +1116,6 @@ const SEND_STATUS = {
 const DEFAULT_GLOBAL_HOTKEY = 'alt+t';
 const DEFAULT_SPEECH_TO_TEXT_RESOURCE_ID = 'volc.seedasr.sauc.duration';
 const DEFAULT_SPEECH_TO_TEXT_ENDPOINT = 'wss://openspeech.bytedance.com/api/v3/plan/sauc/bigmodel_nostream';
-const DEFAULT_SPEECH_TO_TEXT_SHORTCUT = 'right-alt';
 
 const SEND_HOTKEY = {
   ENTER: 'enter',
@@ -1869,40 +1870,70 @@ function normalizeSpeechHotkey(value) {
   return normalizeGlobalHotkey(value);
 }
 
-function isSideAltSpeechHotkey(value) {
-  return ['right-alt', 'left-alt'].includes(normalizeSpeechHotkey(value));
-}
+let capturingSystemDictationShortcut = false;
 
-let activeSideAltSpeechKey = '';
+function formatSystemShortcutFromKeyboardEvent(event) {
+  const code = event.code || '';
+  if (code === 'AltRight' && !event.ctrlKey && !event.shiftKey && !event.metaKey) return 'right-alt';
+  if (code === 'AltLeft' && !event.ctrlKey && !event.shiftKey && !event.metaKey) return 'left-alt';
 
-function getSpeechSideAltEventCode() {
-  if (!currentSettingsFormState.speechToTextShortcutEnabled) return '';
-  const shortcut = normalizeSpeechHotkey(currentSettingsFormState.speechToTextShortcut || DEFAULT_SPEECH_TO_TEXT_SHORTCUT);
-  if (shortcut === 'right-alt') return 'AltRight';
-  if (shortcut === 'left-alt') return 'AltLeft';
-  return '';
-}
-
-function isSpeechSideAltEvent(event, targetCode) {
-  if (!targetCode || event.code === targetCode) return !!targetCode;
-  if (targetCode === 'AltRight') {
-    return event.key === 'AltGraph' || (event.key === 'Alt' && event.altKey && event.ctrlKey);
+  const key = String(event.key || '').toLowerCase();
+  if ((key === 'altgraph' || (key === 'alt' && event.altKey && event.ctrlKey)) && !event.shiftKey && !event.metaKey) {
+    return 'right-alt';
   }
-  return false;
+
+  const parts = [];
+  if (event.ctrlKey) parts.push('ctrl');
+  if (event.altKey && key !== 'altgraph') parts.push('alt');
+  if (event.shiftKey) parts.push('shift');
+  if (event.metaKey) parts.push('meta');
+
+  let mainKey = '';
+  if (/^Key[A-Z]$/.test(code)) mainKey = code.slice(3).toLowerCase();
+  else if (/^Digit\d$/.test(code)) mainKey = code.slice(5);
+  else if (/^Numpad\d$/.test(code)) mainKey = code.slice(6);
+  else if (/^F\d{1,2}$/.test(code)) mainKey = code.toLowerCase();
+  else if (key && !['control', 'ctrl', 'alt', 'shift', 'meta', 'os', 'super', 'win', 'command'].includes(key)) mainKey = key;
+
+  if (!mainKey || parts.length === 0) return '';
+  parts.push(mainKey);
+  return normalizeSpeechHotkey(parts.join('+')) || '';
 }
 
-function handleSpeechSideAltKeydown(event) {
-  const targetCode = getSpeechSideAltEventCode();
-  if (!isSpeechSideAltEvent(event, targetCode) || event.repeat || activeSideAltSpeechKey === targetCode) return;
-  activeSideAltSpeechKey = targetCode;
+function setSystemDictationShortcutCapture(active) {
+  capturingSystemDictationShortcut = !!active;
+  if (!systemDictationShortcutInput) return;
+  systemDictationShortcutInput.classList.toggle('is-capturing-shortcut', capturingSystemDictationShortcut);
+  if (capturingSystemDictationShortcut) {
+    systemDictationShortcutInput.value = '请按下快捷键...';
+  } else {
+    systemDictationShortcutInput.value = currentSettingsFormState.systemDictationShortcut || DEFAULT_SYSTEM_DICTATION_SHORTCUT;
+  }
+}
+
+function handleSystemDictationShortcutCapture(event) {
+  if (!capturingSystemDictationShortcut) return;
   event.preventDefault();
-  toggleSpeechRecording();
-}
+  event.stopPropagation();
 
-function handleSpeechSideAltKeyup(event) {
-  if (isSpeechSideAltEvent(event, activeSideAltSpeechKey)) {
-    activeSideAltSpeechKey = '';
+  if (event.key === 'Escape') {
+    setSystemDictationShortcutCapture(false);
+    return;
   }
+
+  if (event.key === 'Backspace' || event.key === 'Delete') {
+    updateSettingsFormField('systemDictationShortcut', DEFAULT_SYSTEM_DICTATION_SHORTCUT, { delayMs: 0 });
+    setSystemDictationShortcutCapture(false);
+    return;
+  }
+
+  const shortcut = formatSystemShortcutFromKeyboardEvent(event);
+  if (!shortcut) {
+    setStatus('请按下 right-alt、left-alt 或包含修饰键的组合键');
+    return;
+  }
+  updateSettingsFormField('systemDictationShortcut', shortcut, { delayMs: 0 });
+  setSystemDictationShortcutCapture(false);
 }
 
 let speechStream = null;
@@ -1934,6 +1965,32 @@ let speechCaptureSampleRate = 16000;
 let speechState = 'idle';
 let speechLastLevel = 0;
 let speechSessionId = 0;
+let systemDictationMode = false;
+let systemDictationOverlayVisible = false;
+let systemDictationStartRequested = false;
+let systemDictationStopRequested = false;
+let systemDictationAwaitingConfirm = false;
+let systemDictationLevelUpdateInFlight = false;
+let systemDictationLastLevelUpdateAt = 0;
+let systemDictationLastLevelUpdateSkippedCount = 0;
+let systemDictationLastStartAt = 0;
+const SYSTEM_DICTATION_LEVEL_UPDATE_INTERVAL_MS = 120;
+const SYSTEM_DICTATION_START_TOGGLE_GUARD_MS = 650;
+
+function logSystemDictation(message, detail = {}) {
+  try {
+    const payload = {
+      speechState,
+      systemDictationMode,
+      overlayVisible: systemDictationOverlayVisible,
+      capturedSegments: speechCapturedSegments.length,
+      liveStarted: speechLiveTranscriptionStarted,
+      liveChunks: speechLiveTranscriptionChunkCount,
+      ...detail,
+    };
+    console.info('[system-dictation]', message, JSON.stringify(payload), payload);
+  } catch (error) { /* ignore */ }
+}
 
 function setSpeechLevel(level) {
   const normalized = Math.max(0, Math.min(1, Number(level) || 0));
@@ -1952,6 +2009,55 @@ function setSpeechLevel(level) {
   button.style.setProperty('--speech-wave-to-2', (1 + 0.44 * speechMotion).toFixed(3));
   button.style.setProperty('--speech-wave-from-3', (1 - 0.22 * speechMotion).toFixed(3));
   button.style.setProperty('--speech-wave-to-3', (1 + 0.32 * speechMotion).toFixed(3));
+}
+
+function setSystemDictationOverlayVisible(visible) {
+  systemDictationOverlayVisible = !!visible;
+  if (!invoke) return;
+  const action = visible ? 'show' : 'hide';
+  const command = visible ? 'show_system_dictation_window' : 'hide_system_dictation_window';
+  const startedAt = performance.now();
+  logSystemDictation(`overlay ${action} requested`);
+  let settled = false;
+  const timeoutId = window.setTimeout(() => {
+    if (settled) return;
+    logSystemDictation(`overlay ${action} still pending`, { elapsedMs: Math.round(performance.now() - startedAt) });
+  }, 1500);
+  invoke(command)
+    .then(() => {
+      settled = true;
+      window.clearTimeout(timeoutId);
+      logSystemDictation(`overlay ${action} done`, { elapsedMs: Math.round(performance.now() - startedAt) });
+    })
+    .catch((error) => {
+      settled = true;
+      window.clearTimeout(timeoutId);
+      console.warn('[speech-to-text] system dictation window toggle failed', error);
+      logSystemDictation(`overlay ${action} failed`, { elapsedMs: Math.round(performance.now() - startedAt), error: String(error) });
+    });
+}
+
+async function updateSystemDictationOverlayLevel(level) {
+  if (!systemDictationOverlayVisible) return;
+  const now = performance.now();
+  if (now - systemDictationLastLevelUpdateAt < SYSTEM_DICTATION_LEVEL_UPDATE_INTERVAL_MS) {
+    systemDictationLastLevelUpdateSkippedCount += 1;
+    return;
+  }
+  systemDictationLastLevelUpdateAt = now;
+  if (emit) {
+    emit('system-dictation-level', Math.max(0, Math.min(1, Number(level) || 0)));
+    return;
+  }
+  if (!invoke || systemDictationLevelUpdateInFlight) return;
+  systemDictationLevelUpdateInFlight = true;
+  try {
+    await invoke('set_system_dictation_level', { level: Math.max(0, Math.min(1, Number(level) || 0)) });
+  } catch (error) {
+    console.warn('[speech-to-text] system dictation level update failed', error);
+  } finally {
+    systemDictationLevelUpdateInFlight = false;
+  }
 }
 
 function syncSpeechButtonState() {
@@ -2682,7 +2788,39 @@ function buildSpeechTaskRequest(audio) {
 }
 
 async function transcribeSpeechAudio(audio) {
-  return invoke('transcribe_speech', { request: buildSpeechTaskRequest(audio) });
+  const startedAt = performance.now();
+  console.info('[speech-to-text] invoke transcribe_speech start', JSON.stringify({
+    audioBytes: audio.bytes?.length || 0,
+    durationMs: audio.durationMs || 0,
+  }));
+  const requestStartedAt = performance.now();
+  const request = buildSpeechTaskRequest(audio);
+  console.info('[speech-to-text] invoke transcribe_speech request built', JSON.stringify({
+    buildRequestMs: Math.round(performance.now() - requestStartedAt),
+    audioItems: request.audioData.length,
+  }));
+  let timeoutId = null;
+  try {
+    const result = await Promise.race([
+      invoke('transcribe_speech', { request }),
+      new Promise((_, reject) => {
+        timeoutId = window.setTimeout(() => reject(new Error('ASR 调用超时，请稍后重试')), 30000);
+      }),
+    ]);
+    if (timeoutId) window.clearTimeout(timeoutId);
+    console.info('[speech-to-text] invoke transcribe_speech done', JSON.stringify({
+      elapsedMs: Math.round(performance.now() - startedAt),
+      textChars: String(result?.text || '').trim().length,
+    }));
+    return result;
+  } catch (error) {
+    if (timeoutId) window.clearTimeout(timeoutId);
+    console.info('[speech-to-text] invoke transcribe_speech failed', JSON.stringify({
+      elapsedMs: Math.round(performance.now() - startedAt),
+      error: String(error),
+    }));
+    throw error;
+  }
 }
 
 function formatSpeechTimingMs(value) {
@@ -2812,6 +2950,28 @@ async function copySpeechTranscriptToClipboard(text) {
   if (!value) return false;
   await copyTextToClipboard(value);
   return true;
+}
+
+async function pasteDictationTextToFocusedInput(text) {
+  const value = String(text || '').trim();
+  if (!value) return false;
+  const startedAt = performance.now();
+  logSystemDictation('paste requested', { textChars: value.length });
+  if (!invoke) {
+    await copySpeechTranscriptToClipboard(value);
+    logSystemDictation('paste fallback copied without invoke', { elapsedMs: Math.round(performance.now() - startedAt) });
+    return false;
+  }
+  try {
+    await invoke('paste_dictation_text', { text: value });
+    logSystemDictation('paste done', { elapsedMs: Math.round(performance.now() - startedAt) });
+    return true;
+  } catch (error) {
+    await copySpeechTranscriptToClipboard(value);
+    console.warn('[speech-to-text] system paste failed', error);
+    logSystemDictation('paste failed and copied fallback', { elapsedMs: Math.round(performance.now() - startedAt), error: String(error) });
+    return false;
+  }
 }
 
 async function playSpeechTask(id) {
@@ -3068,6 +3228,7 @@ function stopSpeechStream() {
 }
 
 async function startSpeechRecording() {
+  if (systemDictationMode) logSystemDictation('start recording requested');
   if (!currentSettingsFormState.speechToTextEnabled) {
     setErrorStatus('请先在设置中启用语音转文字');
     showToast('请先在设置中启用语音转文字', 'error');
@@ -3092,6 +3253,8 @@ async function startSpeechRecording() {
   try {
     speechCapturedSegments = [];
     resetLiveSpeechTranscription();
+    if (systemDictationMode) void setSystemDictationOverlayVisible(true);
+    if (systemDictationMode) logSystemDictation('opening microphone');
     const deviceId = String(currentSettingsFormState.speechToTextMicrophoneDeviceId || '').trim();
     let stream = null;
     try {
@@ -3142,13 +3305,20 @@ async function startSpeechRecording() {
       for (let index = 0; index < input.length; index += 1) {
         sum += input[index] * input[index];
       }
-      setSpeechLevel(Math.min(1, Math.sqrt(sum / input.length) * 8));
+      const level = Math.min(1, Math.sqrt(sum / input.length) * 8);
+      setSpeechLevel(level);
+      if (systemDictationMode) void updateSystemDictationOverlayLevel(level);
     };
     connectSpeechInputSources(speechAudioContext, speechStream, speechSystemAudioStream);
     speechProcessorNode.connect(speechSilentGainNode);
     speechSilentGainNode.connect(speechAudioContext.destination);
     setSpeechState('recording');
     setStatus('正在录音，再点一次结束');
+    if (systemDictationMode) logSystemDictation('recording started', { sampleRate: speechCaptureSampleRate });
+    if (systemDictationMode && systemDictationStopRequested) {
+      logSystemDictation('pending stop consumed after recording started');
+      window.setTimeout(() => stopSpeechRecording(), 0);
+    }
   } catch (error) {
     if (!isCurrentSpeechSession(sessionId)) return;
     stopSpeechStream();
@@ -3157,15 +3327,23 @@ async function startSpeechRecording() {
     const message = describeSpeechMicError(error);
     setErrorStatus(`启动录音失败：${message}`);
     showToast(`启动录音失败：${message}`, 'error');
+    if (systemDictationMode) void setSystemDictationOverlayVisible(false);
   }
 }
 
 function stopSpeechRecording(options = {}) {
+  if (systemDictationMode) logSystemDictation('stop recording requested', { cancel: !!options.cancel, playCue: !!options.playCue });
   if (speechState === 'recording') {
     if (options.playCue) {
       void playSpeechCueSound('stop');
     }
     speechSessionId += 1;
+    if (options.cancel) {
+      stopSpeechStream();
+      resetLiveSpeechTranscription();
+      setSpeechState('idle');
+      return;
+    }
     void finishSpeechRecording();
     return;
   }
@@ -3173,9 +3351,16 @@ function stopSpeechRecording(options = {}) {
   stopSpeechStream();
   resetLiveSpeechTranscription();
   setSpeechState('idle');
+  if (systemDictationMode) void setSystemDictationOverlayVisible(false);
 }
 
 async function finishSpeechRecording() {
+  const isSystemDictation = systemDictationMode;
+  if (isSystemDictation) logSystemDictation('finish recording entered');
+  systemDictationMode = false;
+  systemDictationAwaitingConfirm = false;
+  systemDictationStartRequested = false;
+  systemDictationStopRequested = false;
   const localStartedAt = performance.now();
   const chunks = speechCapturedSegments.slice();
   speechCapturedSegments = [];
@@ -3183,10 +3368,19 @@ async function finishSpeechRecording() {
   const stopStartedAt = performance.now();
   stopSpeechStream();
   const stopMs = performance.now() - stopStartedAt;
+  if (isSystemDictation) {
+    logSystemDictation('stream stopped', {
+      stopMs: Math.round(stopMs),
+      chunkCount: chunks.length,
+      skippedLevelUpdates: systemDictationLastLevelUpdateSkippedCount,
+    });
+    systemDictationLastLevelUpdateSkippedCount = 0;
+  }
   if (!chunks.length) {
     resetLiveSpeechTranscription();
     setSpeechState('idle');
     setErrorStatus('没有可识别的录音数据');
+    if (isSystemDictation) setSystemDictationOverlayVisible(false);
     return;
   }
   setSpeechState('transcribing');
@@ -3198,6 +3392,13 @@ async function finishSpeechRecording() {
     const buildAudioStartedAt = performance.now();
     const audio = buildCapturedSpeechWav(chunks);
     const buildAudioMs = performance.now() - buildAudioStartedAt;
+    if (isSystemDictation) {
+      logSystemDictation('audio built', {
+        buildAudioMs: Math.round(buildAudioMs),
+        durationMs: audio.durationMs,
+        audioBytes: audio.bytes?.length || 0,
+      });
+    }
     taskId = `speech-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     speechLiveTaskId = taskId;
     const taskBase = {
@@ -3210,12 +3411,19 @@ async function finishSpeechRecording() {
       updatedAtMs: Date.now(),
     };
     pendingSpeechTask = taskBase;
+    if (isSystemDictation) {
+      setSpeechState('idle');
+      setStatus('正在后台识别系统听写...');
+      logSystemDictation('recording UI released before background transcription');
+      void setSystemDictationOverlayVisible(false);
+    }
     let saveTaskMs = 0;
     const saveTaskStartedAt = performance.now();
     if (speechLiveTranscriptionStarted) {
       saveTaskMs = performance.now() - saveTaskStartedAt;
     }
     const transcribeStartedAt = performance.now();
+    if (isSystemDictation) logSystemDictation('transcribe started', { liveStarted: speechLiveTranscriptionStarted });
     let result = null;
     if (!speechLiveTranscriptionStarted && isSpeechAudioLikelySilent(audio)) {
     } else {
@@ -3238,14 +3446,26 @@ async function finishSpeechRecording() {
       }
     }
     const transcribeMs = performance.now() - transcribeStartedAt;
+    if (isSystemDictation) {
+      logSystemDictation('transcribe done', {
+        transcribeMs: Math.round(transcribeMs),
+        textChars: String(result?.text || '').trim().length,
+        chunkCount: result?.chunkCount || 0,
+      });
+    }
     const insertStartedAt = performance.now();
     if (!speechLiveTranscriptionStarted) {
       insertTextIntoComposer(result?.text || '');
     }
     const insertMs = performance.now() - insertStartedAt;
     const copyStartedAt = performance.now();
-    copySpeechTranscriptInBackground(result?.text || '');
+    if (isSystemDictation) {
+      await pasteDictationTextToFocusedInput(result?.text || '');
+    } else {
+      copySpeechTranscriptInBackground(result?.text || '');
+    }
     const copyMs = performance.now() - copyStartedAt;
+    if (isSystemDictation) logSystemDictation('paste step done', { copyMs: Math.round(copyMs) });
     const updateTaskStartedAt = performance.now();
     if (speechLiveTranscriptionStarted) {
       saveSpeechTaskInBackground({
@@ -3277,10 +3497,13 @@ async function finishSpeechRecording() {
       insertMs,
       copyMs,
     };
-    setSpeechState('idle');
-    setSuccessStatus('语音识别完成');
+    if (!isSystemDictation) setSpeechState('idle');
+    setSuccessStatus(isSystemDictation ? '系统听写识别完成' : '语音识别完成');
     reportSpeechLocalTiming(localTiming, result?.timing, speechLiveTranscriptionStarted ? 'session' : 'short');
     resetLiveSpeechTranscription();
+    if (isSystemDictation && systemDictationOverlayVisible) {
+      setSystemDictationOverlayVisible(false);
+    }
   } catch (error) {
     if (taskId && pendingSpeechTask) {
       saveSpeechTaskInBackground({ ...pendingSpeechTask, status: 'failed', error: String(error), updatedAtMs: Date.now() }, '保存失败任务');
@@ -3288,12 +3511,17 @@ async function finishSpeechRecording() {
       updateSpeechTaskInBackground(taskId, { status: 'failed', error: String(error) }, '更新失败任务');
     }
     resetLiveSpeechTranscription();
-    setSpeechState('idle');
+    if (!isSystemDictation || speechState === 'transcribing') setSpeechState('idle');
     setErrorStatus(`语音识别失败：${error}`);
+    if (isSystemDictation) logSystemDictation('finish failed', { error: String(error) });
+    if (isSystemDictation && systemDictationOverlayVisible) {
+      setSystemDictationOverlayVisible(false);
+    }
   }
 }
 
 function toggleSpeechRecording() {
+  systemDictationMode = false;
   if (speechState === 'recording' || speechState === 'preparing') {
     void playSpeechCueSound('stop');
     stopSpeechRecording();
@@ -3301,6 +3529,53 @@ function toggleSpeechRecording() {
     void playSpeechCueSound('start');
     void startSpeechRecording();
   }
+}
+
+function finishSystemDictationRecording(confirmed) {
+  logSystemDictation('overlay action received', { confirmed: !!confirmed });
+  if (!systemDictationMode) return;
+  if (!confirmed) {
+    systemDictationMode = false;
+    systemDictationStartRequested = false;
+    systemDictationStopRequested = false;
+    systemDictationAwaitingConfirm = false;
+    stopSpeechRecording({ cancel: true });
+    void setSystemDictationOverlayVisible(false);
+    return;
+  }
+  systemDictationAwaitingConfirm = true;
+  stopSpeechRecording();
+}
+
+function toggleSystemDictationRecording() {
+  logSystemDictation('toggle event received', { enabled: !!currentSettingsFormState.systemDictationEnabled });
+  if (!currentSettingsFormState.systemDictationEnabled) return;
+  if (speechState === 'preparing') {
+    systemDictationMode = true;
+    if (performance.now() - systemDictationLastStartAt < SYSTEM_DICTATION_START_TOGGLE_GUARD_MS) {
+      logSystemDictation('toggle ignored during start guard');
+      return;
+    }
+    systemDictationStopRequested = true;
+    logSystemDictation('toggle deferred until recording starts');
+    return;
+  }
+  if (speechState === 'recording') {
+    systemDictationMode = true;
+    systemDictationStopRequested = true;
+    stopSpeechRecording();
+    return;
+  }
+  if (speechState === 'idle') {
+    systemDictationMode = true;
+    systemDictationStartRequested = true;
+    systemDictationStopRequested = false;
+    systemDictationAwaitingConfirm = false;
+    systemDictationLastStartAt = performance.now();
+    void startSpeechRecording();
+    return;
+  }
+  logSystemDictation('toggle ignored because speech is busy');
 }
 
 function isImagePath(path) {
@@ -10024,8 +10299,8 @@ function applySettings(settings) {
   if (speechToTextMicrophoneInput) speechToTextMicrophoneInput.value = speechToText.microphone_device_id || '';
   if (speechToTextCaptureSystemAudioInput) speechToTextCaptureSystemAudioInput.checked = !!speechToText.capture_system_audio;
   if (speechToTextSystemAudioDeviceInput) speechToTextSystemAudioDeviceInput.value = speechToText.system_audio_device_id || '';
-  if (speechToTextShortcutEnabledInput) speechToTextShortcutEnabledInput.checked = !!speechToText.shortcut_enabled;
-  if (speechToTextShortcutInput) speechToTextShortcutInput.value = (speechToText.shortcut || DEFAULT_SPEECH_TO_TEXT_SHORTCUT).toLowerCase();
+  if (systemDictationEnabledInput) systemDictationEnabledInput.checked = !!speechToText.system_dictation_enabled;
+  if (systemDictationShortcutInput) systemDictationShortcutInput.value = (speechToText.system_dictation_shortcut || DEFAULT_SYSTEM_DICTATION_SHORTCUT).toLowerCase();
   if (speechToTextTaskRetentionInput) speechToTextTaskRetentionInput.value = Number(speechToText.task_retention_count || 14);
   if (speechToTextCueSoundEnabledInput) speechToTextCueSoundEnabledInput.checked = speechToText.cue_sound_enabled !== false;
   if (speechToTextCueSoundKindInput) speechToTextCueSoundKindInput.value = normalizeSpeechCueSoundKind(speechToText.cue_sound_kind || DEFAULT_SPEECH_CUE_SOUND_KIND);
@@ -10071,8 +10346,8 @@ function applySettings(settings) {
     speechToTextMicrophoneDeviceId: speechToText.microphone_device_id || '',
     speechToTextCaptureSystemAudio: !!speechToText.capture_system_audio,
     speechToTextSystemAudioDeviceId: speechToText.system_audio_device_id || '',
-    speechToTextShortcutEnabled: !!speechToText.shortcut_enabled,
-    speechToTextShortcut: (speechToText.shortcut || DEFAULT_SPEECH_TO_TEXT_SHORTCUT).toLowerCase(),
+    systemDictationEnabled: !!speechToText.system_dictation_enabled,
+    systemDictationShortcut: (speechToText.system_dictation_shortcut || DEFAULT_SYSTEM_DICTATION_SHORTCUT).toLowerCase(),
     speechToTextTaskRetentionCount: Number(speechToText.task_retention_count || 14),
     speechToTextCueSoundEnabled: speechToText.cue_sound_enabled !== false,
     speechToTextCueSoundKind: normalizeSpeechCueSoundKind(speechToText.cue_sound_kind || DEFAULT_SPEECH_CUE_SOUND_KIND),
@@ -10204,9 +10479,9 @@ async function saveSettings(options = {}) {
   const speechToTextMicrophoneDeviceId = (currentSettingsFormState.speechToTextMicrophoneDeviceId || '').trim();
   const speechToTextCaptureSystemAudio = !!currentSettingsFormState.speechToTextCaptureSystemAudio;
   const speechToTextSystemAudioDeviceId = (currentSettingsFormState.speechToTextSystemAudioDeviceId || '').trim();
-  const speechToTextShortcutEnabled = !!currentSettingsFormState.speechToTextShortcutEnabled;
-  const normalizedSpeechShortcut = normalizeSpeechHotkey(
-    currentSettingsFormState.speechToTextShortcut || DEFAULT_SPEECH_TO_TEXT_SHORTCUT,
+  const systemDictationEnabled = !!currentSettingsFormState.systemDictationEnabled;
+  const normalizedSystemDictationShortcut = normalizeSpeechHotkey(
+    currentSettingsFormState.systemDictationShortcut || DEFAULT_SYSTEM_DICTATION_SHORTCUT,
   );
   const speechToTextCueSoundEnabled = !!currentSettingsFormState.speechToTextCueSoundEnabled;
   const speechToTextCueSoundKind = normalizeSpeechCueSoundKind(currentSettingsFormState.speechToTextCueSoundKind || DEFAULT_SPEECH_CUE_SOUND_KIND);
@@ -10227,8 +10502,12 @@ async function saveSettings(options = {}) {
     setErrorStatus('语音转文字接口地址无效，需要使用 Agent Plan ASR WebSocket 地址');
     return;
   }
-  if (speechToTextShortcutEnabled && !normalizedSpeechShortcut) {
-    setErrorStatus('语音录制快捷键格式无效，可填写 right-alt、left-alt 或 Alt+R');
+  if (systemDictationEnabled && !normalizedSystemDictationShortcut) {
+    setErrorStatus('系统听写快捷键格式无效，可填写 right-alt、left-alt 或 Alt+D');
+    return;
+  }
+  if (systemDictationEnabled && globalHotkeyEnabled && normalizedSystemDictationShortcut === normalizedGlobalHotkey) {
+    setErrorStatus('系统听写快捷键不能和显示窗口快捷键相同');
     return;
   }
   const telegramBotToken = (currentSettingsFormState.telegramBotToken || '').trim();
@@ -10384,8 +10663,10 @@ async function saveSettings(options = {}) {
       microphone_device_id: speechToTextMicrophoneDeviceId,
       capture_system_audio: speechToTextCaptureSystemAudio,
       system_audio_device_id: speechToTextSystemAudioDeviceId,
-      shortcut_enabled: speechToTextShortcutEnabled,
-      shortcut: normalizedSpeechShortcut || DEFAULT_SPEECH_TO_TEXT_SHORTCUT,
+      shortcut_enabled: false,
+      shortcut: 'right-alt',
+      system_dictation_enabled: systemDictationEnabled,
+      system_dictation_shortcut: normalizedSystemDictationShortcut || DEFAULT_SYSTEM_DICTATION_SHORTCUT,
       max_duration_secs: speechToTextMaxDurationSecs,
       task_retention_count: speechToTextTaskRetentionCount,
       cue_sound_enabled: speechToTextCueSoundEnabled,
@@ -11591,8 +11872,14 @@ if (listen) {
     syncVueSettingsAutoBackup(currentAutoBackupStatusState);
   });
 
-  listen('speech-to-text-toggle', () => {
-    toggleSpeechRecording();
+  listen('system-dictation-toggle', () => {
+    toggleSystemDictationRecording();
+  });
+  listen('system-dictation-confirm', () => {
+    finishSystemDictationRecording(true);
+  });
+  listen('system-dictation-cancel', () => {
+    finishSystemDictationRecording(false);
   });
 
 }
@@ -11648,8 +11935,6 @@ if (transferClearButton) {
   transferClearButton.addEventListener('click', clearCurrentTransferList);
 }
 sendTextButton.addEventListener('click', sendText);
-window.addEventListener('keydown', handleSpeechSideAltKeydown, true);
-window.addEventListener('keyup', handleSpeechSideAltKeyup, true);
 document.addEventListener('click', (event) => {
   if (event.target?.closest?.('#speech-to-text-toggle')) {
     toggleSpeechRecording();
@@ -11690,14 +11975,20 @@ if (speechToTextSystemAudioDeviceInput) {
     syncVueSettingsForm(currentSettingsFormState);
   });
 }
-if (speechToTextShortcutInput) {
-  speechToTextShortcutInput.addEventListener('input', () => {
-    activeSideAltSpeechKey = '';
-  });
+if (systemDictationShortcutInput) {
+  systemDictationShortcutInput.addEventListener('focus', () => setSystemDictationShortcutCapture(true));
+  systemDictationShortcutInput.addEventListener('click', () => setSystemDictationShortcutCapture(true));
+  systemDictationShortcutInput.addEventListener('mousedown', () => setSystemDictationShortcutCapture(true));
+  systemDictationShortcutInput.addEventListener('keydown', handleSystemDictationShortcutCapture);
+  systemDictationShortcutInput.addEventListener('blur', () => setSystemDictationShortcutCapture(false));
 }
-if (speechToTextShortcutEnabledInput) {
-  speechToTextShortcutEnabledInput.addEventListener('change', () => {
-    activeSideAltSpeechKey = '';
+if (systemDictationEnabledInput) {
+  systemDictationEnabledInput.addEventListener('change', (event) => {
+    currentSettingsFormState = {
+      ...currentSettingsFormState,
+      systemDictationEnabled: !!event.target.checked,
+    };
+    syncVueSettingsForm(currentSettingsFormState);
   });
 }
 if (speechToTextTaskRetentionInput) {

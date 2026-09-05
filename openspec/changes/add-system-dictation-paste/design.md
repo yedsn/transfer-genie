@@ -21,7 +21,7 @@ The app already has speech-to-text recording, ASR transcription, task history, e
 
 ## Decisions
 
-- Decision: Add a separate global dictation shortcut instead of reusing the main window shortcut.
+- Decision: Add a dedicated system dictation shortcut instead of adding another shortcut for ordinary in-window speech recording.
   - Rationale: The existing global shortcut controls window visibility. Dictation has different focus behavior and must not show or focus the main window when recording starts.
   - Alternative considered: Reuse the existing global shortcut with mode switching. That would make the shortcut harder to reason about and risks toggling the window during dictation.
 
@@ -65,5 +65,6 @@ The app already has speech-to-text recording, ASR transcription, task history, e
 
 - Existing speech-to-text settings continue to load unchanged.
 - Existing main window global shortcut behavior remains unchanged.
-- New dictation settings default to disabled unless the existing speech shortcut setting can be safely migrated without conflicting with the window shortcut.
+- Ordinary in-window speech recording remains button-driven; its separate shortcut setting is removed from the settings UI and no longer registered.
+- New dictation settings default to disabled and accept either a normal shortcut combination or side-specific Alt values such as `right-alt` and `left-alt`.
 - If shortcut registration fails, keep the previous working configuration and surface the registration error to the user.

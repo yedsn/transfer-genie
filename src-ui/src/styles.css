@@ -2650,10 +2650,16 @@ label {
 }
 
 input {
-  border-radius: 10px;
+  border-radius: 8px;
   border: 1px solid var(--border);
   padding: 10px 12px;
   font-family: inherit;
+}
+
+input.is-capturing-shortcut {
+  border-color: var(--accent);
+  color: var(--accent);
+  outline: 2px solid color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
 .settings-body {

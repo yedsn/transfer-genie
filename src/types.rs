@@ -122,6 +122,14 @@ pub fn default_speech_to_text_shortcut() -> String {
     "right-alt".to_string()
 }
 
+pub fn default_system_dictation_enabled() -> bool {
+    false
+}
+
+pub fn default_system_dictation_shortcut() -> String {
+    "alt+d".to_string()
+}
+
 pub fn default_speech_to_text_max_duration_secs() -> u64 {
     60
 }
@@ -686,6 +694,10 @@ pub struct SpeechToTextSettings {
     pub shortcut_enabled: bool,
     #[serde(default = "default_speech_to_text_shortcut")]
     pub shortcut: String,
+    #[serde(default = "default_system_dictation_enabled")]
+    pub system_dictation_enabled: bool,
+    #[serde(default = "default_system_dictation_shortcut")]
+    pub system_dictation_shortcut: String,
     #[serde(default = "default_speech_to_text_max_duration_secs")]
     pub max_duration_secs: u64,
     #[serde(default = "default_speech_to_text_task_retention_count")]
@@ -712,6 +724,8 @@ impl Default for SpeechToTextSettings {
             endpoint: default_speech_to_text_endpoint(),
             shortcut_enabled: default_speech_to_text_shortcut_enabled(),
             shortcut: default_speech_to_text_shortcut(),
+            system_dictation_enabled: default_system_dictation_enabled(),
+            system_dictation_shortcut: default_system_dictation_shortcut(),
             max_duration_secs: default_speech_to_text_max_duration_secs(),
             task_retention_count: default_speech_to_text_task_retention_count(),
             cue_sound_enabled: default_speech_to_text_cue_sound_enabled(),

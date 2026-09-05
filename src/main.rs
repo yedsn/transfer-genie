@@ -67,7 +67,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::Window;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 #[cfg(desktop)]
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 use tauri_plugin_log::{Target, TargetKind};
@@ -79,6 +79,10 @@ use tokio::sync::{oneshot, watch, Mutex as AsyncMutex};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+#[cfg(target_os = "windows")]
+static SYSTEM_DICTATION_SIDE_ALT_MONITOR_STARTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 struct AppState {
     settings_path: PathBuf,
@@ -92,7 +96,7 @@ struct AppState {
     sync_loop_signal: watch::Sender<u64>,
     http: Client,
     registered_hotkey: Mutex<Option<Shortcut>>,
-    registered_speech_hotkey: Mutex<Option<Shortcut>>,
+    registered_system_dictation_hotkey: Mutex<Option<Shortcut>>,
     telegram_bridge: Mutex<TelegramBridgeManager>,
     local_http_api: Mutex<LocalHttpApiManager>,
     update_guard: AsyncMutex<()>,
@@ -222,6 +226,7 @@ const LOCAL_HTTP_API_ROUTE: &str = "/api/send-file";
 const LOCAL_HTTP_TEXT_API_ROUTE: &str = "/api/send-text";
 const APP_UPDATE_EVENT: &str = "app-update-event";
 const TRAY_CHECK_UPDATE_EVENT: &str = "tray-check-update";
+const SYSTEM_DICTATION_WINDOW_LABEL: &str = "system-dictation";
 const DEFAULT_UPDATER_ENDPOINT: &str =
     "https://github.com/OWNER/REPO/releases/latest/download/latest.json";
 const DEFAULT_UPDATER_PUBKEY: &str = "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY";
@@ -1667,8 +1672,349 @@ async fn transcribe_speech(
     state: State<'_, AppState>,
     request: SpeechToTextRequest,
 ) -> Result<SpeechToTextResult, String> {
+    eprintln!(
+        "[speech-to-text] command entered audio_bytes={} sample_rate={} channels={} bits={}",
+        request.audio_data.len(),
+        request.sample_rate.unwrap_or(0),
+        request.channels.unwrap_or(0),
+        request.bits_per_sample.unwrap_or(0),
+    );
     let settings = current_settings(&state)?;
     transcribe_speech_impl(&settings, request).await
+}
+
+#[tauri::command]
+fn paste_dictation_text(text: String) -> Result<(), String> {
+    let value = text.trim().to_string();
+    if value.is_empty() {
+        eprintln!("[system-dictation] paste skipped: empty text");
+        return Ok(());
+    }
+    eprintln!("[system-dictation] paste command received: text_chars={}", value.chars().count());
+    write_system_clipboard(&value)?;
+    eprintln!("[system-dictation] clipboard write done");
+    dispatch_system_paste_shortcut()
+}
+
+fn write_system_clipboard(text: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        write_windows_clipboard(text)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut child = std::process::Command::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|err| format!("写入剪贴板失败: {err}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(text.as_bytes())
+                .map_err(|err| format!("写入剪贴板内容失败: {err}"))?;
+        }
+        let output = child
+            .wait_with_output()
+            .map_err(|err| format!("等待剪贴板写入失败: {err}"))?;
+        if !output.status.success() {
+            return Err("写入剪贴板失败".to_string());
+        }
+        Ok(())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "command -v wl-copy >/dev/null 2>&1 && wl-copy || xclip -selection clipboard"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|err| format!("写入剪贴板失败: {err}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(text.as_bytes())
+                .map_err(|err| format!("写入剪贴板内容失败: {err}"))?;
+        }
+        let output = child
+            .wait_with_output()
+            .map_err(|err| format!("等待剪贴板写入失败: {err}"))?;
+        if !output.status.success() {
+            return Err("写入剪贴板失败，需要 wl-copy 或 xclip".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn write_windows_clipboard(text: &str) -> Result<(), String> {
+    use std::ptr::{copy_nonoverlapping, null_mut};
+    use windows_sys::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
+
+    let mut wide: Vec<u16> = text.encode_utf16().collect();
+    wide.push(0);
+    let byte_len = wide.len() * std::mem::size_of::<u16>();
+
+    unsafe {
+        if OpenClipboard(null_mut()) == 0 {
+            return Err("打开剪贴板失败".to_string());
+        }
+        let clipboard_guard = ClipboardCloseGuard;
+        if EmptyClipboard() == 0 {
+            return Err("清空剪贴板失败".to_string());
+        }
+        let handle = GlobalAlloc(GMEM_MOVEABLE, byte_len);
+        if handle.is_null() {
+            return Err("分配剪贴板内存失败".to_string());
+        }
+        let locked = GlobalLock(handle) as *mut u8;
+        if locked.is_null() {
+            return Err("锁定剪贴板内存失败".to_string());
+        }
+        copy_nonoverlapping(wide.as_ptr() as *const u8, locked, byte_len);
+        GlobalUnlock(handle);
+        if SetClipboardData(CF_UNICODETEXT.into(), handle).is_null() {
+            return Err("写入剪贴板失败".to_string());
+        }
+        std::mem::forget(clipboard_guard);
+        let _ = CloseClipboard();
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+struct ClipboardCloseGuard;
+
+#[cfg(target_os = "windows")]
+impl Drop for ClipboardCloseGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows_sys::Win32::System::DataExchange::CloseClipboard();
+        }
+    }
+}
+
+fn dispatch_system_paste_shortcut() -> Result<(), String> {
+    std::thread::sleep(Duration::from_millis(90));
+    #[cfg(target_os = "windows")]
+    {
+        dispatch_windows_paste_shortcut()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("osascript")
+            .args(["-e", "tell application \"System Events\" to keystroke \"v\" using command down"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .map_err(|err| format!("触发粘贴失败: {err}"))?;
+        if !output.status.success() {
+            return Err("触发粘贴失败，请检查辅助功能权限".to_string());
+        }
+        Ok(())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let output = std::process::Command::new("xdotool")
+            .args(["key", "ctrl+v"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .map_err(|err| format!("触发粘贴失败，需要 xdotool: {err}"))?;
+        if !output.status.success() {
+            return Err("触发粘贴失败，需要 xdotool".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn dispatch_windows_paste_shortcut() -> Result<(), String> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+        VK_CONTROL, VK_V,
+    };
+
+    if !windows_has_text_input_focus() {
+        eprintln!("[system-dictation] paste shortcut skipped: no text input focus");
+        return Ok(());
+    }
+    eprintln!("[system-dictation] paste shortcut dispatching: ctrl+v");
+
+    fn keyboard_input(vk: VIRTUAL_KEY, flags: u32) -> INPUT {
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: 0,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    }
+
+    let inputs = [
+        keyboard_input(VK_CONTROL, 0),
+        keyboard_input(VK_V, 0),
+        keyboard_input(VK_V, KEYEVENTF_KEYUP),
+        keyboard_input(VK_CONTROL, KEYEVENTF_KEYUP),
+    ];
+    let sent = unsafe {
+        SendInput(
+            inputs.len() as u32,
+            inputs.as_ptr(),
+            std::mem::size_of::<INPUT>() as i32,
+        )
+    };
+    if sent != inputs.len() as u32 {
+        return Err("触发粘贴失败".to_string());
+    }
+    eprintln!("[system-dictation] paste shortcut dispatched: inputs={sent}");
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_has_text_input_focus() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO,
+    };
+
+    unsafe {
+        let foreground = GetForegroundWindow();
+        if foreground.is_null() {
+            eprintln!("[system-dictation] input focus check: no foreground window");
+            return false;
+        }
+        let thread_id = GetWindowThreadProcessId(foreground, std::ptr::null_mut());
+        if thread_id == 0 {
+            eprintln!("[system-dictation] input focus check: no foreground thread");
+            return false;
+        }
+        let mut info = GUITHREADINFO::default();
+        info.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+        if GetGUIThreadInfo(thread_id, &mut info) == 0 {
+            eprintln!("[system-dictation] input focus check: GetGUIThreadInfo failed");
+            return false;
+        }
+        let has_focus = !info.hwndCaret.is_null();
+        eprintln!("[system-dictation] input focus check: has_caret={has_focus}");
+        has_focus
+    }
+}
+
+#[tauri::command]
+fn show_system_dictation_window(app: AppHandle) -> Result<(), String> {
+    eprintln!("[system-dictation] show window command received");
+    let app_for_task = app.clone();
+    app.run_on_main_thread(move || {
+        if let Err(err) = show_system_dictation_window_impl(&app_for_task) {
+            eprintln!("[system-dictation] show window failed: {err}");
+        }
+    })
+    .map_err(|err| format!("调度系统听写窗口显示失败: {err}"))
+}
+
+#[tauri::command]
+fn hide_system_dictation_window(app: AppHandle) -> Result<(), String> {
+    eprintln!("[system-dictation] hide window command received");
+    let app_for_task = app.clone();
+    app.run_on_main_thread(move || {
+        hide_system_dictation_window_impl(&app_for_task);
+    })
+    .map_err(|err| format!("调度系统听写窗口隐藏失败: {err}"))
+}
+
+#[tauri::command]
+fn set_system_dictation_level(app: AppHandle, level: f64) {
+    emit_system_dictation_overlay_level(&app, level);
+}
+
+#[tauri::command]
+fn system_dictation_action(app: AppHandle, action: String) -> Result<(), String> {
+    let normalized = action.trim().to_lowercase();
+    match normalized.as_str() {
+        "confirm" => {
+            let _ = app.emit("system-dictation-confirm", ());
+            Ok(())
+        }
+        "cancel" => {
+            let _ = app.emit("system-dictation-cancel", ());
+            Ok(())
+        }
+        _ => Err("无效的系统听写操作".to_string()),
+    }
+}
+
+fn system_dictation_window_url() -> WebviewUrl {
+    WebviewUrl::App("system-dictation.html".into())
+}
+
+fn ensure_system_dictation_window_impl(app: &AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(SYSTEM_DICTATION_WINDOW_LABEL) {
+        eprintln!("[system-dictation] ensure window existing");
+        let _ = window.set_focusable(false);
+        let _ = window.set_always_on_top(true);
+        let _ = window.set_skip_taskbar(true);
+        return Ok(());
+    }
+
+    eprintln!("[system-dictation] ensure window building");
+    let window = WebviewWindowBuilder::new(
+        app,
+        SYSTEM_DICTATION_WINDOW_LABEL,
+        system_dictation_window_url(),
+    )
+    .title("Transfer Genie")
+    .inner_size(420.0, 120.0)
+    .resizable(false)
+    .decorations(false)
+    .transparent(true)
+    .skip_taskbar(true)
+    .always_on_top(true)
+    .focusable(false)
+    .visible(false)
+    .build()
+    .map_err(|err| format!("创建系统听写窗口失败: {err}"))?;
+
+    let _ = window.set_focusable(false);
+    let _ = window.set_always_on_top(true);
+    let _ = window.set_skip_taskbar(true);
+    eprintln!("[system-dictation] ensure window built");
+    Ok(())
+}
+
+fn show_system_dictation_window_impl(app: &AppHandle) -> Result<(), String> {
+    eprintln!("[system-dictation] show window start");
+    ensure_system_dictation_window_impl(app)?;
+    if let Some(window) = app.get_webview_window(SYSTEM_DICTATION_WINDOW_LABEL) {
+        let _ = window.show();
+        let _ = window.set_focusable(false);
+        let _ = window.set_always_on_top(true);
+        let _ = window.set_skip_taskbar(true);
+    }
+    eprintln!("[system-dictation] show window done");
+    Ok(())
+}
+
+fn hide_system_dictation_window_impl(app: &AppHandle) {
+    eprintln!("[system-dictation] hide window start");
+    if let Some(window) = app.get_webview_window(SYSTEM_DICTATION_WINDOW_LABEL) {
+        let _ = window.hide();
+    }
+    eprintln!("[system-dictation] hide window done");
+}
+
+fn emit_system_dictation_overlay_level(app: &AppHandle, level: f64) {
+    if let Some(window) = app.get_webview_window(SYSTEM_DICTATION_WINDOW_LABEL) {
+        let _ = window.emit("system-dictation-level", level);
+    }
 }
 
 #[tauri::command]
@@ -5763,7 +6109,7 @@ fn normalize_speech_hotkey(raw: &str) -> Option<String> {
     normalize_global_hotkey(raw)
 }
 
-fn is_side_alt_speech_hotkey(raw: &str) -> bool {
+fn is_side_alt_hotkey(raw: &str) -> bool {
     matches!(
         normalize_speech_hotkey(raw).as_deref(),
         Some("right-alt" | "left-alt")
@@ -5922,6 +6268,20 @@ fn normalize_settings(
     } else {
         settings.global_hotkey =
             normalized_hotkey.unwrap_or_else(|| DEFAULT_GLOBAL_HOTKEY.to_string());
+    }
+    let normalized_system_dictation_hotkey =
+        normalize_speech_hotkey(&settings.speech_to_text.system_dictation_shortcut);
+    if settings.speech_to_text.system_dictation_enabled {
+        let Some(hotkey) = normalized_system_dictation_hotkey else {
+            return Err("系统听写快捷键格式无效，可填写 right-alt、left-alt 或 Alt+D".to_string());
+        };
+        if settings.global_hotkey_enabled && hotkey == settings.global_hotkey {
+            return Err("系统听写快捷键不能和显示窗口快捷键相同".to_string());
+        }
+        settings.speech_to_text.system_dictation_shortcut = hotkey;
+    } else {
+        settings.speech_to_text.system_dictation_shortcut = normalized_system_dictation_hotkey
+            .unwrap_or_else(crate::types::default_system_dictation_shortcut);
     }
     let hotkey_raw = settings.send_hotkey.trim().to_lowercase();
     settings.send_hotkey = match hotkey_raw.as_str() {
@@ -6819,7 +7179,21 @@ async fn transcribe_speech_impl(
     let mut log_id = response_log_id;
     let wait_result_started_at = std::time::Instant::now();
     let mut response_frame_count = 0_u64;
-    while let Some(message) = websocket.next().await {
+    let asr_wait_timeout = Duration::from_secs(25);
+    loop {
+        let message = match tokio::time::timeout(asr_wait_timeout, websocket.next()).await {
+            Ok(Some(message)) => message,
+            Ok(None) => break,
+            Err(_) => {
+                eprintln!(
+                    "[speech-to-text] wait result timeout connect_id={} response_frames={} wait_result_ms={}",
+                    connect_id,
+                    response_frame_count,
+                    wait_result_started_at.elapsed().as_millis(),
+                );
+                return Err("ASR 等待结果超时，请稍后重试".to_string());
+            }
+        };
         let message = message.map_err(|err| {
             sanitize_speech_error(format!("读取 ASR 响应失败: {err}"), &speech_config)
         })?;
@@ -7071,16 +7445,8 @@ fn normalize_speech_to_text_settings(settings: &mut SpeechToTextSettings) -> Res
             return Err("启用语音转文字前请先填写 Resource ID".to_string());
         }
     }
-    let normalized_shortcut = normalize_speech_hotkey(&settings.shortcut);
-    if settings.shortcut_enabled {
-        let Some(shortcut) = normalized_shortcut else {
-            return Err("语音录制快捷键格式无效，可填写 right-alt、left-alt 或 Alt+R".to_string());
-        };
-        settings.shortcut = shortcut;
-    } else {
-        settings.shortcut =
-            normalized_shortcut.unwrap_or_else(crate::types::default_speech_to_text_shortcut);
-    }
+    settings.shortcut_enabled = false;
+    settings.shortcut = crate::types::default_speech_to_text_shortcut();
     if settings.max_duration_secs == 0 {
         settings.max_duration_secs = crate::types::default_speech_to_text_max_duration_secs();
     }
@@ -7983,9 +8349,9 @@ fn spawn_telegram_bridge_process(
     let child = Command::new(&current_exe)
         .arg(TELEGRAM_BRIDGE_ARG)
         .arg(runtime_config_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
         .map_err(|err| format!("启动 Telegram bridge 失败: {err}"))?;
 
@@ -9462,40 +9828,38 @@ fn update_global_hotkey_registration(
 }
 
 #[cfg(desktop)]
-fn update_speech_hotkey_registration(
+fn update_system_dictation_hotkey_registration(
     app: &AppHandle,
     state: &AppState,
     settings: &Settings,
 ) -> Result<(), String> {
     let mut current = state
-        .registered_speech_hotkey
+        .registered_system_dictation_hotkey
         .lock()
-        .map_err(|_| "更新语音录制快捷键失败".to_string())?;
+        .map_err(|_| "更新系统听写快捷键失败".to_string())?;
     let manager = app.global_shortcut();
 
     if let Some(active) = current.clone() {
         if manager.is_registered(active.clone()) {
             manager
                 .unregister(active)
-                .map_err(|err| format!("注销语音录制快捷键失败: {err}"))?;
+                .map_err(|err| format!("注销系统听写快捷键失败: {err}"))?;
         }
     }
 
-    if settings.speech_to_text.shortcut_enabled {
-        let hotkey =
-            normalize_speech_hotkey(&settings.speech_to_text.shortcut).ok_or_else(|| {
-                "语音录制快捷键格式无效，可填写 right-alt、left-alt 或 Alt+R".to_string()
-            })?;
-        if is_side_alt_speech_hotkey(&hotkey) {
+    if settings.speech_to_text.system_dictation_enabled {
+        let hotkey = normalize_speech_hotkey(&settings.speech_to_text.system_dictation_shortcut)
+            .ok_or_else(|| "系统听写快捷键格式无效，可填写 right-alt、left-alt 或 Alt+D".to_string())?;
+        if is_side_alt_hotkey(&hotkey) {
             *current = None;
             return Ok(());
         }
         let shortcut = hotkey
             .parse::<Shortcut>()
-            .map_err(|err| format!("语音录制快捷键解析失败: {err}"))?;
+            .map_err(|err| format!("系统听写快捷键解析失败: {err}"))?;
         manager
             .register(shortcut.clone())
-            .map_err(|err| format!("注册语音录制快捷键失败: {err}"))?;
+            .map_err(|err| format!("注册系统听写快捷键失败: {err}"))?;
         *current = Some(shortcut);
     } else {
         *current = None;
@@ -9511,7 +9875,66 @@ fn update_hotkey_registrations(
     settings: &Settings,
 ) -> Result<(), String> {
     update_global_hotkey_registration(app, state, settings)?;
-    update_speech_hotkey_registration(app, state, settings)
+    update_system_dictation_hotkey_registration(app, state, settings)
+}
+
+#[cfg(target_os = "windows")]
+fn start_system_dictation_side_alt_monitor(app: AppHandle) {
+    use std::sync::atomic::Ordering;
+
+    if SYSTEM_DICTATION_SIDE_ALT_MONITOR_STARTED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        eprintln!("[system-dictation] side-alt monitor already started");
+        return;
+    }
+
+    eprintln!("[system-dictation] side-alt monitor started");
+
+    std::thread::spawn(move || {
+        let mut was_pressed = false;
+        loop {
+            let configured_key = app
+                .try_state::<AppState>()
+                .and_then(|state| {
+                    state.settings.lock().ok().and_then(|settings| {
+                        if !settings.speech_to_text.system_dictation_enabled {
+                            return None;
+                        }
+                        match normalize_speech_hotkey(
+                            &settings.speech_to_text.system_dictation_shortcut,
+                        )
+                        .as_deref()
+                        {
+                            Some("right-alt") => Some(0xA5),
+                            Some("left-alt") => Some(0xA4),
+                            _ => None,
+                        }
+                    })
+                });
+
+            let is_pressed = configured_key
+                .map(|key| unsafe {
+                    windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(key) < 0
+                })
+                .unwrap_or(false);
+
+            if is_pressed && !was_pressed {
+                eprintln!("[system-dictation] side-alt pressed: emitting toggle");
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.emit("system-dictation-toggle", ());
+                } else {
+                    eprintln!("[system-dictation] side-alt pressed: main window not found");
+                }
+            }
+            if !is_pressed && was_pressed {
+                eprintln!("[system-dictation] side-alt released");
+            }
+            was_pressed = is_pressed;
+            std::thread::sleep(Duration::from_millis(35));
+        }
+    });
 }
 
 #[cfg(target_os = "macos")]
@@ -9611,7 +10034,7 @@ fn main() {
                     .build()
                     .map_err(|err| format!("创建 HTTP 客户端失败: {err}"))?,
                 registered_hotkey: Mutex::new(None),
-                registered_speech_hotkey: Mutex::new(None),
+                registered_system_dictation_hotkey: Mutex::new(None),
                 telegram_bridge: Mutex::new(TelegramBridgeManager::default()),
                 local_http_api: Mutex::new(LocalHttpApiManager::default()),
                 update_guard: AsyncMutex::new(()),
@@ -9752,34 +10175,37 @@ fn main() {
                                 toggle_main_window(app);
                                 return;
                             }
-                            let speech_shortcut = state
-                                .registered_speech_hotkey
+                            let system_dictation_shortcut = state
+                                .registered_system_dictation_hotkey
                                 .lock()
                                 .ok()
                                 .and_then(|active| active.clone());
-                            if speech_shortcut
+                            if system_dictation_shortcut
                                 .as_ref()
                                 .is_some_and(|current| *shortcut == *current)
                             {
                                 if let Some(window) = app.get_webview_window("main") {
-                                    let _ = window.emit("speech-to-text-toggle", ());
+                                    let _ = window.emit("system-dictation-toggle", ());
                                 }
                             }
                         })
                         .build(),
                 )?;
 
+                #[cfg(target_os = "windows")]
+                start_system_dictation_side_alt_monitor(app.handle().clone());
+
                 {
-                    let state = app.state::<AppState>();
-                    let settings = match state.settings.lock() {
-                        Ok(guard) => guard.clone(),
-                        Err(_) => return Ok(()),
-                    };
-                    if let Err(err) = update_hotkey_registrations(&app.handle(), &state, &settings)
-                    {
-                        eprintln!("注册全局快捷键失败: {err}");
-                    }
+                let state = app.state::<AppState>();
+                let settings = match state.settings.lock() {
+                    Ok(guard) => guard.clone(),
+                    Err(_) => return Ok(()),
+                };
+                if let Err(err) = update_hotkey_registrations(&app.handle(), &state, &settings)
+                {
+                    eprintln!("注册全局快捷键失败: {err}");
                 }
+            }
 
                 if let Some(window) = app.get_webview_window("main") {
                     if let Some(icon) = app_icon {
@@ -9795,6 +10221,18 @@ fn main() {
                         #[cfg(target_os = "macos")]
                         sync_dock_visibility_webview(&event_window.app_handle(), &event_window);
                     });
+                }
+
+                {
+                    let app_handle = app.handle().clone();
+                    eprintln!("[system-dictation] preload window scheduled");
+                    app.run_on_main_thread(move || {
+                        eprintln!("[system-dictation] preload window start");
+                        match ensure_system_dictation_window_impl(&app_handle) {
+                            Ok(()) => eprintln!("[system-dictation] preload window done"),
+                            Err(err) => eprintln!("[system-dictation] preload window failed: {err}"),
+                        }
+                    })?;
                 }
             }
 
@@ -9884,6 +10322,11 @@ fn main() {
             restart_app,
             discover_telegram_chats,
             save_settings,
+            paste_dictation_text,
+            show_system_dictation_window,
+            hide_system_dictation_window,
+            set_system_dictation_level,
+            system_dictation_action,
             list_settings_snapshots,
             clear_settings_snapshots,
             list_local_backup_archives,
@@ -10028,7 +10471,7 @@ mod tests {
             sync_loop_signal,
             http: Client::builder().build().expect("create http client"),
             registered_hotkey: Mutex::new(None),
-            registered_speech_hotkey: Mutex::new(None),
+            registered_system_dictation_hotkey: Mutex::new(None),
             telegram_bridge: Mutex::new(TelegramBridgeManager::default()),
             local_http_api: Mutex::new(LocalHttpApiManager::default()),
             update_guard: AsyncMutex::new(()),
@@ -10416,15 +10859,49 @@ mod tests {
     }
 
     #[test]
-    fn normalize_settings_accepts_side_alt_speech_shortcut() {
+    fn normalize_settings_applies_system_dictation_defaults() {
         let mut settings = test_settings();
-        settings.speech_to_text.shortcut_enabled = true;
-        settings.speech_to_text.shortcut = "AltRight".to_string();
+        settings.speech_to_text.system_dictation_enabled = false;
+        settings.speech_to_text.system_dictation_shortcut.clear();
+        let download_dir = std::env::temp_dir().join("transfer-genie-settings-test");
+
+        let normalized = normalize_settings(settings, &download_dir).unwrap();
+
+        assert!(!normalized.speech_to_text.system_dictation_enabled);
+        assert_eq!(normalized.speech_to_text.system_dictation_shortcut, "alt+d");
+    }
+
+    #[test]
+    fn normalize_settings_rejects_conflicting_system_dictation_shortcut() {
+        let mut settings = test_settings();
+        settings.global_hotkey_enabled = true;
+        settings.global_hotkey = "ctrl+alt+d".to_string();
+        settings.speech_to_text.system_dictation_enabled = true;
+        settings.speech_to_text.system_dictation_shortcut = "ctrl+alt+d".to_string();
+        let download_dir = std::env::temp_dir().join("transfer-genie-settings-test");
+
+        let error = match normalize_settings(settings, &download_dir) {
+            Ok(_) => panic!("conflicting dictation shortcut should be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("系统听写快捷键不能和显示窗口快捷键相同"));
+    }
+
+    #[test]
+    fn normalize_settings_accepts_side_alt_system_dictation_shortcut() {
+        let mut settings = test_settings();
+        settings.speech_to_text.system_dictation_enabled = true;
+        settings.speech_to_text.system_dictation_shortcut = "AltRight".to_string();
         let download_dir = std::env::temp_dir().join("transfer-genie-speech-settings-test");
 
         let normalized = normalize_settings(settings, &download_dir).unwrap();
 
-        assert_eq!(normalized.speech_to_text.shortcut, "right-alt");
+        assert_eq!(
+            normalized.speech_to_text.system_dictation_shortcut,
+            "right-alt"
+        );
+        assert!(!normalized.speech_to_text.shortcut_enabled);
     }
 
     #[test]

@@ -21,5 +21,11 @@ export default defineConfig({
     outDir: "../dist",
     emptyOutDir: true,
     target: "es2020",
+    rollupOptions: {
+      input: {
+        main: path.resolve(__dirname, "src-ui/index.html"),
+        systemDictation: path.resolve(__dirname, "src-ui/system-dictation.html"),
+      },
+    },
   },
 });
