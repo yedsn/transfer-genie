@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: System dictation settings
-设置界面 SHALL 提供系统级语音听写配置，允许用户启用或关闭全局听写快捷键、设置听写快捷键组合，并配置听写时的目标行为。保存后的设置 SHALL 持久化并在重启后生效。
+设置界面 SHALL 提供系统级语音听写总开关，允许用户启用或关闭该功能，并配置听写快捷键组合与听写时的目标行为。保存后的设置 SHALL 持久化并在重启后生效。关闭总开关时，全局听写快捷键与胶囊浮层 SHALL 不再响应。
 
 #### Scenario: Enable system dictation shortcut
 - **WHEN** 用户在设置中启用系统级听写并保存合法快捷键
@@ -11,6 +11,7 @@
 #### Scenario: Disable system dictation shortcut
 - **WHEN** 用户在设置中关闭系统级听写并保存
 - **THEN** 全局听写快捷键不再响应
+- **AND** 胶囊浮层不会出现
 
 #### Scenario: Invalid dictation shortcut rejected
 - **WHEN** 用户输入不合法的听写快捷键组合
@@ -23,4 +24,3 @@
 - **WHEN** 用户完成一次系统级听写
 - **THEN** 设置页中的语音任务历史 SHALL 显示对应任务
 - **AND** 任务中 SHALL 保留完整音频与识别文本
-

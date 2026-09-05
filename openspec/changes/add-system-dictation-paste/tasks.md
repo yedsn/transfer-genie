@@ -1,7 +1,7 @@
 ## 1. Settings and Shortcut Registration
 
-- [ ] 1.1 Add persisted settings for system dictation enablement and shortcut value, and verify settings import/export and default loading tests cover backward compatibility.
-- [ ] 1.2 Add settings UI controls for enabling system dictation and editing its shortcut, and verify invalid shortcuts and conflicts with the main window shortcut are rejected.
+- [ ] 1.1 Add persisted settings for the system dictation master toggle and shortcut value, and verify settings import/export and default loading tests cover backward compatibility.
+- [ ] 1.2 Add settings UI controls for enabling/disabling system dictation and editing its shortcut, and verify invalid shortcuts and conflicts with the main window shortcut are rejected.
 - [ ] 1.3 Register and unregister the system dictation global shortcut separately from the main window shortcut, and verify shortcut registration tests cover enable, disable, update, and conflict cases.
 
 ## 2. Background Dictation Recording Flow

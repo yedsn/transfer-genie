@@ -5,6 +5,7 @@ Users want a Typeless-like dictation flow that works from any application, not o
 ## What Changes
 
 - Add a system-level dictation paste mode driven by a configurable global speech shortcut.
+- Let users enable or disable system dictation from settings; when disabled, the global shortcut and capsule overlay do not respond.
 - When the shortcut starts recording, the app records audio without showing or focusing the main window.
 - Show a small always-on-top capsule overlay while dictation is active, with live voice waveform feedback plus confirm and cancel controls.
 - When the shortcut stops recording, the app transcribes the captured audio and writes the final text to the system clipboard.
