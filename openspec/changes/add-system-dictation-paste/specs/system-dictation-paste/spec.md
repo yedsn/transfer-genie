@@ -5,7 +5,7 @@ This capability lets users invoke speech dictation from anywhere on the system, 
 ## ADDED Requirements
 
 ### Requirement: System-wide dictation shortcut
-The app SHALL provide a configurable global shortcut that starts and stops speech dictation anywhere on the system. Starting dictation SHALL not require the Transfer Genie window to be visible or focused.
+The app SHALL provide a configurable global shortcut that starts and stops speech dictation anywhere on the system. Starting dictation SHALL not require the Transfer Genie window to be visible or focused. While dictation is active, the app SHALL show a small always-on-top capsule overlay with live voice activity feedback and explicit confirm/cancel controls.
 
 #### Scenario: Start dictation from another application
 - **WHEN** the user presses the configured global dictation shortcut while another application is focused
@@ -14,6 +14,16 @@ The app SHALL provide a configurable global shortcut that starts and stops speec
 #### Scenario: Stop dictation from another application
 - **WHEN** the user presses the configured global dictation shortcut again while dictation is active
 - **THEN** Transfer Genie stops recording and begins transcription of the captured audio
+
+#### Scenario: Dictation overlay appears
+- **WHEN** dictation starts
+- **THEN** the app shows an always-on-top capsule overlay
+- **AND** the overlay displays live voice activity feedback
+- **AND** the overlay remains visible until dictation is confirmed or canceled
+
+#### Scenario: Dictation can be finished from the overlay
+- **WHEN** dictation is active and the user clicks the overlay confirm control
+- **THEN** the app stops recording and begins transcription of the captured audio
 
 ### Requirement: Focus-locked paste target
 The app SHALL paste the dictation result into the input target that is focused at the moment dictation stops. The app SHALL use the system clipboard and the platform paste shortcut to deliver the text. The app SHALL NOT restore the previous clipboard contents after dictation paste.
@@ -25,6 +35,11 @@ The app SHALL paste the dictation result into the input target that is focused a
 #### Scenario: No clipboard restore
 - **WHEN** dictation paste completes
 - **THEN** the clipboard remains set to the recognized text
+
+#### Scenario: Dictation can be canceled from the overlay
+- **WHEN** dictation is active and the user clicks the overlay cancel control
+- **THEN** the app stops recording without pasting recognized text
+- **AND** the current recording is discarded
 
 ### Requirement: Local editor retention
 The app SHALL append the recognized dictation text to Transfer Genie's active editor draft as a retained local copy. This local append SHALL happen even when the system paste target is outside Transfer Genie.
@@ -43,4 +58,3 @@ The app SHALL keep the recognized text available locally when recording, transcr
 #### Scenario: Paste injection fails
 - **WHEN** the app cannot inject the platform paste shortcut after updating the clipboard
 - **THEN** the recognized text remains available in Transfer Genie for manual copy or later use
-

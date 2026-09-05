@@ -7,18 +7,20 @@
 ## 2. Background Dictation Recording Flow
 
 - [ ] 2.1 Add a dedicated global-shortcut event path for starting/stopping dictation without showing or focusing the main window, and verify the app window focus behavior with a mocked shortcut event.
-- [ ] 2.2 Reuse the speech recording/transcription state machine for system dictation sessions, and verify one shortcut press starts recording while a second press stops and transcribes.
-- [ ] 2.3 Ensure dictation results are appended to Transfer Genie's active editor draft with existing separator and scroll-preservation behavior, and verify editor text updates once per completed dictation.
+- [ ] 2.2 Add an always-on-top capsule overlay for active dictation with live waveform feedback plus confirm and cancel controls, and verify the overlay appears and updates while recording.
+- [ ] 2.3 Reuse the speech recording/transcription state machine for system dictation sessions, and verify one shortcut press starts recording while a second press or overlay confirm stops and transcribes.
+- [ ] 2.4 Ensure overlay cancel discards the active dictation session without paste or local append, and verify cancel returns the system to idle.
+- [ ] 2.5 Ensure dictation results are appended to Transfer Genie's active editor draft with existing separator and scroll-preservation behavior, and verify editor text updates once per completed dictation.
 
 ## 3. Clipboard Paste Delivery
 
 - [ ] 3.1 Add a backend command or event handler that writes recognized dictation text to the system clipboard and dispatches the platform paste shortcut, and verify it leaves the clipboard set to the recognized text.
-- [ ] 3.2 Route successful system dictation results through clipboard paste delivery after transcription completes, and verify paste delivery is attempted for external-focus dictation sessions.
+- [ ] 3.2 Route successful system dictation results through clipboard paste delivery after transcription completes or overlay confirm, and verify paste delivery is attempted for external-focus dictation sessions.
 - [ ] 3.3 Handle paste delivery failures without discarding text, and verify failures leave the recognized text in Transfer Genie history/editor and on the clipboard when clipboard write succeeded.
 
 ## 4. History, Feedback, and Verification
 
 - [ ] 4.1 Store system dictation sessions in the existing speech task history with complete audio and final text, and verify replay, download, copy, retry, and delete actions still work.
-- [ ] 4.2 Add focused frontend smoke coverage for system dictation shortcut start/stop, editor append, clipboard overwrite, and no clipboard restore behavior.
+- [ ] 4.2 Add focused frontend smoke coverage for system dictation shortcut start/stop, overlay confirm/cancel, waveform feedback, editor append, clipboard overwrite, and no clipboard restore behavior.
 - [ ] 4.3 Add targeted backend tests for shortcut normalization/registration and paste command failure handling, and verify `cargo test speech` plus relevant shortcut tests pass.
 - [ ] 4.4 Run `node tests/test_speech_to_text_ui_smoke.js`, `cargo test speech`, `cargo test asr`, and `openspec validate add-system-dictation-paste --strict` to verify the completed change.

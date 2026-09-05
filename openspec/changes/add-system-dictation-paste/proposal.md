@@ -6,7 +6,10 @@ Users want a Typeless-like dictation flow that works from any application, not o
 
 - Add a system-level dictation paste mode driven by a configurable global speech shortcut.
 - When the shortcut starts recording, the app records audio without showing or focusing the main window.
+- Show a small always-on-top capsule overlay while dictation is active, with live voice waveform feedback plus confirm and cancel controls.
 - When the shortcut stops recording, the app transcribes the captured audio and writes the final text to the system clipboard.
+- Let users finish dictation either by pressing the shortcut again or by clicking the capsule confirm icon.
+- Let users cancel dictation by clicking the capsule cancel icon, discarding the current recording without pasting.
 - After writing the clipboard, the app simulates the platform paste shortcut so the result is inserted into whichever input target is focused at recording stop time.
 - The app does not restore the previous clipboard content after dictation paste.
 - The same recognized text is appended to Transfer Genie's active editor draft as a retained local copy.
@@ -23,7 +26,7 @@ Users want a Typeless-like dictation flow that works from any application, not o
 
 ## Impact
 
-- Affected frontend: speech recording state machine, composer append behavior, status feedback, and settings UI.
-- Affected backend: global shortcut routing, background recording trigger events, clipboard write, and simulated paste command.
+- Affected frontend: speech recording state machine, composer append behavior, capsule overlay UI, waveform feedback, status feedback, and settings UI.
+- Affected backend: global shortcut routing, overlay window lifecycle, background recording trigger events, clipboard write, and simulated paste command.
 - Affected permissions/platform behavior: paste injection depends on OS-level keyboard simulation support and may require platform-specific handling.
 - Affected tests: shortcut registration, no-focus recording start, stop-time paste behavior, clipboard overwrite behavior, and editor append coverage.

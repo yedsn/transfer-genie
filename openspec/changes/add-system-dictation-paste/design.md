@@ -1,12 +1,13 @@
 ## Context
 
-The app already has speech-to-text recording, ASR transcription, task history, editor append behavior, and Tauri global shortcut registration. Current speech recording is mainly driven by the app window or an in-window shortcut event. System dictation requires the same recording/transcription pipeline to run while another application remains focused, then deliver the final text through clipboard paste injection.
+The app already has speech-to-text recording, ASR transcription, task history, editor append behavior, and Tauri global shortcut registration. Current speech recording is mainly driven by the app window or an in-window shortcut event. System dictation requires the same recording/transcription pipeline to run while another application remains focused, show a Typeless-like capsule overlay during recording, then deliver the final text through clipboard paste injection.
 
 ## Goals / Non-Goals
 
 **Goals:**
 - Reuse the existing speech recording and transcription pipeline where practical.
 - Keep the focused external application active when dictation starts.
+- Show a compact always-on-top capsule overlay with live waveform feedback and confirm/cancel controls while dictation is active.
 - Paste into the focus target that exists when dictation stops.
 - Leave the recognized text on the clipboard after paste.
 - Always append recognized text to Transfer Genie's active editor draft and retained speech history.
@@ -15,6 +16,7 @@ The app already has speech-to-text recording, ASR transcription, task history, e
 - No attempt to restore the previous clipboard value.
 - No direct per-application text field integration.
 - No hidden always-on recording; recording starts only after an explicit shortcut press.
+- No full main-window activation for dictation status.
 - No guarantee that every external application will accept paste injection.
 
 ## Decisions
@@ -29,7 +31,19 @@ The app already has speech-to-text recording, ASR transcription, task history, e
 
 - Decision: Keep the main window hidden/unfocused when starting dictation from the global shortcut.
   - Rationale: The user wants to paste into the system focus target, so focus must remain with the other application until the user chooses to stop or move focus.
-  - Alternative considered: Show a floating dictation window. That gives stronger feedback but would steal focus unless implemented with platform-specific no-focus windows.
+  - Alternative considered: Show the main Transfer Genie window. That gives stronger feedback but steals focus and conflicts with paste-at-stop behavior.
+
+- Decision: Use a dedicated always-on-top capsule overlay for dictation status and controls.
+  - Rationale: A small overlay gives visible feedback without exposing the full app. It can show microphone waveform, confirm, and cancel in a compact surface similar to Typeless.
+  - Alternative considered: Use only system tray or toast feedback. That is less intrusive, but it does not provide live waveform or direct confirm/cancel controls.
+
+- Decision: Treat shortcut stop and overlay confirm as the same commit action.
+  - Rationale: Both actions mean finish recording, transcribe, paste, and retain locally, so they should share one path and one set of failure handling rules.
+  - Alternative considered: Make overlay confirm only stop recording while shortcut stop also pastes. That would create two subtly different endings and make behavior harder to predict.
+
+- Decision: Treat overlay cancel as a discard action.
+  - Rationale: Cancel should stop recording and close the capsule without transcription, paste, clipboard overwrite, or local editor append for that session.
+  - Alternative considered: Save canceled audio to history. That protects data, but conflicts with the expected meaning of cancel and can clutter task history.
 
 - Decision: Use clipboard overwrite plus platform paste shortcut injection.
   - Rationale: This is the most compatible cross-application delivery mechanism available to a desktop utility. The user explicitly accepted that the clipboard should remain overwritten with recognized text.
@@ -42,6 +56,7 @@ The app already has speech-to-text recording, ASR transcription, task history, e
 ## Risks / Trade-offs
 
 - Some platforms may require accessibility/input-monitoring permissions for paste injection -> Detect injection failures where possible and leave text in the clipboard and Transfer Genie editor.
+- A clickable always-on-top overlay can steal focus when clicked -> Capture the intended paste target at commit time immediately before or around the confirm action, and verify platform behavior; if clicking the capsule necessarily changes focus, prefer refocusing the previous active app before paste where feasible.
 - The app cannot always know whether paste succeeded -> Treat clipboard write and paste shortcut dispatch as best effort; local editor append remains the reliable copy.
 - If the user stops dictation while the wrong application is focused, text may paste there -> Use clear audio/status feedback and keep the clipboard result available for correction.
 - Running recording from a hidden/unfocused window may behave differently across WebView platforms -> Verify on the target desktop platforms and fall back to showing a non-disruptive error if microphone capture cannot start.
