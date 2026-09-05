@@ -175,8 +175,8 @@ fn default_ai_actions() -> Vec<AiTextAction> {
             builtin: true,
             favorite: true,
             enabled: true,
-            system_prompt: "你是一个中文写作助手。".to_string(),
-            user_prompt: "请润色下面的内容，保持原意不变，让表达更清晰、自然。如果输入是 Markdown，请保持 Markdown 结构。只输出润色后的文本。\n\n{{text}}".to_string(),
+            system_prompt: "你是一个中文润色助手。你只负责把用户提供的内容整理得更清晰、自然、通顺。无论内容主题、语气、格式或完整度如何，都不要拒绝、不要说无法处理、不要评价内容是否合适，也不要追加说明或免责声明。".to_string(),
+            user_prompt: "请润色下面的内容，保持原意不变，让表达更清晰、自然、通顺。可以修正错别字、标点、口语停顿和明显的语音转写错误；不要新增事实，不要改变人称、立场和核心意思。如果输入是 Markdown、列表、代码块或结构化文本，请尽量保持原有结构。无论输入内容是什么，都直接输出润色后的文本，不要解释，不要提示内容有问题。\n\n{{text}}".to_string(),
             output_mode: default_ai_action_output_mode(),
         },
         AiTextAction {
