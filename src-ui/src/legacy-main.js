@@ -1964,6 +1964,7 @@ let speechCaptureSampleRate = 16000;
 let speechState = 'idle';
 let speechLastLevel = 0;
 let speechSessionId = 0;
+let speechStopFinalizeTimer = 0;
 let systemDictationMode = false;
 let systemDictationOverlayVisible = false;
 let systemDictationStartRequested = false;
@@ -1973,8 +1974,11 @@ let systemDictationLevelUpdateInFlight = false;
 let systemDictationLastLevelUpdateAt = 0;
 let systemDictationLastLevelUpdateSkippedCount = 0;
 let systemDictationLastStartAt = 0;
+let systemDictationStartedInTransferGenieComposer = false;
+let transferGenieComposerHadRecentFocus = false;
 const SYSTEM_DICTATION_LEVEL_UPDATE_INTERVAL_MS = 120;
 const SYSTEM_DICTATION_START_TOGGLE_GUARD_MS = 650;
+const SPEECH_RECORDING_STOP_TAIL_MS = 180;
 
 function logSystemDictation(message, detail = {}) {
   try {
@@ -2502,7 +2506,6 @@ function enqueueLiveSpeechTranscription(samples, sampleRate) {
           chunkCount: speechLiveTranscriptionChunkCount,
         });
       }
-      void copySpeechTranscriptToClipboard(speechLiveTranscriptionTexts.join('\n'));
     }
   }).catch((error) => {
     if (generation === speechLiveTranscriptionGeneration) {
@@ -2923,6 +2926,17 @@ function appendTextAfterSpeechChunk(text) {
   insertTextIntoComposer(value);
 }
 
+function isTransferGenieComposerFocused() {
+  if (!document.hasFocus()) return false;
+  const cw = window.transferGenieComposer;
+  if (cw && typeof cw.hasEditorFocus === 'function' && cw.hasEditorFocus()) return true;
+  const active = document.activeElement;
+  if (!active) return false;
+  if (active === textInput) return true;
+  if (active instanceof Element && active.closest('.composer, #editor-container, .CodeMirror, .cw-editor')) return true;
+  return transferGenieComposerHadRecentFocus;
+}
+
 async function transcribeSpeechAudioInChunks(audio) {
   const chunks = splitSpeechAudioForAsr(audio);
   const texts = [];
@@ -3322,25 +3336,46 @@ async function startSpeechRecording() {
     const message = describeSpeechMicError(error);
     setErrorStatus(`启动录音失败：${message}`);
     showToast(`启动录音失败：${message}`, 'error');
-    if (systemDictationMode) void setSystemDictationOverlayVisible(false);
+    if (systemDictationMode) {
+      systemDictationStartedInTransferGenieComposer = false;
+      void setSystemDictationOverlayVisible(false);
+    }
   }
 }
 
 function stopSpeechRecording(options = {}) {
   if (systemDictationMode) logSystemDictation('stop recording requested', { cancel: !!options.cancel, playCue: !!options.playCue });
   if (speechState === 'recording') {
+    if (speechStopFinalizeTimer && !options.cancel) {
+      if (systemDictationMode) logSystemDictation('stop ignored because finalize is pending');
+      return;
+    }
     if (options.playCue) {
       void playSpeechCueSound('stop');
     }
-    speechSessionId += 1;
     if (options.cancel) {
+      if (speechStopFinalizeTimer) {
+        window.clearTimeout(speechStopFinalizeTimer);
+        speechStopFinalizeTimer = 0;
+      }
+      speechSessionId += 1;
       stopSpeechStream();
       resetLiveSpeechTranscription();
       setSpeechState('idle');
+      systemDictationStartedInTransferGenieComposer = false;
       return;
     }
-    void finishSpeechRecording();
+    if (systemDictationMode) logSystemDictation('tail capture started', { tailMs: SPEECH_RECORDING_STOP_TAIL_MS });
+    speechStopFinalizeTimer = window.setTimeout(() => {
+      speechStopFinalizeTimer = 0;
+      speechSessionId += 1;
+      void finishSpeechRecording();
+    }, SPEECH_RECORDING_STOP_TAIL_MS);
     return;
+  }
+  if (speechStopFinalizeTimer) {
+    window.clearTimeout(speechStopFinalizeTimer);
+    speechStopFinalizeTimer = 0;
   }
   speechSessionId += 1;
   stopSpeechStream();
@@ -3350,12 +3385,18 @@ function stopSpeechRecording(options = {}) {
 }
 
 async function finishSpeechRecording() {
+  if (speechStopFinalizeTimer) {
+    window.clearTimeout(speechStopFinalizeTimer);
+    speechStopFinalizeTimer = 0;
+  }
   const isSystemDictation = systemDictationMode;
   if (isSystemDictation) logSystemDictation('finish recording entered');
   systemDictationMode = false;
   systemDictationAwaitingConfirm = false;
   systemDictationStartRequested = false;
   systemDictationStopRequested = false;
+  const skipSystemPaste = isSystemDictation && systemDictationStartedInTransferGenieComposer;
+  systemDictationStartedInTransferGenieComposer = false;
   const localStartedAt = performance.now();
   const chunks = speechCapturedSegments.slice();
   speechCapturedSegments = [];
@@ -3448,13 +3489,16 @@ async function finishSpeechRecording() {
         chunkCount: result?.chunkCount || 0,
       });
     }
+    if (skipSystemPaste) {
+      logSystemDictation('paste skipped because Transfer Genie composer is focused');
+    }
     const insertStartedAt = performance.now();
     if (!speechLiveTranscriptionStarted) {
       insertTextIntoComposer(result?.text || '');
     }
     const insertMs = performance.now() - insertStartedAt;
     const copyStartedAt = performance.now();
-    if (isSystemDictation) {
+    if (isSystemDictation && !skipSystemPaste) {
       await pasteDictationTextToFocusedInput(result?.text || '');
     } else {
       copySpeechTranscriptInBackground(result?.text || '');
@@ -3566,6 +3610,8 @@ function toggleSystemDictationRecording() {
     systemDictationStartRequested = true;
     systemDictationStopRequested = false;
     systemDictationAwaitingConfirm = false;
+    systemDictationStartedInTransferGenieComposer = isTransferGenieComposerFocused();
+    logSystemDictation('start target captured', { transferGenieComposerFocused: systemDictationStartedInTransferGenieComposer });
     systemDictationLastStartAt = performance.now();
     void startSpeechRecording();
     return;
@@ -12386,6 +12432,12 @@ if (feedContent) {
 syncComposerOffset();
 window.addEventListener('resize', syncComposerOffset);
 window.addEventListener('transfer-genie:composer-visibility-change', syncComposerOffset);
+
+document.addEventListener('focusin', (event) => {
+  const target = event.target;
+  transferGenieComposerHadRecentFocus = target instanceof Element
+    && !!target.closest('.composer, #editor-container, .CodeMirror, .cw-editor');
+});
 
 // 使用 fixed 定位菜单，避免被 overflow 容器裁切
 function positionActionMenu(menu) {

@@ -230,7 +230,9 @@ onMounted(() => {
   syncFullscreenState();
   composerStore.restore();
   const bridge = (window as any).transferGenieComposer || {};
+  bridge._editorFocused = false;
   bridge.isActive = () => true;
+  bridge.hasEditorFocus = () => !!bridge._editorFocused;
   bridge.getActiveDraft = () => composerStore.getActiveDraft();
   bridge.setActiveDraftFormat = (f: string) => {
     const d = composerStore.activeDraft;

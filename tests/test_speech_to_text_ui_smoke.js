@@ -347,7 +347,7 @@ async function launchChrome() {
   const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
   const target = targets.find((item) => item.id === targetId);
   const pageClient = createCdpClient(await connectWebSocket(target.webSocketDebuggerUrl));
-  return { child, userDataDir, browserClient, pageClient };
+  return { child, userDataDir, port, browserClient, pageClient };
 }
 
 async function run() {
@@ -377,6 +377,47 @@ async function run() {
       };
       tick();
     })`);
+
+    const dictationPageResult = await (async () => {
+      const { targetId } = await chrome.browserClient.send('Target.createTarget', { url: `${APP_URL}system-dictation.html` });
+      const targets = await (await fetch(`http://127.0.0.1:${chrome.port}/json/list`)).json();
+      const target = targets.find((item) => item.id === targetId);
+      const dictationClient = createCdpClient(await connectWebSocket(target.webSocketDebuggerUrl));
+      try {
+        await dictationClient.send('Runtime.enable');
+        await evaluate(dictationClient, `new Promise((resolve, reject) => {
+          const start = Date.now();
+          const tick = () => {
+            if (typeof window.__transferGenieSetDictationLevel === 'function' && document.querySelector('.dictation-wave span')) resolve(true);
+            else if (Date.now() - start > 5000) reject(new Error('dictation overlay did not initialize'));
+            else setTimeout(tick, 50);
+          };
+          tick();
+        })`);
+        return await evaluate(dictationClient, `(async () => {
+          const wave = document.querySelector('.dictation-wave');
+          const bar = document.querySelector('.dictation-wave span:nth-child(3)');
+          const beforeMotion = wave.style.getPropertyValue('--dictation-motion');
+          const beforeTransform = getComputedStyle(bar).transform;
+          window.__transferGenieSetDictationLevel(0.65);
+          await new Promise((resolve) => setTimeout(resolve, 220));
+          return {
+            functionReady: typeof window.__transferGenieSetDictationLevel === 'function',
+            beforeMotion,
+            afterMotion: wave.style.getPropertyValue('--dictation-motion'),
+            beforeTransform,
+            afterTransform: getComputedStyle(bar).transform,
+          };
+        })()`);
+      } finally {
+        dictationClient.close();
+        await chrome.browserClient.send('Target.closeTarget', { targetId });
+      }
+    })();
+    assert.equal(dictationPageResult.functionReady, true, 'system dictation overlay exposes level update function');
+    assert.notEqual(dictationPageResult.afterMotion, '', 'system dictation overlay writes waveform motion CSS variable');
+    assert.notEqual(dictationPageResult.afterMotion, dictationPageResult.beforeMotion, 'system dictation waveform responds to level changes');
+    assert.notEqual(dictationPageResult.afterTransform, dictationPageResult.beforeTransform, 'system dictation waveform bar transform changes after level update');
 
     const unsupportedResult = await evaluate(client, `(async () => {
       window.__speechSmoke.hideGetUserMedia = true;
@@ -1152,6 +1193,9 @@ async function run() {
       window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
       window.__speechSmoke.pastedText = '';
       window.__speechSmoke.clipboardText = '';
+      document.activeElement?.blur?.();
+      document.querySelector('.tab-button[data-tab-target="home"]')?.focus();
+      await new Promise((r) => setTimeout(r, 30));
       document.querySelector('#system-dictation-enabled').checked = true;
       document.querySelector('#system-dictation-enabled').dispatchEvent(new Event('change', { bubbles: true }));
       await window.__speechSmoke.eventHandlers['system-dictation-toggle']({ payload: null });
@@ -1193,6 +1237,61 @@ async function run() {
     assert.ok(systemDictationResult.hideCount >= 1, 'system dictation hides the capsule window after confirm');
     assert.ok(systemDictationResult.levelCount >= 1, 'system dictation updates waveform level');
 
+    const focusedComposerDictationResult = await evaluate(client, `(async () => {
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const button = document.querySelector('#speech-to-text-toggle');
+          if (!button.classList.contains('is-recording') && !button.classList.contains('is-transcribing') && !button.classList.contains('is-preparing')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('speech button did not return to idle before focused composer dictation test'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
+      window.__speechSmoke.pastedText = '';
+      window.__speechSmoke.clipboardText = '';
+      window.__speechSmoke.longText = '当前编辑器焦点识别结果';
+      const beforePasteCalls = window.__speechSmoke.calls.filter((call) => call.command === 'paste_dictation_text').length;
+      document.querySelector('.cw-textarea, #text-input')?.focus();
+      await new Promise((r) => setTimeout(r, 30));
+      await window.__speechSmoke.eventHandlers['system-dictation-toggle']({ payload: null });
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#speech-to-text-toggle').classList.contains('is-recording')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('system dictation did not start with composer focused'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      await new Promise((r) => setTimeout(r, 80));
+      await window.__speechSmoke.eventHandlers['system-dictation-toggle']({ payload: null });
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const text = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
+          const button = document.querySelector('#speech-to-text-toggle');
+          const idle = !button.classList.contains('is-recording') && !button.classList.contains('is-transcribing') && !button.classList.contains('is-preparing');
+          if (text && idle) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('focused composer dictation did not append text'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const afterPasteCalls = window.__speechSmoke.calls.filter((call) => call.command === 'paste_dictation_text').length;
+      const result = {
+        text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
+        pastedText: window.__speechSmoke.pastedText,
+        pasteDelta: afterPasteCalls - beforePasteCalls,
+      };
+      window.__speechSmoke.longText = '语音识别文本'.repeat(20);
+      return result;
+    })()`);
+    assert.equal(focusedComposerDictationResult.text, '当前编辑器焦点识别结果', 'system dictation appends text when Transfer Genie composer is focused');
+    assert.equal(focusedComposerDictationResult.pastedText, '', 'system dictation does not paste into Transfer Genie composer a second time');
+    assert.equal(focusedComposerDictationResult.pasteDelta, 0, 'system dictation skips paste command when Transfer Genie composer is focused');
+
     const stalledOverlayDictationResult = await evaluate(client, `(async () => {
       await new Promise((resolve, reject) => {
         const start = Date.now();
@@ -1209,6 +1308,9 @@ async function run() {
       window.__speechSmoke.clipboardText = '';
       window.__speechSmoke.longText = '卡住窗口后的识别结果';
       window.__speechSmoke.hangOverlayInvokes = true;
+      document.activeElement?.blur?.();
+      document.querySelector('.tab-button[data-tab-target="home"]')?.focus();
+      await new Promise((r) => setTimeout(r, 30));
       const beforeTranscribeCalls = window.__speechSmoke.calls.filter((call) => call.command === 'transcribe_speech').length;
       await window.__speechSmoke.eventHandlers['system-dictation-toggle']({ payload: null });
       await new Promise((resolve, reject) => {
@@ -1338,7 +1440,13 @@ async function run() {
           const failedItem = Array.from(document.querySelectorAll('.speech-task-item'))
             .find((item) => item.classList.contains('is-failed'));
           if (/语音识别失败/.test(status) && failedItem) resolve();
-          else if (Date.now() - start > 2000) reject(new Error('failed transcription did not surface'));
+          else if (Date.now() - start > 3000) reject(new Error('failed transcription did not surface: ' + JSON.stringify({
+            status,
+            transcribeCalls: window.__speechSmoke.calls.filter((call) => call.command === 'transcribe_speech').length,
+            failTranscribe: window.__speechSmoke.failTranscribe,
+            speechClasses: document.querySelector('#speech-to-text-toggle')?.className || '',
+            failedItems: Array.from(document.querySelectorAll('.speech-task-item')).map((item) => item.className),
+          })));
           else setTimeout(tick, 20);
         };
         tick();

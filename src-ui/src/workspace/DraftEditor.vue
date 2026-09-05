@@ -110,6 +110,7 @@ function registerFocus() {
   // 注册活动草稿聚焦函数，供 legacy focusTextInput 复用
   const bridge = (window as any).transferGenieComposer;
   if (bridge && props.isActive) {
+    bridge._editorFocused = true;
     bridge._focusActive = () => {
       try {
         if (isMarkdown.value && editor && editor.cm) editor.cm.focus();
@@ -149,6 +150,15 @@ function registerFocus() {
       return null;
     };
   }
+}
+
+function unregisterFocusIfOutsideEditor() {
+  window.setTimeout(() => {
+    const active = document.activeElement;
+    const focused = active instanceof Element && !!active.closest('.cw-editor, #editor-container, .CodeMirror');
+    const bridge = (window as any).transferGenieComposer;
+    if (bridge && !focused) bridge._editorFocused = false;
+  }, 0);
 }
 
 function syncMarkdownTextFromDraft(text: string) {
@@ -873,7 +883,7 @@ function setFormat(format: string) {
       </div>
       <span v-if="aiError" class="cw-ai-error">{{ aiError }}</span>
     </div>
-    <div v-if="isMarkdown" class="cw-md-wrap" ref="mdWrap" @focusin="onActivated" @contextmenu="onEditorContextMenu"></div>
+    <div v-if="isMarkdown" class="cw-md-wrap" ref="mdWrap" @focusin="onActivated" @focusout="unregisterFocusIfOutsideEditor" @contextmenu="onEditorContextMenu"></div>
     <textarea
       v-else
       class="cw-textarea"
@@ -884,6 +894,7 @@ function setFormat(format: string) {
       @input="onTextInput"
       @keydown="handleEditorKeydown"
       @focus="onActivated"
+      @blur="unregisterFocusIfOutsideEditor"
       @contextmenu="onEditorContextMenu"
     ></textarea>
     <div v-if="aiMenu" class="cw-ai-menu-backdrop" @click="closeAiMenu" @contextmenu.prevent="closeAiMenu"></div>

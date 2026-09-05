@@ -81,8 +81,14 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 #[cfg(target_os = "windows")]
-static SYSTEM_DICTATION_SIDE_ALT_MONITOR_STARTED: std::sync::atomic::AtomicBool =
+static SYSTEM_DICTATION_SIDE_ALT_HOOK_STARTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+#[cfg(target_os = "windows")]
+static SYSTEM_DICTATION_SIDE_ALT_CONFIG: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(0);
+#[cfg(target_os = "windows")]
+static SYSTEM_DICTATION_SIDE_ALT_TOGGLE_TX: std::sync::OnceLock<std::sync::mpsc::Sender<()>> =
+    std::sync::OnceLock::new();
 
 struct AppState {
     settings_path: PathBuf,
@@ -227,8 +233,8 @@ const LOCAL_HTTP_TEXT_API_ROUTE: &str = "/api/send-text";
 const APP_UPDATE_EVENT: &str = "app-update-event";
 const TRAY_CHECK_UPDATE_EVENT: &str = "tray-check-update";
 const SYSTEM_DICTATION_WINDOW_LABEL: &str = "system-dictation";
-const SYSTEM_DICTATION_WINDOW_WIDTH: f64 = 360.0;
-const SYSTEM_DICTATION_WINDOW_HEIGHT: f64 = 120.0;
+const SYSTEM_DICTATION_WINDOW_WIDTH: f64 = 340.0;
+const SYSTEM_DICTATION_WINDOW_HEIGHT: f64 = 108.0;
 const SYSTEM_DICTATION_WINDOW_BOTTOM_MARGIN: i32 = 88;
 const DEFAULT_UPDATER_ENDPOINT: &str =
     "https://github.com/OWNER/REPO/releases/latest/download/latest.json";
@@ -1940,7 +1946,11 @@ fn hide_system_dictation_window(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn set_system_dictation_level(app: AppHandle, level: f64) {
-    emit_system_dictation_overlay_level(&app, level);
+    let normalized = level.clamp(0.0, 1.0);
+    let app_for_task = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        emit_system_dictation_overlay_level(&app_for_task, normalized);
+    });
 }
 
 #[tauri::command]
@@ -2062,7 +2072,11 @@ fn hide_system_dictation_window_impl(app: &AppHandle) {
 
 fn emit_system_dictation_overlay_level(app: &AppHandle, level: f64) {
     if let Some(window) = app.get_webview_window(SYSTEM_DICTATION_WINDOW_LABEL) {
-        let _ = window.emit("system-dictation-level", level);
+        let normalized = level.clamp(0.0, 1.0);
+        let _ = window.emit("system-dictation-level", normalized);
+        let _ = window.eval(format!(
+            "window.__transferGenieSetDictationLevel?.({normalized});"
+        ));
     }
 }
 
@@ -9896,6 +9910,9 @@ fn update_system_dictation_hotkey_registration(
         }
     }
 
+    #[cfg(target_os = "windows")]
+    update_windows_side_alt_dictation_config(settings);
+
     if settings.speech_to_text.system_dictation_enabled {
         let hotkey = normalize_speech_hotkey(&settings.speech_to_text.system_dictation_shortcut)
             .ok_or_else(|| "系统听写快捷键格式无效，可填写 right-alt、left-alt 或 Alt+D".to_string())?;
@@ -9931,59 +9948,135 @@ fn update_hotkey_registrations(
 fn start_system_dictation_side_alt_monitor(app: AppHandle) {
     use std::sync::atomic::Ordering;
 
-    if SYSTEM_DICTATION_SIDE_ALT_MONITOR_STARTED
+    if SYSTEM_DICTATION_SIDE_ALT_HOOK_STARTED
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
-        eprintln!("[system-dictation] side-alt monitor already started");
+        eprintln!("[system-dictation] side-alt hook already started");
         return;
     }
 
-    eprintln!("[system-dictation] side-alt monitor started");
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let _ = SYSTEM_DICTATION_SIDE_ALT_TOGGLE_TX.set(tx);
 
-    std::thread::spawn(move || {
-        let mut was_pressed = false;
-        loop {
-            let configured_key = app
-                .try_state::<AppState>()
-                .and_then(|state| {
-                    state.settings.lock().ok().and_then(|settings| {
-                        if !settings.speech_to_text.system_dictation_enabled {
-                            return None;
-                        }
-                        match normalize_speech_hotkey(
-                            &settings.speech_to_text.system_dictation_shortcut,
-                        )
-                        .as_deref()
-                        {
-                            Some("right-alt") => Some(0xA5),
-                            Some("left-alt") => Some(0xA4),
-                            _ => None,
-                        }
-                    })
-                });
-
-            let is_pressed = configured_key
-                .map(|key| unsafe {
-                    windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(key) < 0
-                })
-                .unwrap_or(false);
-
-            if is_pressed && !was_pressed {
-                eprintln!("[system-dictation] side-alt pressed: emitting toggle");
-                if let Some(window) = app.get_webview_window("main") {
+    {
+        let app_for_events = app.clone();
+        std::thread::spawn(move || {
+            while rx.recv().is_ok() {
+                eprintln!("[system-dictation] side-alt hook event: emitting toggle");
+                if let Some(window) = app_for_events.get_webview_window("main") {
                     let _ = window.emit("system-dictation-toggle", ());
                 } else {
-                    eprintln!("[system-dictation] side-alt pressed: main window not found");
+                    eprintln!("[system-dictation] side-alt hook event: main window not found");
                 }
             }
-            if !is_pressed && was_pressed {
-                eprintln!("[system-dictation] side-alt released");
+        });
+    }
+
+    std::thread::spawn(move || {
+        use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW,
+            TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL,
+        };
+
+        static RIGHT_ALT_DOWN: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        static LEFT_ALT_DOWN: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+
+        unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+            use windows_sys::Win32::UI::Input::KeyboardAndMouse::{VK_LMENU, VK_RMENU};
+            use windows_sys::Win32::UI::WindowsAndMessaging::{WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP};
+
+            if code < 0 {
+                return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
             }
-            was_pressed = is_pressed;
-            std::thread::sleep(Duration::from_millis(35));
+            let event = wparam as u32;
+            let is_down = event == WM_KEYDOWN || event == WM_SYSKEYDOWN;
+            let is_up = event == WM_KEYUP || event == WM_SYSKEYUP;
+            if !is_down && !is_up {
+                return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
+            }
+            let key = unsafe { *(lparam as *const KBDLLHOOKSTRUCT) }.vkCode;
+            let configured_key = current_windows_side_alt_dictation_key();
+            let should_handle = match configured_key {
+                Some("right-alt") => key == VK_RMENU as u32,
+                Some("left-alt") => key == VK_LMENU as u32,
+                _ => false,
+            };
+            if !should_handle {
+                return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
+            }
+
+            let down_flag = if key == VK_RMENU as u32 {
+                &RIGHT_ALT_DOWN
+            } else {
+                &LEFT_ALT_DOWN
+            };
+            if is_down {
+                let was_down = down_flag.swap(true, Ordering::SeqCst);
+                if !was_down {
+                    eprintln!("[system-dictation] side-alt hook swallowed keydown");
+                    if let Some(tx) = SYSTEM_DICTATION_SIDE_ALT_TOGGLE_TX.get() {
+                        let _ = tx.send(());
+                    }
+                }
+                return 1;
+            }
+            if is_up {
+                down_flag.store(false, Ordering::SeqCst);
+                eprintln!("[system-dictation] side-alt hook swallowed keyup");
+                return 1;
+            }
+
+            unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
         }
+
+        let hook: HHOOK = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), std::ptr::null_mut(), 0) };
+        if hook.is_null() {
+            eprintln!("[system-dictation] side-alt hook install failed");
+            return;
+        }
+        eprintln!("[system-dictation] side-alt hook started");
+
+        let mut message = MSG::default();
+        while unsafe { GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) } > 0 {
+            unsafe {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+        let _ = unsafe { UnhookWindowsHookEx(hook) };
     });
+}
+
+#[cfg(target_os = "windows")]
+fn update_windows_side_alt_dictation_config(settings: &Settings) {
+    use std::sync::atomic::Ordering;
+
+    let value = if settings.speech_to_text.system_dictation_enabled {
+        match normalize_speech_hotkey(&settings.speech_to_text.system_dictation_shortcut).as_deref() {
+            Some("left-alt") => 1,
+            Some("right-alt") => 2,
+            _ => 0,
+        }
+    } else {
+        0
+    };
+    SYSTEM_DICTATION_SIDE_ALT_CONFIG.store(value, Ordering::SeqCst);
+    eprintln!("[system-dictation] side-alt hook config={value}");
+}
+
+#[cfg(target_os = "windows")]
+fn current_windows_side_alt_dictation_key() -> Option<&'static str> {
+    use std::sync::atomic::Ordering;
+
+    match SYSTEM_DICTATION_SIDE_ALT_CONFIG.load(Ordering::SeqCst) {
+        1 => Some("left-alt"),
+        2 => Some("right-alt"),
+        _ => None,
+    }
 }
 
 #[cfg(target_os = "macos")]
