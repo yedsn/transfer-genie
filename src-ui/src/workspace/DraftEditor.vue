@@ -124,6 +124,30 @@ function registerFocus() {
     bridge._setActiveText = (text: string) => {
       syncMarkdownTextFromDraft(text || "");
     };
+    bridge._captureActiveScroll = () => {
+      try {
+        if (isMarkdown.value && editor?.cm && typeof editor.cm.getScrollInfo === "function") {
+          const scrollInfo = editor.cm.getScrollInfo();
+          const left = scrollInfo?.left || 0;
+          const top = scrollInfo?.top || 0;
+          return () => nextTick(() => window.requestAnimationFrame(() => {
+            try { editor?.cm?.scrollTo?.(left, top); } catch (e) { /* ignore */ }
+          }));
+        }
+        const textarea = textEl.value;
+        if (textarea) {
+          const left = textarea.scrollLeft;
+          const top = textarea.scrollTop;
+          return () => nextTick(() => window.requestAnimationFrame(() => {
+            if (textEl.value) {
+              textEl.value.scrollLeft = left;
+              textEl.value.scrollTop = top;
+            }
+          }));
+        }
+      } catch (e) { /* ignore */ }
+      return null;
+    };
   }
 }
 
@@ -825,7 +849,7 @@ onBeforeUnmount(() => {
   if (visibilityListener) window.removeEventListener("transfer-genie:composer-visibility-change", visibilityListener as EventListener);
   if (resizeListener) window.removeEventListener("resize", resizeListener);
   const bridge = (window as any).transferGenieComposer;
-  if (bridge && props.isActive) { bridge._focusActive = null; bridge._clearActive = null; bridge._setActiveText = null; }
+  if (bridge && props.isActive) { bridge._focusActive = null; bridge._clearActive = null; bridge._setActiveText = null; bridge._captureActiveScroll = null; }
 });
 
 function setFormat(format: string) {

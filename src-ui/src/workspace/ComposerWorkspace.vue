@@ -251,6 +251,13 @@ onMounted(() => {
     if (d) composerStore.setDraftText(d.id, text);
     if (bridge._setActiveText) bridge._setActiveText(text || "");
   };
+  bridge.setActiveDraftTextPreserveScroll = (text: string) => {
+    const restoreScroll = bridge._captureActiveScroll?.();
+    const d = composerStore.activeDraft;
+    if (d) composerStore.setDraftText(d.id, text);
+    if (bridge._setActiveText) bridge._setActiveText(text || "");
+    if (typeof restoreScroll === "function") restoreScroll();
+  };
   (window as any).transferGenieComposer = bridge;
 });
 onUnmounted(() => {

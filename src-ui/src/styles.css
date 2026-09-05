@@ -76,6 +76,12 @@ body {
 }
 
 .status-text {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
   font-size: 13px;
   color: var(--muted);
 }
@@ -86,6 +92,8 @@ body {
   gap: 8px;
   padding: 0;
   margin-left: 10px;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .device-name {
@@ -150,14 +158,16 @@ body {
   align-items: center;
   gap: 12px;
   justify-content: space-between;
-  flex-wrap: wrap;
-  row-gap: 8px;
+  flex-wrap: nowrap;
+  min-width: 0;
 }
 
 .feed-toolbar-left {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .endpoint-switcher {
@@ -186,8 +196,17 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   justify-content: flex-end;
+  min-width: 0;
+  flex-wrap: nowrap;
+}
+
+.feed-toolbar-right .button,
+.feed-toolbar-right .button span,
+.feed-toolbar-right .button img {
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .download-task-panel {

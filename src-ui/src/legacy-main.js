@@ -2373,16 +2373,13 @@ function enqueueLiveSpeechTranscription(samples, sampleRate) {
   if (isSpeechSamplesLikelySilent(samples)) {
     speechLiveTranscriptionStarted = true;
     speechLiveTranscriptionSkippedChunkCount += 1;
-    console.info('[speech-to-text] 跳过近零静音分片', analysis);
     return;
   }
   if (isSpeechSamplesLowSpeechActivity(analysis)) {
     speechLiveTranscriptionStarted = true;
     speechLiveTranscriptionLowActivitySkippedChunkCount += 1;
-    console.info('[speech-to-text] 跳过低语音活跃度分片，停止后使用完整录音兜底', analysis);
     return;
   }
-  console.info('[speech-to-text] 提交语音分片', analysis);
   const audio = buildSpeechWavFromSamples(samples, sampleRate);
   speechLiveTranscriptionChunkCount += 1;
   speechLiveTranscriptionStarted = true;
@@ -2438,23 +2435,10 @@ function appendLiveSpeechSamples(input, sampleRate = speechCaptureSampleRate) {
   };
   if (!isSpeechAnalysisVoiceLike(analysis)) {
     speechLiveTranscriptionIgnoredFrameCount += 1;
-    if (speechLiveTranscriptionIgnoredFrameCount === 1 || speechLiveTranscriptionIgnoredFrameCount % 20 === 0) {
-      console.info('[speech-to-text] 实时采样帧未检测到明显人声，暂不进入 ASR 队列', {
-        ...analysis,
-        ignoredFrameCount: speechLiveTranscriptionIgnoredFrameCount,
-      });
-    }
     return;
   }
   speechLiveTranscriptionVoiceFrameCount += 1;
   appendSpeechVoiceCandidate(samples);
-  if (speechLiveTranscriptionVoiceFrameCount === 1 || speechLiveTranscriptionVoiceFrameCount % 20 === 0) {
-    console.info('[speech-to-text] 检测到人声采样帧，已加入实时 ASR 候选队列', {
-      ...analysis,
-      voiceFrameCount: speechLiveTranscriptionVoiceFrameCount,
-      queuedVoiceDurationMs: Math.round((speechVoiceCandidateSampleCount / targetSampleRate) * 1000),
-    });
-  }
   flushSpeechVoiceCandidates();
   const chunkSampleCount = Math.max(1, Math.floor(targetSampleRate * getSpeechAsrChunkDurationMs() / 1000));
   while (speechPendingAsrSampleCount >= chunkSampleCount) {
@@ -2471,10 +2455,6 @@ async function finishLiveSpeechTranscription() {
       enqueueLiveSpeechTranscription(remainingSamples, 16000);
     } else if (speechLiveTranscriptionStarted) {
       speechLiveTranscriptionSkippedChunkCount += 1;
-      console.info('[speech-to-text] 跳过过短实时人声余量，停止后使用完整录音兜底', {
-        ...analyzeSpeechSamples(remainingSamples),
-        durationMs: remainingDurationMs,
-      });
     }
   }
   const generation = speechLiveTranscriptionGeneration;
@@ -2790,36 +2770,14 @@ async function transcribeSpeechAudioAllowBlank(audio) {
     const result = await transcribeSpeechAudio(audio);
     const text = String(result?.text || '').trim();
     if (!text) {
-      console.info('[speech-to-text] ASR 返回空文本', {
-        durationMs: audio?.durationMs || 0,
-        audioBytes: audio?.bytes?.length || 0,
-        timing: result?.timing || null,
-      });
       return null;
     }
     if (isSpeechTranscriptLikelyHallucinated(text)) {
-      console.info('[speech-to-text] 跳过疑似异常重复识别文本', {
-        durationMs: audio?.durationMs || 0,
-        audioBytes: audio?.bytes?.length || 0,
-        textChars: Array.from(text).length,
-        textPreview: getSpeechTranscriptPreview(text),
-      });
       return null;
     }
-    console.info('[speech-to-text] ASR 返回文本', {
-      durationMs: audio?.durationMs || 0,
-      audioBytes: audio?.bytes?.length || 0,
-      textChars: Array.from(text).length,
-      textPreview: getSpeechTranscriptPreview(text),
-      timing: result?.timing || null,
-    });
     return { ...result, text };
   } catch (error) {
     if (String(error || '').includes('ASR 未返回可用文本')) {
-      console.info('[speech-to-text] ASR 未返回可用文本，跳过该分片', {
-        durationMs: audio?.durationMs || 0,
-        audioBytes: audio?.bytes?.length || 0,
-      });
       return null;
     }
     throw error;
@@ -3047,7 +3005,9 @@ function insertTextIntoComposer(text) {
     const draft = cw.getActiveDraft() || {};
     const previous = String(draft.text || '');
     const separator = previous && !previous.endsWith('\n') ? '\n' : '';
-    cw.setActiveDraftText(`${previous}${separator}${value}`);
+    const nextText = `${previous}${separator}${value}`;
+    if (cw.setActiveDraftTextPreserveScroll) cw.setActiveDraftTextPreserveScroll(nextText);
+    else cw.setActiveDraftText(nextText);
     cw.focusActiveDraft?.();
     return;
   }
@@ -3258,10 +3218,6 @@ async function finishSpeechRecording() {
     const transcribeStartedAt = performance.now();
     let result = null;
     if (!speechLiveTranscriptionStarted && isSpeechAudioLikelySilent(audio)) {
-      console.info('[speech-to-text] 跳过完整静音录音', {
-        durationMs: audio.durationMs,
-        audioBytes: audio.bytes?.length || 0,
-      });
     } else {
       result = speechLiveTranscriptionStarted
       ? await finishLiveSpeechTranscription()
@@ -3272,13 +3228,6 @@ async function finishSpeechRecording() {
       && (speechLiveTranscriptionChunkCount > 0 || speechLiveTranscriptionLowActivitySkippedChunkCount > 0)
       && !String(result?.text || '').trim()
     ) {
-      console.info('[speech-to-text] 实时分片没有可用文本，改用完整录音兜底识别', {
-        durationMs: audio.durationMs,
-        audioBytes: audio.bytes?.length || 0,
-        chunkCount: result?.chunkCount || 0,
-        submittedChunkCount: speechLiveTranscriptionChunkCount,
-        lowActivitySkippedChunkCount: speechLiveTranscriptionLowActivitySkippedChunkCount,
-      });
       const fallbackResult = await transcribeSpeechAudioAllowBlank(audio);
       if (fallbackResult?.text) {
         result = {
