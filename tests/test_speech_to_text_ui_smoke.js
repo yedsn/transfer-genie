@@ -1183,7 +1183,7 @@ async function run() {
         pastedText: window.__speechSmoke.pastedText,
         showCount: calls.filter((command) => command === 'show_system_dictation_window').length,
         hideCount: calls.filter((command) => command === 'hide_system_dictation_window').length,
-        levelCount: window.__speechSmoke.emittedEvents.filter((event) => event.name === 'system-dictation-level').length,
+        levelCount: calls.filter((command) => command === 'set_system_dictation_level').length,
         longText: window.__speechSmoke.longText,
       };
     })()`);

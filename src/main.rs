@@ -67,7 +67,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::Window;
-use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State, WebviewUrl, WebviewWindowBuilder};
 #[cfg(desktop)]
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 use tauri_plugin_log::{Target, TargetKind};
@@ -227,6 +227,9 @@ const LOCAL_HTTP_TEXT_API_ROUTE: &str = "/api/send-text";
 const APP_UPDATE_EVENT: &str = "app-update-event";
 const TRAY_CHECK_UPDATE_EVENT: &str = "tray-check-update";
 const SYSTEM_DICTATION_WINDOW_LABEL: &str = "system-dictation";
+const SYSTEM_DICTATION_WINDOW_WIDTH: f64 = 320.0;
+const SYSTEM_DICTATION_WINDOW_HEIGHT: f64 = 96.0;
+const SYSTEM_DICTATION_WINDOW_BOTTOM_MARGIN: i32 = 88;
 const DEFAULT_UPDATER_ENDPOINT: &str =
     "https://github.com/OWNER/REPO/releases/latest/download/latest.json";
 const DEFAULT_UPDATER_PUBKEY: &str = "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY";
@@ -1903,8 +1906,12 @@ fn windows_has_text_input_focus() -> bool {
             eprintln!("[system-dictation] input focus check: GetGUIThreadInfo failed");
             return false;
         }
-        let has_focus = !info.hwndCaret.is_null();
-        eprintln!("[system-dictation] input focus check: has_caret={has_focus}");
+        let has_focus = !info.hwndFocus.is_null() || !info.hwndCaret.is_null();
+        eprintln!(
+            "[system-dictation] input focus check: has_focus={} has_caret={}",
+            !info.hwndFocus.is_null(),
+            !info.hwndCaret.is_null()
+        );
         has_focus
     }
 }
@@ -1972,7 +1979,10 @@ fn ensure_system_dictation_window_impl(app: &AppHandle) -> Result<(), String> {
         system_dictation_window_url(),
     )
     .title("Transfer Genie")
-    .inner_size(420.0, 120.0)
+    .inner_size(
+        SYSTEM_DICTATION_WINDOW_WIDTH,
+        SYSTEM_DICTATION_WINDOW_HEIGHT,
+    )
     .resizable(false)
     .decorations(false)
     .transparent(true)
@@ -1994,7 +2004,9 @@ fn show_system_dictation_window_impl(app: &AppHandle) -> Result<(), String> {
     eprintln!("[system-dictation] show window start");
     ensure_system_dictation_window_impl(app)?;
     if let Some(window) = app.get_webview_window(SYSTEM_DICTATION_WINDOW_LABEL) {
+        position_system_dictation_window(app, &window);
         let _ = window.show();
+        let _ = window.emit("system-dictation-show", ());
         let _ = window.set_focusable(false);
         let _ = window.set_always_on_top(true);
         let _ = window.set_skip_taskbar(true);
@@ -2003,10 +2015,44 @@ fn show_system_dictation_window_impl(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+fn position_system_dictation_window(app: &AppHandle, window: &tauri::WebviewWindow) {
+    let monitor = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| app.primary_monitor().ok().flatten());
+    let Some(monitor) = monitor else {
+        eprintln!("[system-dictation] position skipped: no monitor");
+        return;
+    };
+    let monitor_position = monitor.position();
+    let monitor_size = monitor.size();
+    let scale_factor = monitor.scale_factor();
+    let window_width = (SYSTEM_DICTATION_WINDOW_WIDTH * scale_factor).round() as i32;
+    let window_height = (SYSTEM_DICTATION_WINDOW_HEIGHT * scale_factor).round() as i32;
+    let x = monitor_position.x + ((monitor_size.width as i32 - window_width) / 2);
+    let y = monitor_position.y
+        + monitor_size.height as i32
+        - window_height
+        - SYSTEM_DICTATION_WINDOW_BOTTOM_MARGIN;
+    let _ = window.set_position(PhysicalPosition::new(x.max(monitor_position.x), y));
+    eprintln!("[system-dictation] positioned window x={x} y={y}");
+}
+
 fn hide_system_dictation_window_impl(app: &AppHandle) {
     eprintln!("[system-dictation] hide window start");
     if let Some(window) = app.get_webview_window(SYSTEM_DICTATION_WINDOW_LABEL) {
-        let _ = window.hide();
+        let _ = window.emit("system-dictation-hide", ());
+        let app_for_hide = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(180));
+            let app_for_lookup = app_for_hide.clone();
+            let _ = app_for_hide.run_on_main_thread(move || {
+                if let Some(window) = app_for_lookup.get_webview_window(SYSTEM_DICTATION_WINDOW_LABEL) {
+                    let _ = window.hide();
+                }
+            });
+        });
     }
     eprintln!("[system-dictation] hide window done");
 }

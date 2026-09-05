@@ -3,7 +3,6 @@ const invoke = tauri.core?.invoke || tauri.invoke;
 const openDialog = tauri.dialog?.open;
 const saveDialog = tauri.dialog?.save;
 const listen = tauri.event?.listen;
-const emit = tauri.event?.emit;
 const convertFileSrc = tauri.path?.convertFileSrc;
 const vueBridge = window.transferGenieVue || null;
 const hasVueAppShell = true;
@@ -2045,10 +2044,6 @@ async function updateSystemDictationOverlayLevel(level) {
     return;
   }
   systemDictationLastLevelUpdateAt = now;
-  if (emit) {
-    emit('system-dictation-level', Math.max(0, Math.min(1, Number(level) || 0)));
-    return;
-  }
   if (!invoke || systemDictationLevelUpdateInFlight) return;
   systemDictationLevelUpdateInFlight = true;
   try {
