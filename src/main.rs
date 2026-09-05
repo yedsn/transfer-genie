@@ -227,8 +227,8 @@ const LOCAL_HTTP_TEXT_API_ROUTE: &str = "/api/send-text";
 const APP_UPDATE_EVENT: &str = "app-update-event";
 const TRAY_CHECK_UPDATE_EVENT: &str = "tray-check-update";
 const SYSTEM_DICTATION_WINDOW_LABEL: &str = "system-dictation";
-const SYSTEM_DICTATION_WINDOW_WIDTH: f64 = 320.0;
-const SYSTEM_DICTATION_WINDOW_HEIGHT: f64 = 96.0;
+const SYSTEM_DICTATION_WINDOW_WIDTH: f64 = 360.0;
+const SYSTEM_DICTATION_WINDOW_HEIGHT: f64 = 120.0;
 const SYSTEM_DICTATION_WINDOW_BOTTOM_MARGIN: i32 = 88;
 const DEFAULT_UPDATER_ENDPOINT: &str =
     "https://github.com/OWNER/REPO/releases/latest/download/latest.json";
@@ -1985,6 +1985,7 @@ fn ensure_system_dictation_window_impl(app: &AppHandle) -> Result<(), String> {
     )
     .resizable(false)
     .decorations(false)
+    .shadow(false)
     .transparent(true)
     .skip_taskbar(true)
     .always_on_top(true)
@@ -1994,6 +1995,7 @@ fn ensure_system_dictation_window_impl(app: &AppHandle) -> Result<(), String> {
     .map_err(|err| format!("创建系统听写窗口失败: {err}"))?;
 
     let _ = window.set_focusable(false);
+    let _ = window.set_shadow(false);
     let _ = window.set_always_on_top(true);
     let _ = window.set_skip_taskbar(true);
     eprintln!("[system-dictation] ensure window built");
@@ -2008,6 +2010,7 @@ fn show_system_dictation_window_impl(app: &AppHandle) -> Result<(), String> {
         let _ = window.show();
         let _ = window.emit("system-dictation-show", ());
         let _ = window.set_focusable(false);
+        let _ = window.set_shadow(false);
         let _ = window.set_always_on_top(true);
         let _ = window.set_skip_taskbar(true);
     }
