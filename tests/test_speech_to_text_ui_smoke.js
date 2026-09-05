@@ -149,6 +149,8 @@ function mockSettings() {
       task_retention_count: 14,
       cue_sound_enabled: true,
       cue_sound_kind: 'system',
+      polish_enabled: false,
+      polish_action_id: 'polish',
     },
   };
 }
@@ -173,6 +175,9 @@ function preloadScript() {
       clipboardText: '',
       pastedText: '',
       downloads: [],
+      aiRequests: [],
+      failAiPolish: false,
+      systemDictationStatus: '',
       chunkDurationMs: 0,
       nextSampleCount: 0,
       chunkTextPrefix: '',
@@ -198,11 +203,23 @@ function preloadScript() {
             window.__speechSmoke.clipboardText = String(args?.text || '');
             return null;
           }
+          if (command === 'process_text_with_ai') {
+            if (window.__speechSmoke.failAiPolish) throw 'AI 润色失败';
+            const request = args?.request || {};
+            const text = String(request.text || '');
+            const actionId = String(request.actionId || 'polish');
+            window.__speechSmoke.aiRequests.push({ actionId, text });
+            return { actionId, actionName: actionId, outputText: '润色：' + text, outputMode: 'preview_replace' };
+          }
           if (command === 'show_system_dictation_window' || command === 'hide_system_dictation_window') {
             if (window.__speechSmoke.hangOverlayInvokes) return new Promise(() => {});
             return null;
           }
           if (command === 'set_system_dictation_level') return null;
+          if (command === 'set_system_dictation_status') {
+            window.__speechSmoke.systemDictationStatus = String(args?.text || '');
+            return null;
+          }
           if (command === 'transcribe_speech') {
             if (window.__speechSmoke.failTranscribe) throw 'ASR 凭据无效';
             if (window.__speechSmoke.chunkTextPrefix) {
@@ -1140,6 +1157,16 @@ async function run() {
     assert.equal(comboShortcutCaptureResult.saved.system_dictation_shortcut, 'alt+d', 'Alt+D is saved as the system dictation shortcut');
 
     const buttonRecordingResult = await evaluate(client, `(async () => {
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const button = document.querySelector('#speech-to-text-toggle');
+          if (!button.classList.contains('is-recording') && !button.classList.contains('is-transcribing') && !button.classList.contains('is-preparing')) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('speech button did not return to idle before button recording test'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
       window.transferGenieActions?.updateSettingsFormField?.('speechToTextCueSoundEnabled', true);
       document.querySelector('#speech-to-text-capture-system-audio').checked = false;
       document.querySelector('#speech-to-text-capture-system-audio').dispatchEvent(new Event('change', { bubbles: true }));
@@ -1179,7 +1206,95 @@ async function run() {
     assert.equal(buttonRecordingResult.requestDelta, 1, 'speech button starts one microphone request');
     assert.equal(buttonRecordingResult.text, buttonRecordingResult.longText, 'speech button still inserts recognized text');
 
+    const speechPolishResult = await evaluate(client, `(async () => {
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const button = document.querySelector('#speech-to-text-toggle');
+          if (!button.classList.contains('is-recording') && !button.classList.contains('is-transcribing') && !button.classList.contains('is-preparing')) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('speech button did not return to idle before polish test'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
+      window.__speechSmoke.aiRequests = [];
+      window.__speechSmoke.failAiPolish = false;
+      window.__speechSmoke.longText = '需要润色的语音文本';
+      window.transferGenieActions?.updateSettingsFormField?.('aiEnabled', true);
+      window.transferGenieActions?.updateSettingsFormField?.('aiBaseUrl', 'https://example.test/v1');
+      window.transferGenieActions?.updateSettingsFormField?.('aiApiKey', 'ai-key');
+      window.transferGenieActions?.updateSettingsFormField?.('aiModel', 'smoke-model');
+      document.querySelector('#speech-to-text-polish-enabled').checked = true;
+      document.querySelector('#speech-to-text-polish-enabled').dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#speech-to-text-polish-action').value = 'formalize';
+      document.querySelector('#speech-to-text-polish-action').dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#save-settings')?.click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const saved = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.speech_to_text || {};
+          if (saved.polish_enabled === true && saved.polish_action_id === 'formalize') resolve();
+          else if (Date.now() - start > 2500) reject(new Error('speech polish settings were not saved'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      document.querySelector('#speech-to-text-toggle').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#speech-to-text-toggle').classList.contains('is-recording')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('polish recording did not start'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      await new Promise((r) => setTimeout(r, 80));
+      document.querySelector('#speech-to-text-toggle').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const text = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
+          if (text === '润色：需要润色的语音文本') resolve();
+          else if (Date.now() - start > 3000) reject(new Error('polished speech text was not inserted: ' + text));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const saved = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.speech_to_text || {};
+      const result = {
+        text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
+        clipboardText: window.__speechSmoke.clipboardText,
+        aiRequest: window.__speechSmoke.aiRequests.at(-1),
+        saved,
+        selectDisabled: document.querySelector('#speech-to-text-polish-action').disabled,
+      };
+      window.__speechSmoke.longText = '语音识别文本'.repeat(20);
+      return result;
+    })()`);
+    assert.equal(speechPolishResult.saved.polish_enabled, true, 'speech polish enabled flag is saved');
+    assert.equal(speechPolishResult.saved.polish_action_id, 'formalize', 'speech polish action id is saved');
+    assert.equal(speechPolishResult.aiRequest.actionId, 'formalize', 'speech polish uses the selected AI action');
+    assert.equal(speechPolishResult.aiRequest.text, '需要润色的语音文本', 'speech polish sends raw transcript to AI');
+    assert.equal(speechPolishResult.text, '润色：需要润色的语音文本', 'speech polish inserts polished text');
+    assert.equal(speechPolishResult.clipboardText, '润色：需要润色的语音文本', 'speech polish copies polished text after completion');
+    assert.equal(speechPolishResult.selectDisabled, false, 'speech polish action selector is enabled when polish is enabled');
+
     const systemDictationResult = await evaluate(client, `(async () => {
+      document.querySelector('#speech-to-text-polish-enabled').checked = false;
+      document.querySelector('#speech-to-text-polish-enabled').dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#save-settings')?.click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const saved = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.speech_to_text || {};
+          if (saved.polish_enabled === false) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('speech polish setting was not disabled before raw dictation test'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
@@ -1237,6 +1352,141 @@ async function run() {
     assert.ok(systemDictationResult.hideCount >= 1, 'system dictation hides the capsule window after confirm');
     assert.ok(systemDictationResult.levelCount >= 1, 'system dictation updates waveform level');
 
+    const polishedSystemDictationResult = await evaluate(client, `(async () => {
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const button = document.querySelector('#speech-to-text-toggle');
+          if (!button.classList.contains('is-recording') && !button.classList.contains('is-transcribing') && !button.classList.contains('is-preparing')) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('speech button did not return to idle before polished dictation test'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
+      window.__speechSmoke.pastedText = '';
+      window.__speechSmoke.clipboardText = '';
+      window.__speechSmoke.aiRequests = [];
+      window.__speechSmoke.systemDictationStatus = '';
+      window.__speechSmoke.longText = '系统听写润色原文';
+      document.querySelector('#speech-to-text-polish-enabled').checked = true;
+      document.querySelector('#speech-to-text-polish-enabled').dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#speech-to-text-polish-action').value = 'polish';
+      document.querySelector('#speech-to-text-polish-action').dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#save-settings')?.click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const saved = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.speech_to_text || {};
+          if (saved.polish_enabled === true && saved.polish_action_id === 'polish') resolve();
+          else if (Date.now() - start > 2500) reject(new Error('polished dictation settings were not saved'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      document.activeElement?.blur?.();
+      document.querySelector('.tab-button[data-tab-target="home"]')?.focus();
+      await window.__speechSmoke.eventHandlers['system-dictation-toggle']({ payload: null });
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#speech-to-text-toggle').classList.contains('is-recording')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('polished system dictation did not start'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      await new Promise((r) => setTimeout(r, 80));
+      await window.__speechSmoke.eventHandlers['system-dictation-toggle']({ payload: null });
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const text = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
+          if (text === '润色：系统听写润色原文') resolve();
+          else if (Date.now() - start > 3500) reject(new Error('polished system dictation did not paste: ' + JSON.stringify({
+            pastedText: window.__speechSmoke.pastedText,
+            clipboardText: window.__speechSmoke.clipboardText,
+            draftText: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
+            aiRequests: window.__speechSmoke.aiRequests,
+            settingsForm: window.transferGenieVue?.store?.settingsForm,
+            statusCalls: window.__speechSmoke.calls.filter((call) => call.command === 'set_system_dictation_status').map((call) => call.args?.text || ''),
+            pasteCalls: window.__speechSmoke.calls.filter((call) => call.command === 'paste_dictation_text').length,
+            lastCommands: window.__speechSmoke.calls.slice(-12).map((call) => call.command),
+            status: document.querySelector('#sync-status')?.textContent || '',
+          })));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const statusCalls = window.__speechSmoke.calls.filter((call) => call.command === 'set_system_dictation_status').map((call) => call.args?.text || '');
+      const result = {
+        text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
+        pastedText: window.__speechSmoke.pastedText,
+        aiRequest: window.__speechSmoke.aiRequests.at(-1),
+        statusCalls,
+      };
+      window.__speechSmoke.longText = '语音识别文本'.repeat(20);
+      return result;
+    })()`);
+    assert.equal(polishedSystemDictationResult.text, '润色：系统听写润色原文', 'polished system dictation appends polished text to composer');
+    assert.ok(
+      polishedSystemDictationResult.pastedText === '' || polishedSystemDictationResult.pastedText === '润色：系统听写润色原文',
+      'polished system dictation pastes polished text when the target is outside the Transfer Genie composer',
+    );
+    assert.equal(polishedSystemDictationResult.aiRequest.actionId, 'polish', 'polished system dictation uses configured polish action');
+    assert.ok(polishedSystemDictationResult.statusCalls.includes('正在进行润色'), 'system dictation shows polishing status');
+    assert.equal(polishedSystemDictationResult.statusCalls.at(-1), '', 'system dictation clears polishing status after output');
+
+    const failedPolishResult = await evaluate(client, `(async () => {
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const button = document.querySelector('#speech-to-text-toggle');
+          if (!button.classList.contains('is-recording') && !button.classList.contains('is-transcribing') && !button.classList.contains('is-preparing')) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('speech button did not return to idle before polish failure test'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
+      window.__speechSmoke.failAiPolish = true;
+      window.__speechSmoke.longText = '润色失败后保留原文';
+      document.querySelector('#speech-to-text-polish-enabled').checked = true;
+      document.querySelector('#speech-to-text-polish-enabled').dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#save-settings')?.click();
+      document.activeElement?.blur?.();
+      document.querySelector('.tab-button[data-tab-target="home"]')?.focus();
+      await window.__speechSmoke.eventHandlers['system-dictation-toggle']({ payload: null });
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#speech-to-text-toggle').classList.contains('is-recording')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('polish failure dictation did not start'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      await new Promise((r) => setTimeout(r, 80));
+      await window.__speechSmoke.eventHandlers['system-dictation-toggle']({ payload: null });
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const text = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
+          if (text === '润色失败后保留原文') resolve();
+          else if (Date.now() - start > 3500) reject(new Error('polish failure did not keep raw transcript'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      window.__speechSmoke.failAiPolish = false;
+      document.querySelector('#speech-to-text-polish-enabled').checked = false;
+      document.querySelector('#speech-to-text-polish-enabled').dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#save-settings')?.click();
+      window.__speechSmoke.longText = '语音识别文本'.repeat(20);
+      return { text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '' };
+    })()`);
+    assert.equal(failedPolishResult.text, '润色失败后保留原文', 'failed speech polish keeps the raw transcript');
+
     const focusedComposerDictationResult = await evaluate(client, `(async () => {
       await new Promise((resolve, reject) => {
         const start = Date.now();
@@ -1252,6 +1502,19 @@ async function run() {
       window.__speechSmoke.pastedText = '';
       window.__speechSmoke.clipboardText = '';
       window.__speechSmoke.longText = '当前编辑器焦点识别结果';
+      document.querySelector('#speech-to-text-polish-enabled').checked = false;
+      document.querySelector('#speech-to-text-polish-enabled').dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#save-settings')?.click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const saved = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.speech_to_text || {};
+          if (saved.polish_enabled === false) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('speech polish setting was not disabled before focused composer dictation test'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
       const beforePasteCalls = window.__speechSmoke.calls.filter((call) => call.command === 'paste_dictation_text').length;
       document.querySelector('.cw-textarea, #text-input')?.focus();
       await new Promise((r) => setTimeout(r, 30));

@@ -6,6 +6,7 @@ const listen = tauri.event?.listen;
 
 const capsule = document.querySelector('.dictation-capsule') as HTMLElement | null;
 const wave = document.querySelector('.dictation-wave') as HTMLElement | null;
+const statusText = document.getElementById('dictation-status');
 const confirmButton = document.getElementById('dictation-confirm');
 const cancelButton = document.getElementById('dictation-cancel');
 let displayedLevel = 0;
@@ -25,6 +26,16 @@ function setWaveLevel(level: number) {
 }
 
 (window as any).__transferGenieSetDictationLevel = setWaveLevel;
+
+function setDictationStatus(text: string) {
+  const value = String(text || '').trim();
+  if (statusText) statusText.textContent = value;
+  capsule?.classList.toggle('is-status', !!value);
+  capsule?.classList.toggle('is-recording', !value && !capsule.classList.contains('is-exiting'));
+  if (value) targetLevel = 0;
+}
+
+(window as any).__transferGenieSetDictationStatus = setDictationStatus;
 
 function paintWave() {
   displayedLevel += (targetLevel - displayedLevel) * 0.34;
@@ -50,7 +61,9 @@ function paintWave() {
 
 function showCapsule() {
   capsule?.classList.remove('is-exiting');
+  capsule?.classList.remove('is-status');
   capsule?.classList.add('is-recording');
+  if (statusText) statusText.textContent = '';
   setWaveLevel(0.26);
   if (introPulseTimer) window.clearTimeout(introPulseTimer);
   introPulseTimer = window.setTimeout(() => setWaveLevel(0), 260);
@@ -96,6 +109,10 @@ void listen?.('system-dictation-show', () => {
 
 void listen?.('system-dictation-hide', () => {
   hideCapsule();
+});
+
+void listen?.('system-dictation-status', (event: any) => {
+  setDictationStatus(event.payload ?? '');
 });
 
 capsule?.classList.add('is-recording');

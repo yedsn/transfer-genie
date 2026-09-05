@@ -158,6 +158,14 @@ pub fn default_speech_to_text_system_audio_device_id() -> String {
     String::new()
 }
 
+pub fn default_speech_to_text_polish_enabled() -> bool {
+    false
+}
+
+pub fn default_speech_to_text_polish_action_id() -> String {
+    "polish".to_string()
+}
+
 fn default_ai_actions() -> Vec<AiTextAction> {
     vec![
         AiTextAction {
@@ -712,6 +720,10 @@ pub struct SpeechToTextSettings {
     pub microphone_device_id: String,
     #[serde(default = "default_speech_to_text_system_audio_device_id")]
     pub system_audio_device_id: String,
+    #[serde(default = "default_speech_to_text_polish_enabled")]
+    pub polish_enabled: bool,
+    #[serde(default = "default_speech_to_text_polish_action_id")]
+    pub polish_action_id: String,
 }
 
 impl Default for SpeechToTextSettings {
@@ -733,6 +745,8 @@ impl Default for SpeechToTextSettings {
             capture_system_audio: default_speech_to_text_capture_system_audio(),
             microphone_device_id: default_speech_to_text_microphone_device_id(),
             system_audio_device_id: default_speech_to_text_system_audio_device_id(),
+            polish_enabled: default_speech_to_text_polish_enabled(),
+            polish_action_id: default_speech_to_text_polish_action_id(),
         }
     }
 }

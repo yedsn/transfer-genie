@@ -15,6 +15,7 @@ const DEFAULT_EDITOR_FORMAT_STORAGE_KEY = 'transfer-genie.default-editor-format'
 const HOME_LAYOUT_STORAGE_KEY = 'transfer-genie.home-layout';
 const DEFAULT_SPEECH_CUE_SOUND_KIND = 'system';
 const DEFAULT_SYSTEM_DICTATION_SHORTCUT = 'alt+d';
+const DEFAULT_SPEECH_POLISH_ACTION_ID = 'polish';
 
 function normalizeEditorFormat(format) {
   return format === 'markdown' ? 'markdown' : 'text';
@@ -115,6 +116,80 @@ function syncVueSettingsForm(formState) {
   vueBridge?.syncSettingsForm?.(formState);
 }
 
+function getEnabledAiActions() {
+  const actions = normalizeAiActions(currentSettingsFormState.aiActions);
+  return actions.filter((action) => action && action.enabled !== false && String(action.id || '').trim() && String(action.user_prompt || '').trim());
+}
+
+function getSpeechPolishSettings() {
+  const enabled = !!currentSettingsFormState.speechToTextPolishEnabled;
+  const actionId = String(currentSettingsFormState.speechToTextPolishActionId || DEFAULT_SPEECH_POLISH_ACTION_ID).trim() || DEFAULT_SPEECH_POLISH_ACTION_ID;
+  return { enabled, actionId };
+}
+
+function resolveSpeechPolishAction(actionId) {
+  const enabledActions = getEnabledAiActions();
+  const normalizedId = String(actionId || DEFAULT_SPEECH_POLISH_ACTION_ID).trim() || DEFAULT_SPEECH_POLISH_ACTION_ID;
+  const direct = enabledActions.find((action) => action.id === normalizedId);
+  if (direct) return direct;
+  const fallback = enabledActions.find((action) => action.id === DEFAULT_SPEECH_POLISH_ACTION_ID);
+  return fallback || enabledActions[0] || null;
+}
+
+async function setSystemDictationStatusText(text) {
+  const value = String(text || '').trim();
+  if (invoke) {
+    systemDictationOverlayVisible = !!value;
+    await invoke('set_system_dictation_status', { text: value }).catch((error) => {
+      console.warn('[speech-to-text] system dictation status failed', error);
+    });
+  }
+}
+
+async function polishSpeechTranscript(text, options = {}) {
+  const value = String(text || '').trim();
+  if (!value) return '';
+  const { enabled, actionId } = getSpeechPolishSettings();
+  if (!enabled) return value;
+  const action = resolveSpeechPolishAction(actionId);
+  if (!action) return value;
+  const isSystemDictationPolish = !!options.systemDictation;
+  const api = window.transferGenieApi;
+  const tauriInvoke = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
+  const request = {
+    text: value,
+    format: currentFormat || 'text',
+    actionId: action.id,
+  };
+  const startedAt = performance.now();
+  setStatus('正在进行润色...');
+  if (isSystemDictationPolish) {
+    logSystemDictation('polish started', { actionId: action.id, textChars: value.length });
+    await setSystemDictationStatusText('正在进行润色');
+  }
+  try {
+    const result = api?.invoke
+      ? await api.invoke('process_text_with_ai', { request })
+      : tauriInvoke
+        ? await tauriInvoke('process_text_with_ai', { request })
+        : null;
+    const output = String(result?.outputText || '').trim();
+    if (!output) throw new Error('AI 响应为空');
+    if (isSystemDictationPolish) {
+      logSystemDictation('polish done', { elapsedMs: Math.round(performance.now() - startedAt), outputChars: output.length, actionId: action.id });
+      await setSystemDictationStatusText('');
+    }
+    return output;
+  } catch (error) {
+    console.warn('[speech-to-text] polish failed', error);
+    if (isSystemDictationPolish) {
+      logSystemDictation('polish failed', { elapsedMs: Math.round(performance.now() - startedAt), error: String(error), actionId: action.id });
+      await setSystemDictationStatusText('');
+    }
+    return value;
+  }
+}
+
 function syncVueSettingsSnapshots(snapshots) {
   vueBridge?.syncSettingsSnapshots?.(snapshots);
 }
@@ -142,6 +217,7 @@ function syncVueSettingsAutoBackup(autoBackupState) {
 let settingsAutoSaveTimer = null;
 let settingsAutoSaveRunning = false;
 let settingsAutoSavePending = false;
+let settingsFormRevision = 0;
 const SETTINGS_AUTO_SAVE_DELAY_MS = 650;
 
 function queueSettingsAutoSave(options = {}) {
@@ -185,6 +261,7 @@ function updateSettingsAutoBackupField(field, value, options = {}) {
     ...currentAutoBackupStatusState,
     [field]: value,
   };
+  settingsFormRevision += 1;
   syncVueSettingsAutoBackup(currentAutoBackupStatusState);
   queueSettingsAutoSave(options);
 }
@@ -197,6 +274,7 @@ function updateSettingsFormField(field, value, options = {}) {
     ...currentSettingsFormState,
     [field]: value,
   };
+  settingsFormRevision += 1;
   if (field === 'defaultEditorFormat') {
     saveDefaultEditorFormat(value);
     applyDefaultEditorFormat(value);
@@ -711,6 +789,8 @@ const speechToTextTaskRetentionInput = document.getElementById('speech-to-text-t
 const speechToTextCueSoundEnabledInput = document.getElementById('speech-to-text-cue-sound-enabled');
 const speechToTextCueSoundKindInput = document.getElementById('speech-to-text-cue-sound-kind');
 const speechToTextCueSoundPreviewButton = document.getElementById('speech-to-text-cue-sound-preview');
+const speechToTextPolishEnabledInput = document.getElementById('speech-to-text-polish-enabled');
+const speechToTextPolishActionInput = document.getElementById('speech-to-text-polish-action');
 const speechTaskHistorySummary = document.getElementById('speech-task-history-summary');
 const speechTaskHistoryList = document.getElementById('speech-task-history-list');
 const sendHotkeyInputs = document.querySelectorAll('input[name="send-hotkey"]');
@@ -985,6 +1065,8 @@ let currentSettingsFormState = {
   speechToTextTaskRetentionCount: 14,
   speechToTextCueSoundEnabled: true,
   speechToTextCueSoundKind: DEFAULT_SPEECH_CUE_SOUND_KIND,
+  speechToTextPolishEnabled: false,
+  speechToTextPolishActionId: 'polish',
 };
 let currentAutoBackupStatusState = {
   enabled: false,
@@ -2498,7 +2580,9 @@ function enqueueLiveSpeechTranscription(samples, sampleRate) {
     if (result?.text) {
       const text = String(result.text);
       speechLiveTranscriptionTexts.push(text);
-      appendTextAfterSpeechChunk(text);
+      if (!getSpeechPolishSettings().enabled) {
+        appendTextAfterSpeechChunk(text);
+      }
       reportSpeechTiming(result.timing, `chunk ${chunkNumber}`);
       if (speechLiveTaskId) {
         void updateSpeechTask(speechLiveTaskId, {
@@ -3393,6 +3477,7 @@ async function finishSpeechRecording() {
     speechStopFinalizeTimer = 0;
   }
   const isSystemDictation = systemDictationMode;
+  const polishEnabled = getSpeechPolishSettings().enabled;
   if (isSystemDictation) logSystemDictation('finish recording entered');
   systemDictationMode = false;
   systemDictationAwaitingConfirm = false;
@@ -3481,7 +3566,9 @@ async function finishSpeechRecording() {
           ...fallbackResult,
           chunkCount: result?.chunkCount || 1,
         };
-        insertTextIntoComposer(fallbackResult.text);
+        if (!polishEnabled) {
+          insertTextIntoComposer(fallbackResult.text);
+        }
       }
     }
     const transcribeMs = performance.now() - transcribeStartedAt;
@@ -3495,8 +3582,13 @@ async function finishSpeechRecording() {
     if (skipSystemPaste) {
       logSystemDictation('paste skipped because Transfer Genie composer is focused');
     }
+    const rawText = String(result?.text || '').trim();
+    const finalText = polishEnabled
+      ? await polishSpeechTranscript(rawText, { systemDictation: isSystemDictation })
+      : rawText;
+    result = { ...(result || {}), text: finalText };
     const insertStartedAt = performance.now();
-    if (!speechLiveTranscriptionStarted) {
+    if (!speechLiveTranscriptionStarted || polishEnabled) {
       insertTextIntoComposer(result?.text || '');
     }
     const insertMs = performance.now() - insertStartedAt;
@@ -10348,6 +10440,8 @@ function applySettings(settings) {
   if (speechToTextTaskRetentionInput) speechToTextTaskRetentionInput.value = Number(speechToText.task_retention_count || 14);
   if (speechToTextCueSoundEnabledInput) speechToTextCueSoundEnabledInput.checked = speechToText.cue_sound_enabled !== false;
   if (speechToTextCueSoundKindInput) speechToTextCueSoundKindInput.value = normalizeSpeechCueSoundKind(speechToText.cue_sound_kind || DEFAULT_SPEECH_CUE_SOUND_KIND);
+  if (speechToTextPolishEnabledInput) speechToTextPolishEnabledInput.checked = !!speechToText.polish_enabled;
+  if (speechToTextPolishActionInput) speechToTextPolishActionInput.value = speechToText.polish_action_id || 'polish';
   currentSettingsFormState = {
     senderName: settings.sender_name || '',
     refreshIntervalSecs: Number(settings.refresh_interval_secs || 5),
@@ -10395,6 +10489,8 @@ function applySettings(settings) {
     speechToTextTaskRetentionCount: Number(speechToText.task_retention_count || 14),
     speechToTextCueSoundEnabled: speechToText.cue_sound_enabled !== false,
     speechToTextCueSoundKind: normalizeSpeechCueSoundKind(speechToText.cue_sound_kind || DEFAULT_SPEECH_CUE_SOUND_KIND),
+    speechToTextPolishEnabled: !!speechToText.polish_enabled,
+    speechToTextPolishActionId: speechToText.polish_action_id || 'polish',
   };
   syncVueSettingsForm(currentSettingsFormState);
   syncSpeechCueSoundControls();
@@ -10501,6 +10597,7 @@ async function saveSettings(options = {}) {
   const requireTelegramBridgeConfig = !!options.requireTelegramBridgeConfig;
   const silent = !!options.silent;
   const isAutoSave = options.source === 'auto';
+  const saveStartedRevision = settingsFormRevision;
   const endpoints = collectEndpointPayload();
   for (const endpoint of endpoints) {
     if (endpoint.enabled && !endpoint.url) {
@@ -10529,6 +10626,7 @@ async function saveSettings(options = {}) {
   );
   const speechToTextCueSoundEnabled = !!currentSettingsFormState.speechToTextCueSoundEnabled;
   const speechToTextCueSoundKind = normalizeSpeechCueSoundKind(currentSettingsFormState.speechToTextCueSoundKind || DEFAULT_SPEECH_CUE_SOUND_KIND);
+  const speechToTextPolishEnabled = !!currentSettingsFormState.speechToTextPolishEnabled;
   const speechToTextMaxDurationSecs = 60;
   const speechToTextTaskRetentionCount = Math.max(
     1,
@@ -10595,6 +10693,12 @@ async function saveSettings(options = {}) {
   const aiDefaultActionId = aiActions.some((action) => action.id === currentSettingsFormState.aiDefaultActionId)
     ? currentSettingsFormState.aiDefaultActionId
     : aiActions[0]?.id || 'polish';
+  const enabledAiActionIds = new Set(aiActions.filter((action) => action.enabled !== false).map((action) => action.id));
+  const speechToTextPolishActionId = enabledAiActionIds.has(currentSettingsFormState.speechToTextPolishActionId)
+    ? currentSettingsFormState.speechToTextPolishActionId
+    : enabledAiActionIds.has(DEFAULT_SPEECH_POLISH_ACTION_ID)
+      ? DEFAULT_SPEECH_POLISH_ACTION_ID
+      : aiDefaultActionId;
   if (currentSettingsFormState.aiEnabled) {
     if (!(currentSettingsFormState.aiBaseUrl || '').trim()) {
       setErrorStatus('启用 AI 前请先填写 Provider Base URL');
@@ -10711,6 +10815,8 @@ async function saveSettings(options = {}) {
       shortcut: 'right-alt',
       system_dictation_enabled: systemDictationEnabled,
       system_dictation_shortcut: normalizedSystemDictationShortcut || DEFAULT_SYSTEM_DICTATION_SHORTCUT,
+      polish_enabled: speechToTextPolishEnabled,
+      polish_action_id: speechToTextPolishActionId || DEFAULT_SPEECH_POLISH_ACTION_ID,
       max_duration_secs: speechToTextMaxDurationSecs,
       task_retention_count: speechToTextTaskRetentionCount,
       cue_sound_enabled: speechToTextCueSoundEnabled,
@@ -10728,7 +10834,11 @@ async function saveSettings(options = {}) {
     if (!silent) {
       setSuccessStatus('设置已保存');
     }
-    applySettings(updated);
+    if (settingsFormRevision === saveStartedRevision) {
+      applySettings(updated);
+    } else {
+      syncVueSettings(updated);
+    }
     await pruneSpeechTasks();
     await renderSpeechTaskHistory();
     await loadLocalHttpApiStatus({ silent: true });
@@ -12055,6 +12165,28 @@ if (speechToTextCueSoundEnabledInput) {
     };
     syncVueSettingsForm(currentSettingsFormState);
     syncSpeechCueSoundControls();
+  });
+}
+if (speechToTextPolishEnabledInput) {
+  speechToTextPolishEnabledInput.addEventListener('change', (event) => {
+    settingsFormRevision += 1;
+    currentSettingsFormState = {
+      ...currentSettingsFormState,
+      speechToTextPolishEnabled: !!event.target.checked,
+    };
+    syncVueSettingsForm(currentSettingsFormState);
+    queueSettingsAutoSave({ source: 'user' });
+  });
+}
+if (speechToTextPolishActionInput) {
+  speechToTextPolishActionInput.addEventListener('change', (event) => {
+    settingsFormRevision += 1;
+    currentSettingsFormState = {
+      ...currentSettingsFormState,
+      speechToTextPolishActionId: event.target.value || 'polish',
+    };
+    syncVueSettingsForm(currentSettingsFormState);
+    queueSettingsAutoSave({ source: 'user' });
   });
 }
 if (speechToTextCueSoundKindInput) {

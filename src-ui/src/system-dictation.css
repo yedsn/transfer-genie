@@ -53,6 +53,33 @@
   animation: dictation-exit 140ms cubic-bezier(0.4, 0, 1, 1) both;
 }
 
+.dictation-capsule.is-status {
+  --dictation-expanded-width: 116px;
+  grid-template-columns: 1fr;
+  padding: 7px 12px;
+  animation: dictation-status-enter 160ms cubic-bezier(0.18, 0.9, 0.22, 1) both;
+}
+
+.dictation-status {
+  display: none;
+  min-width: 0;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 12px;
+  font-weight: 520;
+  line-height: 1;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.dictation-capsule.is-status .dictation-status {
+  display: block;
+}
+
+.dictation-capsule.is-status .dictation-action,
+.dictation-capsule.is-status .dictation-wave {
+  display: none;
+}
+
 .dictation-wave {
   width: 24px;
   height: 22px;
@@ -192,6 +219,11 @@
   0% { width: var(--dictation-expanded-width); opacity: 1; transform: translateY(0) scale(1); }
   70% { width: var(--dictation-collapsed-width); opacity: 1; transform: translateY(3px) scale(0.98); }
   100% { width: var(--dictation-collapsed-width); opacity: 0; transform: translateY(9px) scale(0.94); }
+}
+
+@keyframes dictation-status-enter {
+  from { width: var(--dictation-collapsed-width); opacity: 0; transform: translateY(5px) scale(0.96); }
+  to { width: var(--dictation-expanded-width); opacity: 1; transform: translateY(0) scale(1); }
 }
 
 @keyframes dictation-wave-enter {

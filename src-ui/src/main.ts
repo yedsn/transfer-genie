@@ -159,6 +159,14 @@ const app = createApp({
         .map((action: any, index: number) => ({ action, index }))
         .filter((item: any) => (String(item.action?.category || "通用").trim() || "通用") === active);
     },
+    enabledAiPromptActions(): any[] {
+      const actions = Array.isArray(this.settingsFormState().aiActions) ? this.settingsFormState().aiActions : [];
+      const enabled = actions.filter((action: any) => {
+        return action && action.enabled !== false && String(action.id || "").trim() && String(action.user_prompt || action.userPrompt || "").trim();
+      });
+      if (enabled.some((action: any) => action.id === "polish")) return enabled;
+      return [{ id: "polish", name: "润色" }, ...enabled];
+    },
     currentSettingsWebdavEndpoints(): any[] {
       return this.settingsWebdavState().endpoints || [];
     },

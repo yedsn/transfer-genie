@@ -969,6 +969,17 @@
                     </label>
                   </div>
                   <label class="toggle-left">
+                    <span class="toggle-label">转录后自动润色</span>
+                    <input id="speech-to-text-polish-enabled" type="checkbox" :checked="ui.settingsForm.speechToTextPolishEnabled" @change="updateSettingsFormField('speechToTextPolishEnabled', $event.target.checked)" />
+                  </label>
+                  <label>
+                    润色提示词动作
+                    <select id="speech-to-text-polish-action" :value="ui.settingsForm.speechToTextPolishActionId || 'polish'" :disabled="!ui.settingsForm.speechToTextPolishEnabled" @change="updateSettingsFormField('speechToTextPolishActionId', $event.target.value)">
+                      <option v-for="action in enabledAiPromptActions()" :key="action.id" :value="action.id">{{ action.name || action.id }}</option>
+                    </select>
+                    <span class="field-hint">使用 AI 助手里的提示词动作处理转录结果；默认使用基础润色。</span>
+                  </label>
+                  <label class="toggle-left">
                     <span class="toggle-label">启用录音提示音</span>
                     <input id="speech-to-text-cue-sound-enabled" type="checkbox" :checked="ui.settingsForm.speechToTextCueSoundEnabled !== false" @change="updateSettingsFormField('speechToTextCueSoundEnabled', $event.target.checked)" />
                   </label>

@@ -2081,6 +2081,31 @@ fn emit_system_dictation_overlay_level(app: &AppHandle, level: f64) {
 }
 
 #[tauri::command]
+fn set_system_dictation_status(app: AppHandle, text: String) -> Result<(), String> {
+    let message = text.trim().to_string();
+    let app_for_task = app.clone();
+    app.run_on_main_thread(move || {
+        if !message.is_empty() {
+            if let Err(err) = show_system_dictation_window_impl(&app_for_task) {
+                eprintln!("[system-dictation] show status window failed: {err}");
+                return;
+            }
+        }
+        if let Some(window) = app_for_task.get_webview_window(SYSTEM_DICTATION_WINDOW_LABEL) {
+            let _ = window.emit("system-dictation-status", message.clone());
+            let escaped = serde_json::to_string(&message).unwrap_or_else(|_| "\"\"".to_string());
+            let _ = window.eval(format!(
+                "window.__transferGenieSetDictationStatus?.({escaped});"
+            ));
+        }
+        if message.is_empty() {
+            hide_system_dictation_window_impl(&app_for_task);
+        }
+    })
+    .map_err(|err| format!("调度系统听写状态失败: {err}"))
+}
+
+#[tauri::command]
 fn get_device_name() -> String {
     resolve_device_name()
 }
@@ -10468,6 +10493,7 @@ fn main() {
             show_system_dictation_window,
             hide_system_dictation_window,
             set_system_dictation_level,
+            set_system_dictation_status,
             system_dictation_action,
             list_settings_snapshots,
             clear_settings_snapshots,
