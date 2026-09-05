@@ -2058,7 +2058,7 @@ fn hide_system_dictation_window_impl(app: &AppHandle) {
         let _ = window.emit("system-dictation-hide", ());
         let app_for_hide = app.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(180));
+            std::thread::sleep(Duration::from_millis(150));
             let app_for_lookup = app_for_hide.clone();
             let _ = app_for_hide.run_on_main_thread(move || {
                 if let Some(window) = app_for_lookup.get_webview_window(SYSTEM_DICTATION_WINDOW_LABEL) {

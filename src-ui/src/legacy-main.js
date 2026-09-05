@@ -1978,7 +1978,7 @@ let systemDictationStartedInTransferGenieComposer = false;
 let transferGenieComposerHadRecentFocus = false;
 const SYSTEM_DICTATION_LEVEL_UPDATE_INTERVAL_MS = 120;
 const SYSTEM_DICTATION_START_TOGGLE_GUARD_MS = 650;
-const SPEECH_RECORDING_STOP_TAIL_MS = 180;
+const SPEECH_RECORDING_STOP_TAIL_MS = 300;
 
 function logSystemDictation(message, detail = {}) {
   try {
@@ -3365,7 +3365,10 @@ function stopSpeechRecording(options = {}) {
       systemDictationStartedInTransferGenieComposer = false;
       return;
     }
-    if (systemDictationMode) logSystemDictation('tail capture started', { tailMs: SPEECH_RECORDING_STOP_TAIL_MS });
+    if (systemDictationMode) {
+      logSystemDictation('overlay closing before tail capture', { tailMs: SPEECH_RECORDING_STOP_TAIL_MS });
+      void setSystemDictationOverlayVisible(false);
+    }
     speechStopFinalizeTimer = window.setTimeout(() => {
       speechStopFinalizeTimer = 0;
       speechSessionId += 1;
