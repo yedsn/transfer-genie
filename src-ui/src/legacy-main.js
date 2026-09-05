@@ -1917,10 +1917,16 @@ let speechSilentGainNode = null;
 let speechCapturedSegments = [];
 let speechPendingAsrSamples = [];
 let speechPendingAsrSampleCount = 0;
+let speechVoiceCandidateSegments = [];
+let speechVoiceCandidateSampleCount = 0;
 let speechLiveTranscriptionChain = Promise.resolve();
 let speechLiveTranscriptionTexts = [];
 let speechLiveTranscriptionError = null;
 let speechLiveTranscriptionChunkCount = 0;
+let speechLiveTranscriptionSkippedChunkCount = 0;
+let speechLiveTranscriptionLowActivitySkippedChunkCount = 0;
+let speechLiveTranscriptionVoiceFrameCount = 0;
+let speechLiveTranscriptionIgnoredFrameCount = 0;
 let speechLiveTranscriptionStarted = false;
 let speechLiveTranscriptionGeneration = 0;
 let speechLiveTaskId = '';
@@ -2228,7 +2234,8 @@ function buildCapturedSpeechWav(segments = speechCapturedSegments) {
   };
 }
 
-const SPEECH_ASR_CHUNK_DURATION_MS = 20 * 1000;
+const SPEECH_ASR_CHUNK_DURATION_MS = 5 * 1000;
+const SPEECH_ASR_MIN_REMAINDER_DURATION_MS = 900;
 
 function getSpeechAsrChunkDurationMs() {
   const testValue = Number(window.__speechSmoke?.chunkDurationMs || 0);
@@ -2248,14 +2255,92 @@ function buildSpeechWavFromSamples(samples, sampleRate) {
   };
 }
 
+function analyzeSpeechSamples(samples) {
+  if (!samples?.length) return { rms: 0, peak: 0, activeRatio: 0, sampleCount: 0 };
+  let sumSquares = 0;
+  let peak = 0;
+  let activeCount = 0;
+  const activeThreshold = 0.012;
+  for (let index = 0; index < samples.length; index += 1) {
+    const value = Math.abs(Number(samples[index]) || 0);
+    sumSquares += value * value;
+    if (value > peak) peak = value;
+    if (value >= activeThreshold) activeCount += 1;
+  }
+  return {
+    rms: Math.sqrt(sumSquares / samples.length),
+    peak,
+    activeRatio: activeCount / samples.length,
+    sampleCount: samples.length,
+  };
+}
+
+function isSpeechSamplesLikelySilent(samples) {
+  const analysis = analyzeSpeechSamples(samples);
+  return analysis.rms < 0.0005 && analysis.peak < 0.003;
+}
+
+function isSpeechAudioLikelySilent(audio) {
+  const decoded = decodeSpeechWavPcm16(audio);
+  return decoded?.samples?.length ? isSpeechSamplesLikelySilent(decoded.samples) : false;
+}
+
+function isSpeechSamplesLowSpeechActivity(analysis) {
+  if (!analysis) return false;
+  return analysis.rms < 0.004 && analysis.peak < 0.02 && analysis.activeRatio < 0.005;
+}
+
+function isSpeechAnalysisVoiceLike(analysis) {
+  if (!analysis) return false;
+  return analysis.rms >= 0.004 || analysis.peak >= 0.02 || analysis.activeRatio >= 0.005;
+}
+
+function normalizeSpeechTranscriptForAnomaly(text) {
+  return String(text || '').replace(/[\s\p{P}\p{S}]/gu, '');
+}
+
+function isSpeechTranscriptLikelyHallucinated(text) {
+  const normalized = normalizeSpeechTranscriptForAnomaly(text);
+  if (normalized.length < 8) return false;
+  const chars = Array.from(normalized);
+  const counts = new Map();
+  chars.forEach((char) => counts.set(char, (counts.get(char) || 0) + 1));
+  const maxCount = Math.max(...counts.values());
+  const dominantRatio = maxCount / chars.length;
+  const uniqueCount = counts.size;
+  if (dominantRatio >= 0.8 && uniqueCount <= 3) return true;
+  for (let phraseLength = 2; phraseLength <= 4; phraseLength += 1) {
+    const phrase = chars.slice(0, phraseLength).join('');
+    if (phrase.length < phraseLength) continue;
+    const repeated = phrase.repeat(Math.ceil(chars.length / phraseLength)).slice(0, chars.length);
+    let matches = 0;
+    for (let index = 0; index < chars.length; index += 1) {
+      if (chars[index] === repeated[index]) matches += 1;
+    }
+    if (matches / chars.length >= 0.9) return true;
+  }
+  return false;
+}
+
+function getSpeechTranscriptPreview(text, maxLength = 80) {
+  const value = String(text || '').replace(/\s+/g, ' ').trim();
+  return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
+}
+
 function resetLiveSpeechTranscription() {
   speechLiveTranscriptionGeneration += 1;
   speechPendingAsrSamples = [];
   speechPendingAsrSampleCount = 0;
+  speechVoiceCandidateSegments = [];
+  speechVoiceCandidateSampleCount = 0;
   speechLiveTranscriptionChain = Promise.resolve();
   speechLiveTranscriptionTexts = [];
   speechLiveTranscriptionError = null;
   speechLiveTranscriptionChunkCount = 0;
+  speechLiveTranscriptionSkippedChunkCount = 0;
+  speechLiveTranscriptionLowActivitySkippedChunkCount = 0;
+  speechLiveTranscriptionVoiceFrameCount = 0;
+  speechLiveTranscriptionIgnoredFrameCount = 0;
   speechLiveTranscriptionStarted = false;
   speechLiveTaskId = '';
 }
@@ -2281,6 +2366,23 @@ function takeSpeechPendingSamples(sampleCount) {
 
 function enqueueLiveSpeechTranscription(samples, sampleRate) {
   if (!samples?.length || speechLiveTranscriptionError) return;
+  const analysis = {
+    ...analyzeSpeechSamples(samples),
+    durationMs: Math.round((samples.length / sampleRate) * 1000),
+  };
+  if (isSpeechSamplesLikelySilent(samples)) {
+    speechLiveTranscriptionStarted = true;
+    speechLiveTranscriptionSkippedChunkCount += 1;
+    console.info('[speech-to-text] 跳过近零静音分片', analysis);
+    return;
+  }
+  if (isSpeechSamplesLowSpeechActivity(analysis)) {
+    speechLiveTranscriptionStarted = true;
+    speechLiveTranscriptionLowActivitySkippedChunkCount += 1;
+    console.info('[speech-to-text] 跳过低语音活跃度分片，停止后使用完整录音兜底', analysis);
+    return;
+  }
+  console.info('[speech-to-text] 提交语音分片', analysis);
   const audio = buildSpeechWavFromSamples(samples, sampleRate);
   speechLiveTranscriptionChunkCount += 1;
   speechLiveTranscriptionStarted = true;
@@ -2311,13 +2413,49 @@ function enqueueLiveSpeechTranscription(samples, sampleRate) {
   });
 }
 
+function appendSpeechVoiceCandidate(samples) {
+  if (!samples?.length) return;
+  speechVoiceCandidateSegments.push(samples);
+  speechVoiceCandidateSampleCount += samples.length;
+}
+
+function flushSpeechVoiceCandidates() {
+  if (!speechVoiceCandidateSampleCount) return;
+  speechPendingAsrSamples.push(mergeSpeechSamples(speechVoiceCandidateSegments));
+  speechPendingAsrSampleCount += speechVoiceCandidateSampleCount;
+  speechVoiceCandidateSegments = [];
+  speechVoiceCandidateSampleCount = 0;
+}
+
 function appendLiveSpeechSamples(input, sampleRate = speechCaptureSampleRate) {
   if (!input?.length || speechLiveTranscriptionError) return;
   const targetSampleRate = 16000;
   const samples = downsampleSpeechSamples(input, sampleRate, targetSampleRate);
   if (!samples.length) return;
-  speechPendingAsrSamples.push(samples);
-  speechPendingAsrSampleCount += samples.length;
+  const analysis = {
+    ...analyzeSpeechSamples(samples),
+    durationMs: Math.round((samples.length / targetSampleRate) * 1000),
+  };
+  if (!isSpeechAnalysisVoiceLike(analysis)) {
+    speechLiveTranscriptionIgnoredFrameCount += 1;
+    if (speechLiveTranscriptionIgnoredFrameCount === 1 || speechLiveTranscriptionIgnoredFrameCount % 20 === 0) {
+      console.info('[speech-to-text] 实时采样帧未检测到明显人声，暂不进入 ASR 队列', {
+        ...analysis,
+        ignoredFrameCount: speechLiveTranscriptionIgnoredFrameCount,
+      });
+    }
+    return;
+  }
+  speechLiveTranscriptionVoiceFrameCount += 1;
+  appendSpeechVoiceCandidate(samples);
+  if (speechLiveTranscriptionVoiceFrameCount === 1 || speechLiveTranscriptionVoiceFrameCount % 20 === 0) {
+    console.info('[speech-to-text] 检测到人声采样帧，已加入实时 ASR 候选队列', {
+      ...analysis,
+      voiceFrameCount: speechLiveTranscriptionVoiceFrameCount,
+      queuedVoiceDurationMs: Math.round((speechVoiceCandidateSampleCount / targetSampleRate) * 1000),
+    });
+  }
+  flushSpeechVoiceCandidates();
   const chunkSampleCount = Math.max(1, Math.floor(targetSampleRate * getSpeechAsrChunkDurationMs() / 1000));
   while (speechPendingAsrSampleCount >= chunkSampleCount) {
     enqueueLiveSpeechTranscription(takeSpeechPendingSamples(chunkSampleCount), targetSampleRate);
@@ -2325,15 +2463,33 @@ function appendLiveSpeechSamples(input, sampleRate = speechCaptureSampleRate) {
 }
 
 async function finishLiveSpeechTranscription() {
+  flushSpeechVoiceCandidates();
   if (speechPendingAsrSampleCount > 0) {
-    enqueueLiveSpeechTranscription(takeSpeechPendingSamples(speechPendingAsrSampleCount), 16000);
+    const remainingSamples = takeSpeechPendingSamples(speechPendingAsrSampleCount);
+    const remainingDurationMs = Math.round((remainingSamples.length / 16000) * 1000);
+    if (!isSpeechSamplesLikelySilent(remainingSamples) && remainingDurationMs >= SPEECH_ASR_MIN_REMAINDER_DURATION_MS) {
+      enqueueLiveSpeechTranscription(remainingSamples, 16000);
+    } else if (speechLiveTranscriptionStarted) {
+      speechLiveTranscriptionSkippedChunkCount += 1;
+      console.info('[speech-to-text] 跳过过短实时人声余量，停止后使用完整录音兜底', {
+        ...analyzeSpeechSamples(remainingSamples),
+        durationMs: remainingDurationMs,
+      });
+    }
   }
   const generation = speechLiveTranscriptionGeneration;
   await speechLiveTranscriptionChain;
   if (generation !== speechLiveTranscriptionGeneration) throw new Error('语音录制已取消');
   if (speechLiveTranscriptionError) throw speechLiveTranscriptionError;
   const text = speechLiveTranscriptionTexts.join('\n').trim();
-  return { text, logId: null, chunkCount: speechLiveTranscriptionChunkCount || 1 };
+  return {
+    text,
+    logId: null,
+    chunkCount: speechLiveTranscriptionChunkCount
+      + speechLiveTranscriptionSkippedChunkCount
+      + speechLiveTranscriptionLowActivitySkippedChunkCount
+      || 1,
+  };
 }
 
 function decodeSpeechWavPcm16(audio) {
@@ -2633,10 +2789,37 @@ async function transcribeSpeechAudioAllowBlank(audio) {
   try {
     const result = await transcribeSpeechAudio(audio);
     const text = String(result?.text || '').trim();
-    if (!text) return null;
+    if (!text) {
+      console.info('[speech-to-text] ASR 返回空文本', {
+        durationMs: audio?.durationMs || 0,
+        audioBytes: audio?.bytes?.length || 0,
+        timing: result?.timing || null,
+      });
+      return null;
+    }
+    if (isSpeechTranscriptLikelyHallucinated(text)) {
+      console.info('[speech-to-text] 跳过疑似异常重复识别文本', {
+        durationMs: audio?.durationMs || 0,
+        audioBytes: audio?.bytes?.length || 0,
+        textChars: Array.from(text).length,
+        textPreview: getSpeechTranscriptPreview(text),
+      });
+      return null;
+    }
+    console.info('[speech-to-text] ASR 返回文本', {
+      durationMs: audio?.durationMs || 0,
+      audioBytes: audio?.bytes?.length || 0,
+      textChars: Array.from(text).length,
+      textPreview: getSpeechTranscriptPreview(text),
+      timing: result?.timing || null,
+    });
     return { ...result, text };
   } catch (error) {
     if (String(error || '').includes('ASR 未返回可用文本')) {
+      console.info('[speech-to-text] ASR 未返回可用文本，跳过该分片', {
+        durationMs: audio?.durationMs || 0,
+        audioBytes: audio?.bytes?.length || 0,
+      });
       return null;
     }
     throw error;
@@ -3070,13 +3253,41 @@ async function finishSpeechRecording() {
     let saveTaskMs = 0;
     const saveTaskStartedAt = performance.now();
     if (speechLiveTranscriptionStarted) {
-      await putSpeechTask({ ...taskBase, status: 'transcribing' });
       saveTaskMs = performance.now() - saveTaskStartedAt;
     }
     const transcribeStartedAt = performance.now();
-    const result = speechLiveTranscriptionStarted
+    let result = null;
+    if (!speechLiveTranscriptionStarted && isSpeechAudioLikelySilent(audio)) {
+      console.info('[speech-to-text] 跳过完整静音录音', {
+        durationMs: audio.durationMs,
+        audioBytes: audio.bytes?.length || 0,
+      });
+    } else {
+      result = speechLiveTranscriptionStarted
       ? await finishLiveSpeechTranscription()
       : await transcribeSpeechAudioAllowBlank(audio);
+    }
+    if (
+      speechLiveTranscriptionStarted
+      && (speechLiveTranscriptionChunkCount > 0 || speechLiveTranscriptionLowActivitySkippedChunkCount > 0)
+      && !String(result?.text || '').trim()
+    ) {
+      console.info('[speech-to-text] 实时分片没有可用文本，改用完整录音兜底识别', {
+        durationMs: audio.durationMs,
+        audioBytes: audio.bytes?.length || 0,
+        chunkCount: result?.chunkCount || 0,
+        submittedChunkCount: speechLiveTranscriptionChunkCount,
+        lowActivitySkippedChunkCount: speechLiveTranscriptionLowActivitySkippedChunkCount,
+      });
+      const fallbackResult = await transcribeSpeechAudioAllowBlank(audio);
+      if (fallbackResult?.text) {
+        result = {
+          ...fallbackResult,
+          chunkCount: result?.chunkCount || 1,
+        };
+        insertTextIntoComposer(fallbackResult.text);
+      }
+    }
     const transcribeMs = performance.now() - transcribeStartedAt;
     const insertStartedAt = performance.now();
     if (!speechLiveTranscriptionStarted) {
@@ -3088,7 +3299,14 @@ async function finishSpeechRecording() {
     const copyMs = performance.now() - copyStartedAt;
     const updateTaskStartedAt = performance.now();
     if (speechLiveTranscriptionStarted) {
-      updateSpeechTaskInBackground(taskId, { status: 'success', text: result?.text || '', error: '', chunkCount: result?.chunkCount || 1 }, '更新长录音任务');
+      saveSpeechTaskInBackground({
+        ...taskBase,
+        status: 'success',
+        text: result?.text || '',
+        error: '',
+        chunkCount: result?.chunkCount || 1,
+        updatedAtMs: Date.now(),
+      }, '保存长录音任务');
     } else {
       saveSpeechTaskInBackground({
         ...taskBase,

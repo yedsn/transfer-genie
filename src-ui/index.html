@@ -1084,7 +1084,7 @@
                         <label>
                           用户提示词模板
                           <textarea rows="4" :value="item.action.user_prompt" @input="updateAiActionField(item.index, 'user_prompt', $event.target.value)"></textarea>
-                          <span class="field-hint">可使用 `{{text}}` 和 `{{format}}`。</span>
+                          <span class="field-hint" v-pre>可使用 `{{text}}` 和 `{{format}}`。</span>
                         </label>
                       </div>
                     </div>

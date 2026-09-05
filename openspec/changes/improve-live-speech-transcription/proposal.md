@@ -5,7 +5,7 @@ Current speech transcription feels uneven for long recordings: users need record
 ## What Changes
 
 - Introduce a speech-to-text capability that supports one explicit recording session continuing until the user stops it.
-- Segment captured audio internally into approximately 20-second ASR chunks while recording remains active.
+- Segment captured audio internally into approximately 10-second ASR chunks while recording remains active.
 - Submit completed chunks for transcription in the background and append each successful chunk result to the active composer as soon as it is available.
 - Submit the final remaining audio after the user stops recording, then finalize the retained task with the complete audio and combined transcript.
 - Keep user-visible task history at one task per recording session, with progress, combined text, retained complete audio, and retry support.

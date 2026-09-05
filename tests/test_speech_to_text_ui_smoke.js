@@ -172,7 +172,11 @@ function preloadScript() {
       nextSampleCount: 0,
       chunkTextPrefix: '',
       blankChunkNumbers: [],
+      blankAllChunkRequests: false,
+      repeatedChunkNumbers: [],
+      repeatedPhraseChunkNumbers: [],
       transcribeChunkCallCount: 0,
+      silentSamples: false,
     };
     window.__speechSmoke.longText = '语音识别文本'.repeat(20);
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
@@ -188,8 +192,17 @@ function preloadScript() {
             if (window.__speechSmoke.failTranscribe) throw 'ASR 凭据无效';
             if (window.__speechSmoke.chunkTextPrefix) {
               window.__speechSmoke.transcribeChunkCallCount += 1;
+              if (window.__speechSmoke.blankAllChunkRequests && window.__speechSmoke.transcribeChunkCallCount <= 99) {
+                throw 'ASR 未返回可用文本';
+              }
               if (window.__speechSmoke.blankChunkNumbers.includes(window.__speechSmoke.transcribeChunkCallCount)) {
                 throw 'ASR 未返回可用文本';
+              }
+              if (window.__speechSmoke.repeatedChunkNumbers.includes(window.__speechSmoke.transcribeChunkCallCount)) {
+                return { text: '娘'.repeat(24), logId: 'smoke-log', timing: { totalMs: 1100, connectMs: 180, sendConfigMs: 30, sendAudioMs: 60, waitResultMs: 830, audioBytes: 30000 } };
+              }
+              if (window.__speechSmoke.repeatedPhraseChunkNumbers.includes(window.__speechSmoke.transcribeChunkCallCount)) {
+                return { text: '五秒'.repeat(24), logId: 'smoke-log', timing: { totalMs: 1100, connectMs: 180, sendConfigMs: 30, sendAudioMs: 60, waitResultMs: 830, audioBytes: 30000 } };
               }
               return { text: window.__speechSmoke.chunkTextPrefix + window.__speechSmoke.transcribeChunkCallCount, logId: 'smoke-log', timing: { totalMs: 1200, connectMs: 200, sendConfigMs: 30, sendAudioMs: 70, waitResultMs: 900, audioBytes: 32000 } };
             }
@@ -276,7 +289,9 @@ function preloadScript() {
               const sampleCount = window.__speechSmoke.nextSampleCount || 1600;
               window.__speechSmoke.nextSampleCount = 0;
               const samples = new Float32Array(sampleCount);
-              for (let index = 0; index < samples.length; index += 1) samples[index] = Math.sin(index / 8) * 0.25;
+              if (!window.__speechSmoke.silentSamples) {
+                for (let index = 0; index < samples.length; index += 1) samples[index] = Math.sin(index / 8) * 0.25;
+              }
               processor.onaudioprocess({ inputBuffer: { numberOfChannels: 2, getChannelData: () => samples } });
             }, 20);
           },
@@ -565,6 +580,69 @@ async function run() {
     assert.ok(longRecordingResult.taskAudioBytes > Math.max(...longRecordingResult.chunkTexts), 'retained long recording task keeps the complete audio, not a chunk');
     assert.equal(longRecordingResult.chunkCount, longRecordingResult.chunkCalls, 'retained task records the internal chunk count without creating chunk tasks');
 
+    const blankAllChunkFallbackResult = await evaluate(client, `(async () => {
+      window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
+      window.__speechSmoke.chunkDurationMs = 100;
+      window.__speechSmoke.chunkTextPrefix = '空分片';
+      window.__speechSmoke.blankAllChunkRequests = true;
+      window.__speechSmoke.transcribeChunkCallCount = 0;
+      window.__speechSmoke.nextSampleCount = 3200;
+      const beforeCalls = window.__speechSmoke.calls.filter((call) => call.command === 'transcribe_speech').length;
+      document.querySelector('#speech-to-text-toggle').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#speech-to-text-toggle').classList.contains('is-recording')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('blank-all fallback recording did not enter recording state'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      await new Promise((r) => setTimeout(r, 80));
+      window.__speechSmoke.blankAllChunkRequests = false;
+      window.__speechSmoke.chunkTextPrefix = '';
+      document.querySelector('#speech-to-text-toggle').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const text = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
+          if (text === window.__speechSmoke.longText) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('blank-all chunk fallback did not insert full transcription'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const title = document.querySelector('.speech-task-item .speech-task-text')?.getAttribute('title') || '';
+          if (title === window.__speechSmoke.longText) resolve();
+          else if (Date.now() - start > 4000) reject(new Error('blank-all fallback task title was not updated'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const calls = window.__speechSmoke.calls.filter((call) => call.command === 'transcribe_speech').slice(beforeCalls);
+      const result = {
+        callCount: calls.length,
+        requestBytes: calls.map((call) => call.args?.request?.audioData?.length || 0),
+        text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
+        taskTitle: document.querySelector('.speech-task-item .speech-task-text')?.getAttribute('title') || '',
+        longText: window.__speechSmoke.longText,
+      };
+      window.__speechSmoke.chunkDurationMs = 0;
+      window.__speechSmoke.chunkTextPrefix = '';
+      window.__speechSmoke.blankAllChunkRequests = false;
+      return result;
+    })()`);
+    assert.ok(blankAllChunkFallbackResult.callCount >= 3, 'blank live chunks fall back to a full-audio ASR request');
+    assert.ok(
+      blankAllChunkFallbackResult.requestBytes.at(-1) > Math.min(...blankAllChunkFallbackResult.requestBytes.slice(0, -1)),
+      'blank live chunk fallback sends the retained full recording, not another chunk',
+    );
+    assert.equal(blankAllChunkFallbackResult.text, blankAllChunkFallbackResult.longText, 'full-audio fallback inserts text when live chunks are blank');
+    assert.equal(blankAllChunkFallbackResult.taskTitle, blankAllChunkFallbackResult.longText, 'full-audio fallback stores task text');
+
     const blankChunkResult = await evaluate(client, `(async () => {
       window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
       window.__speechSmoke.chunkDurationMs = 100;
@@ -599,6 +677,16 @@ async function run() {
         tick();
       });
       const calls = window.__speechSmoke.calls.filter((call) => call.command === 'transcribe_speech').slice(beforeCalls);
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const title = document.querySelector('.speech-task-item .speech-task-text')?.getAttribute('title') || '';
+          if (title.includes('有效1') && title.includes('有效3')) resolve();
+          else if (Date.now() - start > 4000) reject(new Error('blank chunk task title was not updated'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
       const taskItems = Array.from(document.querySelectorAll('.speech-task-item'));
       const result = {
         chunkCalls: calls.length,
@@ -617,6 +705,86 @@ async function run() {
     assert.equal(blankChunkResult.text, '有效1\n有效3', 'blank middle chunk is skipped while surrounding chunk text is preserved');
     assert.equal(blankChunkResult.taskCount, blankChunkResult.beforeTaskCount + 1, 'blank middle chunk still adds only one visible speech task');
     assert.equal(blankChunkResult.taskTitle, '有效1\n有效3', 'speech task stores the combined nonblank transcript');
+
+    const hallucinatedChunkResult = await evaluate(client, `(async () => {
+      window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
+      window.__speechSmoke.chunkDurationMs = 100;
+      window.__speechSmoke.chunkTextPrefix = '正常';
+      window.__speechSmoke.repeatedChunkNumbers = [2];
+      window.__speechSmoke.repeatedPhraseChunkNumbers = [3];
+      window.__speechSmoke.transcribeChunkCallCount = 0;
+      window.__speechSmoke.nextSampleCount = 6400;
+      const beforeCalls = window.__speechSmoke.calls.filter((call) => call.command === 'transcribe_speech').length;
+      document.querySelector('#speech-to-text-toggle').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#speech-to-text-toggle').classList.contains('is-recording')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('hallucinated chunk recording did not enter recording state'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      await new Promise((r) => setTimeout(r, 80));
+      document.querySelector('#speech-to-text-toggle').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const text = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
+          const button = document.querySelector('#speech-to-text-toggle');
+          const idle = !button.classList.contains('is-recording') && !button.classList.contains('is-transcribing') && !button.classList.contains('is-preparing');
+          if (text.includes('正常1') && text.includes('正常4') && idle) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('hallucinated chunk recording did not complete'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const calls = window.__speechSmoke.calls.filter((call) => call.command === 'transcribe_speech').slice(beforeCalls);
+      const result = {
+        chunkCalls: calls.length,
+        text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
+      };
+      window.__speechSmoke.chunkDurationMs = 0;
+      window.__speechSmoke.chunkTextPrefix = '';
+      window.__speechSmoke.repeatedChunkNumbers = [];
+      window.__speechSmoke.repeatedPhraseChunkNumbers = [];
+      return result;
+    })()`);
+    assert.equal(hallucinatedChunkResult.chunkCalls, 4, 'pathological repeated chunks are detected after ASR returns');
+    assert.equal(hallucinatedChunkResult.text, '正常1\n正常4', 'pathological repeated single-character and phrase text is not inserted');
+
+    const silentChunkResult = await evaluate(client, `(async () => {
+      window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
+      window.__speechSmoke.chunkDurationMs = 100;
+      window.__speechSmoke.chunkTextPrefix = '静音';
+      window.__speechSmoke.transcribeChunkCallCount = 0;
+      window.__speechSmoke.nextSampleCount = 3200;
+      window.__speechSmoke.silentSamples = true;
+      const beforeCalls = window.__speechSmoke.calls.filter((call) => call.command === 'transcribe_speech').length;
+      document.querySelector('#speech-to-text-toggle').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#speech-to-text-toggle').classList.contains('is-recording')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('silent recording did not enter recording state'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      await new Promise((r) => setTimeout(r, 80));
+      document.querySelector('#speech-to-text-toggle').click();
+      await new Promise((r) => setTimeout(r, 120));
+      const result = {
+        callDelta: window.__speechSmoke.calls.filter((call) => call.command === 'transcribe_speech').length - beforeCalls,
+        text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
+      };
+      window.__speechSmoke.chunkDurationMs = 0;
+      window.__speechSmoke.chunkTextPrefix = '';
+      window.__speechSmoke.silentSamples = false;
+      return result;
+    })()`);
+    assert.equal(silentChunkResult.callDelta, 0, 'silent long-recording chunks are not sent to ASR');
+    assert.equal(silentChunkResult.text, '', 'silent long-recording chunks do not insert hallucinated text');
 
     const rapidToggleResult = await evaluate(client, `(async () => {
       await new Promise((resolve, reject) => {

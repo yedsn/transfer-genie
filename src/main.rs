@@ -6652,6 +6652,15 @@ fn sanitize_speech_error(err: impl ToString, settings: &SpeechToTextSettings) ->
     text
 }
 
+fn speech_log_text_preview(text: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let mut preview: String = text.chars().take(MAX_CHARS).collect();
+    if text.chars().count() > MAX_CHARS {
+        preview.push_str("...");
+    }
+    preview.replace('\n', "\\n")
+}
+
 async fn transcribe_speech_impl(
     settings: &Settings,
     request: SpeechToTextRequest,
@@ -6666,6 +6675,29 @@ async fn transcribe_speech_impl(
     }
     let mut speech_config = speech.clone();
     normalize_speech_to_text_settings(&mut speech_config)?;
+    let request_audio_format = speech_audio_format(&request);
+    let request_audio_codec = speech_audio_codec(&request);
+    let request_sample_rate = request.sample_rate.unwrap_or(16000);
+    let request_channels = request.channels.unwrap_or(1);
+    let request_bits = request.bits_per_sample.unwrap_or(16);
+    let estimated_audio_payload_bytes = if request_audio_format.eq_ignore_ascii_case("wav") {
+        request.audio_data.len().saturating_sub(44)
+    } else {
+        request.audio_data.len()
+    };
+    let estimated_duration_ms = if request_sample_rate > 0 && request_bits > 0 && request_channels > 0 {
+        let bytes_per_second = request_sample_rate as u64
+            * request_channels as u64
+            * request_bits as u64
+            / 8;
+        if bytes_per_second > 0 {
+            Some((estimated_audio_payload_bytes as u64).saturating_mul(1000) / bytes_per_second)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let mut ws_request = speech_config
         .endpoint
         .as_str()
@@ -6698,11 +6730,30 @@ async fn transcribe_speech_impl(
         "X-Control-Require-Usage-Tokens-Return",
         "*".parse().unwrap(),
     );
+    eprintln!(
+        "[speech-to-text] start connect_id={} audio_bytes={} payload_bytes={} duration_ms={} format={} codec={} sample_rate={} channels={} bits={} mime_type={}",
+        connect_id,
+        request.audio_data.len(),
+        estimated_audio_payload_bytes,
+        estimated_duration_ms
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        request_audio_format,
+        request_audio_codec,
+        request_sample_rate,
+        request_channels,
+        request_bits,
+        request.mime_type.as_deref().unwrap_or(""),
+    );
     let connect_started_at = std::time::Instant::now();
     let (mut websocket, response) = connect_async(ws_request).await.map_err(|err| {
         sanitize_speech_error(format!("连接 ASR 服务失败: {err}"), &speech_config)
     })?;
     let connect_ms = connect_started_at.elapsed().as_millis();
+    eprintln!(
+        "[speech-to-text] connected connect_id={} connect_ms={}",
+        connect_id, connect_ms
+    );
     let response_log_id = response
         .headers()
         .get("x-tt-logid")
@@ -6712,11 +6763,11 @@ async fn transcribe_speech_impl(
     let full_request = serde_json::json!({
         "user": { "uid": "transfer-genie" },
         "audio": {
-            "format": speech_audio_format(&request),
-            "codec": speech_audio_codec(&request),
-            "rate": request.sample_rate.unwrap_or(16000),
-            "bits": request.bits_per_sample.unwrap_or(16),
-            "channel": request.channels.unwrap_or(1),
+            "format": request_audio_format,
+            "codec": request_audio_codec,
+            "rate": request_sample_rate,
+            "bits": request_bits,
+            "channel": request_channels,
             "language": "zh-CN"
         },
         "request": {
@@ -6736,10 +6787,15 @@ async fn transcribe_speech_impl(
             sanitize_speech_error(format!("发送 ASR 请求失败: {err}"), &speech_config)
         })?;
     let send_config_ms = send_config_started_at.elapsed().as_millis();
+    eprintln!(
+        "[speech-to-text] sent config connect_id={} send_config_ms={}",
+        connect_id, send_config_ms
+    );
 
     let chunk_size = 16 * 1024;
     let mut sequence = 2_i32;
     let audio_bytes = request.audio_data.len();
+    let audio_frame_count = request.audio_data.chunks(chunk_size).count();
     let send_audio_started_at = std::time::Instant::now();
     for (index, chunk) in request.audio_data.chunks(chunk_size).enumerate() {
         let last = (index + 1) * chunk_size >= request.audio_data.len();
@@ -6754,18 +6810,37 @@ async fn transcribe_speech_impl(
         sequence += 1;
     }
     let send_audio_ms = send_audio_started_at.elapsed().as_millis();
+    eprintln!(
+        "[speech-to-text] sent audio connect_id={} frames={} send_audio_ms={}",
+        connect_id, audio_frame_count, send_audio_ms
+    );
 
     let mut final_text = String::new();
     let mut log_id = response_log_id;
     let wait_result_started_at = std::time::Instant::now();
+    let mut response_frame_count = 0_u64;
     while let Some(message) = websocket.next().await {
         let message = message.map_err(|err| {
             sanitize_speech_error(format!("读取 ASR 响应失败: {err}"), &speech_config)
         })?;
         match message {
             WsMessage::Binary(data) => {
+                response_frame_count += 1;
                 let frame = parse_asr_server_frame(&data)?;
                 if frame.message_type == ASR_SERVER_ERROR_RESPONSE {
+                    eprintln!(
+                        "[speech-to-text] asr error connect_id={} code={} text={}",
+                        connect_id,
+                        frame
+                            .error_code
+                            .map(|code| code.to_string())
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        frame
+                            .error_text
+                            .as_deref()
+                            .map(speech_log_text_preview)
+                            .unwrap_or_default(),
+                    );
                     return Err(format!(
                         "ASR 服务返回错误{}{}",
                         frame
@@ -6799,8 +6874,25 @@ async fn transcribe_speech_impl(
     }
     let wait_result_ms = wait_result_started_at.elapsed().as_millis();
     if final_text.trim().is_empty() {
+        eprintln!(
+            "[speech-to-text] empty result connect_id={} response_frames={} wait_result_ms={}",
+            connect_id, response_frame_count, wait_result_ms
+        );
         return Err("ASR 未返回可用文本".to_string());
     }
+    eprintln!(
+        "[speech-to-text] result connect_id={} response_frames={} total_ms={} connect_ms={} send_config_ms={} send_audio_ms={} wait_result_ms={} text_chars={} text_preview=\"{}\" log_id={}",
+        connect_id,
+        response_frame_count,
+        total_started_at.elapsed().as_millis(),
+        connect_ms,
+        send_config_ms,
+        send_audio_ms,
+        wait_result_ms,
+        final_text.chars().count(),
+        speech_log_text_preview(&final_text),
+        log_id.as_deref().unwrap_or(""),
+    );
     Ok(SpeechToTextResult {
         text: final_text,
         log_id,

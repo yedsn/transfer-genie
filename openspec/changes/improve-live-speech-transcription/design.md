@@ -29,8 +29,8 @@ The ASR provider remains the existing Volcengine Agent Plan WebSocket endpoint. 
   - Each chunk receives a monotonic sequence number. The app SHALL append text only when all earlier appendable chunks have been handled, even if internal implementation later allows concurrent ASR requests.
   - Alternative considered: append whichever chunk returns first. That improves perceived speed when parallelized, but it can scramble dictated text.
 
-- Decision: Use approximately 20 seconds as the fixed internal chunk target for the first speed experiment.
-  - This should make the first recognized text appear much sooner while keeping provider calls within practical duration limits.
+- Decision: Use approximately 10 seconds as the fixed internal chunk target for sparse speech recordings.
+  - Shorter chunks reduce long silence inside each ASR request and make intermittent speech appear sooner.
   - Alternative considered: expose a chunk-duration setting. That would complicate settings for a transport detail most users should not need to understand.
 
 - Decision: Preserve one retained task per recording session.
