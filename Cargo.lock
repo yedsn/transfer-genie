@@ -5497,13 +5497,15 @@ dependencies = [
 
 [[package]]
 name = "transfer-genie"
-version = "0.4.22"
+version = "0.4.23"
 dependencies = [
  "aes-gcm",
  "async-recursion",
  "axum",
  "base64 0.21.7",
  "bytes",
+ "core-foundation 0.9.4",
+ "core-graphics",
  "flate2",
  "futures-util",
  "image 0.24.9",

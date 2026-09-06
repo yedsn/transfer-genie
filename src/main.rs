@@ -67,7 +67,9 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::Window;
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Emitter, Manager, PhysicalPosition, State, WebviewUrl, WebviewWindowBuilder,
+};
 #[cfg(desktop)]
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 use tauri_plugin_log::{Target, TargetKind};
@@ -80,13 +82,13 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 static SYSTEM_DICTATION_SIDE_ALT_HOOK_STARTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 static SYSTEM_DICTATION_SIDE_ALT_CONFIG: std::sync::atomic::AtomicU8 =
     std::sync::atomic::AtomicU8::new(0);
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 static SYSTEM_DICTATION_SIDE_ALT_TOGGLE_TX: std::sync::OnceLock<std::sync::mpsc::Sender<()>> =
     std::sync::OnceLock::new();
 
@@ -1699,7 +1701,10 @@ fn paste_dictation_text(text: String) -> Result<(), String> {
         eprintln!("[system-dictation] paste skipped: empty text");
         return Ok(());
     }
-    eprintln!("[system-dictation] paste command received: text_chars={}", value.chars().count());
+    eprintln!(
+        "[system-dictation] paste command received: text_chars={}",
+        value.chars().count()
+    );
     write_system_clipboard(&value)?;
     eprintln!("[system-dictation] clipboard write done");
     dispatch_system_paste_shortcut()
@@ -1734,7 +1739,10 @@ fn write_system_clipboard(text: &str) -> Result<(), String> {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         let mut child = std::process::Command::new("sh")
-            .args(["-c", "command -v wl-copy >/dev/null 2>&1 && wl-copy || xclip -selection clipboard"])
+            .args([
+                "-c",
+                "command -v wl-copy >/dev/null 2>&1 && wl-copy || xclip -selection clipboard",
+            ])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
@@ -1761,7 +1769,9 @@ fn write_windows_clipboard(text: &str) -> Result<(), String> {
     use windows_sys::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
     };
-    use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    use windows_sys::Win32::System::Memory::{
+        GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
+    };
     use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
 
     let mut wide: Vec<u16> = text.encode_utf16().collect();
@@ -1816,7 +1826,10 @@ fn dispatch_system_paste_shortcut() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         let output = std::process::Command::new("osascript")
-            .args(["-e", "tell application \"System Events\" to keystroke \"v\" using command down"])
+            .args([
+                "-e",
+                "tell application \"System Events\" to keystroke \"v\" using command down",
+            ])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .output()
@@ -2044,8 +2057,7 @@ fn position_system_dictation_window(app: &AppHandle, window: &tauri::WebviewWind
     let window_width = (SYSTEM_DICTATION_WINDOW_WIDTH * scale_factor).round() as i32;
     let window_height = (SYSTEM_DICTATION_WINDOW_HEIGHT * scale_factor).round() as i32;
     let x = monitor_position.x + ((monitor_size.width as i32 - window_width) / 2);
-    let y = monitor_position.y
-        + monitor_size.height as i32
+    let y = monitor_position.y + monitor_size.height as i32
         - window_height
         - SYSTEM_DICTATION_WINDOW_BOTTOM_MARGIN;
     let _ = window.set_position(PhysicalPosition::new(x.max(monitor_position.x), y));
@@ -2061,7 +2073,9 @@ fn hide_system_dictation_window_impl(app: &AppHandle) {
             std::thread::sleep(Duration::from_millis(150));
             let app_for_lookup = app_for_hide.clone();
             let _ = app_for_hide.run_on_main_thread(move || {
-                if let Some(window) = app_for_lookup.get_webview_window(SYSTEM_DICTATION_WINDOW_LABEL) {
+                if let Some(window) =
+                    app_for_lookup.get_webview_window(SYSTEM_DICTATION_WINDOW_LABEL)
+                {
                     let _ = window.hide();
                 }
             });
@@ -6184,13 +6198,13 @@ fn normalize_speech_hotkey(raw: &str) -> Option<String> {
     let compact = raw.trim().to_lowercase().replace([' ', '_'], "");
     if matches!(
         compact.as_str(),
-        "rightalt" | "right-alt" | "altright" | "alt-right"
+        "rightalt" | "right-alt" | "altright" | "alt-right" | "rightoption" | "right-option"
     ) {
         return Some("right-alt".to_string());
     }
     if matches!(
         compact.as_str(),
-        "leftalt" | "left-alt" | "altleft" | "alt-left"
+        "leftalt" | "left-alt" | "altleft" | "alt-left" | "option" | "leftoption" | "left-option"
     ) {
         return Some("left-alt".to_string());
     }
@@ -6202,6 +6216,10 @@ fn is_side_alt_hotkey(raw: &str) -> bool {
         normalize_speech_hotkey(raw).as_deref(),
         Some("right-alt" | "left-alt")
     )
+}
+
+fn normalize_system_dictation_hotkey(raw: &str) -> Option<String> {
+    normalize_speech_hotkey(raw)
 }
 
 fn is_valid_endpoint_id(value: &str) -> bool {
@@ -6358,7 +6376,7 @@ fn normalize_settings(
             normalized_hotkey.unwrap_or_else(|| DEFAULT_GLOBAL_HOTKEY.to_string());
     }
     let normalized_system_dictation_hotkey =
-        normalize_speech_hotkey(&settings.speech_to_text.system_dictation_shortcut);
+        normalize_system_dictation_hotkey(&settings.speech_to_text.system_dictation_shortcut);
     if settings.speech_to_text.system_dictation_enabled {
         let Some(hotkey) = normalized_system_dictation_hotkey else {
             return Err("系统听写快捷键格式无效，可填写 right-alt、left-alt 或 Alt+D".to_string());
@@ -7133,19 +7151,18 @@ async fn transcribe_speech_impl(
     } else {
         request.audio_data.len()
     };
-    let estimated_duration_ms = if request_sample_rate > 0 && request_bits > 0 && request_channels > 0 {
-        let bytes_per_second = request_sample_rate as u64
-            * request_channels as u64
-            * request_bits as u64
-            / 8;
-        if bytes_per_second > 0 {
-            Some((estimated_audio_payload_bytes as u64).saturating_mul(1000) / bytes_per_second)
+    let estimated_duration_ms =
+        if request_sample_rate > 0 && request_bits > 0 && request_channels > 0 {
+            let bytes_per_second =
+                request_sample_rate as u64 * request_channels as u64 * request_bits as u64 / 8;
+            if bytes_per_second > 0 {
+                Some((estimated_audio_payload_bytes as u64).saturating_mul(1000) / bytes_per_second)
+            } else {
+                None
+            }
         } else {
             None
-        }
-    } else {
-        None
-    };
+        };
     let mut ws_request = speech_config
         .endpoint
         .as_str()
@@ -7254,7 +7271,7 @@ async fn transcribe_speech_impl(
             .await
             .map_err(|err| {
                 sanitize_speech_error(format!("发送 ASR 音频失败: {err}"), &speech_config)
-        })?;
+            })?;
         sequence += 1;
     }
     let send_audio_ms = send_audio_started_at.elapsed().as_millis();
@@ -9939,12 +9956,26 @@ fn update_system_dictation_hotkey_registration(
     #[cfg(target_os = "windows")]
     update_windows_side_alt_dictation_config(settings);
 
+    #[cfg(target_os = "macos")]
+    update_macos_side_alt_dictation_config(settings);
+
     if settings.speech_to_text.system_dictation_enabled {
-        let hotkey = normalize_speech_hotkey(&settings.speech_to_text.system_dictation_shortcut)
-            .ok_or_else(|| "系统听写快捷键格式无效，可填写 right-alt、left-alt 或 Alt+D".to_string())?;
+        let hotkey =
+            normalize_system_dictation_hotkey(&settings.speech_to_text.system_dictation_shortcut)
+                .ok_or_else(|| {
+                "系统听写快捷键格式无效，可填写 right-alt、left-alt 或 Alt+D".to_string()
+            })?;
         if is_side_alt_hotkey(&hotkey) {
-            *current = None;
-            return Ok(());
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            {
+                *current = None;
+                return Ok(());
+            }
+
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+            {
+                return Err("当前系统不支持单独 left-alt/right-alt 作为系统听写快捷键".to_string());
+            }
         }
         let shortcut = hotkey
             .parse::<Shortcut>()
@@ -10002,8 +10033,8 @@ fn start_system_dictation_side_alt_monitor(app: AppHandle) {
     std::thread::spawn(move || {
         use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW,
-            TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL,
+            CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage,
+            UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL,
         };
 
         static RIGHT_ALT_DOWN: std::sync::atomic::AtomicBool =
@@ -10013,7 +10044,9 @@ fn start_system_dictation_side_alt_monitor(app: AppHandle) {
 
         unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
             use windows_sys::Win32::UI::Input::KeyboardAndMouse::{VK_LMENU, VK_RMENU};
-            use windows_sys::Win32::UI::WindowsAndMessaging::{WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP};
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+            };
 
             if code < 0 {
                 return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
@@ -10059,7 +10092,8 @@ fn start_system_dictation_side_alt_monitor(app: AppHandle) {
             unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
         }
 
-        let hook: HHOOK = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), std::ptr::null_mut(), 0) };
+        let hook: HHOOK =
+            unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), std::ptr::null_mut(), 0) };
         if hook.is_null() {
             eprintln!("[system-dictation] side-alt hook install failed");
             return;
@@ -10077,12 +10111,122 @@ fn start_system_dictation_side_alt_monitor(app: AppHandle) {
     });
 }
 
+#[cfg(target_os = "macos")]
+fn start_system_dictation_side_alt_monitor(app: AppHandle) {
+    use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
+    use core_graphics::event::{
+        CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
+        CGEventType, EventField, KeyCode,
+    };
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    if SYSTEM_DICTATION_SIDE_ALT_HOOK_STARTED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        eprintln!("[system-dictation] mac side-alt hook already started");
+        return;
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let _ = SYSTEM_DICTATION_SIDE_ALT_TOGGLE_TX.set(tx);
+
+    {
+        let app_for_events = app.clone();
+        std::thread::spawn(move || {
+            while rx.recv().is_ok() {
+                eprintln!("[system-dictation] mac side-alt event: emitting toggle");
+                if let Some(window) = app_for_events.get_webview_window("main") {
+                    let _ = window.emit("system-dictation-toggle", ());
+                } else {
+                    eprintln!("[system-dictation] mac side-alt event: main window not found");
+                }
+            }
+        });
+    }
+
+    std::thread::spawn(move || {
+        let option_down = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let option_down_for_tap = option_down.clone();
+        let tap = match CGEventTap::new(
+            CGEventTapLocation::HID,
+            CGEventTapPlacement::HeadInsertEventTap,
+            CGEventTapOptions::Default,
+            vec![CGEventType::FlagsChanged],
+            move |_proxy, event_type, event| {
+                if !matches!(event_type, CGEventType::FlagsChanged) {
+                    return Some(event.clone());
+                }
+                let flags = event.get_flags();
+                let is_option = flags.contains(CGEventFlags::CGEventFlagAlternate);
+                let keycode =
+                    event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;
+                let configured = SYSTEM_DICTATION_SIDE_ALT_CONFIG.load(Ordering::SeqCst);
+                let key_kind = if keycode == KeyCode::OPTION {
+                    1
+                } else if keycode == KeyCode::RIGHT_OPTION {
+                    2
+                } else {
+                    0
+                };
+
+                let should_handle = match configured {
+                    1 => key_kind == 1,
+                    2 => key_kind == 2,
+                    _ => false,
+                };
+                if !should_handle {
+                    return Some(event.clone());
+                }
+
+                let is_down = is_option;
+                if is_down {
+                    let was_down = option_down_for_tap.swap(true, Ordering::SeqCst);
+                    if !was_down {
+                        eprintln!("[system-dictation] mac side-alt swallowed option down");
+                        if let Some(tx) = SYSTEM_DICTATION_SIDE_ALT_TOGGLE_TX.get() {
+                            let _ = tx.send(());
+                        }
+                    }
+                } else {
+                    option_down_for_tap.store(false, Ordering::SeqCst);
+                    eprintln!("[system-dictation] mac side-alt swallowed option up");
+                }
+                let null_event = event.clone();
+                null_event.set_type(CGEventType::Null);
+                Some(null_event)
+            },
+        ) {
+            Ok(tap) => tap,
+            Err(_) => {
+                eprintln!("[system-dictation] mac side-alt hook install failed");
+                return;
+            }
+        };
+
+        let run_loop = CFRunLoop::get_current();
+        let source = match tap.mach_port.create_runloop_source(0) {
+            Ok(source) => source,
+            Err(_) => {
+                eprintln!("[system-dictation] mac side-alt runloop source failed");
+                return;
+            }
+        };
+        run_loop.add_source(&source, kCFRunLoopCommonModes);
+        tap.enable();
+        eprintln!("[system-dictation] mac side-alt hook started");
+        CFRunLoop::run_current();
+    });
+}
+
 #[cfg(target_os = "windows")]
 fn update_windows_side_alt_dictation_config(settings: &Settings) {
     use std::sync::atomic::Ordering;
 
     let value = if settings.speech_to_text.system_dictation_enabled {
-        match normalize_speech_hotkey(&settings.speech_to_text.system_dictation_shortcut).as_deref() {
+        match normalize_speech_hotkey(&settings.speech_to_text.system_dictation_shortcut).as_deref()
+        {
             Some("left-alt") => 1,
             Some("right-alt") => 2,
             _ => 0,
@@ -10092,6 +10236,24 @@ fn update_windows_side_alt_dictation_config(settings: &Settings) {
     };
     SYSTEM_DICTATION_SIDE_ALT_CONFIG.store(value, Ordering::SeqCst);
     eprintln!("[system-dictation] side-alt hook config={value}");
+}
+
+#[cfg(target_os = "macos")]
+fn update_macos_side_alt_dictation_config(settings: &Settings) {
+    use std::sync::atomic::Ordering;
+
+    let value = if settings.speech_to_text.system_dictation_enabled {
+        match normalize_speech_hotkey(&settings.speech_to_text.system_dictation_shortcut).as_deref()
+        {
+            Some("left-alt") => 1,
+            Some("right-alt") => 2,
+            _ => 0,
+        }
+    } else {
+        0
+    };
+    SYSTEM_DICTATION_SIDE_ALT_CONFIG.store(value, Ordering::SeqCst);
+    eprintln!("[system-dictation] mac side-alt config={value}");
 }
 
 #[cfg(target_os = "windows")]
@@ -10363,17 +10525,20 @@ fn main() {
                 #[cfg(target_os = "windows")]
                 start_system_dictation_side_alt_monitor(app.handle().clone());
 
+                #[cfg(target_os = "macos")]
+                start_system_dictation_side_alt_monitor(app.handle().clone());
+
                 {
-                let state = app.state::<AppState>();
-                let settings = match state.settings.lock() {
-                    Ok(guard) => guard.clone(),
-                    Err(_) => return Ok(()),
-                };
-                if let Err(err) = update_hotkey_registrations(&app.handle(), &state, &settings)
-                {
-                    eprintln!("注册全局快捷键失败: {err}");
+                    let state = app.state::<AppState>();
+                    let settings = match state.settings.lock() {
+                        Ok(guard) => guard.clone(),
+                        Err(_) => return Ok(()),
+                    };
+                    if let Err(err) = update_hotkey_registrations(&app.handle(), &state, &settings)
+                    {
+                        eprintln!("注册全局快捷键失败: {err}");
+                    }
                 }
-            }
 
                 if let Some(window) = app.get_webview_window("main") {
                     if let Some(icon) = app_icon {
@@ -10398,7 +10563,9 @@ fn main() {
                         eprintln!("[system-dictation] preload window start");
                         match ensure_system_dictation_window_impl(&app_handle) {
                             Ok(()) => eprintln!("[system-dictation] preload window done"),
-                            Err(err) => eprintln!("[system-dictation] preload window failed: {err}"),
+                            Err(err) => {
+                                eprintln!("[system-dictation] preload window failed: {err}")
+                            }
                         }
                     })?;
                 }
@@ -11058,7 +11225,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_settings_accepts_side_alt_system_dictation_shortcut() {
+    fn normalize_settings_handles_side_alt_system_dictation_shortcut_by_platform() {
         let mut settings = test_settings();
         settings.speech_to_text.system_dictation_enabled = true;
         settings.speech_to_text.system_dictation_shortcut = "AltRight".to_string();
@@ -11066,10 +11233,14 @@ mod tests {
 
         let normalized = normalize_settings(settings, &download_dir).unwrap();
 
-        assert_eq!(
-            normalized.speech_to_text.system_dictation_shortcut,
-            "right-alt"
-        );
+        if cfg!(any(target_os = "windows", target_os = "macos")) {
+            assert_eq!(
+                normalized.speech_to_text.system_dictation_shortcut,
+                "right-alt"
+            );
+        } else {
+            assert_eq!(normalized.speech_to_text.system_dictation_shortcut, "alt+d");
+        }
         assert!(!normalized.speech_to_text.shortcut_enabled);
     }
 

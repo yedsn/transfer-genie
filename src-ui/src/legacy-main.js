@@ -1946,8 +1946,8 @@ function normalizeGlobalHotkey(value) {
 
 function normalizeSpeechHotkey(value) {
   const normalized = String(value || '').toLowerCase().trim().replace(/\s+/g, '');
-  if (['rightalt', 'right-alt', 'alt-right', 'altright', 'right_alt'].includes(normalized)) return 'right-alt';
-  if (['leftalt', 'left-alt', 'alt-left', 'altleft', 'left_alt'].includes(normalized)) return 'left-alt';
+  if (['rightalt', 'right-alt', 'alt-right', 'altright', 'right_alt', 'rightoption', 'right-option'].includes(normalized)) return 'right-alt';
+  if (['leftalt', 'left-alt', 'alt-left', 'altleft', 'left_alt', 'option', 'leftoption', 'left-option'].includes(normalized)) return 'left-alt';
   return normalizeGlobalHotkey(value);
 }
 
