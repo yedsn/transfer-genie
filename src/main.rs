@@ -10213,7 +10213,9 @@ fn start_system_dictation_side_alt_monitor(app: AppHandle) {
                 return;
             }
         };
-        run_loop.add_source(&source, kCFRunLoopCommonModes);
+        unsafe {
+            run_loop.add_source(&source, kCFRunLoopCommonModes);
+        }
         tap.enable();
         eprintln!("[system-dictation] mac side-alt hook started");
         CFRunLoop::run_current();
