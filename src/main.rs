@@ -7542,6 +7542,9 @@ fn normalize_speech_to_text_settings(settings: &mut SpeechToTextSettings) -> Res
     {
         return Err("语音转文字接口地址无效，需要使用 Agent Plan ASR WebSocket 地址".to_string());
     }
+    if settings.system_dictation_enabled {
+        settings.enabled = true;
+    }
     if settings.enabled {
         if settings.api_key.is_empty() {
             return Err("启用语音转文字前请先填写 API Key".to_string());
@@ -11210,6 +11213,38 @@ mod tests {
     }
 
     #[test]
+    fn normalize_settings_enables_speech_for_system_dictation() {
+        let mut settings = test_settings();
+        settings.speech_to_text.enabled = false;
+        settings.speech_to_text.api_key = "speech-key".to_string();
+        settings.speech_to_text.system_dictation_enabled = true;
+        settings.speech_to_text.system_dictation_shortcut = "alt+d".to_string();
+        let download_dir = std::env::temp_dir().join("transfer-genie-settings-test");
+
+        let normalized = normalize_settings(settings, &download_dir).unwrap();
+
+        assert!(normalized.speech_to_text.enabled);
+        assert!(normalized.speech_to_text.system_dictation_enabled);
+        assert_eq!(normalized.speech_to_text.system_dictation_shortcut, "alt+d");
+    }
+
+    #[test]
+    fn normalize_settings_rejects_system_dictation_without_api_key() {
+        let mut settings = test_settings();
+        settings.speech_to_text.enabled = false;
+        settings.speech_to_text.api_key.clear();
+        settings.speech_to_text.system_dictation_enabled = true;
+        let download_dir = std::env::temp_dir().join("transfer-genie-settings-test");
+
+        let error = match normalize_settings(settings, &download_dir) {
+            Ok(_) => panic!("system dictation without api key should fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("API Key"));
+    }
+
+    #[test]
     fn normalize_settings_rejects_conflicting_system_dictation_shortcut() {
         let mut settings = test_settings();
         settings.global_hotkey_enabled = true;
@@ -11230,6 +11265,7 @@ mod tests {
     fn normalize_settings_handles_side_alt_system_dictation_shortcut_by_platform() {
         let mut settings = test_settings();
         settings.speech_to_text.system_dictation_enabled = true;
+        settings.speech_to_text.api_key = "speech-key".to_string();
         settings.speech_to_text.system_dictation_shortcut = "AltRight".to_string();
         let download_dir = std::env::temp_dir().join("transfer-genie-speech-settings-test");
 

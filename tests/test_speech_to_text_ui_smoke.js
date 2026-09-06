@@ -1236,6 +1236,7 @@ async function run() {
     assert.equal(systemShortcutSaveResult.captureClass, true, 'shortcut input shows capture state');
     assert.equal(systemShortcutSaveResult.inputValue, 'right-alt', 'captured right Alt is shown in shortcut input');
     assert.equal(systemShortcutSaveResult.saved.shortcut_enabled, false, 'ordinary speech shortcut remains disabled when settings are saved');
+    assert.equal(systemShortcutSaveResult.saved.enabled, true, 'system dictation enables speech-to-text when saved');
     assert.equal(systemShortcutSaveResult.saved.system_dictation_enabled, true, 'system dictation enabled flag is saved');
     assert.equal(systemShortcutSaveResult.saved.system_dictation_shortcut, 'right-alt', 'right Alt is saved as the system dictation shortcut');
 
@@ -1261,6 +1262,27 @@ async function run() {
     })()`);
     assert.equal(comboShortcutCaptureResult.inputValue, 'alt+d', 'captured Alt+D is shown in shortcut input');
     assert.equal(comboShortcutCaptureResult.saved.system_dictation_shortcut, 'alt+d', 'Alt+D is saved as the system dictation shortcut');
+
+    const systemDictationOnlyResult = await evaluate(client, `(async () => {
+      document.querySelector('#speech-to-text-enabled').checked = false;
+      document.querySelector('#speech-to-text-enabled').dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#system-dictation-enabled').checked = true;
+      document.querySelector('#system-dictation-enabled').dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#save-settings')?.click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const saved = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.speech_to_text || {};
+          if (saved.enabled === true && saved.system_dictation_enabled === true) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('system dictation did not force speech-to-text enabled on save'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      return window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.speech_to_text || {};
+    })()`);
+    assert.equal(systemDictationOnlyResult.enabled, true, 'system dictation saves speech-to-text as enabled');
+    assert.equal(systemDictationOnlyResult.system_dictation_enabled, true, 'system dictation remains enabled when saved alone');
 
     const buttonRecordingResult = await evaluate(client, `(async () => {
       await new Promise((resolve, reject) => {

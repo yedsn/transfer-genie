@@ -3372,7 +3372,7 @@ function stopSpeechStream() {
 
 async function startSpeechRecording() {
   if (systemDictationMode) logSystemDictation('start recording requested');
-  if (!currentSettingsFormState.speechToTextEnabled) {
+  if (!currentSettingsFormState.speechToTextEnabled && !currentSettingsFormState.systemDictationEnabled) {
     setErrorStatus('请先在设置中启用语音转文字');
     showToast('请先在设置中启用语音转文字', 'error');
     return;
@@ -10666,14 +10666,14 @@ async function saveSettings(options = {}) {
     setErrorStatus('全局快捷键需包含修饰键，例如 Ctrl+Alt+T');
     return;
   }
-  const speechToTextEnabled = !!currentSettingsFormState.speechToTextEnabled;
+  const systemDictationEnabled = !!currentSettingsFormState.systemDictationEnabled;
+  const speechToTextEnabled = !!currentSettingsFormState.speechToTextEnabled || systemDictationEnabled;
   const speechToTextApiKey = (currentSettingsFormState.speechToTextApiKey || '').trim();
   const speechToTextResourceId = (currentSettingsFormState.speechToTextResourceId || DEFAULT_SPEECH_TO_TEXT_RESOURCE_ID).trim();
   const speechToTextEndpoint = (currentSettingsFormState.speechToTextEndpoint || DEFAULT_SPEECH_TO_TEXT_ENDPOINT).trim();
   const speechToTextMicrophoneDeviceId = (currentSettingsFormState.speechToTextMicrophoneDeviceId || '').trim();
   const speechToTextCaptureSystemAudio = !!currentSettingsFormState.speechToTextCaptureSystemAudio;
   const speechToTextSystemAudioDeviceId = (currentSettingsFormState.speechToTextSystemAudioDeviceId || '').trim();
-  const systemDictationEnabled = !!currentSettingsFormState.systemDictationEnabled;
   const normalizedSystemDictationShortcut = normalizeSpeechHotkey(
     currentSettingsFormState.systemDictationShortcut || DEFAULT_SYSTEM_DICTATION_SHORTCUT,
   );
