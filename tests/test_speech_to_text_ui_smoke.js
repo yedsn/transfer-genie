@@ -112,7 +112,11 @@ async function evaluate(client, expression, awaitPromise = true) {
     returnByValue: true,
   });
   if (result.exceptionDetails) {
-    throw new Error(result.exceptionDetails.text || 'Browser evaluation failed');
+    const detail = result.exceptionDetails.exception?.description
+      || result.exceptionDetails.exception?.value
+      || result.exceptionDetails.text
+      || 'Browser evaluation failed';
+    throw new Error(detail);
   }
   return result.result?.value;
 }
@@ -127,7 +131,15 @@ function mockSettings() {
     global_hotkey_enabled: true,
     global_hotkey: 'alt+t',
     default_editor_format: 'text',
-    webdav_endpoints: [],
+    active_webdav_id: 'endpoint-1',
+    webdav_endpoints: [{
+      id: 'endpoint-1',
+      name: 'Smoke Endpoint',
+      url: 'https://example.test/dav',
+      username: 'smoke',
+      password: 'secret',
+      enabled: true,
+    }],
     send: { copy_after_send: false },
     backup: {},
     telegram: {},
@@ -161,6 +173,7 @@ function preloadScript() {
     const settings = ${JSON.stringify(mockSettings())};
     window.__speechSmoke = {
       calls: [],
+      sentMessages: [],
       emittedEvents: [],
       eventHandlers,
       failTranscribe: false,
@@ -174,6 +187,12 @@ function preloadScript() {
       cueSounds: [],
       clipboardText: '',
       pastedText: '',
+      focusCaptureCount: 0,
+      focusDetectedAtDictationStart: true,
+      pasteReturnsNoPaste: false,
+      stealFocusOnOverlayShow: false,
+      overlayFocusStealCount: 0,
+      pasteWithoutFocus: false,
       downloads: [],
       aiRequests: [],
       failAiPolish: false,
@@ -187,8 +206,20 @@ function preloadScript() {
       repeatedPhraseChunkNumbers: [],
       transcribeChunkCallCount: 0,
       silentSamples: false,
+      sendSpeechDelayMs: 0,
+      sendTextDelayMs: 0,
+      loadMessagesDelayMs: 0,
+      fullscreenWasExitedBeforeLoadMessagesAfterSpeechSend: null,
     };
     window.__speechSmoke.longText = '语音识别文本'.repeat(20);
+    const originalFetch = window.fetch?.bind(window);
+    window.fetch = async (input, init) => {
+      const url = typeof input === 'string' ? input : String(input?.url || '');
+      if (url.startsWith('data:audio/') || url.includes('speech-message.wav')) {
+        return new Response(new Uint8Array([82, 73, 70, 70]), { status: 200, headers: { 'Content-Type': 'audio/wav' } });
+      }
+      return originalFetch(input, init);
+    };
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
       writeText: async (text) => { window.__speechSmoke.clipboardText = String(text || ''); },
     } });
@@ -199,9 +230,16 @@ function preloadScript() {
           if (command === 'get_settings') return structuredClone(settings);
           if (command === 'save_settings') return args.settings;
           if (command === 'paste_dictation_text') {
-            window.__speechSmoke.pastedText = String(args?.text || '');
-            window.__speechSmoke.clipboardText = String(args?.text || '');
-            return null;
+            const text = String(args?.text || '');
+            const pasted = !window.__speechSmoke.pasteWithoutFocus && !window.__speechSmoke.pasteReturnsNoPaste;
+            if (pasted) window.__speechSmoke.pastedText = text;
+            window.__speechSmoke.clipboardText = text;
+            return { focusDetected: !window.__speechSmoke.pasteWithoutFocus, pasted };
+          }
+          if (command === 'capture_system_dictation_focus_window') {
+            window.__speechSmoke.focusCaptureCount += 1;
+            window.__speechSmoke.capturedFocusTarget = document.activeElement || null;
+            return { focusDetected: window.__speechSmoke.focusDetectedAtDictationStart };
           }
           if (command === 'process_text_with_ai') {
             if (window.__speechSmoke.failAiPolish) throw 'AI 润色失败';
@@ -213,11 +251,20 @@ function preloadScript() {
           }
           if (command === 'show_system_dictation_window' || command === 'hide_system_dictation_window') {
             if (window.__speechSmoke.hangOverlayInvokes) return new Promise(() => {});
+            if (command === 'show_system_dictation_window' && window.__speechSmoke.stealFocusOnOverlayShow) {
+              window.__speechSmoke.overlayFocusStealCount += 1;
+              document.activeElement?.blur?.();
+            }
             return null;
           }
           if (command === 'set_system_dictation_level') return null;
           if (command === 'set_system_dictation_status') {
             window.__speechSmoke.systemDictationStatus = String(args?.text || '');
+            return null;
+          }
+          if (command === 'copy_dictation_text') {
+            window.__speechSmoke.dictationCopyText = String(args?.text || '');
+            window.__speechSmoke.clipboardText = String(args?.text || '');
             return null;
           }
           if (command === 'transcribe_speech') {
@@ -240,7 +287,74 @@ function preloadScript() {
             }
             return { text: window.__speechSmoke.longText, logId: 'smoke-log', timing: { totalMs: 1500, connectMs: 250, sendConfigMs: 40, sendAudioMs: 80, waitResultMs: 1130, audioBytes: 64000 } };
           }
-          if (command === 'list_messages_window') return { messages: [], has_more_before: false, has_more_after: false };
+          if (command === 'send_speech_message') {
+            const request = args?.request || {};
+            const delayMs = Number(window.__speechSmoke.sendSpeechDelayMs || 0);
+            if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+            window.__speechSmoke.fullscreenWasExitedBeforeLoadMessagesAfterSpeechSend = false;
+            const message = {
+              filename: 'speech-message.wav',
+              original_name: request.originalName || 'speech-message.wav',
+              endpoint_id: 'endpoint-1',
+              sender: 'Smoke',
+              timestamp_ms: Date.now(),
+              size: Array.isArray(request.audioData) ? request.audioData.length : 0,
+              kind: 'text',
+              content: request.transcript || '',
+              marked: false,
+              marked_tag_ids: [],
+              marked_pinned: false,
+              format: 'text',
+              transcript_source: 'speech-to-text',
+              source_audio_mime_type: request.mimeType || 'audio/wav',
+              transcript_raw_text: request.rawTranscript || '',
+            };
+            window.__speechSmoke.sentMessages = [message, ...window.__speechSmoke.sentMessages];
+            return {
+              filename: message.filename,
+              originalName: message.original_name,
+              endpointId: message.endpoint_id,
+              transcriptSource: message.transcript_source,
+              sourceAudioMimeType: message.source_audio_mime_type,
+              transcriptText: message.content,
+              transcriptRawText: message.transcript_raw_text,
+            };
+          }
+          if (command === 'send_text') {
+            const delayMs = Number(window.__speechSmoke.sendTextDelayMs || 0);
+            if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+            const message = {
+              filename: 'text-message.txt',
+              original_name: 'message.txt',
+              endpoint_id: 'endpoint-1',
+              sender: 'Smoke',
+              timestamp_ms: Date.now(),
+              size: String(args?.text || '').length,
+              kind: 'text',
+              content: String(args?.text || ''),
+              marked: false,
+              marked_tag_ids: [],
+              marked_pinned: false,
+              format: args?.format || 'text',
+            };
+            window.__speechSmoke.sentMessages = [message, ...window.__speechSmoke.sentMessages];
+            return { filename: message.filename, markedTagIds: [] };
+          }
+          if (command === 'send_file') {
+            return { filename: 'file-message.bin', markedTagIds: [] };
+          }
+          if (command === 'get_message_source_audio_file') return 'data:audio/wav;base64,UklGRg==';
+          if (command === 'download_message_file') {
+            return { status: 'saved', path: 'C:/Downloads/speech-message.wav' };
+          }
+          if (command === 'list_messages_window') {
+            const delayMs = Number(window.__speechSmoke.loadMessagesDelayMs || 0);
+            if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+            if (window.__speechSmoke.fullscreenWasExitedBeforeLoadMessagesAfterSpeechSend === false) {
+              window.__speechSmoke.fullscreenWasExitedBeforeLoadMessagesAfterSpeechSend = !document.documentElement.classList.contains('composer-fullscreen-active') && !document.body.classList.contains('composer-fullscreen-active');
+            }
+            return { messages: window.__speechSmoke.sentMessages, has_more_before: false, has_more_after: false };
+          }
           if (command === 'get_sync_status') return { state: 'idle', syncing: false, pending: false };
           if (command === 'get_local_http_api_status') return { state: 'disabled', running: false };
           if (command === 'get_telegram_bridge_status') return { running: false };
@@ -411,15 +525,66 @@ async function run() {
           };
           tick();
         })`);
-        return await evaluate(dictationClient, `(async () => {
+          return await evaluate(dictationClient, `(async () => {
           const wave = document.querySelector('.dictation-wave');
           const bar = document.querySelector('.dictation-wave span:nth-child(3)');
           const beforeMotion = wave.style.getPropertyValue('--dictation-motion');
           const beforeTransform = getComputedStyle(bar).transform;
           window.__transferGenieSetDictationLevel(0.65);
           await new Promise((resolve) => setTimeout(resolve, 220));
+          window.__transferGenieSetDictationStatus({ text: '无焦点识别结果', copyText: '无焦点识别结果' });
+          await new Promise((resolve) => setTimeout(resolve, 60));
+          const statusElement = document.querySelector('#dictation-status');
+          const resultStatus = statusElement?.textContent || '';
+          const copyButton = document.querySelector('#dictation-copy');
+          const copyVisible = !!copyButton && getComputedStyle(copyButton).display !== 'none' && !copyButton.hidden;
+          const copyDisabled = copyButton?.disabled;
+           const closeButton = document.querySelector('#dictation-close');
+           const closeVisible = !!closeButton && getComputedStyle(closeButton).display !== 'none' && !closeButton.hidden;
+           const resultMode = document.querySelector('.dictation-capsule')?.classList.contains('is-status') || false;
+          const resultCapsule = document.querySelector('.dictation-capsule');
+          const defaultResultBackground = resultCapsule ? getComputedStyle(resultCapsule).backgroundColor : '';
+          const defaultResultShadow = resultCapsule ? getComputedStyle(resultCapsule).boxShadow : '';
+          const defaultCopyBackground = copyButton ? getComputedStyle(copyButton).backgroundColor : '';
+          const defaultCopyColor = copyButton ? getComputedStyle(copyButton).color : '';
+          const resultHoverRule = Array.from(document.styleSheets)
+            .flatMap((sheet) => Array.from(sheet.cssRules || []))
+            .find((rule) => rule.selectorText === '.dictation-capsule.is-result:hover');
+          const resultHoverBackground = resultHoverRule?.style?.backgroundColor || '';
+          resultCapsule?.dispatchEvent(new PointerEvent('pointerenter', { bubbles: true }));
+           await new Promise((resolve) => setTimeout(resolve, 3100));
+           const hoveredStatus = document.querySelector('#dictation-status')?.textContent || '';
+           closeButton?.click();
+           await new Promise((resolve) => setTimeout(resolve, 20));
+           const closedStatus = document.querySelector('#dictation-status')?.textContent || '';
+           window.__transferGenieSetDictationStatus({ text: '自动关闭的识别结果', copyText: '自动关闭的识别结果' });
+           await new Promise((resolve) => setTimeout(resolve, 3100));
+           const autoClosedStatus = document.querySelector('#dictation-status')?.textContent || '';
+           window.__transferGenieSetDictationStatus({ text: '最新识别结果', copyText: '最新识别结果', requestId: 20 });
+           window.__transferGenieSetDictationStatus({ text: '延迟的旧状态', copyText: '延迟的旧状态', requestId: 19 });
+           const staleStatusIgnored = document.querySelector('#dictation-status')?.textContent || '';
+           window.__transferGenieSetDictationStatus({ text: '正在进行润色', copyText: '' });
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          const progressWidth = document.querySelector('.dictation-capsule')?.getBoundingClientRect().width || 0;
+          const copyHiddenDuringProgress = copyButton?.hidden === true;
           return {
             functionReady: typeof window.__transferGenieSetDictationLevel === 'function',
+            resultStatus,
+            defaultResultBackground,
+            defaultResultShadow,
+            defaultCopyBackground,
+            defaultCopyColor,
+            resultHoverBackground,
+            copyVisible,
+            copyDisabled,
+             closeVisible,
+             hoveredStatus,
+             closedStatus,
+             autoClosedStatus,
+            staleStatusIgnored,
+            resultMode,
+            copyHiddenDuringProgress,
+            progressWidth,
             beforeMotion,
             afterMotion: wave.style.getPropertyValue('--dictation-motion'),
             beforeTransform,
@@ -432,6 +597,22 @@ async function run() {
       }
     })();
     assert.equal(dictationPageResult.functionReady, true, 'system dictation overlay exposes level update function');
+    assert.equal(dictationPageResult.resultStatus, '无焦点识别结果', 'system dictation overlay shows the copied result text');
+    assert.equal(dictationPageResult.resultMode, true, 'system dictation overlay enters result mode');
+    assert.equal(dictationPageResult.defaultResultBackground, 'rgba(8, 10, 14, 0.62)', 'system dictation result capsule uses a translucent readable background by default');
+    assert.equal(dictationPageResult.defaultResultShadow, 'none', 'translucent result capsule does not cast a blocking shadow');
+    assert.equal(dictationPageResult.defaultCopyBackground, 'rgba(0, 0, 0, 0)', 'result actions do not use opaque surfaces before hover');
+    assert.equal(dictationPageResult.defaultCopyColor, 'rgb(255, 255, 255)', 'transparent result action icons remain readable on the translucent surface');
+    assert.match(dictationPageResult.resultHoverBackground, /8, 10, 14/, 'system dictation result capsule restores an opaque surface on hover');
+    assert.equal(dictationPageResult.copyVisible, true, 'system dictation result exposes a copy button');
+    assert.equal(dictationPageResult.copyDisabled, false, 'system dictation copy button is enabled for the result');
+    assert.equal(dictationPageResult.closeVisible, true, 'system dictation result exposes a close button');
+    assert.equal(dictationPageResult.hoveredStatus, '无焦点识别结果', 'hovering over the result keeps it visible past the automatic close delay');
+    assert.equal(dictationPageResult.closedStatus, '', 'system dictation close button clears the result');
+    assert.equal(dictationPageResult.autoClosedStatus, '', 'unhovered result automatically closes after three seconds');
+    assert.equal(dictationPageResult.staleStatusIgnored, '最新识别结果', 'delayed status from an older overlay request cannot replace the latest result');
+    assert.equal(dictationPageResult.copyHiddenDuringProgress, true, 'system dictation progress status does not expose the copy button');
+    assert.ok(dictationPageResult.progressWidth > 0 && dictationPageResult.progressWidth < 160, 'system dictation progress capsule fits its status text without hidden action space');
     assert.notEqual(dictationPageResult.afterMotion, '', 'system dictation overlay writes waveform motion CSS variable');
     assert.notEqual(dictationPageResult.afterMotion, dictationPageResult.beforeMotion, 'system dictation waveform responds to level changes');
     assert.notEqual(dictationPageResult.afterTransform, dictationPageResult.beforeTransform, 'system dictation waveform bar transform changes after level update');
@@ -446,11 +627,62 @@ async function run() {
     })()`);
     assert.match(unsupportedResult, /麦克风 API|macOS|系统设置/, 'missing getUserMedia shows actionable macOS microphone guidance');
 
+    const sendButtonResult = await evaluate(client, `(async () => {
+      window.__speechSmoke.calls = [];
+      window.__speechSmoke.sentMessages = [];
+      window.__speechSmoke.sendTextDelayMs = 120;
+      const bridge = window.transferGenieComposer || {};
+      bridge.setActiveDraftText?.('普通发送按钮测试');
+      const draftBeforeSend = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
+      document.querySelector('#send-text')?.click();
+      const clearedImmediately = window.transferGenieComposerStore?.getActiveDraft?.()?.text === '';
+      bridge.setActiveDraftText?.('继续输入');
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const sent = window.__speechSmoke.sentMessages.some((message) => message.content === '普通发送按钮测试');
+          if (sent) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('send button did not finish in background'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      return {
+        clearedImmediately,
+        draftBeforeSend,
+        draftValue: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
+        sentText: window.__speechSmoke.sentMessages.at(-1)?.content || '',
+        calls: window.__speechSmoke.calls.map((call) => call.command),
+      };
+    })()`);
+    assert.equal(sendButtonResult.clearedImmediately, true, 'send button clears the editor immediately');
+    assert.equal(sendButtonResult.draftBeforeSend, '普通发送按钮测试', 'send button reads the current draft before clearing');
+    assert.equal(sendButtonResult.draftValue, '继续输入', 'background send does not overwrite new editor input');
+    assert.equal(sendButtonResult.sentText, '普通发送按钮测试', 'send button still sends the original text in the background');
+    await evaluate(client, `(async () => {
+      window.__speechSmoke.sentMessages = [];
+      window.__speechSmoke.calls = [];
+      window.transferGenieComposer?.setActiveDraftText?.('');
+      await new Promise((r) => setTimeout(r, 20));
+      return true;
+    })()`);
+
     const buttonResult = await evaluate(client, `(async () => {
       let markdownSyncCount = 0;
       window.transferGenieComposer = window.transferGenieComposer || {};
       window.transferGenieComposer._setActiveText = () => { markdownSyncCount += 1; };
       const cueCountBeforeToggle = window.__speechSmoke.cueSounds.length;
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (window.transferGenieLegacyFullscreen?.set) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('fullscreen bridge was not ready'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      window.transferGenieLegacyFullscreen.set(true);
+      const fullscreenBeforeSend = window.transferGenieLegacyFullscreen.get();
       document.querySelector('#speech-to-text-toggle').click();
       await new Promise((r) => setTimeout(r, 20));
       const cueCountImmediatelyAfterStartClick = window.__speechSmoke.cueSounds.length;
@@ -481,17 +713,16 @@ async function run() {
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
-          const text = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
           const status = document.querySelector('#sync-status')?.textContent || '';
-          if (text) resolve();
+          if (window.__speechSmoke.calls.some((call) => call.command === 'send_speech_message')) resolve();
           else if (/语音识别失败/.test(status)) reject(new Error(status));
-          else if (Date.now() - start > 2500) reject(new Error('recognized text was not inserted'));
+          else if (Date.now() - start > 2500) reject(new Error('speech message was not sent'));
           else setTimeout(tick, 20);
         };
         tick();
       });
+      const fullscreenExitedImmediately = !document.documentElement.classList.contains('composer-fullscreen-active') && !document.body.classList.contains('composer-fullscreen-active');
       const calls = window.__speechSmoke.calls.filter((call) => call.command === 'transcribe_speech');
-      const activeDraft = window.transferGenieComposerStore?.getActiveDraft?.();
       const autoClipboardText = window.__speechSmoke.clipboardText;
       if (!window.__speechSmoke.downloadHookInstalled) {
         window.__speechSmoke.downloadHookInstalled = true;
@@ -521,8 +752,9 @@ async function run() {
       await new Promise((r) => setTimeout(r, 20));
       return {
         recording,
-        text: activeDraft?.text || '',
+        text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
         request: calls.at(-1)?.args?.request,
+        sendRequest: window.__speechSmoke.calls.find((call) => call.command === 'send_speech_message')?.args?.request || null,
         mediaRequest: window.__speechSmoke.mediaRequests.at(-1),
         speechTaskCount: taskItems.length,
         speechTaskText: taskItems[0]?.querySelector('.speech-task-text')?.textContent || '',
@@ -535,6 +767,8 @@ async function run() {
         cueSoundCount: window.__speechSmoke.cueSounds.length,
         startClickCueDelta: cueCountImmediatelyAfterStartClick - cueCountBeforeToggle,
         stopClickCueDelta: cueCountImmediatelyAfterStopClick - cueCountBeforeStopClick,
+        fullscreenBeforeSend,
+        fullscreenExitedImmediately,
         longText: window.__speechSmoke.longText,
         markdownSyncCount,
         ...liveWaveState,
@@ -548,8 +782,9 @@ async function run() {
       };
     })()`);
     assert.equal(buttonResult.recording, true, `speech button enters recording state: ${JSON.stringify(buttonResult)}`);
-    assert.equal(buttonResult.text, buttonResult.longText, 'recognized text is inserted into composer draft');
-    assert.equal(buttonResult.clipboardText, buttonResult.longText, 'recognized text is copied to clipboard after transcription');
+    assert.equal(buttonResult.text, '', 'recognized text is not inserted into the composer draft');
+    assert.equal(buttonResult.sendRequest?.transcript, buttonResult.longText, 'recognized text is sent as a message');
+    assert.equal(buttonResult.clipboardText, buttonResult.longText, 'recognized text is still copied for clipboard convenience');
     assert.equal(buttonResult.speechTaskCount, 1, 'successful transcription creates a retained task');
     assert.ok(buttonResult.speechTaskText.length < buttonResult.longText.length, 'transcription task list shows a shortened preview');
     assert.ok(buttonResult.speechTaskText.endsWith('...'), 'long transcription task preview is ellipsized');
@@ -560,13 +795,16 @@ async function run() {
     assert.match(buttonResult.downloadName, /^speech-.*\.wav$/, 'transcription task audio can be downloaded as wav');
     assert.match(buttonResult.status, /本地耗时.*语音耗时/, 'local and ASR timing diagnostics are visible after transcription');
     assert.equal(buttonResult.speechTaskCountAfterDelete, 0, 'transcription task can be deleted');
+    assert.match(buttonResult.sendRequest?.mimeType || '', /^audio\//, 'speech message sends a source audio mime type');
     assert.equal(buttonResult.cueEnabledChecked, true, 'speech cue sounds default to enabled');
     assert.equal(buttonResult.cueKindValue, 'system', 'speech cue sound defaults to system');
     assert.equal(buttonResult.systemAudioChecked, false, 'system audio capture defaults to disabled');
     assert.ok(buttonResult.cueSoundCount >= 2, 'speech recording plays start and stop cue sounds by default');
     assert.equal(buttonResult.startClickCueDelta, 1, 'speech button immediately plays cue when opening recording');
     assert.equal(buttonResult.stopClickCueDelta, 1, 'speech button immediately plays cue when closing recording');
-    assert.ok(buttonResult.markdownSyncCount > 0, 'markdown editor is refreshed after speech insertion');
+    assert.equal(buttonResult.fullscreenBeforeSend, true, 'speech button test starts from fullscreen');
+    assert.equal(buttonResult.fullscreenExitedImmediately, true, 'speech button exits fullscreen before message list refresh completes');
+    assert.equal(buttonResult.markdownSyncCount, 0, 'markdown editor is not touched when speech is sent directly');
     assert.equal(buttonResult.request.format, 'wav', 'recording is transcoded to WAV before sending to backend');
     assert.equal(buttonResult.request.mimeType, 'audio/wav', 'WAV mime type is sent to backend');
     assert.equal(buttonResult.request.sampleRate, 16000, 'WAV sample rate is sent to backend');
@@ -610,9 +848,11 @@ async function run() {
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
-          const text = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
           const hasTask = document.querySelectorAll('.speech-task-item').length > 0;
-          if (text.includes('分片1') && text.includes('分片2') && text.includes('分片3') && hasTask) resolve();
+          const sent = window.__speechSmoke.calls.some(
+            (call) => call.command === 'send_speech_message' && call.args?.request?.transcript === '分片1\\n分片2\\n分片3',
+          );
+          if (sent && hasTask) resolve();
           else if (Date.now() - start > 2500) reject(new Error('long recording chunks were not transcribed'));
           else setTimeout(tick, 20);
         };
@@ -643,18 +883,22 @@ async function run() {
         taskCount: taskItems.length,
         taskTitle: taskItems[0]?.querySelector('.speech-task-text')?.getAttribute('title') || '',
         taskAudioBytes: newest.audio?.bytes?.length || 0,
+        sourceMessageFilename: newest.sourceMessageFilename || '',
+        sourceAudioMimeType: newest.sourceAudioMimeType || '',
         fullTaskText: newest.text || '',
         chunkCount: newest.chunkCount || 0,
       };
     })()`);
     assert.ok(longRecordingResult.callsWhileRecording > 0, 'long recording transcribes completed chunks while recording continues');
-    assert.ok(longRecordingResult.textWhileRecording.includes('分片1'), 'first chunk is written during recording');
+    assert.equal(longRecordingResult.textWhileRecording, '', 'ordinary long recording does not write chunk text during recording');
     assert.ok(longRecordingResult.chunkCalls >= 3, `long recording is submitted as multiple ASR chunks: ${JSON.stringify(longRecordingResult)}`);
-    assert.equal(longRecordingResult.text, '分片1\n分片2\n分片3', 'long recording chunk text is merged in chronological order');
+    assert.equal(longRecordingResult.text, '', 'ordinary long recording does not write merged text into composer');
     assert.equal(longRecordingResult.taskCount, 1, 'long recording still creates one visible speech task');
     assert.equal(longRecordingResult.taskTitle, '分片1\n分片2\n分片3', 'long recording task stores combined text');
     assert.equal(longRecordingResult.fullTaskText, '分片1\n分片2\n分片3', 'retained long recording task stores combined transcript');
-    assert.ok(longRecordingResult.taskAudioBytes > Math.max(...longRecordingResult.chunkTexts), 'retained long recording task keeps the complete audio, not a chunk');
+    assert.equal(longRecordingResult.taskAudioBytes, 0, 'successful speech task does not retain a standalone audio blob');
+    assert.equal(longRecordingResult.sourceMessageFilename, 'speech-message.wav', 'successful speech task references the sent message audio file');
+    assert.equal(longRecordingResult.sourceAudioMimeType, 'audio/wav', 'successful speech task records the source audio mime type');
     assert.equal(longRecordingResult.chunkCount, longRecordingResult.chunkCalls, 'retained task records the internal chunk count without creating chunk tasks');
 
     const polishedLongRecordingResult = await evaluate(client, `(async () => {
@@ -698,9 +942,11 @@ async function run() {
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
-          const text = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
-          if (text === '润色：润色分片1\\n润色分片2\\n润色分片3') resolve();
-          else if (Date.now() - start > 3500) reject(new Error('polished long recording did not insert final polished text: ' + text));
+          const sent = window.__speechSmoke.calls.some(
+            (call) => call.command === 'send_speech_message' && call.args?.request?.transcript === '润色：润色分片1\\n润色分片2\\n润色分片3',
+          );
+          if (sent) resolve();
+          else if (Date.now() - start > 3500) reject(new Error('polished long recording did not send final polished text'));
           else setTimeout(tick, 20);
         };
         tick();
@@ -709,6 +955,16 @@ async function run() {
       document.querySelector('#speech-to-text-polish-enabled').checked = false;
       document.querySelector('#speech-to-text-polish-enabled').dispatchEvent(new Event('change', { bubbles: true }));
       document.querySelector('#save-settings')?.click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const saved = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.speech_to_text || {};
+          if (saved.polish_enabled === false) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('long speech polish disable was not saved'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
       window.__speechSmoke.chunkDurationMs = 0;
       window.__speechSmoke.chunkTextPrefix = '';
       window.__speechSmoke.transcribeChunkCallCount = 0;
@@ -716,6 +972,7 @@ async function run() {
         callsWhileRecording,
         textWhileRecording,
         text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
+        sendTranscript: window.__speechSmoke.calls.filter((call) => call.command === 'send_speech_message').at(-1)?.args?.request?.transcript || '',
         aiRequest,
         aiRequestCount: window.__speechSmoke.aiRequests.length,
       };
@@ -724,7 +981,8 @@ async function run() {
     assert.equal(polishedLongRecordingResult.textWhileRecording, '', 'polished long recording does not write chunk text during recording');
     assert.equal(polishedLongRecordingResult.aiRequestCount, 1, 'polished long recording runs polish once after all chunks are complete');
     assert.equal(polishedLongRecordingResult.aiRequest.text, '润色分片1\n润色分片2\n润色分片3', 'polished long recording sends the complete transcript to AI');
-    assert.equal(polishedLongRecordingResult.text, '润色：润色分片1\n润色分片2\n润色分片3', 'polished long recording inserts one final polished transcript');
+    assert.equal(polishedLongRecordingResult.text, '', 'polished long recording does not insert one final polished transcript');
+    assert.equal(polishedLongRecordingResult.sendTranscript, '润色：润色分片1\n润色分片2\n润色分片3', 'polished long recording sends one final polished transcript');
 
     const blankAllChunkFallbackResult = await evaluate(client, `(async () => {
       window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
@@ -751,9 +1009,11 @@ async function run() {
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
-          const text = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
-          if (text === window.__speechSmoke.longText) resolve();
-          else if (Date.now() - start > 3000) reject(new Error('blank-all chunk fallback did not insert full transcription'));
+          const sent = window.__speechSmoke.sentMessages.some(
+            (message) => message.content === window.__speechSmoke.longText,
+          );
+          if (sent) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('blank-all chunk fallback did not send full transcription'));
           else setTimeout(tick, 20);
         };
         tick();
@@ -773,6 +1033,7 @@ async function run() {
         callCount: calls.length,
         requestBytes: calls.map((call) => call.args?.request?.audioData?.length || 0),
         text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
+        sendTranscript: window.__speechSmoke.calls.filter((call) => call.command === 'send_speech_message').at(-1)?.args?.request?.transcript || '',
         taskTitle: document.querySelector('.speech-task-item .speech-task-text')?.getAttribute('title') || '',
         longText: window.__speechSmoke.longText,
       };
@@ -786,7 +1047,8 @@ async function run() {
       blankAllChunkFallbackResult.requestBytes.at(-1) > Math.min(...blankAllChunkFallbackResult.requestBytes.slice(0, -1)),
       'blank live chunk fallback sends the retained full recording, not another chunk',
     );
-    assert.equal(blankAllChunkFallbackResult.text, blankAllChunkFallbackResult.longText, 'full-audio fallback inserts text when live chunks are blank');
+    assert.equal(blankAllChunkFallbackResult.text, '', 'full-audio fallback does not insert text into composer');
+    assert.equal(blankAllChunkFallbackResult.sendTranscript, blankAllChunkFallbackResult.longText, 'full-audio fallback sends text when live chunks are blank');
     assert.equal(blankAllChunkFallbackResult.taskTitle, blankAllChunkFallbackResult.longText, 'full-audio fallback stores task text');
 
     const blankChunkResult = await evaluate(client, `(async () => {
@@ -814,10 +1076,12 @@ async function run() {
         const start = Date.now();
         const tick = () => {
           const status = document.querySelector('#sync-status')?.textContent || '';
-          const text = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
-          if (/(语音识别完成|本地耗时)/.test(status) && text.includes('有效1') && text.includes('有效3')) resolve();
+          const sent = window.__speechSmoke.calls.some(
+            (call) => call.command === 'send_speech_message' && call.args?.request?.transcript === '有效1\\n有效3',
+          );
+          if (/(语音识别完成|本地耗时)/.test(status) && sent) resolve();
           else if (/语音识别失败/.test(status)) reject(new Error(status));
-          else if (Date.now() - start > 2500) reject(new Error('blank chunk recording did not complete'));
+          else if (Date.now() - start > 2500) reject(new Error('blank chunk recording did not send message'));
           else setTimeout(tick, 20);
         };
         tick();
@@ -838,6 +1102,7 @@ async function run() {
         chunkCalls: calls.length,
         status: document.querySelector('#sync-status')?.textContent || '',
         text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
+        sendTranscript: window.__speechSmoke.calls.filter((call) => call.command === 'send_speech_message').at(-1)?.args?.request?.transcript || '',
         beforeTaskCount,
         taskCount: taskItems.length,
         taskTitle: taskItems[0]?.querySelector('.speech-task-text')?.getAttribute('title') || '',
@@ -848,7 +1113,8 @@ async function run() {
       return result;
     })()`);
     assert.equal(blankChunkResult.chunkCalls, 3, 'blank middle chunk is still counted as one internal ASR chunk');
-    assert.equal(blankChunkResult.text, '有效1\n有效3', 'blank middle chunk is skipped while surrounding chunk text is preserved');
+    assert.equal(blankChunkResult.text, '', 'blank middle chunk is not written into the composer');
+    assert.equal(blankChunkResult.sendTranscript, '有效1\n有效3', 'blank middle chunk is skipped while surrounding chunk text is preserved');
     assert.equal(blankChunkResult.taskCount, blankChunkResult.beforeTaskCount + 1, 'blank middle chunk still adds only one visible speech task');
     assert.equal(blankChunkResult.taskTitle, '有效1\n有效3', 'speech task stores the combined nonblank transcript');
 
@@ -876,10 +1142,12 @@ async function run() {
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
-          const text = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
           const button = document.querySelector('#speech-to-text-toggle');
           const idle = !button.classList.contains('is-recording') && !button.classList.contains('is-transcribing') && !button.classList.contains('is-preparing');
-          if (text.includes('正常1') && text.includes('正常4') && idle) resolve();
+          const sent = window.__speechSmoke.calls.some(
+            (call) => call.command === 'send_speech_message' && call.args?.request?.transcript === '正常1\\n正常4',
+          );
+          if (sent && idle) resolve();
           else if (Date.now() - start > 2500) reject(new Error('hallucinated chunk recording did not complete'));
           else setTimeout(tick, 20);
         };
@@ -889,6 +1157,7 @@ async function run() {
       const result = {
         chunkCalls: calls.length,
         text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
+        sendTranscript: window.__speechSmoke.calls.filter((call) => call.command === 'send_speech_message').at(-1)?.args?.request?.transcript || '',
       };
       window.__speechSmoke.chunkDurationMs = 0;
       window.__speechSmoke.chunkTextPrefix = '';
@@ -897,7 +1166,8 @@ async function run() {
       return result;
     })()`);
     assert.equal(hallucinatedChunkResult.chunkCalls, 4, 'pathological repeated chunks are detected after ASR returns');
-    assert.equal(hallucinatedChunkResult.text, '正常1\n正常4', 'pathological repeated single-character and phrase text is not inserted');
+    assert.equal(hallucinatedChunkResult.text, '', 'pathological repeated single-character and phrase text is not inserted');
+    assert.equal(hallucinatedChunkResult.sendTranscript, '正常1\n正常4', 'pathological repeated single-character and phrase text is sent');
 
     const silentChunkResult = await evaluate(client, `(async () => {
       window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
@@ -1299,6 +1569,9 @@ async function run() {
       document.querySelector('#speech-to-text-capture-system-audio').checked = false;
       document.querySelector('#speech-to-text-capture-system-audio').dispatchEvent(new Event('change', { bubbles: true }));
       window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
+      window.__speechSmoke.calls = [];
+      window.__speechSmoke.sentMessages = [];
+      window.__speechSmoke.longText = '语音识别文本'.repeat(400);
       const beforeRequests = window.__speechSmoke.mediaRequests.length;
       document.querySelector('#speech-to-text-toggle').click();
       await new Promise((resolve, reject) => {
@@ -1316,11 +1589,34 @@ async function run() {
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
-          const text = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
+          const bodyText = document.querySelector('.message-card .message-body')?.textContent || '';
+          const hasSourceAudioControls = !!document.querySelector('.message-card .speech-source-audio-controls[controls]');
           const status = document.querySelector('#sync-status')?.textContent || '';
-          if (text) resolve();
+          if (window.__speechSmoke.calls.some((call) => call.command === 'send_speech_message') && bodyText && hasSourceAudioControls) resolve();
           else if (/语音识别失败/.test(status)) reject(new Error(status));
-          else if (Date.now() - start > 2500) reject(new Error('button recognition did not insert text'));
+          else if (Date.now() - start > 2500) reject(new Error('button recognition did not render sent message'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const audio = document.querySelector('.message-card .speech-source-audio-controls');
+          const sourceRequested = window.__speechSmoke.calls.some((call) => call.command === 'get_message_source_audio_file');
+          if (audio && sourceRequested) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('source audio controls did not load'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      document.querySelector('.message-card .message-actions .button.primary.small.icon-only')?.click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const downloadCall = window.__speechSmoke.calls.find((call) => call.command === 'download_message_file');
+          if (downloadCall?.args?.filename === 'speech-message.wav') resolve();
+          else if (Date.now() - start > 2000) reject(new Error('source audio download did not start'));
           else setTimeout(tick, 20);
         };
         tick();
@@ -1328,11 +1624,28 @@ async function run() {
       return {
         requestDelta,
         text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
+        sendCall: window.__speechSmoke.calls.find((call) => call.command === 'send_speech_message')?.args?.request || null,
+        messagePreview: document.querySelector('.message-card .message-body')?.textContent || '',
+        hasAudioControls: !!document.querySelector('.message-card .speech-source-audio-controls[controls]'),
+        messagePreviewLength: document.querySelector('.message-card .message-body')?.textContent.length || 0,
+        hasFullTextAction: !!document.querySelector('.message-card .message-view-full-text'),
+        sourceAudioRequested: window.__speechSmoke.calls.some((call) => call.command === 'get_message_source_audio_file'),
+        sourceAudioDownloadRequested: window.__speechSmoke.calls.some(
+          (call) => call.command === 'download_message_file' && call.args?.filename === 'speech-message.wav',
+        ),
         longText: window.__speechSmoke.longText,
       };
     })()`);
     assert.equal(buttonRecordingResult.requestDelta, 1, 'speech button starts one microphone request');
-    assert.equal(buttonRecordingResult.text, buttonRecordingResult.longText, 'speech button still inserts recognized text');
+    assert.equal(buttonRecordingResult.text, '', 'speech button does not keep recognized text in the composer');
+    assert.equal(buttonRecordingResult.sendCall?.transcript, buttonRecordingResult.longText, 'speech completion sends the recognized text');
+    assert.equal(buttonRecordingResult.sendCall?.mimeType, 'audio/wav', 'speech completion sends the source audio mime type');
+    assert.match(buttonRecordingResult.messagePreview, /语音识别文本/, 'sent speech message shows the transcript in the feed');
+    assert.equal(buttonRecordingResult.messagePreviewLength, 2003, 'feed text preview is limited for long messages');
+    assert.equal(buttonRecordingResult.hasFullTextAction, true, 'long feed text exposes a full-text action');
+    assert.equal(buttonRecordingResult.hasAudioControls, true, 'sent speech message exposes inline audio controls');
+    assert.equal(buttonRecordingResult.sourceAudioRequested, true, 'source audio preview uses the linked message audio file');
+    assert.equal(buttonRecordingResult.sourceAudioDownloadRequested, true, 'speech download button downloads the linked audio file');
 
     const speechPolishResult = await evaluate(client, `(async () => {
       await new Promise((resolve, reject) => {
@@ -1348,6 +1661,7 @@ async function run() {
       window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
       window.__speechSmoke.aiRequests = [];
       window.__speechSmoke.failAiPolish = false;
+      window.__speechSmoke.sentMessages = [];
       window.__speechSmoke.longText = '需要润色的语音文本';
       window.transferGenieActions?.updateSettingsFormField?.('aiEnabled', true);
       window.transferGenieActions?.updateSettingsFormField?.('aiBaseUrl', 'https://example.test/v1');
@@ -1383,21 +1697,53 @@ async function run() {
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
-          const text = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
-          if (text === '润色：需要润色的语音文本') resolve();
-          else if (Date.now() - start > 3000) reject(new Error('polished speech text was not inserted: ' + text));
+          const sent = window.__speechSmoke.calls.some(
+            (call) => call.command === 'send_speech_message' && call.args?.request?.transcript === '润色：需要润色的语音文本' && call.args?.request?.rawTranscript === '需要润色的语音文本',
+          );
+          if (sent) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('polished speech text was not sent'));
           else setTimeout(tick, 20);
         };
         tick();
       });
       const saved = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.speech_to_text || {};
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const text = document.querySelector('.message-card[data-filename="speech-message.wav"] .message-body')?.textContent || '';
+          if (text === '润色：需要润色的语音文本') resolve();
+          else if (Date.now() - start > 2000) reject(new Error('polished speech message was not rendered in the feed'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
       const result = {
         text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
+        sendTranscript: window.__speechSmoke.calls.filter((call) => call.command === 'send_speech_message').at(-1)?.args?.request?.transcript || '',
+        sendRawTranscript: window.__speechSmoke.calls.filter((call) => call.command === 'send_speech_message').at(-1)?.args?.request?.rawTranscript || '',
         clipboardText: window.__speechSmoke.clipboardText,
         aiRequest: window.__speechSmoke.aiRequests.at(-1),
+        feedTextBeforeToggle: document.querySelector('.message-card[data-filename="speech-message.wav"] .message-body')?.textContent || '',
+        hasTranscriptToggle: !!document.querySelector('.message-card[data-filename="speech-message.wav"] .speech-transcript-toggle'),
         saved,
         selectDisabled: document.querySelector('#speech-to-text-polish-action').disabled,
       };
+      const speechCard = document.querySelector('.message-card[data-filename="speech-message.wav"]');
+      const copySpeechText = async () => {
+        Array.from(speechCard?.querySelectorAll('.message-actions button') || [])
+          .find((button) => button.querySelector('img[alt="复制"]'))
+          ?.click();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      };
+      await copySpeechText();
+      result.copiedPolishedText = window.__speechSmoke.clipboardText;
+      document.querySelector('.message-card[data-filename="speech-message.wav"] .speech-transcript-toggle-button:nth-child(2)')?.click();
+      result.feedTextAfterToggle = document.querySelector('.message-card[data-filename="speech-message.wav"] .message-body')?.textContent || '';
+      await copySpeechText();
+      result.copiedRawText = window.__speechSmoke.clipboardText;
+      document.querySelector('.message-card[data-filename="speech-message.wav"] .speech-transcript-toggle-button:nth-child(1)')?.click();
+      await copySpeechText();
+      result.copiedPolishedAgainText = window.__speechSmoke.clipboardText;
       window.__speechSmoke.longText = '语音识别文本'.repeat(20);
       return result;
     })()`);
@@ -1405,8 +1751,16 @@ async function run() {
     assert.equal(speechPolishResult.saved.polish_action_id, 'formalize', 'speech polish action id is saved');
     assert.equal(speechPolishResult.aiRequest.actionId, 'formalize', 'speech polish uses the selected AI action');
     assert.equal(speechPolishResult.aiRequest.text, '需要润色的语音文本', 'speech polish sends raw transcript to AI');
-    assert.equal(speechPolishResult.text, '润色：需要润色的语音文本', 'speech polish inserts polished text');
+    assert.equal(speechPolishResult.text, '', 'speech polish does not insert polished text into composer');
+    assert.equal(speechPolishResult.sendTranscript, '润色：需要润色的语音文本', 'speech polish sends polished text');
+    assert.equal(speechPolishResult.sendRawTranscript, '需要润色的语音文本', 'speech polish sends raw transcript metadata');
+    assert.equal(speechPolishResult.feedTextBeforeToggle, '润色：需要润色的语音文本', 'speech feed defaults to polished text');
+    assert.equal(speechPolishResult.hasTranscriptToggle, true, 'speech feed exposes a raw/polished toggle');
+    assert.equal(speechPolishResult.feedTextAfterToggle, '需要润色的语音文本', 'speech feed can switch to raw transcript');
     assert.equal(speechPolishResult.clipboardText, '润色：需要润色的语音文本', 'speech polish copies polished text after completion');
+    assert.equal(speechPolishResult.copiedPolishedText, '润色：需要润色的语音文本', 'copy action follows the polished transcript mode');
+    assert.equal(speechPolishResult.copiedRawText, '需要润色的语音文本', 'copy action follows the raw transcript mode');
+    assert.equal(speechPolishResult.copiedPolishedAgainText, '润色：需要润色的语音文本', 'copy action returns to polished text after switching back');
     assert.equal(speechPolishResult.selectDisabled, false, 'speech polish action selector is enabled when polish is enabled');
 
     const systemDictationResult = await evaluate(client, `(async () => {
@@ -1436,6 +1790,8 @@ async function run() {
       window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
       window.__speechSmoke.pastedText = '';
       window.__speechSmoke.clipboardText = '';
+      window.__speechSmoke.calls = [];
+      window.__speechSmoke.sendSpeechDelayMs = 120;
       const cueCountBeforeToggle = window.__speechSmoke.cueSounds.length;
       document.activeElement?.blur?.();
       document.querySelector('.tab-button[data-tab-target="home"]')?.focus();
@@ -1457,10 +1813,26 @@ async function run() {
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
-          const pasted = window.__speechSmoke.pastedText || '';
-          const text = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
-          if (pasted && text) resolve();
-          else if (Date.now() - start > 2500) reject(new Error('system dictation did not paste and append'));
+          if (window.__speechSmoke.pastedText === window.__speechSmoke.longText) resolve();
+          else if (Date.now() - start > 1500) reject(new Error('system dictation did not paste immediately after transcription'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const sent = window.__speechSmoke.sentMessages.some(
+            (message) => message.content === window.__speechSmoke.longText,
+          );
+          if (sent && window.__speechSmoke.pastedText === window.__speechSmoke.longText) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('system dictation did not send and paste message: ' + JSON.stringify({
+            pastedText: window.__speechSmoke.pastedText,
+            clipboardText: window.__speechSmoke.clipboardText,
+            draftText: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
+            status: document.querySelector('#sync-status')?.textContent || '',
+            lastCommands: window.__speechSmoke.calls.slice(-12).map((call) => call.command),
+          })));
           else setTimeout(tick, 20);
         };
         tick();
@@ -1469,6 +1841,10 @@ async function run() {
       return {
         text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
         pastedText: window.__speechSmoke.pastedText,
+        clipboardText: window.__speechSmoke.clipboardText,
+        sendTranscript: window.__speechSmoke.calls.filter((call) => call.command === 'send_speech_message').at(-1)?.args?.request?.transcript || '',
+        pasteCount: calls.filter((command) => command === 'paste_dictation_text').length,
+        pasteBeforeSend: calls.indexOf('paste_dictation_text') >= 0 && calls.indexOf('send_speech_message') >= 0 && calls.indexOf('paste_dictation_text') < calls.indexOf('send_speech_message'),
         cueDelta: window.__speechSmoke.cueSounds.length - cueCountBeforeToggle,
         showCount: calls.filter((command) => command === 'show_system_dictation_window').length,
         hideCount: calls.filter((command) => command === 'hide_system_dictation_window').length,
@@ -1476,8 +1852,12 @@ async function run() {
         longText: window.__speechSmoke.longText,
       };
     })()`);
-    assert.equal(systemDictationResult.text, systemDictationResult.longText, 'system dictation appends recognized text to composer');
-    assert.equal(systemDictationResult.pastedText, systemDictationResult.longText, 'system dictation sends recognized text through paste command');
+    assert.equal(systemDictationResult.text, '', 'shortcut speech does not append text to Transfer Genie composer');
+    assert.equal(systemDictationResult.pastedText, systemDictationResult.longText, 'shortcut speech pastes recognized text into the focused app');
+    assert.equal(systemDictationResult.clipboardText, systemDictationResult.longText, 'shortcut speech copies recognized text before pasting');
+    assert.equal(systemDictationResult.pasteCount, 1, 'shortcut speech calls the paste command immediately');
+    assert.equal(systemDictationResult.pasteBeforeSend, true, 'shortcut speech starts paste before background message send');
+    assert.equal(systemDictationResult.sendTranscript, systemDictationResult.longText, 'shortcut speech sends recognized text as a message');
     assert.equal(systemDictationResult.cueDelta, 4, 'system dictation plays the selected double-beat start and stop cue sounds');
     assert.ok(systemDictationResult.showCount >= 1, 'system dictation shows the capsule window');
     assert.ok(systemDictationResult.hideCount >= 1, 'system dictation hides the capsule window after confirm');
@@ -1499,6 +1879,8 @@ async function run() {
       window.__speechSmoke.clipboardText = '';
       window.__speechSmoke.aiRequests = [];
       window.__speechSmoke.systemDictationStatus = '';
+      window.__speechSmoke.calls = [];
+      window.__speechSmoke.sendSpeechDelayMs = 120;
       window.__speechSmoke.longText = '系统听写润色原文';
       document.querySelector('#speech-to-text-polish-enabled').checked = true;
       document.querySelector('#speech-to-text-polish-enabled').dispatchEvent(new Event('change', { bubbles: true }));
@@ -1532,9 +1914,20 @@ async function run() {
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
-          const text = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
-          if (text === '润色：系统听写润色原文') resolve();
-          else if (Date.now() - start > 3500) reject(new Error('polished system dictation did not paste: ' + JSON.stringify({
+          if (window.__speechSmoke.pastedText === '润色：系统听写润色原文') resolve();
+          else if (Date.now() - start > 1500) reject(new Error('polished shortcut speech did not paste immediately'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const sent = window.__speechSmoke.sentMessages.some(
+            (message) => message.content === '润色：系统听写润色原文',
+          );
+          if (sent && window.__speechSmoke.pastedText === '润色：系统听写润色原文') resolve();
+          else if (Date.now() - start > 3500) reject(new Error('polished shortcut speech did not send: ' + JSON.stringify({
             pastedText: window.__speechSmoke.pastedText,
             clipboardText: window.__speechSmoke.clipboardText,
             draftText: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
@@ -1553,20 +1946,21 @@ async function run() {
       const result = {
         text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
         pastedText: window.__speechSmoke.pastedText,
+        clipboardText: window.__speechSmoke.clipboardText,
+        sendTranscript: window.__speechSmoke.calls.filter((call) => call.command === 'send_speech_message').at(-1)?.args?.request?.transcript || '',
         aiRequest: window.__speechSmoke.aiRequests.at(-1),
         statusCalls,
       };
       window.__speechSmoke.longText = '语音识别文本'.repeat(20);
       return result;
     })()`);
-    assert.equal(polishedSystemDictationResult.text, '润色：系统听写润色原文', 'polished system dictation appends polished text to composer');
-    assert.ok(
-      polishedSystemDictationResult.pastedText === '' || polishedSystemDictationResult.pastedText === '润色：系统听写润色原文',
-      'polished system dictation pastes polished text when the target is outside the Transfer Genie composer',
-    );
+    assert.equal(polishedSystemDictationResult.text, '', 'polished shortcut speech does not append text to Transfer Genie composer');
+    assert.equal(polishedSystemDictationResult.pastedText, '润色：系统听写润色原文', 'polished shortcut speech pastes text immediately');
+    assert.equal(polishedSystemDictationResult.clipboardText, '润色：系统听写润色原文', 'polished shortcut speech copies text before pasting');
+    assert.equal(polishedSystemDictationResult.sendTranscript, '润色：系统听写润色原文', 'polished shortcut speech sends polished text as a message');
     assert.equal(polishedSystemDictationResult.aiRequest.actionId, 'polish', 'polished system dictation uses configured polish action');
     assert.ok(polishedSystemDictationResult.statusCalls.includes('正在进行润色'), 'system dictation shows polishing status');
-    assert.equal(polishedSystemDictationResult.statusCalls.at(-1), '', 'system dictation clears polishing status after output');
+    assert.equal(polishedSystemDictationResult.statusCalls.at(-1), '润色：系统听写润色原文', 'system dictation displays the final polished result after output');
 
     const failedPolishResult = await evaluate(client, `(async () => {
       await new Promise((resolve, reject) => {
@@ -1581,6 +1975,9 @@ async function run() {
       });
       window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
       window.__speechSmoke.failAiPolish = true;
+      window.__speechSmoke.pastedText = '';
+      window.__speechSmoke.calls = [];
+      window.__speechSmoke.sendSpeechDelayMs = 120;
       window.__speechSmoke.longText = '润色失败后保留原文';
       document.querySelector('#speech-to-text-polish-enabled').checked = true;
       document.querySelector('#speech-to-text-polish-enabled').dispatchEvent(new Event('change', { bubbles: true }));
@@ -1602,9 +1999,20 @@ async function run() {
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
-          const text = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
-          if (text === '润色失败后保留原文') resolve();
-          else if (Date.now() - start > 3500) reject(new Error('polish failure did not keep raw transcript'));
+          if (window.__speechSmoke.pastedText === '润色失败后保留原文') resolve();
+          else if (Date.now() - start > 1500) reject(new Error('polish failure dictation did not paste immediately'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const sent = window.__speechSmoke.sentMessages.some(
+            (message) => message.content === '润色失败后保留原文',
+          );
+          if (sent && window.__speechSmoke.pastedText === '润色失败后保留原文') resolve();
+          else if (Date.now() - start > 3500) reject(new Error('polish failure did not send raw transcript'));
           else setTimeout(tick, 20);
         };
         tick();
@@ -1614,9 +2022,152 @@ async function run() {
       document.querySelector('#speech-to-text-polish-enabled').dispatchEvent(new Event('change', { bubbles: true }));
       document.querySelector('#save-settings')?.click();
       window.__speechSmoke.longText = '语音识别文本'.repeat(20);
-      return { text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '' };
+      return {
+        text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
+        pastedText: window.__speechSmoke.pastedText,
+        clipboardText: window.__speechSmoke.clipboardText,
+        sendTranscript: window.__speechSmoke.calls.filter((call) => call.command === 'send_speech_message').at(-1)?.args?.request?.transcript || '',
+      };
     })()`);
-    assert.equal(failedPolishResult.text, '润色失败后保留原文', 'failed speech polish keeps the raw transcript');
+    assert.equal(failedPolishResult.text, '', 'failed shortcut polish does not append text to Transfer Genie composer');
+    assert.equal(failedPolishResult.pastedText, '润色失败后保留原文', 'failed shortcut polish pastes raw text immediately');
+    assert.equal(failedPolishResult.clipboardText, '润色失败后保留原文', 'failed shortcut polish copies raw text before pasting');
+    assert.equal(failedPolishResult.sendTranscript, '润色失败后保留原文', 'failed shortcut polish keeps and sends the raw transcript');
+
+    const noFocusDictationResult = await evaluate(client, `(async () => {
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const button = document.querySelector('#speech-to-text-toggle');
+          if (!button.classList.contains('is-recording') && !button.classList.contains('is-transcribing') && !button.classList.contains('is-preparing')) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('speech button did not idle before no-focus dictation test'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      window.__speechSmoke.pastedText = '';
+      window.__speechSmoke.clipboardText = '';
+      window.__speechSmoke.calls = [];
+      window.__speechSmoke.sentMessages = [];
+      window.__speechSmoke.pasteWithoutFocus = true;
+      window.__speechSmoke.focusDetectedAtDictationStart = false;
+      window.__speechSmoke.longText = '没有系统焦点的识别结果';
+      document.activeElement?.blur?.();
+      await window.__speechSmoke.eventHandlers['system-dictation-toggle']({ payload: null });
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#speech-to-text-toggle').classList.contains('is-recording')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('no-focus dictation did not start'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      await new Promise((r) => setTimeout(r, 80));
+      await window.__speechSmoke.eventHandlers['system-dictation-toggle']({ payload: null });
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const status = window.__speechSmoke.calls.find(
+            (call) => call.command === 'set_system_dictation_status' && call.args?.text === '没有系统焦点的识别结果',
+          );
+          if (status && window.__speechSmoke.clipboardText === '没有系统焦点的识别结果') resolve();
+          else if (Date.now() - start > 2500) reject(new Error('no-focus dictation result was not copied and shown'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const sent = window.__speechSmoke.sentMessages.some(
+            (message) => message.content === '没有系统焦点的识别结果',
+          );
+          if (sent) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('no-focus dictation message was not sent'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const result = {
+        pastedText: window.__speechSmoke.pastedText,
+        clipboardText: window.__speechSmoke.clipboardText,
+        pasteCount: window.__speechSmoke.calls.filter((call) => call.command === 'paste_dictation_text').length,
+        statusCall: window.__speechSmoke.calls.find(
+          (call) => call.command === 'set_system_dictation_status' && call.args?.text === '没有系统焦点的识别结果',
+        )?.args || null,
+      };
+      window.__speechSmoke.pasteWithoutFocus = false;
+      window.__speechSmoke.focusDetectedAtDictationStart = true;
+      window.__speechSmoke.longText = '语音识别文本'.repeat(20);
+      return result;
+    })()`);
+    assert.equal(noFocusDictationResult.pastedText, '', 'no-focus dictation does not claim a paste target');
+    assert.equal(noFocusDictationResult.clipboardText, '没有系统焦点的识别结果', 'no-focus dictation automatically copies the result');
+    assert.equal(noFocusDictationResult.pasteCount, 1, 'shortcut dictation attempts one paste regardless of initial focus detection');
+    assert.equal(noFocusDictationResult.statusCall?.text, '没有系统焦点的识别结果', 'no-focus capsule displays the copied result text');
+    assert.equal(noFocusDictationResult.statusCall?.copyText, '没有系统焦点的识别结果', 'no-focus capsule receives the result for its copy button');
+
+    const failedPasteDictationResult = await evaluate(client, `(async () => {
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const button = document.querySelector('#speech-to-text-toggle');
+          if (!button.classList.contains('is-recording') && !button.classList.contains('is-transcribing') && !button.classList.contains('is-preparing')) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('speech button did not idle before failed-paste dictation test'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      window.__speechSmoke.pastedText = '';
+      window.__speechSmoke.clipboardText = '';
+      window.__speechSmoke.calls = [];
+      window.__speechSmoke.sentMessages = [];
+      window.__speechSmoke.focusDetectedAtDictationStart = true;
+      window.__speechSmoke.pasteReturnsNoPaste = true;
+      window.__speechSmoke.longText = '粘贴失败时的识别结果';
+      document.querySelector('.cw-textarea, #text-input')?.focus();
+      await window.__speechSmoke.eventHandlers['system-dictation-toggle']({ payload: null });
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#speech-to-text-toggle').classList.contains('is-recording')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('failed-paste dictation did not start'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      await window.__speechSmoke.eventHandlers['system-dictation-toggle']({ payload: null });
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const status = window.__speechSmoke.calls.find(
+            (call) => call.command === 'set_system_dictation_status' && call.args?.text === '粘贴失败时的识别结果',
+          );
+          if (status && window.__speechSmoke.clipboardText === '粘贴失败时的识别结果') resolve();
+          else if (Date.now() - start > 2500) reject(new Error('failed-paste dictation result was not copied and shown'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const result = {
+        pastedText: window.__speechSmoke.pastedText,
+        clipboardText: window.__speechSmoke.clipboardText,
+        pasteCount: window.__speechSmoke.calls.filter((call) => call.command === 'paste_dictation_text').length,
+        statusCall: window.__speechSmoke.calls.find(
+          (call) => call.command === 'set_system_dictation_status' && call.args?.text === '粘贴失败时的识别结果',
+        )?.args || null,
+      };
+      window.__speechSmoke.pasteReturnsNoPaste = false;
+      window.__speechSmoke.longText = '语音识别文本'.repeat(20);
+      return result;
+    })()`);
+    assert.equal(failedPasteDictationResult.pastedText, '', 'failed paste does not claim that text reached the input');
+    assert.equal(failedPasteDictationResult.clipboardText, '粘贴失败时的识别结果', 'failed paste still copies the result');
+    assert.equal(failedPasteDictationResult.pasteCount, 1, 'failed paste attempts the captured input once');
+    assert.equal(failedPasteDictationResult.statusCall?.text, '粘贴失败时的识别结果', 'failed paste displays the copied result text');
+    assert.equal(failedPasteDictationResult.statusCall?.copyText, '粘贴失败时的识别结果', 'failed paste keeps the result available in the capsule');
 
     const focusedComposerDictationResult = await evaluate(client, `(async () => {
       await new Promise((resolve, reject) => {
@@ -1632,22 +2183,31 @@ async function run() {
       window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
       window.__speechSmoke.pastedText = '';
       window.__speechSmoke.clipboardText = '';
+      window.__speechSmoke.calls = [];
+      window.__speechSmoke.sendSpeechDelayMs = 120;
       window.__speechSmoke.longText = '当前编辑器焦点识别结果';
-      document.querySelector('#speech-to-text-polish-enabled').checked = false;
+      document.querySelector('#speech-to-text-polish-enabled').checked = true;
       document.querySelector('#speech-to-text-polish-enabled').dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#speech-to-text-polish-action').value = 'formalize';
+      document.querySelector('#speech-to-text-polish-action').dispatchEvent(new Event('change', { bubbles: true }));
       document.querySelector('#save-settings')?.click();
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
           const saved = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.speech_to_text || {};
-          if (saved.polish_enabled === false) resolve();
-          else if (Date.now() - start > 2500) reject(new Error('speech polish setting was not disabled before focused composer dictation test'));
+          if (saved.polish_enabled === true && saved.polish_action_id === 'formalize') resolve();
+          else if (Date.now() - start > 2500) reject(new Error('speech polish setting was not enabled before focused composer dictation test'));
           else setTimeout(tick, 20);
         };
         tick();
       });
       const beforePasteCalls = window.__speechSmoke.calls.filter((call) => call.command === 'paste_dictation_text').length;
-      document.querySelector('.cw-textarea, #text-input')?.focus();
+      const focusedInput = document.querySelector('.cw-textarea, #text-input');
+      window.__speechSmoke.focusCaptureCount = 0;
+      window.__speechSmoke.overlayFocusStealCount = 0;
+      window.__speechSmoke.stealFocusOnOverlayShow = true;
+      focusedInput?.focus();
+      if (typeof focusedInput?.setSelectionRange === 'function') focusedInput.setSelectionRange(0, 0);
       await new Promise((r) => setTimeout(r, 30));
       await window.__speechSmoke.eventHandlers['system-dictation-toggle']({ payload: null });
       await new Promise((resolve, reject) => {
@@ -1659,32 +2219,61 @@ async function run() {
         };
         tick();
       });
+      await new Promise((r) => setTimeout(r, 30));
+      const activeAfterOverlayShown = document.activeElement;
       await new Promise((r) => setTimeout(r, 80));
       await window.__speechSmoke.eventHandlers['system-dictation-toggle']({ payload: null });
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
-          const text = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
+          if (window.__speechSmoke.pastedText === '润色：当前编辑器焦点识别结果') resolve();
+          else if (Date.now() - start > 1500) reject(new Error('focused composer dictation did not paste immediately'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
           const button = document.querySelector('#speech-to-text-toggle');
           const idle = !button.classList.contains('is-recording') && !button.classList.contains('is-transcribing') && !button.classList.contains('is-preparing');
-          if (text && idle) resolve();
-          else if (Date.now() - start > 2500) reject(new Error('focused composer dictation did not append text'));
+          const sent = window.__speechSmoke.sentMessages.some(
+            (message) => message.content === '润色：当前编辑器焦点识别结果',
+          );
+          if (sent && window.__speechSmoke.pastedText === '润色：当前编辑器焦点识别结果' && idle) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('focused composer dictation did not send message'));
           else setTimeout(tick, 20);
         };
         tick();
       });
       const afterPasteCalls = window.__speechSmoke.calls.filter((call) => call.command === 'paste_dictation_text').length;
+      const selectionAfterPaste = typeof focusedInput?.selectionStart === 'number' ? focusedInput.selectionStart : null;
       const result = {
         text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
         pastedText: window.__speechSmoke.pastedText,
+        clipboardText: window.__speechSmoke.clipboardText,
+        sendTranscript: window.__speechSmoke.calls.filter((call) => call.command === 'send_speech_message').at(-1)?.args?.request?.transcript || '',
         pasteDelta: afterPasteCalls - beforePasteCalls,
+        focusCaptureCount: window.__speechSmoke.focusCaptureCount,
+        overlayFocusStealCount: window.__speechSmoke.overlayFocusStealCount,
+        activeAfterOverlayShownIsFocusedInput: activeAfterOverlayShown === focusedInput,
+        activeAfterPasteIsFocusedInput: document.activeElement === focusedInput,
+        selectionAfterPaste,
       };
       window.__speechSmoke.longText = '语音识别文本'.repeat(20);
+      window.__speechSmoke.stealFocusOnOverlayShow = false;
       return result;
     })()`);
-    assert.equal(focusedComposerDictationResult.text, '当前编辑器焦点识别结果', 'system dictation appends text when Transfer Genie composer is focused');
-    assert.equal(focusedComposerDictationResult.pastedText, '', 'system dictation does not paste into Transfer Genie composer a second time');
-    assert.equal(focusedComposerDictationResult.pasteDelta, 0, 'system dictation skips paste command when Transfer Genie composer is focused');
+    assert.equal(focusedComposerDictationResult.text, '', 'shortcut dictation does not append text when Transfer Genie composer is focused');
+    assert.equal(focusedComposerDictationResult.pastedText, '润色：当前编辑器焦点识别结果', 'shortcut dictation pastes polished text into the focused app immediately');
+    assert.equal(focusedComposerDictationResult.clipboardText, '润色：当前编辑器焦点识别结果', 'shortcut dictation copies polished text before pasting when focused in Transfer Genie');
+    assert.equal(focusedComposerDictationResult.pasteDelta, 1, 'shortcut dictation calls paste when Transfer Genie composer is focused');
+    assert.equal(focusedComposerDictationResult.sendTranscript, '润色：当前编辑器焦点识别结果', 'shortcut dictation sends the polished focused composer text as a message');
+    assert.equal(focusedComposerDictationResult.focusCaptureCount, 1, 'shortcut dictation captures the focused window before showing the overlay');
+    assert.equal(focusedComposerDictationResult.overlayFocusStealCount, 1, 'focused-editor test simulates overlay webview focus loss');
+    assert.equal(focusedComposerDictationResult.activeAfterOverlayShownIsFocusedInput, false, 'shortcut dictation records its editor target before overlay focus loss');
+    assert.equal(focusedComposerDictationResult.activeAfterPasteIsFocusedInput, true, 'focused composer remains the paste target after dictation completes');
+    assert.equal(focusedComposerDictationResult.selectionAfterPaste, 0, 'focused composer restores the captured caret before paste');
 
     const stalledOverlayDictationResult = await evaluate(client, `(async () => {
       await new Promise((resolve, reject) => {
@@ -1700,8 +2289,23 @@ async function run() {
       window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
       window.__speechSmoke.pastedText = '';
       window.__speechSmoke.clipboardText = '';
+      window.__speechSmoke.calls = [];
+      window.__speechSmoke.sendSpeechDelayMs = 120;
       window.__speechSmoke.longText = '卡住窗口后的识别结果';
       window.__speechSmoke.hangOverlayInvokes = true;
+      document.querySelector('#speech-to-text-polish-enabled').checked = false;
+      document.querySelector('#speech-to-text-polish-enabled').dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#save-settings')?.click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const saved = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.speech_to_text || {};
+          if (saved.polish_enabled === false) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('stalled overlay polish disable was not saved'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
       document.activeElement?.blur?.();
       document.querySelector('.tab-button[data-tab-target="home"]')?.focus();
       await new Promise((r) => setTimeout(r, 30));
@@ -1721,12 +2325,22 @@ async function run() {
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
-          const pasted = window.__speechSmoke.pastedText || '';
-          const text = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
+          if (window.__speechSmoke.pastedText === '卡住窗口后的识别结果') resolve();
+          else if (Date.now() - start > 1500) reject(new Error('stalled overlay dictation did not paste immediately'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
           const button = document.querySelector('#speech-to-text-toggle');
           const idle = !button.classList.contains('is-recording') && !button.classList.contains('is-transcribing') && !button.classList.contains('is-preparing');
-          if (pasted && text && idle) resolve();
-          else if (Date.now() - start > 2500) reject(new Error('stalled overlay system dictation did not paste and append'));
+          const sent = window.__speechSmoke.sentMessages.some(
+            (message) => message.content === '卡住窗口后的识别结果',
+          );
+          if (sent && window.__speechSmoke.pastedText === '卡住窗口后的识别结果' && idle) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('stalled overlay system dictation did not send message'));
           else setTimeout(tick, 20);
         };
         tick();
@@ -1734,14 +2348,18 @@ async function run() {
       const result = {
         text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
         pastedText: window.__speechSmoke.pastedText,
+        clipboardText: window.__speechSmoke.clipboardText,
+        sendTranscript: window.__speechSmoke.calls.filter((call) => call.command === 'send_speech_message').at(-1)?.args?.request?.transcript || '',
         transcribeDelta: window.__speechSmoke.calls.filter((call) => call.command === 'transcribe_speech').length - beforeTranscribeCalls,
       };
       window.__speechSmoke.hangOverlayInvokes = false;
       window.__speechSmoke.longText = '语音识别文本'.repeat(20);
       return result;
     })()`);
-    assert.equal(stalledOverlayDictationResult.text, '卡住窗口后的识别结果', 'system dictation appends text even when overlay command is stalled');
-    assert.equal(stalledOverlayDictationResult.pastedText, '卡住窗口后的识别结果', 'system dictation pastes text even when overlay command is stalled');
+    assert.equal(stalledOverlayDictationResult.text, '', 'shortcut dictation does not append text to Transfer Genie composer when overlay command is stalled and another target is focused');
+    assert.equal(stalledOverlayDictationResult.pastedText, '卡住窗口后的识别结果', 'shortcut dictation pastes text immediately even when overlay command is stalled');
+    assert.equal(stalledOverlayDictationResult.clipboardText, '卡住窗口后的识别结果', 'shortcut dictation copies text before pasting when overlay is stalled');
+    assert.equal(stalledOverlayDictationResult.sendTranscript, '卡住窗口后的识别结果', 'shortcut dictation sends text even when overlay command is stalled');
     assert.equal(stalledOverlayDictationResult.transcribeDelta, 1, 'stalled overlay does not block transcription invoke');
 
     const systemDictationCancelResult = await evaluate(client, `(async () => {
@@ -1757,7 +2375,9 @@ async function run() {
       });
       window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
       window.__speechSmoke.pastedText = '';
+      window.__speechSmoke.sendSpeechDelayMs = 0;
       const beforePasteCalls = window.__speechSmoke.calls.filter((call) => call.command === 'paste_dictation_text').length;
+      const beforeSendCalls = window.__speechSmoke.calls.filter((call) => call.command === 'send_speech_message').length;
       await window.__speechSmoke.eventHandlers['system-dictation-toggle']({ payload: null });
       await new Promise((resolve, reject) => {
         const start = Date.now();
@@ -1780,17 +2400,20 @@ async function run() {
         tick();
       });
       const afterPasteCalls = window.__speechSmoke.calls.filter((call) => call.command === 'paste_dictation_text').length;
+      const afterSendCalls = window.__speechSmoke.calls.filter((call) => call.command === 'send_speech_message').length;
       const calls = window.__speechSmoke.calls.map((call) => call.command);
       return {
         text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
         pastedText: window.__speechSmoke.pastedText,
         pasteDelta: afterPasteCalls - beforePasteCalls,
+        sendDelta: afterSendCalls - beforeSendCalls,
         hideCount: calls.filter((command) => command === 'hide_system_dictation_window').length,
       };
     })()`);
     assert.equal(systemDictationCancelResult.text, '', 'system dictation cancel does not append text');
     assert.equal(systemDictationCancelResult.pastedText, '', 'system dictation cancel does not paste');
     assert.equal(systemDictationCancelResult.pasteDelta, 0, 'system dictation cancel does not call paste command');
+    assert.equal(systemDictationCancelResult.sendDelta, 0, 'system dictation cancel does not send a message');
     assert.ok(systemDictationCancelResult.hideCount >= 1, 'system dictation cancel hides the capsule window');
 
     const deniedResult = await evaluate(client, `(async () => {

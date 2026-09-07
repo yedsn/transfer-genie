@@ -1458,6 +1458,54 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+}
+
+.speech-source-audio-player {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.speech-transcript-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.speech-transcript-toggle-button {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.2;
+  padding: 0;
+  cursor: pointer;
+}
+
+.speech-transcript-toggle-button.is-active {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.speech-source-audio-controls {
+  width: 260px;
+  max-width: min(52vw, 320px);
+  height: 32px;
+}
+
+@media (max-width: 640px) {
+  .speech-source-audio-player {
+    width: 100%;
+  }
+
+  .speech-source-audio-controls {
+    width: 100%;
+    max-width: 100%;
+  }
 }
 
 .button.icon-only {

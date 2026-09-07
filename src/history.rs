@@ -34,6 +34,14 @@ pub struct HistoryEntry {
     pub marked_due_date: Option<String>,
     #[serde(default)]
     pub format: String,
+    #[serde(default)]
+    pub transcript_source: Option<String>,
+    #[serde(default)]
+    pub source_audio_mime_type: Option<String>,
+    #[serde(default)]
+    pub transcript_text: Option<String>,
+    #[serde(default)]
+    pub transcript_raw_text: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -925,12 +933,26 @@ mod tests {
             marked_pinned: false,
             marked_due_date: None,
             format: "text".to_string(),
+            transcript_source: Some("speech-to-text".to_string()),
+            source_audio_mime_type: Some("audio/wav".to_string()),
+            transcript_text: Some("hello".to_string()),
+            transcript_raw_text: Some("raw hello".to_string()),
         }];
 
         let json = serde_json::to_vec_pretty(&entries).expect("serialize history");
         let decoded: Vec<HistoryEntry> =
             serde_json::from_slice(&json).expect("deserialize history");
         assert_eq!(decoded, entries);
+        assert_eq!(
+            decoded[0].transcript_source.as_deref(),
+            Some("speech-to-text")
+        );
+        assert_eq!(
+            decoded[0].source_audio_mime_type.as_deref(),
+            Some("audio/wav")
+        );
+        assert_eq!(decoded[0].transcript_text.as_deref(), Some("hello"));
+        assert_eq!(decoded[0].transcript_raw_text.as_deref(), Some("raw hello"));
     }
 
     #[test]
@@ -941,6 +963,9 @@ mod tests {
         .expect("parse legacy history");
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].remote_path.as_deref(), Some("files/a.txt"));
+        assert_eq!(decoded[0].transcript_source, None);
+        assert_eq!(decoded[0].source_audio_mime_type, None);
+        assert_eq!(decoded[0].transcript_text, None);
     }
 
     #[test]
@@ -970,6 +995,10 @@ mod tests {
             marked_pinned: false,
             marked_due_date: None,
             format: "text".to_string(),
+            transcript_source: None,
+            source_audio_mime_type: None,
+            transcript_text: None,
+            transcript_raw_text: None,
         }
     }
 

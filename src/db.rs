@@ -38,6 +38,9 @@ pub struct DbMessage {
     pub marked_pinned: bool,
     pub marked_due_date: Option<String>,
     pub format: String,
+    pub transcript_source: Option<String>,
+    pub source_audio_mime_type: Option<String>,
+    pub transcript_raw_text: Option<String>,
 }
 
 #[derive(Clone)]
@@ -113,7 +116,7 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
 
     if table_exists.is_none() {
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS messages (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        sender TEXT NOT NULL,        timestamp_ms INTEGER NOT NULL,        size INTEGER NOT NULL,        kind TEXT NOT NULL,        original_name TEXT NOT NULL,        etag TEXT,        mtime TEXT,        content TEXT,        local_path TEXT,        remote_path TEXT,        file_hash TEXT,        marked BOOLEAN NOT NULL DEFAULT 0,        marked_tag_ids TEXT NOT NULL DEFAULT '[]',        marked_pinned BOOLEAN NOT NULL DEFAULT 0,        marked_due_date TEXT,        format TEXT NOT NULL DEFAULT 'text',        PRIMARY KEY(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS marked_tags (        endpoint_id TEXT NOT NULL,        id TEXT NOT NULL,        name TEXT NOT NULL,        PRIMARY KEY(endpoint_id, id)      );      CREATE TABLE IF NOT EXISTS download_history (        id INTEGER PRIMARY KEY AUTOINCREMENT,        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        saved_path TEXT,        status TEXT NOT NULL,        error TEXT,        file_size INTEGER NOT NULL DEFAULT 0,        created_at_ms INTEGER NOT NULL,        updated_at_ms INTEGER NOT NULL,        UNIQUE(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS upload_history (        id INTEGER PRIMARY KEY AUTOINCREMENT,        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        local_path TEXT,        status TEXT NOT NULL,        error TEXT,        file_size INTEGER NOT NULL DEFAULT 0,        created_at_ms INTEGER NOT NULL,        updated_at_ms INTEGER NOT NULL,        UNIQUE(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS partial_downloads (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        final_path TEXT NOT NULL,        temp_path TEXT NOT NULL,        downloaded_bytes INTEGER NOT NULL DEFAULT 0,        total_bytes INTEGER NOT NULL DEFAULT 0,        etag TEXT,        mtime TEXT,        updated_at_ms INTEGER NOT NULL,        PRIMARY KEY(endpoint_id, filename)      );",
+            "CREATE TABLE IF NOT EXISTS messages (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        sender TEXT NOT NULL,        timestamp_ms INTEGER NOT NULL,        size INTEGER NOT NULL,        kind TEXT NOT NULL,        original_name TEXT NOT NULL,        etag TEXT,        mtime TEXT,        content TEXT,        local_path TEXT,        remote_path TEXT,        file_hash TEXT,        marked BOOLEAN NOT NULL DEFAULT 0,        marked_tag_ids TEXT NOT NULL DEFAULT '[]',        marked_pinned BOOLEAN NOT NULL DEFAULT 0,        marked_due_date TEXT,        format TEXT NOT NULL DEFAULT 'text',        transcript_source TEXT,        source_audio_mime_type TEXT,        transcript_raw_text TEXT,        PRIMARY KEY(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS marked_tags (        endpoint_id TEXT NOT NULL,        id TEXT NOT NULL,        name TEXT NOT NULL,        PRIMARY KEY(endpoint_id, id)      );      CREATE TABLE IF NOT EXISTS download_history (        id INTEGER PRIMARY KEY AUTOINCREMENT,        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        saved_path TEXT,        status TEXT NOT NULL,        error TEXT,        file_size INTEGER NOT NULL DEFAULT 0,        created_at_ms INTEGER NOT NULL,        updated_at_ms INTEGER NOT NULL,        UNIQUE(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS upload_history (        id INTEGER PRIMARY KEY AUTOINCREMENT,        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        local_path TEXT,        status TEXT NOT NULL,        error TEXT,        file_size INTEGER NOT NULL DEFAULT 0,        created_at_ms INTEGER NOT NULL,        updated_at_ms INTEGER NOT NULL,        UNIQUE(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS partial_downloads (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        final_path TEXT NOT NULL,        temp_path TEXT NOT NULL,        downloaded_bytes INTEGER NOT NULL DEFAULT 0,        total_bytes INTEGER NOT NULL DEFAULT 0,        etag TEXT,        mtime TEXT,        updated_at_ms INTEGER NOT NULL,        PRIMARY KEY(endpoint_id, filename)      );",
         )
         .map_err(|err| format!("初始化数据库表失败: {err}"))?;
         ensure_pending_marked_sync_schema(&conn)
@@ -149,11 +152,11 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
             .transaction()
             .map_err(|err| format!("迁移消息表失败: {err}"))?;
         tx.execute_batch(
-            "CREATE TABLE messages_new (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        sender TEXT NOT NULL,        timestamp_ms INTEGER NOT NULL,        size INTEGER NOT NULL,        kind TEXT NOT NULL,        original_name TEXT NOT NULL,        etag TEXT,        mtime TEXT,        content TEXT,        local_path TEXT,        remote_path TEXT,        file_hash TEXT,        marked BOOLEAN NOT NULL DEFAULT 0,        marked_tag_ids TEXT NOT NULL DEFAULT '[]',        marked_pinned BOOLEAN NOT NULL DEFAULT 0,        marked_due_date TEXT,        format TEXT NOT NULL DEFAULT 'text',        PRIMARY KEY(endpoint_id, filename)      );",
+            "CREATE TABLE messages_new (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        sender TEXT NOT NULL,        timestamp_ms INTEGER NOT NULL,        size INTEGER NOT NULL,        kind TEXT NOT NULL,        original_name TEXT NOT NULL,        etag TEXT,        mtime TEXT,        content TEXT,        local_path TEXT,        remote_path TEXT,        file_hash TEXT,        marked BOOLEAN NOT NULL DEFAULT 0,        marked_tag_ids TEXT NOT NULL DEFAULT '[]',        marked_pinned BOOLEAN NOT NULL DEFAULT 0,        marked_due_date TEXT,        format TEXT NOT NULL DEFAULT 'text',        transcript_source TEXT,        source_audio_mime_type TEXT,        transcript_raw_text TEXT,        PRIMARY KEY(endpoint_id, filename)      );",
         )
         .map_err(|err| format!("迁移消息表失败: {err}"))?;
         tx.execute(
-            "INSERT INTO messages_new        (endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, format)        SELECT ?1, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, NULL, NULL, 0, '[]', 0, 'text' FROM messages",
+            "INSERT INTO messages_new        (endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, format, transcript_source, source_audio_mime_type, transcript_raw_text)        SELECT ?1, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, NULL, NULL, 0, '[]', 0, 'text', NULL, NULL, NULL FROM messages",
             params![endpoint_id],
         )
         .map_err(|err| format!("迁移消息表失败: {err}"))?;
@@ -328,6 +331,78 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
         .map_err(|err| format!("补充 format 列失败: {err}"))?;
     }
 
+    let mut has_transcript_source = false;
+    {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(messages)")
+            .map_err(|err| format!("读取消息表结构失败: {err}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|err| format!("读取消息表结构失败: {err}"))?;
+        for row in rows {
+            if row.map_err(|err| format!("读取消息表结构失败: {err}"))? == "transcript_source"
+            {
+                has_transcript_source = true;
+                break;
+            }
+        }
+    }
+
+    if !has_transcript_source {
+        conn.execute("ALTER TABLE messages ADD COLUMN transcript_source TEXT", [])
+            .map_err(|err| format!("补充 transcript_source 列失败: {err}"))?;
+    }
+
+    let mut has_source_audio_mime_type = false;
+    {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(messages)")
+            .map_err(|err| format!("读取消息表结构失败: {err}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|err| format!("读取消息表结构失败: {err}"))?;
+        for row in rows {
+            if row.map_err(|err| format!("读取消息表结构失败: {err}"))? == "source_audio_mime_type"
+            {
+                has_source_audio_mime_type = true;
+                break;
+            }
+        }
+    }
+
+    if !has_source_audio_mime_type {
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN source_audio_mime_type TEXT",
+            [],
+        )
+        .map_err(|err| format!("补充 source_audio_mime_type 列失败: {err}"))?;
+    }
+
+    let mut has_transcript_raw_text = false;
+    {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(messages)")
+            .map_err(|err| format!("读取消息表结构失败: {err}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|err| format!("读取消息表结构失败: {err}"))?;
+        for row in rows {
+            if row.map_err(|err| format!("读取消息表结构失败: {err}"))? == "transcript_raw_text"
+            {
+                has_transcript_raw_text = true;
+                break;
+            }
+        }
+    }
+
+    if !has_transcript_raw_text {
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN transcript_raw_text TEXT",
+            [],
+        )
+        .map_err(|err| format!("补充 transcript_raw_text 列失败: {err}"))?;
+    }
+
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS marked_tags (        endpoint_id TEXT NOT NULL,        id TEXT NOT NULL,        name TEXT NOT NULL,        PRIMARY KEY(endpoint_id, id)      );      CREATE TABLE IF NOT EXISTS download_history (        id INTEGER PRIMARY KEY AUTOINCREMENT,        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        saved_path TEXT,        status TEXT NOT NULL,        error TEXT,        file_size INTEGER NOT NULL DEFAULT 0,        created_at_ms INTEGER NOT NULL,        updated_at_ms INTEGER NOT NULL,        UNIQUE(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS upload_history (        id INTEGER PRIMARY KEY AUTOINCREMENT,        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        local_path TEXT,        status TEXT NOT NULL,        error TEXT,        file_size INTEGER NOT NULL DEFAULT 0,        created_at_ms INTEGER NOT NULL,        updated_at_ms INTEGER NOT NULL,        UNIQUE(endpoint_id, filename)      );      CREATE TABLE IF NOT EXISTS partial_downloads (        endpoint_id TEXT NOT NULL,        filename TEXT NOT NULL,        original_name TEXT NOT NULL,        final_path TEXT NOT NULL,        temp_path TEXT NOT NULL,        downloaded_bytes INTEGER NOT NULL DEFAULT 0,        total_bytes INTEGER NOT NULL DEFAULT 0,        etag TEXT,        mtime TEXT,        updated_at_ms INTEGER NOT NULL,        PRIMARY KEY(endpoint_id, filename)      );",
     )
@@ -388,7 +463,7 @@ pub fn get_message(
     let conn = Connection::open(path)?;
     conn
     .query_row(
-      "SELECT endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, marked_due_date, format \
+      "SELECT endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, marked_due_date, format, transcript_source, source_audio_mime_type, transcript_raw_text \
        FROM messages WHERE endpoint_id = ?1 AND filename = ?2",
       params![endpoint_id, filename],
       |row| {
@@ -412,6 +487,9 @@ pub fn get_message(
           marked_pinned: row.get(15)?,
           marked_due_date: row.get(16)?,
           format: row.get(17)?,
+          transcript_source: row.get(18)?,
+          source_audio_mime_type: row.get(19)?,
+          transcript_raw_text: row.get(20)?,
         })
       },
     )
@@ -422,8 +500,8 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
     let conn = Connection::open(path)?;
     conn.execute(
     "INSERT INTO messages\
-      (endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, marked_due_date, format)\
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)\
+      (endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, marked_due_date, format, transcript_source, source_audio_mime_type, transcript_raw_text)\
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)\
       ON CONFLICT(endpoint_id, filename) DO UPDATE SET \
         sender=excluded.sender,\
         timestamp_ms=excluded.timestamp_ms,\
@@ -440,7 +518,10 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
         marked_tag_ids=excluded.marked_tag_ids,\
         marked_pinned=excluded.marked_pinned,\
         marked_due_date=excluded.marked_due_date,\
-        format=excluded.format",
+        format=excluded.format,\
+        transcript_source=excluded.transcript_source,\
+        source_audio_mime_type=excluded.source_audio_mime_type,\
+        transcript_raw_text=excluded.transcript_raw_text",
     params![
       message.endpoint_id,
       message.filename,
@@ -460,6 +541,9 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
       message.marked_pinned,
       message.marked_due_date,
       message.format,
+      message.transcript_source,
+      message.source_audio_mime_type,
+      message.transcript_raw_text,
     ],
   )?;
     Ok(())
@@ -550,7 +634,7 @@ pub fn list_messages(
 }
 
 fn message_row_select_sql() -> &'static str {
-    "filename, sender, timestamp_ms, size, kind, original_name, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, marked_due_date, format"
+    "filename, sender, timestamp_ms, size, kind, original_name, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, marked_due_date, format, transcript_source, source_audio_mime_type, transcript_raw_text"
 }
 
 fn map_message_row(row: &Row<'_>) -> rusqlite::Result<Message> {
@@ -572,6 +656,9 @@ fn map_message_row(row: &Row<'_>) -> rusqlite::Result<Message> {
         marked_pinned: row.get(12)?,
         marked_due_date: row.get(13)?,
         format: row.get(14)?,
+        transcript_source: row.get(15)?,
+        source_audio_mime_type: row.get(16)?,
+        transcript_raw_text: row.get(17)?,
     })
 }
 
@@ -1419,6 +1506,9 @@ mod tests {
             marked_pinned,
             marked_due_date: None,
             format: "text".to_string(),
+            transcript_source: None,
+            source_audio_mime_type: None,
+            transcript_raw_text: None,
         }
     }
 
@@ -1476,6 +1566,8 @@ mod tests {
         assert!(message.marked_tag_ids.is_empty());
         assert!(!message.marked_pinned);
         assert_eq!(message.marked_due_date, None);
+        assert_eq!(message.transcript_source, None);
+        assert_eq!(message.source_audio_mime_type, None);
         assert!(list_marked_tags(&path, "endpoint-1")
             .expect("list marked tags after migration")
             .is_empty());

@@ -136,11 +136,12 @@ function resolveSpeechPolishAction(actionId) {
   return fallback || enabledActions[0] || null;
 }
 
-async function setSystemDictationStatusText(text) {
+async function setSystemDictationStatusText(text, options = {}) {
   const value = String(text || '').trim();
   if (invoke) {
+    const requestId = ++systemDictationOverlayRequestId;
     systemDictationOverlayVisible = !!value;
-    await invoke('set_system_dictation_status', { text: value }).catch((error) => {
+    await invoke('set_system_dictation_status', { text: value, copyText: options.copyText || '', requestId }).catch((error) => {
       console.warn('[speech-to-text] system dictation status failed', error);
     });
   }
@@ -626,6 +627,7 @@ function createMessageViewModel(message) {
       senderName: currentSettingsFormState.senderName,
       formatTime,
       formatBytes,
+      previewMaxChars: MESSAGE_BODY_PREVIEW_MAX_CHARS,
       isImagePath,
       hasLocalMessageFile,
       isDownloadTaskActive: (source) =>
@@ -646,6 +648,13 @@ function createMessageViewModel(message) {
       (!!currentSettingsFormState.senderName?.trim() &&
         message?.sender === currentSettingsFormState.senderName.trim()),
     isMarked: !!message?.marked,
+    isSpeechTranscript: isSpeechTranscriptMessage(message),
+    hasSpeechRawTranscript:
+      isSpeechTranscriptMessage(message) &&
+      !!String(message?.transcript_raw_text || '').trim() &&
+      String(message?.transcript_raw_text || '').trim() !== String(message?.content || '').trim(),
+    speechRawTranscriptText: String(message?.transcript_raw_text || '').trim(),
+    speechPolishedTranscriptText: String(message?.content || ''),
     isUploading: !!message?.uploading,
     isSending: !!message?.sending,
     sendStatus: message?.sendStatus || '',
@@ -1119,6 +1128,7 @@ const expandedTextMessages = new Set();
 let currentPreviewMessage = null;
 const MESSAGE_BODY_COLLAPSE_HEIGHT = 260;
 const MARKED_MESSAGE_BODY_COLLAPSE_HEIGHT = 130;
+const MESSAGE_BODY_PREVIEW_MAX_CHARS = 2000;
 let isRefreshRunning = false;
 let isLoadMessagesRunning = false;
 let isLoadSyncStatusRunning = false;
@@ -2042,6 +2052,7 @@ let speechLiveTranscriptionIgnoredFrameCount = 0;
 let speechLiveTranscriptionStarted = false;
 let speechLiveTranscriptionGeneration = 0;
 let speechLiveTaskId = '';
+let speechLiveTranscriptionSystemDictation = false;
 let speechCaptureSampleRate = 16000;
 let speechState = 'idle';
 let speechLastLevel = 0;
@@ -2056,8 +2067,8 @@ let systemDictationLevelUpdateInFlight = false;
 let systemDictationLastLevelUpdateAt = 0;
 let systemDictationLastLevelUpdateSkippedCount = 0;
 let systemDictationLastStartAt = 0;
-let systemDictationStartedInTransferGenieComposer = false;
-let transferGenieComposerHadRecentFocus = false;
+let systemDictationOverlayRequestId = 0;
+let systemDictationInputTarget = null;
 const SYSTEM_DICTATION_LEVEL_UPDATE_INTERVAL_MS = 120;
 const SYSTEM_DICTATION_START_TOGGLE_GUARD_MS = 650;
 const SPEECH_RECORDING_STOP_TAIL_MS = 300;
@@ -2075,6 +2086,53 @@ function logSystemDictation(message, detail = {}) {
     };
     console.info('[system-dictation]', message, JSON.stringify(payload), payload);
   } catch (error) { /* ignore */ }
+}
+
+function isSystemDictationEditableTarget(element) {
+  if (!element || !element.isConnected || typeof element.focus !== 'function') return false;
+  if (element instanceof HTMLTextAreaElement) return true;
+  if (element instanceof HTMLInputElement) {
+    return !['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit'].includes(element.type?.toLowerCase() || 'text');
+  }
+  return !!element.isContentEditable;
+}
+
+function captureSystemDictationInputTarget() {
+  systemDictationInputTarget = null;
+  if (!document.hasFocus()) return;
+  const element = document.activeElement;
+  if (!isSystemDictationEditableTarget(element)) return;
+  const selectionStart = Number.isInteger(element.selectionStart) ? element.selectionStart : null;
+  const selectionEnd = Number.isInteger(element.selectionEnd) ? element.selectionEnd : selectionStart;
+  systemDictationInputTarget = { element, selectionStart, selectionEnd };
+  logSystemDictation('input target captured', {
+    selectionStart,
+    selectionEnd,
+    targetClass: String(element.className || ''),
+  });
+}
+
+function consumeSystemDictationInputTarget() {
+  const target = systemDictationInputTarget;
+  systemDictationInputTarget = null;
+  return target;
+}
+
+function restoreSystemDictationInputTarget(target) {
+  if (!target?.element || !target.element.isConnected) return false;
+  target.element.focus({ preventScroll: true });
+  if (
+    target.selectionStart !== null
+    && target.selectionEnd !== null
+    && typeof target.element.setSelectionRange === 'function'
+  ) {
+    try {
+      target.element.setSelectionRange(target.selectionStart, target.selectionEnd);
+    } catch (error) { /* Non-text targets keep their browser-restored caret. */ }
+  }
+  const restored = document.activeElement === target.element;
+  logSystemDictation('input target restored', { restored });
+  return restored;
 }
 
 function setSpeechLevel(level) {
@@ -2099,6 +2157,7 @@ function setSpeechLevel(level) {
 function setSystemDictationOverlayVisible(visible) {
   systemDictationOverlayVisible = !!visible;
   if (!invoke) return;
+  const requestId = ++systemDictationOverlayRequestId;
   const action = visible ? 'show' : 'hide';
   const command = visible ? 'show_system_dictation_window' : 'hide_system_dictation_window';
   const startedAt = performance.now();
@@ -2108,7 +2167,7 @@ function setSystemDictationOverlayVisible(visible) {
     if (settled) return;
     logSystemDictation(`overlay ${action} still pending`, { elapsedMs: Math.round(performance.now() - startedAt) });
   }, 1500);
-  invoke(command)
+  invoke(command, { requestId })
     .then(() => {
       settled = true;
       window.clearTimeout(timeoutId);
@@ -2580,6 +2639,7 @@ function resetLiveSpeechTranscription() {
   speechLiveTranscriptionIgnoredFrameCount = 0;
   speechLiveTranscriptionStarted = false;
   speechLiveTaskId = '';
+  speechLiveTranscriptionSystemDictation = systemDictationMode;
 }
 
 function takeSpeechPendingSamples(sampleCount) {
@@ -2630,9 +2690,6 @@ function enqueueLiveSpeechTranscription(samples, sampleRate) {
     if (result?.text) {
       const text = String(result.text);
       speechLiveTranscriptionTexts.push(text);
-      if (!getSpeechPolishSettings().enabled) {
-        appendTextAfterSpeechChunk(text);
-      }
       reportSpeechTiming(result.timing, `chunk ${chunkNumber}`);
       if (speechLiveTaskId) {
         void updateSpeechTask(speechLiveTaskId, {
@@ -2768,6 +2825,7 @@ const SPEECH_TASK_DB_NAME = 'transfer-genie-speech-tasks';
 const SPEECH_TASK_STORE_NAME = 'tasks';
 let speechTaskDbPromise = null;
 let speechTaskAudioUrl = '';
+let speechTaskSourceAudioUrl = '';
 
 function getSpeechTaskRetentionCount() {
   return Math.max(1, Math.min(100, Number(currentSettingsFormState.speechToTextTaskRetentionCount) || 14));
@@ -2995,7 +3053,8 @@ function reportSpeechTiming(timing, context = '') {
 
 function summarizeSpeechLocalTiming(timing) {
   if (!timing) return '';
-  return `本地耗时：总 ${formatSpeechTimingMs(timing.totalMs)}，停止 ${formatSpeechTimingMs(timing.stopMs)}，构建音频 ${formatSpeechTimingMs(timing.buildAudioMs)}，存任务 ${formatSpeechTimingMs(timing.saveTaskMs)}，调用ASR ${formatSpeechTimingMs(timing.transcribeMs)}，更新任务 ${formatSpeechTimingMs(timing.updateTaskMs)}，写入 ${formatSpeechTimingMs(timing.insertMs)}，复制 ${formatSpeechTimingMs(timing.copyMs)}`;
+  const writeOrPasteMs = Number.isFinite(timing.pasteMs) ? timing.pasteMs : timing.insertMs;
+  return `本地耗时：总 ${formatSpeechTimingMs(timing.totalMs)}，停止 ${formatSpeechTimingMs(timing.stopMs)}，构建音频 ${formatSpeechTimingMs(timing.buildAudioMs)}，存任务 ${formatSpeechTimingMs(timing.saveTaskMs)}，调用ASR ${formatSpeechTimingMs(timing.transcribeMs)}，更新任务 ${formatSpeechTimingMs(timing.updateTaskMs)}，写入/粘贴 ${formatSpeechTimingMs(writeOrPasteMs)}，复制 ${formatSpeechTimingMs(timing.copyMs)}`;
 }
 
 function reportSpeechLocalTiming(timing, asrTiming, context = '') {
@@ -3060,17 +3119,6 @@ function appendTextAfterSpeechChunk(text) {
   insertTextIntoComposer(value);
 }
 
-function isTransferGenieComposerFocused() {
-  if (!document.hasFocus()) return false;
-  const cw = window.transferGenieComposer;
-  if (cw && typeof cw.hasEditorFocus === 'function' && cw.hasEditorFocus()) return true;
-  const active = document.activeElement;
-  if (!active) return false;
-  if (active === textInput) return true;
-  if (active instanceof Element && active.closest('.composer, #editor-container, .CodeMirror, .cw-editor')) return true;
-  return transferGenieComposerHadRecentFocus;
-}
-
 async function transcribeSpeechAudioInChunks(audio) {
   const chunks = splitSpeechAudioForAsr(audio);
   const texts = [];
@@ -3088,9 +3136,155 @@ async function transcribeSpeechAudioInChunks(audio) {
   return { text: texts.join('\n').trim(), logId, chunkCount: chunks.length, timing: mergeSpeechTimings(timings) };
 }
 
+function isSpeechTranscriptMessage(message) {
+  return String(message?.transcript_source || '') === 'speech-to-text';
+}
+
+function buildSpeechMessageRequest(audio, transcript, rawTranscript) {
+  return {
+    audioData: Array.from(audio?.bytes || []),
+    transcript: String(transcript || '').trim(),
+    rawTranscript: String(rawTranscript || '').trim(),
+    mimeType: audio?.mimeType || 'audio/wav',
+    originalName: `speech-${Date.now()}.wav`,
+  };
+}
+
+async function sendSpeechTranscriptMessage(audio, transcript, rawTranscript) {
+  if (!invoke) throw new Error('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
+  const request = buildSpeechMessageRequest(audio, transcript, rawTranscript);
+  if (!request.audioData.length) throw new Error('没有可发送的录音数据');
+  if (!request.transcript) throw new Error('转写文本为空');
+  return invoke('send_speech_message', { request });
+}
+
+async function getMessageSourceAudioSrc(message) {
+  if (!message?.filename) return;
+  if (!invoke) {
+    setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
+    return;
+  }
+  const path = await invoke('get_message_source_audio_file', { filename: message.filename });
+  const tauriConvert = window.__TAURI__?.tauri?.convertFileSrc || window.__TAURI__?.path?.convertFileSrc || window.__TAURI__?.core?.convertFileSrc;
+  return tauriConvert ? tauriConvert(path) : path;
+}
+
+async function playMessageSourceAudio(message) {
+  try {
+    const src = await getMessageSourceAudioSrc(message);
+    if (!src) return;
+    if (speechTaskAudioUrl) URL.revokeObjectURL(speechTaskAudioUrl);
+    const audio = new Audio(src);
+    await audio.play();
+  } catch (error) {
+    setErrorStatus(`播放源音频失败：${error}`);
+    showToast(`播放源音频失败：${error}`, 'error');
+  }
+}
+
+function createSpeechSourceAudioControls(message) {
+  const wrap = document.createElement('div');
+  wrap.className = 'speech-source-audio-player';
+
+  const audio = document.createElement('audio');
+  audio.className = 'speech-source-audio-controls';
+  audio.controls = true;
+  audio.preload = 'metadata';
+  audio.setAttribute('aria-label', '源音频');
+
+  let loadPromise = null;
+  const loadAudioSource = async () => {
+    if (audio.src) return audio.src;
+    if (!loadPromise) {
+      loadPromise = getMessageSourceAudioSrc(message).then((src) => {
+        if (src) audio.src = src;
+        return src;
+      });
+    }
+    return loadPromise;
+  };
+
+  loadAudioSource().catch((error) => {
+    console.warn('Load speech source audio failed', error);
+  });
+  wrap.appendChild(audio);
+  return wrap;
+}
+
+function createSpeechTranscriptToggle(message, body) {
+  const rawText = String(message?.transcript_raw_text || '').trim();
+  const polishedText = String(message?.content || '').trim();
+  if (!rawText || rawText === polishedText) return null;
+
+  const wrap = document.createElement('div');
+  wrap.className = 'speech-transcript-toggle';
+
+  const polishedButton = document.createElement('button');
+  polishedButton.type = 'button';
+  polishedButton.className = 'speech-transcript-toggle-button is-active';
+  polishedButton.textContent = '润色后';
+
+  const rawButton = document.createElement('button');
+  rawButton.type = 'button';
+  rawButton.className = 'speech-transcript-toggle-button';
+  rawButton.textContent = '原文';
+
+  const setMode = (mode) => {
+    const showRaw = mode === 'raw';
+    body.dataset.speechTranscriptMode = mode;
+    body.textContent = getMessageBodyPreviewText(showRaw ? rawText : polishedText);
+    polishedButton.classList.toggle('is-active', !showRaw);
+    rawButton.classList.toggle('is-active', showRaw);
+  };
+  polishedButton.addEventListener('click', () => setMode('polished'));
+  rawButton.addEventListener('click', () => setMode('raw'));
+
+  wrap.appendChild(polishedButton);
+  wrap.appendChild(rawButton);
+  return wrap;
+}
+
+function getDisplayedSpeechTranscriptText(message, body) {
+  const polishedText = String(message?.content || '');
+  if (
+    !isSpeechTranscriptMessage(message)
+    || body?.dataset?.speechTranscriptMode !== 'raw'
+  ) {
+    return polishedText;
+  }
+  return String(message?.transcript_raw_text || '').trim() || polishedText;
+}
+
+function getMessageBodyPreviewText(text) {
+  const value = String(text || '');
+  if (value.length <= MESSAGE_BODY_PREVIEW_MAX_CHARS) return value;
+  return `${value.slice(0, MESSAGE_BODY_PREVIEW_MAX_CHARS).trimEnd()}...`;
+}
+
+function createMessageFullTextAction(message) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'message-expand-toggle message-view-full-text';
+  button.textContent = '查看全文';
+  button.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openMessagePreview(message);
+  });
+  return button;
+}
+
 async function copySpeechTranscriptToClipboard(text) {
   const value = String(text || '').trim();
   if (!value) return false;
+  if (invoke) {
+    try {
+      await invoke('copy_dictation_text', { text: value });
+      return true;
+    } catch (error) {
+      console.warn('[speech-to-text] system clipboard copy failed', error);
+    }
+  }
   await copyTextToClipboard(value);
   return true;
 }
@@ -3103,35 +3297,48 @@ async function pasteDictationTextToFocusedInput(text) {
   if (!invoke) {
     await copySpeechTranscriptToClipboard(value);
     logSystemDictation('paste fallback copied without invoke', { elapsedMs: Math.round(performance.now() - startedAt) });
-    return false;
+    return { copied: true, pasted: false, focusDetected: false };
   }
   try {
-    await invoke('paste_dictation_text', { text: value });
-    logSystemDictation('paste done', { elapsedMs: Math.round(performance.now() - startedAt) });
-    return true;
+    const result = await invoke('paste_dictation_text', { text: value });
+    const focusDetected = result?.focusDetected !== false;
+    const pasted = result?.pasted !== false && focusDetected;
+    logSystemDictation('paste done', { elapsedMs: Math.round(performance.now() - startedAt), focusDetected, pasted });
+    return { copied: true, pasted, focusDetected };
   } catch (error) {
     await copySpeechTranscriptToClipboard(value);
     console.warn('[speech-to-text] system paste failed', error);
     logSystemDictation('paste failed and copied fallback', { elapsedMs: Math.round(performance.now() - startedAt), error: String(error) });
-    return false;
+    return { copied: true, pasted: false, focusDetected: false, error };
   }
+}
+
+async function copyThenPasteSpeechTranscript(text, inputTarget) {
+  const value = String(text || '').trim();
+  if (!value) return { copied: false, pasted: false, focusDetected: false };
+  const copied = await copySpeechTranscriptToClipboard(value);
+  if (!copied) return { copied: false, pasted: false, focusDetected: false };
+  if (inputTarget) restoreSystemDictationInputTarget(inputTarget);
+  return pasteDictationTextToFocusedInput(value);
 }
 
 async function playSpeechTask(id) {
   const task = await getSpeechTask(id);
-  if (!task?.audio?.bytes?.length) {
+  const audioBlob = await getSpeechTaskAudioBlob(task);
+  if (!audioBlob) {
     showToast('没有可重听的录音', 'error');
     return;
   }
   if (speechTaskAudioUrl) URL.revokeObjectURL(speechTaskAudioUrl);
-  speechTaskAudioUrl = URL.createObjectURL(new Blob([new Uint8Array(task.audio.bytes)], { type: task.audio.mimeType || 'audio/wav' }));
+  speechTaskAudioUrl = URL.createObjectURL(audioBlob.blob);
   const audio = new Audio(speechTaskAudioUrl);
   await audio.play();
 }
 
 async function downloadSpeechTaskAudio(id) {
   const task = await getSpeechTask(id);
-  if (!task?.audio?.bytes?.length) {
+  const audioBlob = await getSpeechTaskAudioBlob(task);
+  if (!audioBlob) {
     showToast('没有可下载的录音', 'error');
     return;
   }
@@ -3139,8 +3346,7 @@ async function downloadSpeechTaskAudio(id) {
     ? new Date(task.createdAtMs).toISOString().replace(/[:.]/g, '-')
     : Date.now();
   const filename = `speech-${created}.wav`;
-  const blob = new Blob([new Uint8Array(task.audio.bytes)], { type: task.audio.mimeType || 'audio/wav' });
-  const url = URL.createObjectURL(blob);
+  const url = URL.createObjectURL(audioBlob.blob);
   const anchor = document.createElement('a');
   anchor.href = url;
   anchor.download = filename;
@@ -3153,19 +3359,64 @@ async function downloadSpeechTaskAudio(id) {
 
 async function retrySpeechTask(id) {
   const task = await getSpeechTask(id);
-  if (!task?.audio?.bytes?.length) {
+  const audioBlob = await getSpeechTaskAudioBlob(task);
+  if (!audioBlob) {
     showToast('没有可重试的录音', 'error');
     return;
   }
   await updateSpeechTask(id, { status: 'transcribing', error: '' });
   try {
-    const result = await transcribeSpeechAudioInChunks(task.audio);
+    const taskAudio = audioBlob.taskAudio || task.audio;
+    const result = await transcribeSpeechAudioInChunks(taskAudio);
     await updateSpeechTask(id, { status: 'success', text: result?.text || '', error: '', chunkCount: result?.chunkCount || 1 });
     await copySpeechTranscriptToClipboard(result?.text || '');
     showToast('重新转录完成', 'success');
   } catch (error) {
     await updateSpeechTask(id, { status: 'failed', error: String(error), text: task.text || '' });
     showToast(`重新转录失败：${error}`, 'error');
+  }
+}
+
+async function getSpeechTaskAudioBlob(task) {
+  if (task?.audio?.bytes?.length) {
+    return {
+      blob: new Blob([new Uint8Array(task.audio.bytes)], { type: task.audio.mimeType || 'audio/wav' }),
+      taskAudio: task.audio,
+    };
+  }
+  const sourceFilename = String(task?.sourceMessageFilename || '').trim();
+  if (!sourceFilename) {
+    return null;
+  }
+  if (!invoke) {
+    return null;
+  }
+  try {
+    const path = await invoke('get_message_source_audio_file', { filename: sourceFilename });
+    const tauriConvert = window.__TAURI__?.tauri?.convertFileSrc || window.__TAURI__?.path?.convertFileSrc || window.__TAURI__?.core?.convertFileSrc;
+    const src = tauriConvert ? tauriConvert(path) : path;
+    const response = await fetch(src);
+    if (!response.ok) {
+      return null;
+    }
+    const blob = await response.blob();
+    const bytes = Array.from(new Uint8Array(await blob.arrayBuffer()));
+    if (speechTaskSourceAudioUrl) URL.revokeObjectURL(speechTaskSourceAudioUrl);
+    speechTaskSourceAudioUrl = URL.createObjectURL(blob);
+    return {
+      blob,
+      taskAudio: {
+        bytes,
+        mimeType: task.sourceAudioMimeType || blob.type || 'audio/wav',
+        format: 'wav',
+        sampleRate: 16000,
+        channels: 1,
+        bitsPerSample: 16,
+      },
+    };
+  } catch (error) {
+    console.warn('读取源音频失败', error);
+    return null;
   }
 }
 
@@ -3391,12 +3642,21 @@ async function startSpeechRecording() {
   }
   const sessionId = speechSessionId + 1;
   speechSessionId = sessionId;
+  if (systemDictationMode) captureSystemDictationInputTarget();
   setSpeechState('preparing');
   setStatus('正在打开麦克风...');
   try {
     speechCapturedSegments = [];
     resetLiveSpeechTranscription();
-    if (systemDictationMode) void setSystemDictationOverlayVisible(true);
+    if (systemDictationMode) {
+      try {
+        await invoke('capture_system_dictation_focus_window');
+      } catch (error) {
+        console.warn('[speech-to-text] system dictation focus capture failed', error);
+        logSystemDictation('focus capture failed', { error: String(error) });
+      }
+      void setSystemDictationOverlayVisible(true);
+    }
     if (systemDictationMode) logSystemDictation('opening microphone');
     const deviceId = String(currentSettingsFormState.speechToTextMicrophoneDeviceId || '').trim();
     let stream = null;
@@ -3471,7 +3731,6 @@ async function startSpeechRecording() {
     setErrorStatus(`启动录音失败：${message}`);
     showToast(`启动录音失败：${message}`, 'error');
     if (systemDictationMode) {
-      systemDictationStartedInTransferGenieComposer = false;
       void setSystemDictationOverlayVisible(false);
     }
   }
@@ -3496,12 +3755,10 @@ function stopSpeechRecording(options = {}) {
       stopSpeechStream();
       resetLiveSpeechTranscription();
       setSpeechState('idle');
-      systemDictationStartedInTransferGenieComposer = false;
       return;
     }
     if (systemDictationMode) {
-      logSystemDictation('overlay closing before tail capture', { tailMs: SPEECH_RECORDING_STOP_TAIL_MS });
-      void setSystemDictationOverlayVisible(false);
+      logSystemDictation('overlay kept visible during tail capture', { tailMs: SPEECH_RECORDING_STOP_TAIL_MS });
     }
     speechStopFinalizeTimer = window.setTimeout(() => {
       speechStopFinalizeTimer = 0;
@@ -3533,8 +3790,6 @@ async function finishSpeechRecording() {
   systemDictationAwaitingConfirm = false;
   systemDictationStartRequested = false;
   systemDictationStopRequested = false;
-  const skipSystemPaste = isSystemDictation && systemDictationStartedInTransferGenieComposer;
-  systemDictationStartedInTransferGenieComposer = false;
   const localStartedAt = performance.now();
   const chunks = speechCapturedSegments.slice();
   speechCapturedSegments = [];
@@ -3552,6 +3807,7 @@ async function finishSpeechRecording() {
   }
   if (!chunks.length) {
     resetLiveSpeechTranscription();
+    consumeSystemDictationInputTarget();
     setSpeechState('idle');
     setErrorStatus('没有可识别的录音数据');
     if (isSystemDictation) setSystemDictationOverlayVisible(false);
@@ -3616,9 +3872,6 @@ async function finishSpeechRecording() {
           ...fallbackResult,
           chunkCount: result?.chunkCount || 1,
         };
-        if (!polishEnabled) {
-          insertTextIntoComposer(fallbackResult.text);
-        }
       }
     }
     const transcribeMs = performance.now() - transcribeStartedAt;
@@ -3629,46 +3882,88 @@ async function finishSpeechRecording() {
         chunkCount: result?.chunkCount || 0,
       });
     }
-    if (skipSystemPaste) {
-      logSystemDictation('paste skipped because Transfer Genie composer is focused');
-    }
     const rawText = String(result?.text || '').trim();
     const finalText = polishEnabled
       ? await polishSpeechTranscript(rawText, { systemDictation: isSystemDictation })
       : rawText;
     result = { ...(result || {}), text: finalText };
-    const insertStartedAt = performance.now();
-    if (!speechLiveTranscriptionStarted || polishEnabled) {
-      insertTextIntoComposer(result?.text || '');
-    }
-    const insertMs = performance.now() - insertStartedAt;
-    const copyStartedAt = performance.now();
-    if (isSystemDictation && !skipSystemPaste) {
-      await pasteDictationTextToFocusedInput(result?.text || '');
-    } else {
-      copySpeechTranscriptInBackground(result?.text || '');
-    }
-    const copyMs = performance.now() - copyStartedAt;
-    if (isSystemDictation) logSystemDictation('paste step done', { copyMs: Math.round(copyMs) });
+    let pasteMs = 0;
+    let copyMs = 0;
+    let speechSendResult = null;
     const updateTaskStartedAt = performance.now();
-    if (speechLiveTranscriptionStarted) {
+    const wasLiveSpeechTranscription = speechLiveTranscriptionStarted;
+    const successTaskBase = (sendResult) => ({
+      ...taskBase,
+      audio: null,
+      sourceMessageFilename: sendResult?.filename || '',
+      sourceAudioMimeType: sendResult?.sourceAudioMimeType || audio.mimeType || 'audio/wav',
+    });
+    const saveSuccessfulSpeechTask = (sendResult) => {
       saveSpeechTaskInBackground({
-        ...taskBase,
+        ...successTaskBase(sendResult),
         status: 'success',
         text: result?.text || '',
         error: '',
         chunkCount: result?.chunkCount || 1,
         updatedAtMs: Date.now(),
-      }, '保存长录音任务');
+      }, wasLiveSpeechTranscription ? '保存长录音任务' : '保存短录音任务');
+    };
+    const finishSpeechMessageSend = async (sendPromise) => {
+      const sendResult = await sendPromise;
+      normalizeComposerDraftAfterSuccessfulSend(sendResult);
+      saveSuccessfulSpeechTask(sendResult);
+      return sendResult;
+    };
+    const clearComposerForBackgroundSpeechSend = () => {
+      const cw = window.transferGenieComposer;
+      if (cw && cw.isActive && cw.isActive() && cw.clearActiveDraftAfterSend) {
+        cw.clearActiveDraftAfterSend();
+        return;
+      }
+      if (currentFormat === 'markdown' && mdEditor) {
+        mdEditor.setMarkdown('');
+      } else if (textInput) {
+        textInput.value = '';
+      }
+    };
+    if (isSystemDictation) {
+      const copyStartedAt = performance.now();
+      const inputTarget = consumeSystemDictationInputTarget();
+      await copyThenPasteSpeechTranscript(result?.text || '', inputTarget);
+      copyMs = performance.now() - copyStartedAt;
+      pasteMs = copyMs;
+      logSystemDictation('paste step done', { pasteMs: Math.round(pasteMs) });
+      void setSystemDictationStatusText(result?.text || '', { copyText: result?.text || '' });
+      const sendStartedAt = performance.now();
+      const speechSendPromise = Promise.resolve().then(() => sendSpeechTranscriptMessage(audio, result?.text || '', rawText));
+      const localTiming = {
+        totalMs: performance.now() - localStartedAt,
+        stopMs,
+        buildAudioMs,
+        saveTaskMs,
+        transcribeMs,
+        updateTaskMs: 0,
+        pasteMs,
+        copyMs,
+      };
+      setSuccessStatus('系统听写识别完成，正在后台发送消息');
+      reportSpeechLocalTiming(localTiming, result?.timing, wasLiveSpeechTranscription ? 'session' : 'short');
+      resetLiveSpeechTranscription();
+      void finishSpeechMessageSend(speechSendPromise).then(() => {
+        logSystemDictation('background message send done', { sendMs: Math.round(performance.now() - sendStartedAt) });
+        exitComposerFullscreenAfterSendSuccess();
+        void loadMessages({ scrollToBottom: true });
+      }).catch((error) => {
+        saveSpeechTaskInBackground({ ...pendingSpeechTask, status: 'failed', error: String(error), updatedAtMs: Date.now() }, '保存失败任务');
+        console.warn('[speech-to-text] background speech message send failed', error);
+        logSystemDictation('background message send failed', { error: String(error) });
+        setErrorStatus(`系统听写已粘贴，消息发送失败：${error}`);
+        showToast(`系统听写已粘贴，消息发送失败：${error}`, 'error');
+      });
+      return;
     } else {
-      saveSpeechTaskInBackground({
-        ...taskBase,
-        status: 'success',
-        text: result?.text || '',
-        error: '',
-        chunkCount: result?.chunkCount || 1,
-        updatedAtMs: Date.now(),
-      }, '保存短录音任务');
+      clearComposerForBackgroundSpeechSend();
+      copySpeechTranscriptInBackground(result?.text || '');
     }
     const updateTaskMs = performance.now() - updateTaskStartedAt;
     const localTiming = {
@@ -3678,13 +3973,25 @@ async function finishSpeechRecording() {
       saveTaskMs,
       transcribeMs,
       updateTaskMs,
-      insertMs,
+      pasteMs,
       copyMs,
     };
     if (!isSystemDictation) setSpeechState('idle');
-    setSuccessStatus(isSystemDictation ? '系统听写识别完成' : '语音识别完成');
+    setSuccessStatus('语音识别完成，正在后台发送消息');
     reportSpeechLocalTiming(localTiming, result?.timing, speechLiveTranscriptionStarted ? 'session' : 'short');
     resetLiveSpeechTranscription();
+    const sendStartedAt = performance.now();
+    const speechSendPromise = Promise.resolve().then(() => sendSpeechTranscriptMessage(audio, result?.text || '', rawText));
+    void finishSpeechMessageSend(speechSendPromise).then(() => {
+      console.info(`[speech-to-text] background message send ${formatSpeechTimingMs(performance.now() - sendStartedAt)}`);
+      exitComposerFullscreenAfterSendSuccess();
+      void loadMessages({ scrollToBottom: true });
+    }).catch((error) => {
+      saveSpeechTaskInBackground({ ...pendingSpeechTask, status: 'failed', error: String(error), updatedAtMs: Date.now() }, '保存失败任务');
+      console.warn('[speech-to-text] background speech message send failed', error);
+      setErrorStatus(`语音识别已完成，消息发送失败：${error}`);
+      showToast(`语音识别已完成，消息发送失败：${error}`, 'error');
+    });
     if (isSystemDictation && systemDictationOverlayVisible) {
       setSystemDictationOverlayVisible(false);
     }
@@ -3695,6 +4002,7 @@ async function finishSpeechRecording() {
       updateSpeechTaskInBackground(taskId, { status: 'failed', error: String(error) }, '更新失败任务');
     }
     resetLiveSpeechTranscription();
+    consumeSystemDictationInputTarget();
     if (!isSystemDictation || speechState === 'transcribing') setSpeechState('idle');
     setErrorStatus(`语音识别失败：${error}`);
     if (isSystemDictation) logSystemDictation('finish failed', { error: String(error) });
@@ -3757,8 +4065,6 @@ function toggleSystemDictationRecording() {
     systemDictationStartRequested = true;
     systemDictationStopRequested = false;
     systemDictationAwaitingConfirm = false;
-    systemDictationStartedInTransferGenieComposer = isTransferGenieComposerFocused();
-    logSystemDictation('start target captured', { transferGenieComposerFocused: systemDictationStartedInTransferGenieComposer });
     systemDictationLastStartAt = performance.now();
     void playSpeechCueSound('start');
     void startSpeechRecording();
@@ -8525,15 +8831,34 @@ function renderPreviewActions(message) {
     copyButton.type = 'button';
     copyButton.className = 'button ghost small';
     copyButton.textContent = '复制内容';
-    copyButton.addEventListener('click', () => copyTextToClipboard(message.content || ''));
+    copyButton.addEventListener('click', () => {
+      const displayedBody = isSpeechTranscriptMessage(message)
+        ? messagePreviewBody?.querySelector('[data-speech-transcript-mode]')
+        : null;
+      copyTextToClipboard(getDisplayedSpeechTranscriptText(message, displayedBody));
+    });
     buttons.push(copyButton);
 
     const downloadButton = document.createElement('button');
     downloadButton.type = 'button';
     downloadButton.className = 'button ghost small';
-    downloadButton.textContent = '下载文件';
-    downloadButton.addEventListener('click', () => downloadTextMessageAsFile(message));
+    downloadButton.textContent = isSpeechTranscriptMessage(message) ? '下载音频' : '下载文件';
+    downloadButton.addEventListener('click', () => {
+      if (isSpeechTranscriptMessage(message)) {
+        downloadMessageFile(message);
+        return;
+      }
+      downloadTextMessageAsFile(message);
+    });
     buttons.push(downloadButton);
+    if (isSpeechTranscriptMessage(message)) {
+      const downloadTextButton = document.createElement('button');
+      downloadTextButton.type = 'button';
+      downloadTextButton.className = 'button ghost small';
+      downloadTextButton.textContent = '下载文本';
+      downloadTextButton.addEventListener('click', () => downloadTextMessageAsFile(message));
+      buttons.push(downloadTextButton);
+    }
   } else {
     const openButton = document.createElement('button');
     openButton.type = 'button';
@@ -8606,6 +8931,12 @@ function renderPreviewContent(message) {
       const textBlock = document.createElement('div');
       textBlock.textContent = message.content || '';
       messagePreviewBody.appendChild(textBlock);
+      const transcriptToggle = isSpeechTranscriptMessage(message)
+        ? createSpeechTranscriptToggle(message, textBlock)
+        : null;
+      if (transcriptToggle) {
+        messagePreviewBody.appendChild(transcriptToggle);
+      }
     }
   } else {
     messagePreviewBody.classList.remove('is-markdown');
@@ -8830,6 +9161,7 @@ function renderMessages(messages, options = {}) {
     item.classList.toggle('is-text', viewModel.isText);
     item.classList.toggle('is-self', viewModel.isSelf);
     item.classList.toggle('is-marked', viewModel.isMarked);
+    item.classList.toggle('is-speech-transcript', viewModel.isSpeechTranscript);
     item.classList.toggle('with-selection', selectionMode);
     item.dataset.filename = viewModel.filename;
     item.classList.toggle('is-selected', selectedMessages.has(viewModel.filename));
@@ -8856,8 +9188,9 @@ function renderMessages(messages, options = {}) {
 
     const body = document.createElement('div');
     body.className = 'message-body';
+    const isBodyTruncated = viewModel.isText && viewModel.bodyText.length > MESSAGE_BODY_PREVIEW_MAX_CHARS;
     if (message.kind === 'text') {
-      if (viewModel.isMarkdown) {
+      if (viewModel.isMarkdown && !isBodyTruncated) {
         body.classList.add('markdown-body', 'editormd-html-preview', 'is-markdown');
         // Generate a safe unique ID
         const uniqueId = `md-msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -8868,9 +9201,13 @@ function renderMessages(messages, options = {}) {
           content: viewModel.bodyText,
         });
       } else {
-        body.textContent = viewModel.bodyText;
+        body.textContent = isBodyTruncated
+          ? getMessageBodyPreviewText(viewModel.bodyText)
+          : viewModel.bodyText;
       }
-      collapseQueue.push({ item, body, message });
+      if (!isBodyTruncated) {
+        collapseQueue.push({ item, body, message });
+      }
     } else {
       if (viewModel.isImage) {
         body.classList.add('is-image-message');
@@ -8947,6 +9284,13 @@ function renderMessages(messages, options = {}) {
     const meta = document.createElement('div');
     meta.className = 'message-meta';
     meta.textContent = `大小 ${formatBytes(message.size || 0)}`;
+
+    const transcriptToggle = viewModel.isSpeechTranscript
+      ? createSpeechTranscriptToggle(message, body)
+      : null;
+    const fullTextAction = isBodyTruncated
+      ? createMessageFullTextAction(message)
+      : null;
 
     const actions = document.createElement('div');
     actions.className = 'message-actions';
@@ -9026,19 +9370,30 @@ function renderMessages(messages, options = {}) {
         copyIcon.style.width = '16px';
         copyIcon.style.height = '16px';
         copyButton.appendChild(copyIcon);
-        copyButton.addEventListener('click', () => copyTextToClipboard(message.content || ''));
+        copyButton.addEventListener('click', () => copyTextToClipboard(getDisplayedSpeechTranscriptText(message, body)));
         actions.appendChild(copyButton);
 
-        const downloadTextButton = document.createElement('button');
-        downloadTextButton.className = 'button primary small icon-only';
-        const downloadTextIcon = document.createElement('img');
-        downloadTextIcon.src = 'icons/download.svg';
-        downloadTextIcon.alt = '下载为文件';
-        downloadTextIcon.style.width = '16px';
-        downloadTextIcon.style.height = '16px';
-        downloadTextButton.appendChild(downloadTextIcon);
-        downloadTextButton.addEventListener('click', () => downloadTextMessageAsFile(message));
-        actions.appendChild(downloadTextButton);
+        if (viewModel.isSpeechTranscript) {
+          actions.appendChild(createSpeechSourceAudioControls(message));
+        }
+
+        const downloadButton = document.createElement('button');
+        downloadButton.className = 'button primary small icon-only';
+        const downloadIcon = document.createElement('img');
+        downloadIcon.src = 'icons/download.svg';
+        downloadIcon.alt = viewModel.isSpeechTranscript ? '下载音频' : '下载为文件';
+        downloadIcon.style.width = '16px';
+        downloadIcon.style.height = '16px';
+        downloadButton.appendChild(downloadIcon);
+        downloadButton.title = viewModel.isSpeechTranscript ? '下载音频' : '下载为文件';
+        downloadButton.addEventListener('click', () => {
+          if (viewModel.isSpeechTranscript) {
+            downloadMessageFile(message);
+            return;
+          }
+          downloadTextMessageAsFile(message);
+        });
+        actions.appendChild(downloadButton);
 
         const menu = document.createElement('details');
         menu.className = 'action-menu';
@@ -9065,13 +9420,27 @@ function renderMessages(messages, options = {}) {
 
         const downloadAsFileButton = document.createElement('button');
         downloadAsFileButton.className = 'button ghost small';
-        downloadAsFileButton.textContent = '下载为文件';
+        downloadAsFileButton.textContent = viewModel.isSpeechTranscript ? '下载音频' : '下载为文件';
         downloadAsFileButton.addEventListener('click', () => {
           menu.open = false;
+          if (viewModel.isSpeechTranscript) {
+            downloadMessageFile(message);
+            return;
+          }
           downloadTextMessageAsFile(message);
         });
 
         menuList.appendChild(downloadAsFileButton);
+        if (viewModel.isSpeechTranscript) {
+          const downloadTranscriptButton = document.createElement('button');
+          downloadTranscriptButton.className = 'button ghost small';
+          downloadTranscriptButton.textContent = '下载文本';
+          downloadTranscriptButton.addEventListener('click', () => {
+            menu.open = false;
+            downloadTextMessageAsFile(message);
+          });
+          menuList.appendChild(downloadTranscriptButton);
+        }
         const addToPaneTextBtn = document.createElement('button');
         addToPaneTextBtn.className = 'button ghost small';
         addToPaneTextBtn.textContent = '添加到分栏';
@@ -9199,6 +9568,12 @@ function renderMessages(messages, options = {}) {
 
     item.appendChild(header);
     item.appendChild(body);
+    if (fullTextAction) {
+      item.appendChild(fullTextAction);
+    }
+    if (transcriptToggle) {
+      item.appendChild(transcriptToggle);
+    }
     item.appendChild(footer);
 
     item.addEventListener('dblclick', (event) => {
@@ -11307,14 +11682,15 @@ async function sendText() {
     setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
     return;
   }
-  
+
   let text = '';
- const cw = window.transferGenieComposer;
- if (cw && cw.isActive && cw.isActive() && cw.getActiveDraft) {
-   const draft = cw.getActiveDraft();
+  const cw = window.transferGenieComposer;
+  const usesWorkspaceComposer = !!(cw && cw.isActive && cw.isActive() && cw.getActiveDraft);
+  if (usesWorkspaceComposer) {
+    const draft = cw.getActiveDraft();
     if (draft && draft.format) currentFormat = draft.format;
-   text = draft ? (draft.text || '') : '';
- } else if (currentFormat === 'markdown' && mdEditor) {
+    text = draft ? (draft.text || '') : '';
+  } else if (currentFormat === 'markdown' && mdEditor) {
     text = mdEditor.getMarkdown();
   } else {
     text = textInput.value;
@@ -11324,20 +11700,17 @@ async function sendText() {
     return;
   }
 
-  const settings = await invoke('get_settings');
-  const activeEndpoint = settings.webdav_endpoints.find(
-    (e) => e.id === settings.active_webdav_id,
-  );
-  if (!activeEndpoint) {
+  if (!getActiveEndpoint()) {
     setErrorStatus('请先选择 WebDAV 端点');
     return;
   }
 
   let activeMarkedOptions = cloneComposerMarkedOptions(getComposerMarkedOptions());
-  let hadSendFailure = false;
+  const textToSend = text;
+  const formatToSend = currentFormat === 'markdown' ? 'markdown' : 'text';
+  const filesToUpload = [...selectedFiles];
 
   const applySuccessfulSendResult = (result) => {
-    normalizeComposerDraftAfterSuccessfulSend(result);
     activeMarkedOptions = {
       marked: !!activeMarkedOptions.marked,
       dueDate: activeMarkedOptions.dueDate || null,
@@ -11347,53 +11720,63 @@ async function sendText() {
     };
   };
 
-  if (text.trim()) {
-      const timestamp_ms = Date.now();
-      const filename = `sending-${timestamp_ms}`;
-      
-      pendingSends.set(filename, {
-        filename,
-        sender: '我',
-        timestamp_ms,
-        size: new Blob([text]).size,
-        kind: 'text',
-        content: text,
-        sending: true,
-        sendStatus: SEND_STATUS.SENDING,
-        format: currentFormat,
-        marked: activeMarkedOptions.marked,
-        marked_tag_ids: [...activeMarkedOptions.selectedTagIds],
-        marked_due_date: activeMarkedOptions.dueDate || null,
-      });
+  let pendingTextFilename = '';
+  if (textToSend.trim()) {
+    const timestamp_ms = Date.now();
+    pendingTextFilename = `sending-${timestamp_ms}`;
 
-      if (currentFormat === 'markdown' && mdEditor) {
-        mdEditor.setMarkdown('');
-      } else {
-        textInput.value = '';
-      }
-      // 输入框即工作区：发送成功后清空活动草稿
+    pendingSends.set(pendingTextFilename, {
+      filename: pendingTextFilename,
+      sender: '我',
+      timestamp_ms,
+      size: new Blob([textToSend]).size,
+      kind: 'text',
+      content: textToSend,
+      sending: true,
+      sendStatus: SEND_STATUS.SENDING,
+      format: formatToSend,
+      marked: activeMarkedOptions.marked,
+      marked_tag_ids: [...activeMarkedOptions.selectedTagIds],
+      marked_due_date: activeMarkedOptions.dueDate || null,
+    });
+
+    if (usesWorkspaceComposer) {
       if (cw && cw.clearActiveDraftAfterSend) cw.clearActiveDraftAfterSend();
-      
-      renderCurrentMessageView();
-      forceScrollMessageListToBottom();
+    } else if (formatToSend === 'markdown' && mdEditor) {
+      mdEditor.setMarkdown('');
+    } else {
+      textInput.value = '';
+    }
+  }
 
+  selectedFiles = [];
+  renderSelectedFiles();
+  resetComposerMarkDraft();
+  renderCurrentMessageView();
+  forceScrollMessageListToBottom();
+
+  void (async () => {
+    let hadSendFailure = false;
+    if (textToSend.trim()) {
       try {
         const result = await invoke('send_text', {
-          text,
-          format: currentFormat,
+          text: textToSend,
+          format: formatToSend,
           markedOptions: activeMarkedOptions,
         });
-        pendingSends.set(filename, {
-          ...pendingSends.get(filename),
-          sendStatus: SEND_STATUS.SUCCESS,
-        });
+        if (pendingTextFilename && pendingSends.has(pendingTextFilename)) {
+          pendingSends.set(pendingTextFilename, {
+            ...pendingSends.get(pendingTextFilename),
+            sendStatus: SEND_STATUS.SUCCESS,
+          });
+        }
         renderCurrentMessageView({ preserveScroll: true });
         applySuccessfulSendResult(result);
-        await copySentTextAfterSend(text);
         exitComposerFullscreenAfterSendSuccess();
+        await copySentTextAfterSend(textToSend);
         setTimeout(async () => {
           const shouldStickToBottom = isMessageListAtBottom();
-          pendingSends.delete(filename);
+          if (pendingTextFilename) pendingSends.delete(pendingTextFilename);
           await loadMessages({
             scrollToBottom: shouldStickToBottom,
             preserveScroll: !shouldStickToBottom,
@@ -11402,22 +11785,20 @@ async function sendText() {
         }, 1000);
       } catch (error) {
         hadSendFailure = true;
-        pendingSends.set(filename, {
-          ...pendingSends.get(filename),
-          sendStatus: SEND_STATUS.FAILED,
-          sendError: String(error),
-        });
+        if (pendingTextFilename && pendingSends.has(pendingTextFilename)) {
+          pendingSends.set(pendingTextFilename, {
+            ...pendingSends.get(pendingTextFilename),
+            sendStatus: SEND_STATUS.FAILED,
+            sendError: String(error),
+          });
+        }
         renderCurrentMessageView();
         setErrorStatus(`发送失败：${error}`);
       }
-  }
-  
-  if (selectedFiles.length > 0) {
-    const filesToUpload = [...selectedFiles];
-    selectedFiles = [];
-    renderSelectedFiles();
-    
-    for (const path of filesToUpload) {
+    }
+
+    if (filesToUpload.length > 0) {
+      for (const path of filesToUpload) {
         let clientId = null;
         try {
             clientId = `upload-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -11446,10 +11827,10 @@ async function sendText() {
               renderCurrentMessageView();
               renderUploadTasks();
             }
-            await loadMessages({ scrollToBottom: true });
-            await loadPersistedUploadHistory({ silent: true });
             applySuccessfulSendResult(result);
             exitComposerFullscreenAfterSendSuccess();
+            await loadMessages({ scrollToBottom: true });
+            await loadPersistedUploadHistory({ silent: true });
             setSuccessStatus('发送成功');
         } catch (error) {
             hadSendFailure = true;
@@ -11460,12 +11841,13 @@ async function sendText() {
             }
             setErrorStatus(`发送文件失败：${error}`);
         }
+      }
     }
-  }
 
-  if (!hadSendFailure) {
-    resetComposerMarkDraft();
-  }
+    if (!hadSendFailure) {
+      setSuccessStatus('发送成功');
+    }
+  })();
 }
 
 async function selectFiles() {
@@ -12621,12 +13003,6 @@ syncComposerOffset();
 window.addEventListener('resize', syncComposerOffset);
 window.addEventListener('transfer-genie:composer-visibility-change', syncComposerOffset);
 
-document.addEventListener('focusin', (event) => {
-  const target = event.target;
-  transferGenieComposerHadRecentFocus = target instanceof Element
-    && !!target.closest('.composer, #editor-container, .CodeMirror, .cw-editor');
-});
-
 // 使用 fixed 定位菜单，避免被 overflow 容器裁切
 function positionActionMenu(menu) {
   if (!menu) return;
@@ -12987,10 +13363,10 @@ async function sendFileByPath(path) {
       renderCurrentMessageView();
       renderUploadTasks();
     }
-    await loadMessages({ scrollToBottom: true });
-    await loadPersistedUploadHistory({ silent: true });
     normalizeComposerDraftAfterSuccessfulSend(result);
     exitComposerFullscreenAfterSendSuccess();
+    await loadMessages({ scrollToBottom: true });
+    await loadPersistedUploadHistory({ silent: true });
     resetComposerMarkDraft();
     setSuccessStatus('发送成功');
   } catch (error) {
@@ -13087,10 +13463,10 @@ async function sendFileData(data, originalName) {
       renderCurrentMessageView();
       renderUploadTasks();
     }
-    await loadMessages({ scrollToBottom: true });
-    await loadPersistedUploadHistory({ silent: true });
     normalizeComposerDraftAfterSuccessfulSend(result);
     exitComposerFullscreenAfterSendSuccess();
+    await loadMessages({ scrollToBottom: true });
+    await loadPersistedUploadHistory({ silent: true });
     resetComposerMarkDraft();
     setSuccessStatus('发送成功');
   } catch (error) {
@@ -13855,9 +14231,19 @@ function renderMarkedMessages(messages = [], options = {}) {
 
     const body = document.createElement('div');
     body.className = 'message-body';
-    body.textContent = message.kind === 'text'
+    const fullBodyText = message.kind === 'text'
       ? (message.content || '')
       : (message.original_name || message.filename || '');
+    const isBodyTruncated = message.kind === 'text' && fullBodyText.length > MESSAGE_BODY_PREVIEW_MAX_CHARS;
+    body.textContent = isBodyTruncated
+      ? getMessageBodyPreviewText(fullBodyText)
+      : fullBodyText;
+    const transcriptToggle = viewModel.isSpeechTranscript
+      ? createSpeechTranscriptToggle(message, body)
+      : null;
+    const fullTextAction = isBodyTruncated
+      ? createMessageFullTextAction(message)
+      : null;
     if (message.kind === 'file') {
       body.addEventListener('click', (event) => {
         if (markedSelectionMode) return;
@@ -13931,6 +14317,10 @@ function renderMarkedMessages(messages = [], options = {}) {
     markButton.addEventListener('click', () => toggleMessageMarked(message));
     actions.appendChild(markButton);
 
+    if (viewModel.isSpeechTranscript) {
+      actions.appendChild(createSpeechSourceAudioControls(message));
+    }
+
     const tagButton = document.createElement('button');
     tagButton.className = 'button ghost small';
     tagButton.textContent = '标签';
@@ -13960,18 +14350,24 @@ function renderMarkedMessages(messages = [], options = {}) {
       copyIcon.style.width = '16px';
       copyIcon.style.height = '16px';
       copyButton.appendChild(copyIcon);
-      copyButton.addEventListener('click', () => copyTextToClipboard(message.content || ''));
+      copyButton.addEventListener('click', () => copyTextToClipboard(getDisplayedSpeechTranscriptText(message, body)));
       actions.appendChild(copyButton);
 
       const downloadButton = document.createElement('button');
       downloadButton.className = 'button primary small icon-only';
       const downloadIcon = document.createElement('img');
       downloadIcon.src = 'icons/download.svg';
-      downloadIcon.alt = '下载为文件';
+      downloadIcon.alt = viewModel.isSpeechTranscript ? '下载音频' : '下载为文件';
       downloadIcon.style.width = '16px';
       downloadIcon.style.height = '16px';
       downloadButton.appendChild(downloadIcon);
-      downloadButton.addEventListener('click', () => downloadTextMessageAsFile(message));
+      downloadButton.addEventListener('click', () => {
+        if (viewModel.isSpeechTranscript) {
+          downloadMessageFile(message);
+          return;
+        }
+        downloadTextMessageAsFile(message);
+      });
       actions.appendChild(downloadButton);
     } else {
       const downloadButton = document.createElement('button');
@@ -14002,12 +14398,26 @@ function renderMarkedMessages(messages = [], options = {}) {
     if (message.kind === 'text') {
       const downloadAsFileButton = document.createElement('button');
       downloadAsFileButton.className = 'button ghost small';
-      downloadAsFileButton.textContent = '下载为文件';
+      downloadAsFileButton.textContent = viewModel.isSpeechTranscript ? '下载音频' : '下载为文件';
       downloadAsFileButton.addEventListener('click', () => {
         menu.open = false;
+        if (viewModel.isSpeechTranscript) {
+          downloadMessageFile(message);
+          return;
+        }
         downloadTextMessageAsFile(message);
       });
       menuList.appendChild(downloadAsFileButton);
+      if (viewModel.isSpeechTranscript) {
+        const downloadTranscriptButton = document.createElement('button');
+        downloadTranscriptButton.className = 'button ghost small';
+        downloadTranscriptButton.textContent = '下载文本';
+        downloadTranscriptButton.addEventListener('click', () => {
+          menu.open = false;
+          downloadTextMessageAsFile(message);
+        });
+        menuList.appendChild(downloadTranscriptButton);
+      }
     } else {
       const saveAsButton = document.createElement('button');
       saveAsButton.className = 'button ghost small';
@@ -14038,6 +14448,12 @@ function renderMarkedMessages(messages = [], options = {}) {
 
     item.appendChild(header);
     item.appendChild(body);
+    if (fullTextAction) {
+      item.appendChild(fullTextAction);
+    }
+    if (transcriptToggle) {
+      item.appendChild(transcriptToggle);
+    }
     item.appendChild(tagRow);
     item.appendChild(footer);
     item.addEventListener('dblclick', (event) => {
@@ -14054,7 +14470,7 @@ function renderMarkedMessages(messages = [], options = {}) {
       openMessagePreview(message);
     });
     markedMessageList.appendChild(item);
-    if (message.kind === 'text') {
+    if (message.kind === 'text' && !isBodyTruncated) {
       applyMessageBodyCollapse(item, body, message, {
         collapseHeight: MARKED_MESSAGE_BODY_COLLAPSE_HEIGHT,
       });

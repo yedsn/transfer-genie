@@ -578,6 +578,10 @@ async fn import_into_webdav(
                     marked_pinned: false,
                     marked_due_date: None,
                     format: "text".to_string(),
+                    transcript_source: None,
+                    source_audio_mime_type: None,
+                    transcript_text: Some(text.clone()),
+                    transcript_raw_text: None,
                 },
             )
             .await
@@ -643,6 +647,10 @@ async fn import_into_webdav(
                     marked_pinned: false,
                     marked_due_date: None,
                     format: "text".to_string(),
+                    transcript_source: None,
+                    source_audio_mime_type: None,
+                    transcript_text: None,
+                    transcript_raw_text: None,
                 },
             )
             .await
@@ -778,6 +786,10 @@ async fn collect_remote_messages(
                     } else {
                         "text".to_string()
                     },
+                    transcript_source: None,
+                    source_audio_mime_type: None,
+                    transcript_text: None,
+                    transcript_raw_text: None,
                 };
                 map.insert(entry.filename.clone(), history_entry.clone());
                 derived_entries.push(history_entry);
@@ -1332,6 +1344,10 @@ mod tests {
             marked_pinned: false,
             marked_due_date: None,
             format: "text".to_string(),
+            transcript_source: None,
+            source_audio_mime_type: None,
+            transcript_text: None,
+            transcript_raw_text: None,
         };
         let sent = HistoryEntry {
             filename: "b".to_string(),

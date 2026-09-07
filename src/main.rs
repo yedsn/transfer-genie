@@ -91,6 +91,10 @@ static SYSTEM_DICTATION_SIDE_ALT_CONFIG: std::sync::atomic::AtomicU8 =
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 static SYSTEM_DICTATION_SIDE_ALT_TOGGLE_TX: std::sync::OnceLock<std::sync::mpsc::Sender<()>> =
     std::sync::OnceLock::new();
+static SYSTEM_DICTATION_OVERLAY_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static SYSTEM_DICTATION_OVERLAY_REQUEST_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 struct AppState {
     settings_path: PathBuf,
@@ -105,6 +109,8 @@ struct AppState {
     http: Client,
     registered_hotkey: Mutex<Option<Shortcut>>,
     registered_system_dictation_hotkey: Mutex<Option<Shortcut>>,
+    #[cfg(target_os = "windows")]
+    system_dictation_focus_target: Mutex<Option<SystemDictationFocusTarget>>,
     telegram_bridge: Mutex<TelegramBridgeManager>,
     local_http_api: Mutex<LocalHttpApiManager>,
     update_guard: AsyncMutex<()>,
@@ -510,6 +516,19 @@ struct SpeechToTextRequest {
     bits_per_sample: Option<u16>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SendSpeechMessageRequest {
+    audio_data: Vec<u8>,
+    transcript: String,
+    #[serde(default)]
+    raw_transcript: Option<String>,
+    #[serde(default)]
+    mime_type: Option<String>,
+    #[serde(default)]
+    original_name: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SpeechToTextResult {
@@ -745,6 +764,14 @@ struct SendMessageResult {
     filename: String,
     original_name: String,
     endpoint_id: String,
+    #[serde(default)]
+    transcript_source: Option<String>,
+    #[serde(default)]
+    source_audio_mime_type: Option<String>,
+    #[serde(default)]
+    transcript_text: Option<String>,
+    #[serde(default)]
+    transcript_raw_text: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1695,19 +1722,102 @@ async fn transcribe_speech(
 }
 
 #[tauri::command]
-fn paste_dictation_text(text: String) -> Result<(), String> {
+fn paste_dictation_text(
+    state: State<'_, AppState>,
+    text: String,
+) -> Result<SystemDictationPasteResult, String> {
     let value = text.trim().to_string();
     if value.is_empty() {
         eprintln!("[system-dictation] paste skipped: empty text");
-        return Ok(());
+        return Ok(SystemDictationPasteResult {
+            focus_detected: false,
+            pasted: false,
+        });
     }
     eprintln!(
         "[system-dictation] paste command received: text_chars={}",
         value.chars().count()
     );
-    write_system_clipboard(&value)?;
-    eprintln!("[system-dictation] clipboard write done");
-    dispatch_system_paste_shortcut()
+    #[cfg(target_os = "windows")]
+    let focus_target = state
+        .system_dictation_focus_target
+        .lock()
+        .map_err(|_| "系统听写焦点状态不可用".to_string())?
+        .take();
+    let paste_result = write_system_clipboard(&value).and_then(|()| {
+        eprintln!("[system-dictation] clipboard write done");
+        dispatch_system_paste_shortcut(
+            #[cfg(target_os = "windows")]
+            focus_target,
+        )
+    });
+    paste_result.map(|outcome| SystemDictationPasteResult {
+        focus_detected: !matches!(outcome, SystemPasteDispatchOutcome::NoFocusedInput),
+        pasted: matches!(outcome, SystemPasteDispatchOutcome::Pasted),
+    })
+}
+
+#[tauri::command]
+fn copy_dictation_text(text: String) -> Result<(), String> {
+    let value = text.trim().to_string();
+    if value.is_empty() {
+        return Ok(());
+    }
+    write_system_clipboard(&value)
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemDictationPasteResult {
+    focus_detected: bool,
+    pasted: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemDictationFocusCaptureResult {
+    focus_detected: bool,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy)]
+struct SystemDictationFocusTarget {
+    window: isize,
+}
+
+enum SystemPasteDispatchOutcome {
+    Pasted,
+    NoFocusedInput,
+}
+
+#[tauri::command]
+fn capture_system_dictation_focus_window(
+    state: State<'_, AppState>,
+) -> Result<SystemDictationFocusCaptureResult, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+        let foreground = unsafe { GetForegroundWindow() };
+        let handle = (!foreground.is_null()).then_some(foreground as isize);
+        *state
+            .system_dictation_focus_target
+            .lock()
+            .map_err(|_| "系统听写焦点状态不可用".to_string())? =
+            handle.map(|window| SystemDictationFocusTarget { window });
+        eprintln!("[system-dictation] foreground target captured: hwnd={handle:?}");
+        return Ok(SystemDictationFocusCaptureResult {
+            focus_detected: handle.is_some(),
+        });
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = state;
+        Ok(SystemDictationFocusCaptureResult {
+            focus_detected: true,
+        })
+    }
 }
 
 fn write_system_clipboard(text: &str) -> Result<(), String> {
@@ -1817,11 +1927,13 @@ impl Drop for ClipboardCloseGuard {
     }
 }
 
-fn dispatch_system_paste_shortcut() -> Result<(), String> {
+fn dispatch_system_paste_shortcut(
+    #[cfg(target_os = "windows")] focus_target: Option<SystemDictationFocusTarget>,
+) -> Result<SystemPasteDispatchOutcome, String> {
     std::thread::sleep(Duration::from_millis(90));
     #[cfg(target_os = "windows")]
     {
-        dispatch_windows_paste_shortcut()
+        dispatch_windows_paste_shortcut(focus_target)
     }
     #[cfg(target_os = "macos")]
     {
@@ -1837,7 +1949,7 @@ fn dispatch_system_paste_shortcut() -> Result<(), String> {
         if !output.status.success() {
             return Err("触发粘贴失败，请检查辅助功能权限".to_string());
         }
-        Ok(())
+        Ok(SystemPasteDispatchOutcome::Pasted)
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -1850,21 +1962,33 @@ fn dispatch_system_paste_shortcut() -> Result<(), String> {
         if !output.status.success() {
             return Err("触发粘贴失败，需要 xdotool".to_string());
         }
-        Ok(())
+        Ok(SystemPasteDispatchOutcome::Pasted)
     }
 }
 
 #[cfg(target_os = "windows")]
-fn dispatch_windows_paste_shortcut() -> Result<(), String> {
+fn dispatch_windows_paste_shortcut(
+    focus_target: Option<SystemDictationFocusTarget>,
+) -> Result<SystemPasteDispatchOutcome, String> {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
         VK_CONTROL, VK_V,
     };
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
-    if !windows_has_text_input_focus() {
-        eprintln!("[system-dictation] paste shortcut skipped: no text input focus");
-        return Ok(());
+    let Some(focus_target) = focus_target else {
+        eprintln!("[system-dictation] paste shortcut skipped: no captured input target");
+        return Ok(SystemPasteDispatchOutcome::NoFocusedInput);
+    };
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground.is_null() || foreground as isize != focus_target.window {
+        eprintln!(
+            "[system-dictation] paste shortcut skipped: captured window is no longer foreground"
+        );
+        return Ok(SystemPasteDispatchOutcome::NoFocusedInput);
     }
+    // Paste once into the foreground window captured at dictation start. This deliberately
+    // does not depend on native caret inspection because modern editors often draw it themselves.
     eprintln!("[system-dictation] paste shortcut dispatching: ctrl+v");
 
     fn keyboard_input(vk: VIRTUAL_KEY, flags: u32) -> INPUT {
@@ -1899,48 +2023,20 @@ fn dispatch_windows_paste_shortcut() -> Result<(), String> {
         return Err("触发粘贴失败".to_string());
     }
     eprintln!("[system-dictation] paste shortcut dispatched: inputs={sent}");
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn windows_has_text_input_focus() -> bool {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO,
-    };
-
-    unsafe {
-        let foreground = GetForegroundWindow();
-        if foreground.is_null() {
-            eprintln!("[system-dictation] input focus check: no foreground window");
-            return false;
-        }
-        let thread_id = GetWindowThreadProcessId(foreground, std::ptr::null_mut());
-        if thread_id == 0 {
-            eprintln!("[system-dictation] input focus check: no foreground thread");
-            return false;
-        }
-        let mut info = GUITHREADINFO::default();
-        info.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
-        if GetGUIThreadInfo(thread_id, &mut info) == 0 {
-            eprintln!("[system-dictation] input focus check: GetGUIThreadInfo failed");
-            return false;
-        }
-        let has_focus = !info.hwndFocus.is_null() || !info.hwndCaret.is_null();
-        eprintln!(
-            "[system-dictation] input focus check: has_focus={} has_caret={}",
-            !info.hwndFocus.is_null(),
-            !info.hwndCaret.is_null()
-        );
-        has_focus
-    }
+    Ok(SystemPasteDispatchOutcome::Pasted)
 }
 
 #[tauri::command]
-fn show_system_dictation_window(app: AppHandle) -> Result<(), String> {
+fn show_system_dictation_window(app: AppHandle, request_id: Option<u64>) -> Result<(), String> {
     eprintln!("[system-dictation] show window command received");
+    let request_id = register_system_dictation_overlay_request(request_id);
     let app_for_task = app.clone();
     app.run_on_main_thread(move || {
-        if let Err(err) = show_system_dictation_window_impl(&app_for_task) {
+        if !is_current_system_dictation_overlay_request(request_id) {
+            eprintln!("[system-dictation] stale show window request skipped");
+            return;
+        }
+        if let Err(err) = show_system_dictation_window_impl(&app_for_task, request_id, true) {
             eprintln!("[system-dictation] show window failed: {err}");
         }
     })
@@ -1948,13 +2044,31 @@ fn show_system_dictation_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn hide_system_dictation_window(app: AppHandle) -> Result<(), String> {
+fn hide_system_dictation_window(app: AppHandle, request_id: Option<u64>) -> Result<(), String> {
     eprintln!("[system-dictation] hide window command received");
+    let request_id = register_system_dictation_overlay_request(request_id);
     let app_for_task = app.clone();
     app.run_on_main_thread(move || {
-        hide_system_dictation_window_impl(&app_for_task);
+        if !is_current_system_dictation_overlay_request(request_id) {
+            eprintln!("[system-dictation] stale hide window request skipped");
+            return;
+        }
+        hide_system_dictation_window_impl(&app_for_task, request_id);
     })
     .map_err(|err| format!("调度系统听写窗口隐藏失败: {err}"))
+}
+
+fn register_system_dictation_overlay_request(request_id: Option<u64>) -> Option<u64> {
+    request_id.map(|id| {
+        SYSTEM_DICTATION_OVERLAY_REQUEST_ID.fetch_max(id, std::sync::atomic::Ordering::SeqCst);
+        id
+    })
+}
+
+fn is_current_system_dictation_overlay_request(request_id: Option<u64>) -> bool {
+    request_id.is_none_or(|id| {
+        SYSTEM_DICTATION_OVERLAY_REQUEST_ID.load(std::sync::atomic::Ordering::SeqCst) == id
+    })
 }
 
 #[tauri::command]
@@ -2025,13 +2139,20 @@ fn ensure_system_dictation_window_impl(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-fn show_system_dictation_window_impl(app: &AppHandle) -> Result<(), String> {
+fn show_system_dictation_window_impl(
+    app: &AppHandle,
+    request_id: Option<u64>,
+    show_recording_capsule: bool,
+) -> Result<(), String> {
+    SYSTEM_DICTATION_OVERLAY_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     eprintln!("[system-dictation] show window start");
     ensure_system_dictation_window_impl(app)?;
     if let Some(window) = app.get_webview_window(SYSTEM_DICTATION_WINDOW_LABEL) {
         position_system_dictation_window(app, &window);
         let _ = window.show();
-        let _ = window.emit("system-dictation-show", ());
+        if show_recording_capsule {
+            let _ = window.emit("system-dictation-show", request_id.unwrap_or_default());
+        }
         let _ = window.set_focusable(false);
         let _ = window.set_shadow(false);
         let _ = window.set_always_on_top(true);
@@ -2064,13 +2185,22 @@ fn position_system_dictation_window(app: &AppHandle, window: &tauri::WebviewWind
     eprintln!("[system-dictation] positioned window x={x} y={y}");
 }
 
-fn hide_system_dictation_window_impl(app: &AppHandle) {
+fn hide_system_dictation_window_impl(app: &AppHandle, request_id: Option<u64>) {
     eprintln!("[system-dictation] hide window start");
     if let Some(window) = app.get_webview_window(SYSTEM_DICTATION_WINDOW_LABEL) {
-        let _ = window.emit("system-dictation-hide", ());
+        let generation = SYSTEM_DICTATION_OVERLAY_GENERATION
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let _ = window.emit("system-dictation-hide", request_id.unwrap_or_default());
         let app_for_hide = app.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(150));
+            if SYSTEM_DICTATION_OVERLAY_GENERATION.load(std::sync::atomic::Ordering::SeqCst)
+                != generation
+            {
+                eprintln!("[system-dictation] stale hide skipped");
+                return;
+            }
             let app_for_lookup = app_for_hide.clone();
             let _ = app_for_hide.run_on_main_thread(move || {
                 if let Some(window) =
@@ -2095,25 +2225,48 @@ fn emit_system_dictation_overlay_level(app: &AppHandle, level: f64) {
 }
 
 #[tauri::command]
-fn set_system_dictation_status(app: AppHandle, text: String) -> Result<(), String> {
+fn set_system_dictation_status(
+    app: AppHandle,
+    text: String,
+    copy_text: Option<String>,
+    request_id: Option<u64>,
+) -> Result<(), String> {
     let message = text.trim().to_string();
+    let copy_text = copy_text.unwrap_or_default();
+    let request_id = if message.is_empty() && request_id.is_none() {
+        Some(
+            SYSTEM_DICTATION_OVERLAY_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1,
+        )
+    } else {
+        register_system_dictation_overlay_request(request_id)
+    };
     let app_for_task = app.clone();
     app.run_on_main_thread(move || {
+        if !is_current_system_dictation_overlay_request(request_id) {
+            eprintln!("[system-dictation] stale status request skipped");
+            return;
+        }
         if !message.is_empty() {
-            if let Err(err) = show_system_dictation_window_impl(&app_for_task) {
+            if let Err(err) = show_system_dictation_window_impl(&app_for_task, request_id, false) {
                 eprintln!("[system-dictation] show status window failed: {err}");
                 return;
             }
         }
         if let Some(window) = app_for_task.get_webview_window(SYSTEM_DICTATION_WINDOW_LABEL) {
-            let _ = window.emit("system-dictation-status", message.clone());
-            let escaped = serde_json::to_string(&message).unwrap_or_else(|_| "\"\"".to_string());
+            let payload = serde_json::json!({
+                "text": message,
+                "copyText": copy_text,
+                "requestId": request_id,
+            });
+            let _ = window.emit("system-dictation-status", payload.clone());
+            let escaped = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
             let _ = window.eval(format!(
                 "window.__transferGenieSetDictationStatus?.({escaped});"
             ));
         }
         if message.is_empty() {
-            hide_system_dictation_window_impl(&app_for_task);
+            hide_system_dictation_window_impl(&app_for_task, request_id);
         }
     })
     .map_err(|err| format!("调度系统听写状态失败: {err}"))
@@ -2525,6 +2678,13 @@ async fn persist_sent_message_with_marked_options(
         filename: message.filename.clone(),
         original_name: message.original_name.clone(),
         endpoint_id: endpoint.id.clone(),
+        transcript_source: message.transcript_source.clone(),
+        source_audio_mime_type: message.source_audio_mime_type.clone(),
+        transcript_text: message
+            .transcript_source
+            .as_ref()
+            .and_then(|_| message.content.clone()),
+        transcript_raw_text: message.transcript_raw_text.clone(),
     })
 }
 
@@ -3297,6 +3457,9 @@ async fn send_text_impl(
         marked_pinned: false,
         marked_due_date: None,
         format,
+        transcript_source: None,
+        source_audio_mime_type: None,
+        transcript_raw_text: None,
     };
 
     persist_sent_message_with_marked_options(state, &endpoint, &mut message, marked_options).await
@@ -3556,6 +3719,9 @@ async fn send_file_path_impl(
         marked_pinned: false,
         marked_due_date: None,
         format: "text".to_string(),
+        transcript_source: None,
+        source_audio_mime_type: None,
+        transcript_raw_text: None,
     };
 
     let result =
@@ -3639,6 +3805,88 @@ async fn send_file_data(
         marked_options,
     )
     .await
+}
+
+#[tauri::command]
+async fn send_speech_message(
+    state: State<'_, AppState>,
+    request: SendSpeechMessageRequest,
+    marked_options: Option<SendMarkedOptionsInput>,
+) -> Result<SendMessageResult, String> {
+    send_speech_message_impl(state.inner(), request, marked_options).await
+}
+
+async fn send_speech_message_impl(
+    state: &AppState,
+    request: SendSpeechMessageRequest,
+    marked_options: Option<SendMarkedOptionsInput>,
+) -> Result<SendMessageResult, String> {
+    let settings = current_settings(state)?;
+    let endpoint = resolve_active_endpoint(&settings)?;
+    let transcript = request.transcript.trim().to_string();
+    if transcript.is_empty() {
+        return Err("转写文本为空".to_string());
+    }
+    let raw_transcript = request
+        .raw_transcript
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != transcript)
+        .map(ToOwned::to_owned);
+
+    let timestamp_ms = now_ms();
+    let original_name = request
+        .original_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("speech-{timestamp_ms}.wav"));
+    let filename = build_message_filename(&settings.sender_name, &original_name, timestamp_ms);
+    let remote_path = message_remote_path(&filename, timestamp_ms);
+    let audio_data = request.audio_data;
+    let mime_type = request.mime_type.filter(|value| !value.trim().is_empty());
+
+    webdav::upload_file_ensuring_parent(&state.http, &endpoint, &remote_path, audio_data.clone())
+        .await?;
+
+    let mut message = DbMessage {
+        endpoint_id: endpoint.id.clone(),
+        filename: filename.clone(),
+        sender: settings.sender_name.clone(),
+        timestamp_ms,
+        size: audio_data.len() as i64,
+        kind: MessageKind::Text.as_str().to_string(),
+        original_name: original_name.clone(),
+        etag: None,
+        mtime: None,
+        content: Some(transcript),
+        local_path: None,
+        remote_path: Some(remote_path),
+        file_hash: None,
+        marked: false,
+        marked_tag_ids: Vec::new(),
+        marked_pinned: false,
+        marked_due_date: None,
+        format: "text".to_string(),
+        transcript_source: Some("speech-to-text".to_string()),
+        source_audio_mime_type: mime_type.clone(),
+        transcript_raw_text: raw_transcript,
+    };
+
+    let result =
+        persist_sent_message_with_marked_options(state, &endpoint, &mut message, marked_options)
+            .await?;
+    Ok(SendMessageResult {
+        marked_tag_ids: result.marked_tag_ids,
+        filename: result.filename,
+        original_name: result.original_name,
+        endpoint_id: result.endpoint_id,
+        transcript_source: message.transcript_source.clone(),
+        source_audio_mime_type: message.source_audio_mime_type.clone(),
+        transcript_text: message.content.clone(),
+        transcript_raw_text: message.transcript_raw_text.clone(),
+    })
 }
 
 #[tauri::command]
@@ -4614,6 +4862,51 @@ async fn open_message_file(
 }
 
 #[tauri::command]
+async fn get_message_source_audio_file(
+    state: State<'_, AppState>,
+    filename: String,
+) -> Result<String, String> {
+    if filename.trim().is_empty() {
+        return Err("文件名为空".to_string());
+    }
+    let settings = current_settings(&state)?;
+    let endpoint = resolve_active_endpoint(&settings)?;
+    let message = db::get_message(&state.db_path, &endpoint.id, &filename)
+        .map_err(|err| format!("读取消息失败: {err}"))?
+        .ok_or_else(|| "消息不存在".to_string())?;
+    if message.transcript_source.as_deref() != Some("speech-to-text") {
+        return Err("消息没有关联的源音频".to_string());
+    }
+
+    if let Some(local_path) = message
+        .local_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+        .map(PathBuf::from)
+    {
+        if local_path.is_file() {
+            return Ok(local_path.to_string_lossy().to_string());
+        }
+    }
+
+    let cache_dir = endpoint_files_dir(&state, &endpoint.id).join("source-audio");
+    fs::create_dir_all(&cache_dir).map_err(|err| format!("创建音频缓存目录失败: {err}"))?;
+    let cache_path = cache_dir.join(&filename);
+    if cache_path.is_file() {
+        return Ok(cache_path.to_string_lossy().to_string());
+    }
+
+    let remote_path = resolved_remote_path(
+        message.remote_path.as_deref(),
+        &message.filename,
+        Some(message.timestamp_ms),
+    );
+    let bytes = webdav::download_file(&state.http, &endpoint, &remote_path).await?;
+    fs::write(&cache_path, bytes).map_err(|err| format!("保存源音频缓存失败: {err}"))?;
+    Ok(cache_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 async fn open_download_dir(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let settings = current_settings(&state)?;
     let base_dir = resolve_download_dir(&state, &settings);
@@ -4815,6 +5108,8 @@ async fn delete_messages(
             delete_local_files_for_entry(
                 &state,
                 &settings,
+                &endpoint.id,
+                &message.filename,
                 &message.kind,
                 &message.original_name,
                 message.timestamp_ms,
@@ -4840,6 +5135,8 @@ async fn delete_messages(
             delete_local_files_for_entry(
                 &state,
                 &settings,
+                &endpoint.id,
+                &message.filename,
                 &message.kind,
                 &message.original_name,
                 message.timestamp_ms,
@@ -4884,6 +5181,8 @@ async fn cleanup_messages(
                 delete_local_files_for_entry(
                     &state,
                     &settings,
+                    &endpoint.id,
+                    &message.filename,
                     &message.kind,
                     &message.original_name,
                     message.timestamp_ms,
@@ -4942,6 +5241,8 @@ async fn cleanup_messages(
                 delete_local_files_for_entry(
                     &state,
                     &settings,
+                    &endpoint.id,
+                    &message.filename,
                     &message.kind,
                     &message.original_name,
                     message.timestamp_ms,
@@ -8947,11 +9248,18 @@ fn delete_local_file(path: &Path, base_dir: &Path) -> Result<(), String> {
 fn delete_local_files_for_entry(
     state: &AppState,
     settings: &Settings,
+    endpoint_id: &str,
+    filename: &str,
     kind: &str,
     original_name: &str,
     timestamp_ms: i64,
     local_path: Option<&str>,
 ) -> Result<(), String> {
+    if !filename.trim().is_empty() {
+        let endpoint_dir = endpoint_files_dir(state, endpoint_id);
+        let source_audio_path = endpoint_dir.join("source-audio").join(filename);
+        let _ = delete_local_file(&source_audio_path, &endpoint_dir);
+    }
     if kind != MessageKind::File.as_str() {
         return Ok(());
     }
@@ -9490,6 +9798,10 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
             marked_pinned,
             marked_due_date,
             format,
+            transcript_source,
+            source_audio_mime_type,
+            _transcript_text,
+            transcript_raw_text,
         ) = if let Some(history) = history_entry {
             (
                 history.sender.clone(),
@@ -9503,6 +9815,10 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
                 history.marked_pinned,
                 history.marked_due_date.clone(),
                 history.format.clone(),
+                history.transcript_source.clone(),
+                history.source_audio_mime_type.clone(),
+                history.transcript_text.clone(),
+                history.transcript_raw_text.clone(),
             )
         } else if let Some(parsed) = parsed.as_ref() {
             let format = if parsed.original_name.to_lowercase().ends_with(".md") {
@@ -9522,6 +9838,10 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
                 false,
                 None,
                 format,
+                None,
+                None,
+                None,
+                None,
             )
         } else {
             continue;
@@ -9556,6 +9876,9 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
             marked_pinned,
             marked_due_date,
             format,
+            transcript_source,
+            source_audio_mime_type,
+            transcript_raw_text,
         });
 
         if let Some(history) = history_entry {
@@ -9572,6 +9895,12 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
             message.marked_pinned = history.marked_pinned;
             message.marked_due_date = history.marked_due_date.clone();
             message.format = history.format.clone();
+            message.transcript_source = history.transcript_source.clone();
+            message.source_audio_mime_type = history.source_audio_mime_type.clone();
+            message.transcript_raw_text = history.transcript_raw_text.clone();
+            if history.transcript_source.as_deref() == Some("speech-to-text") {
+                message.content = history.transcript_text.clone();
+            }
         }
         if let Some(pending) = pending_marked_sync_by_filename.get(&filename) {
             apply_pending_marked_sync_to_message(&mut message, pending);
@@ -9606,7 +9935,7 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
 
         match kind_enum {
             MessageKind::Text => {
-                if message.content.is_none() {
+                if message.content.is_none() && message.transcript_source.is_none() {
                     let bytes = if file_entry.is_some() {
                         Some(webdav::download_file(&state.http, &endpoint, &remote_path).await?)
                     } else {
@@ -9650,6 +9979,8 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
                 || existing.etag != message.etag
                 || existing.mtime != message.mtime
                 || existing.format != message.format
+                || existing.transcript_source != message.transcript_source
+                || existing.source_audio_mime_type != message.source_audio_mime_type
             {
                 should_upsert = true;
             }
@@ -9705,6 +10036,13 @@ fn message_to_history(message: &DbMessage) -> HistoryEntry {
         marked_pinned: message.marked_pinned,
         marked_due_date: message.marked_due_date.clone(),
         format: message.format.clone(),
+        transcript_source: message.transcript_source.clone(),
+        source_audio_mime_type: message.source_audio_mime_type.clone(),
+        transcript_text: message
+            .transcript_source
+            .as_ref()
+            .and_then(|_| message.content.clone()),
+        transcript_raw_text: message.transcript_raw_text.clone(),
     }
 }
 
@@ -10370,6 +10708,8 @@ fn main() {
                     .map_err(|err| format!("创建 HTTP 客户端失败: {err}"))?,
                 registered_hotkey: Mutex::new(None),
                 registered_system_dictation_hotkey: Mutex::new(None),
+                #[cfg(target_os = "windows")]
+                system_dictation_focus_target: Mutex::new(None),
                 telegram_bridge: Mutex::new(TelegramBridgeManager::default()),
                 local_http_api: Mutex::new(LocalHttpApiManager::default()),
                 update_guard: AsyncMutex::new(()),
@@ -10663,6 +11003,8 @@ fn main() {
             discover_telegram_chats,
             save_settings,
             paste_dictation_text,
+            copy_dictation_text,
+            capture_system_dictation_focus_window,
             show_system_dictation_window,
             hide_system_dictation_window,
             set_system_dictation_level,
@@ -10677,6 +11019,7 @@ fn main() {
             process_text_with_ai,
             process_text_with_ai_stream,
             transcribe_speech,
+            send_speech_message,
             get_device_name,
             export_settings,
             import_settings,
@@ -10701,6 +11044,7 @@ fn main() {
             open_download_history_file,
             save_local_data,
             open_message_file,
+            get_message_source_audio_file,
             open_download_dir,
             open_log_dir,
             open_data_dir,
@@ -10813,6 +11157,8 @@ mod tests {
             http: Client::builder().build().expect("create http client"),
             registered_hotkey: Mutex::new(None),
             registered_system_dictation_hotkey: Mutex::new(None),
+            #[cfg(target_os = "windows")]
+            system_dictation_focus_target: Mutex::new(None),
             telegram_bridge: Mutex::new(TelegramBridgeManager::default()),
             local_http_api: Mutex::new(LocalHttpApiManager::default()),
             update_guard: AsyncMutex::new(()),
@@ -10868,6 +11214,10 @@ mod tests {
             marked_pinned: false,
             marked_due_date: None,
             format: "text".to_string(),
+            transcript_source: None,
+            source_audio_mime_type: None,
+            transcript_text: None,
+            transcript_raw_text: None,
         };
 
         let json = serde_json::to_string(&entry).unwrap();
@@ -10882,6 +11232,9 @@ mod tests {
         let deserialized_old: HistoryEntry = serde_json::from_str(json_old).unwrap();
         assert_eq!(deserialized_old.marked, false);
         assert_eq!(deserialized_old.format, "");
+        assert_eq!(deserialized_old.transcript_source, None);
+        assert_eq!(deserialized_old.source_audio_mime_type, None);
+        assert_eq!(deserialized_old.transcript_text, None);
     }
 
     #[test]
@@ -10904,6 +11257,9 @@ mod tests {
                 marked_pinned: false,
                 marked_due_date: None,
                 format: "text".to_string(),
+                transcript_source: None,
+                source_audio_mime_type: None,
+                transcript_raw_text: None,
             },
             Message {
                 filename: "old-marked.txt".to_string(),
@@ -10922,6 +11278,9 @@ mod tests {
                 marked_pinned: false,
                 marked_due_date: None,
                 format: "text".to_string(),
+                transcript_source: None,
+                source_audio_mime_type: None,
+                transcript_raw_text: None,
             },
             Message {
                 filename: "new-unmarked.txt".to_string(),
@@ -10940,12 +11299,79 @@ mod tests {
                 marked_pinned: false,
                 marked_due_date: None,
                 format: "text".to_string(),
+                transcript_source: None,
+                source_audio_mime_type: None,
+                transcript_raw_text: None,
             },
         ];
 
         let candidates = collect_cleanup_candidates(messages, Some(50));
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].filename, "old-unmarked.txt");
+    }
+
+    #[test]
+    fn message_to_history_preserves_speech_transcript_metadata() {
+        let message = DbMessage {
+            endpoint_id: "endpoint-1".to_string(),
+            filename: "speech.wav".to_string(),
+            sender: "tester".to_string(),
+            timestamp_ms: 123,
+            size: 4,
+            kind: "text".to_string(),
+            original_name: "speech.wav".to_string(),
+            etag: None,
+            mtime: None,
+            content: Some("转写结果".to_string()),
+            local_path: None,
+            remote_path: Some("files/speech.wav".to_string()),
+            file_hash: None,
+            marked: false,
+            marked_tag_ids: Vec::new(),
+            marked_pinned: false,
+            marked_due_date: None,
+            format: "text".to_string(),
+            transcript_source: Some("speech-to-text".to_string()),
+            source_audio_mime_type: Some("audio/wav".to_string()),
+            transcript_raw_text: Some("原始转写".to_string()),
+        };
+
+        let history = message_to_history(&message);
+
+        assert_eq!(history.kind, "text");
+        assert_eq!(history.original_name, "speech.wav");
+        assert_eq!(history.transcript_source.as_deref(), Some("speech-to-text"));
+        assert_eq!(history.source_audio_mime_type.as_deref(), Some("audio/wav"));
+        assert_eq!(history.transcript_text.as_deref(), Some("转写结果"));
+        assert_eq!(history.transcript_raw_text.as_deref(), Some("原始转写"));
+    }
+
+    #[test]
+    fn delete_local_files_for_entry_removes_speech_source_audio_cache() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-source-audio-cleanup-{}", now_ms()));
+        let settings = test_settings();
+        let state = test_app_state(&temp_dir, settings.clone());
+        let endpoint_dir = endpoint_files_dir(&state, "endpoint-1");
+        let cache_dir = endpoint_dir.join("source-audio");
+        fs::create_dir_all(&cache_dir).expect("create source audio cache");
+        let cache_path = cache_dir.join("speech.wav");
+        fs::write(&cache_path, b"RIFF").expect("write cached source audio");
+
+        delete_local_files_for_entry(
+            &state,
+            &settings,
+            "endpoint-1",
+            "speech.wav",
+            MessageKind::Text.as_str(),
+            "speech.wav",
+            123,
+            None,
+        )
+        .expect("delete local speech cache");
+
+        assert!(!cache_path.exists());
+        let _ = fs::remove_dir_all(temp_dir);
     }
 
     #[test]
@@ -11013,6 +11439,10 @@ mod tests {
                 marked_pinned: false,
                 marked_due_date: None,
                 format: "text".to_string(),
+                transcript_source: None,
+                source_audio_mime_type: None,
+                transcript_text: None,
+                transcript_raw_text: None,
             },
             HistoryEntry {
                 filename: "unselected.txt".to_string(),
@@ -11027,6 +11457,10 @@ mod tests {
                 marked_pinned: false,
                 marked_due_date: None,
                 format: "text".to_string(),
+                transcript_source: None,
+                source_audio_mime_type: None,
+                transcript_text: None,
+                transcript_raw_text: None,
             },
             HistoryEntry {
                 filename: "not-marked.txt".to_string(),
@@ -11041,6 +11475,10 @@ mod tests {
                 marked_pinned: false,
                 marked_due_date: None,
                 format: "text".to_string(),
+                transcript_source: None,
+                source_audio_mime_type: None,
+                transcript_text: None,
+                transcript_raw_text: None,
             },
         ];
 
@@ -11074,6 +11512,10 @@ mod tests {
             marked_pinned: false,
             marked_due_date: None,
             format: "text".to_string(),
+            transcript_source: None,
+            source_audio_mime_type: None,
+            transcript_text: None,
+            transcript_raw_text: None,
         }];
 
         let changed = apply_marked_tag_ids_to_entries(&mut entries, &[], &["tag-a".to_string()]);
@@ -12512,6 +12954,9 @@ mod tests {
             marked_pinned: false,
             marked_due_date: None,
             format: "text".to_string(),
+            transcript_source: None,
+            source_audio_mime_type: None,
+            transcript_raw_text: None,
         };
         let remote = crate::types::DavEntry {
             filename: "message.txt".to_string(),

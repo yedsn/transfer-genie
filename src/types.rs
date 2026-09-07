@@ -819,6 +819,12 @@ pub struct Message {
     pub marked_due_date: Option<String>,
     #[serde(default)]
     pub format: String,
+    #[serde(default)]
+    pub transcript_source: Option<String>,
+    #[serde(default)]
+    pub source_audio_mime_type: Option<String>,
+    #[serde(default)]
+    pub transcript_raw_text: Option<String>,
 }
 
 #[derive(Clone, Serialize)]

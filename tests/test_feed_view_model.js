@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import '../frontend/feed-view-model.js';
+import '../src-ui/src/utils/feed-view-model.js';
 
 const feedViewModel = globalThis.transferGenieFeedViewModel;
 
@@ -150,6 +150,49 @@ function testCanRenderInVueFlag() {
   assert.equal(file.showSaveFileAsAction, true);
 }
 
+function testSpeechTranscriptMessage() {
+  const viewModel = feedViewModel.createMessageViewModel(
+    message({
+      filename: 'speech.wav',
+      original_name: 'speech.wav',
+      content: '润色后的语音识别结果',
+      transcript_source: 'speech-to-text',
+      source_audio_mime_type: 'audio/wav',
+      transcript_raw_text: '语音识别结果',
+    }),
+    {
+      senderName: '',
+      formatTime: () => 'T',
+      formatBytes: () => '12 KB',
+      isImagePath: () => false,
+    }
+  );
+
+  assert.equal(viewModel.isText, true);
+  assert.equal(viewModel.isSpeechTranscript, true);
+  assert.equal(viewModel.canRenderInVue, false);
+  assert.equal(viewModel.showPlaySourceAudioAction, true);
+  assert.equal(viewModel.hasSpeechRawTranscript, true);
+  assert.equal(viewModel.speechRawTranscriptText, '语音识别结果');
+  assert.equal(viewModel.bodyText, '润色后的语音识别结果');
+}
+
+function testLongTextStaysOnLegacyPathForPreviewLimit() {
+  const viewModel = feedViewModel.createMessageViewModel(
+    message({ content: 'a'.repeat(11) }),
+    {
+      senderName: '',
+      formatTime: () => 'T',
+      formatBytes: () => '1 B',
+      isImagePath: () => false,
+      previewMaxChars: 10,
+    }
+  );
+
+  assert.equal(viewModel.exceedsPreviewLimit, true);
+  assert.equal(viewModel.canRenderInVue, false);
+}
+
 function testComplexFileMessagesStayOnLegacyPath() {
   const imageFile = feedViewModel.createMessageViewModel(
     message({ kind: 'file', original_name: 'photo.png', content: null }),
@@ -196,6 +239,8 @@ function run() {
   testImageFileMessage();
   testCreateMessageViewModels();
   testCanRenderInVueFlag();
+  testSpeechTranscriptMessage();
+  testLongTextStaysOnLegacyPathForPreviewLimit();
   testComplexFileMessagesStayOnLegacyPath();
   console.log('feed-view-model tests passed');
 }

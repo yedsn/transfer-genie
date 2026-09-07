@@ -20,21 +20,26 @@
     var format = normalizeText(source.format || 'text');
     var isFile = kind === 'file';
     var isText = !isFile;
+    var polishedText = isText ? normalizeText(source.content) : '';
+    var rawTranscriptText = normalizeText(source.transcript_raw_text).trim();
     var isMarkdown = isText && format === 'markdown';
     var isSelf = sender === '我' || (!!senderName && sender === senderName);
     var isMarked = !!source.marked;
+    var isSpeechTranscript = normalizeText(source.transcript_source) === 'speech-to-text';
     var isUploading = !!source.uploading;
     var isSending = !!source.sending;
     var isImage = isFile && !!ctx.isImagePath && ctx.isImagePath(originalName);
     var hasLocalFile = !!(ctx.hasLocalMessageFile && ctx.hasLocalMessageFile(source));
     var isDownloading = !!(ctx.isDownloadTaskActive && ctx.isDownloadTaskActive(source));
-    var canRenderSimpleText = isText && !isMarkdown && !isSending && !isUploading;
+    var previewMaxChars = Number(ctx.previewMaxChars || 0);
+    var exceedsPreviewLimit = isText && previewMaxChars > 0 && polishedText.length > previewMaxChars;
+    var canRenderSimpleText = isText && !isMarkdown && !isSpeechTranscript && !exceedsPreviewLimit && !isSending && !isUploading;
     var canRenderSimpleFile = isFile && !isImage && !isUploading && !isDownloading;
     var canRenderInVue = canRenderSimpleText || canRenderSimpleFile;
     var headerText = ctx.formatTime
       ? sender + ' · ' + ctx.formatTime(timestampMs)
       : sender;
-    var bodyText = isText ? normalizeText(source.content) : originalName;
+    var bodyText = isText ? polishedText : originalName;
     var metaText = ctx.formatBytes ? '大小 ' + ctx.formatBytes(size) : '';
 
     return {
@@ -49,12 +54,18 @@
       isImage: isImage,
       isSelf: isSelf,
       isMarked: isMarked,
+      isSpeechTranscript: isSpeechTranscript,
+      hasSpeechRawTranscript: isSpeechTranscript && !!rawTranscriptText && rawTranscriptText !== polishedText.trim(),
+      speechRawTranscriptText: rawTranscriptText,
+      speechPolishedTranscriptText: polishedText,
+      exceedsPreviewLimit: exceedsPreviewLimit,
       isUploading: isUploading,
       isSending: isSending,
       hasLocalFile: hasLocalFile,
       isDownloading: isDownloading,
       canRenderInVue: canRenderInVue,
       showCopyAction: isText && !isSending,
+      showPlaySourceAudioAction: isSpeechTranscript && !isSending,
       showDownloadTextAction: isText && !isSending,
       showOpenFileAction: isFile && !isUploading,
       showDownloadFileAction: isFile && !isUploading,

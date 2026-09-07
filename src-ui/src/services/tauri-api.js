@@ -65,6 +65,9 @@
     async sendFile(params) {
       return invoke('send_file', params);
     },
+    async sendSpeechMessage(params) {
+      return invoke('send_speech_message', params);
+    },
     async deleteMessages(filenames, deleteRemote) {
       return invoke('delete_messages', { filenames, deleteRemote });
     },
@@ -82,6 +85,9 @@
     },
     async getThumbnail(filename) {
       return invoke('get_thumbnail', { filename });
+    },
+    async getMessageSourceAudioFile(filename) {
+      return invoke('get_message_source_audio_file', { filename });
     },
   };
 
