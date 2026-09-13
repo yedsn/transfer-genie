@@ -2280,6 +2280,32 @@ async function run() {
       focusedInput?.focus();
       if (typeof focusedInput?.setSelectionRange === 'function') focusedInput.setSelectionRange(0, 0);
       await new Promise((r) => setTimeout(r, 30));
+      const altEvent = new KeyboardEvent('keydown', {
+        key: 'Alt',
+        code: 'AltRight',
+        bubbles: true,
+        cancelable: true,
+      });
+      focusedInput?.dispatchEvent(altEvent);
+      const store = window.transferGenieVue?.store;
+      const originalShortcut = store?.settingsForm?.systemDictationShortcut;
+      if (store?.settingsForm) store.settingsForm.systemDictationShortcut = 'alt+d';
+      const altComboEvent = new KeyboardEvent('keydown', {
+        key: 'd',
+        code: 'KeyD',
+        altKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      focusedInput?.dispatchEvent(altComboEvent);
+      if (store?.settingsForm) store.settingsForm.systemDictationShortcut = originalShortcut;
+      const speechButton = document.querySelector('#speech-to-text-toggle');
+      const buttonMouseDown = new MouseEvent('mousedown', {
+        bubbles: true,
+        cancelable: true,
+      });
+      speechButton?.dispatchEvent(buttonMouseDown);
+      const editorRemainedFocusedAfterTriggers = document.activeElement === focusedInput;
       await window.__speechSmoke.eventHandlers['system-dictation-toggle']({ payload: null });
       await new Promise((resolve, reject) => {
         const start = Date.now();
@@ -2336,6 +2362,10 @@ async function run() {
         overlayFocusStealCount: window.__speechSmoke.overlayFocusStealCount,
         activeAfterOverlayShownIsFocusedInput: activeAfterOverlayShown === focusedInput,
         activeAtOutputTimeIsSecondInput: document.activeElement === outputTimeInput,
+        altKeydownPrevented: altEvent.defaultPrevented,
+        altComboKeydownPrevented: altComboEvent.defaultPrevented,
+        buttonMouseDownPrevented: buttonMouseDown.defaultPrevented,
+        editorRemainedFocusedAfterTriggers,
       };
       window.__speechSmoke.longText = '语音识别文本'.repeat(20);
       window.__speechSmoke.stealFocusOnOverlayShow = false;
@@ -2354,6 +2384,10 @@ async function run() {
     assert.equal(focusedComposerDictationResult.activeAtOutputTimeIsSecondInput, true, 'the second input is focused while polish is still running');
     assert.equal(focusedComposerDictationResult.pastedBeforePolishDone, 0, 'system dictation does not paste partial or raw text while polish is running');
     assert.deepEqual(focusedComposerDictationResult.pastedTargets, [{ target: 'B', text: '润色：当前编辑器焦点识别结果' }], 'system dictation pastes once into the output-time target');
+    assert.equal(focusedComposerDictationResult.altKeydownPrevented, true, 'Alt keydown does not activate the editor-inactive default behavior');
+    assert.equal(focusedComposerDictationResult.altComboKeydownPrevented, true, 'configured Alt dictation shortcut does not alter editor focus');
+    assert.equal(focusedComposerDictationResult.buttonMouseDownPrevented, true, 'speech button mouse press does not take editor focus');
+    assert.equal(focusedComposerDictationResult.editorRemainedFocusedAfterTriggers, true, 'editor remains focused after Alt, shortcut, and button triggers');
 
     const stalledOverlayDictationResult = await evaluate(client, `(async () => {
       await new Promise((resolve, reject) => {

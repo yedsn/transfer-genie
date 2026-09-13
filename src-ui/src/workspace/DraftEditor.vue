@@ -704,6 +704,33 @@ function shouldSendForEnter(event: KeyboardEvent) {
   return !isCtrlLike && !isAlt && !isShift;
 }
 
+function preserveFocusForAltDictation(event: KeyboardEvent) {
+  if (event.isComposing) return false;
+  if (event.key === "Alt" || event.key === "AltGraph") {
+    event.preventDefault();
+    event.stopPropagation();
+    return true;
+  }
+
+  const settings = aiSettings.value;
+  if (!settings.systemDictationEnabled) return false;
+  const shortcut = String(settings.systemDictationShortcut || "").trim().toLowerCase();
+  if (!shortcut.includes("alt")) return false;
+
+  const mainKey = shortcut.split("+").pop() || "";
+  if (!mainKey) return false;
+  const code = event.code || "";
+  let eventKey = event.key.toLowerCase();
+  if (/^Key[A-Z]$/.test(code)) eventKey = code.slice(3).toLowerCase();
+  else if (/^Digit\d$/.test(code)) eventKey = code.slice(5);
+  else if (/^Numpad\d$/.test(code)) eventKey = code.slice(6);
+  if (!event.altKey || eventKey !== mainKey) return false;
+
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
 function handleEscapeKeydown(event: KeyboardEvent) {
   if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) return false;
   if (document.querySelector(".dialog-overlay, .cw-modal-backdrop")) return false;
@@ -727,6 +754,7 @@ function handleEscapeKeydown(event: KeyboardEvent) {
 }
 
 function handleEditorKeydown(event: KeyboardEvent) {
+  if (preserveFocusForAltDictation(event)) return;
   if (handleEscapeKeydown(event)) return;
   if (!shouldSendForEnter(event)) return;
   event.preventDefault();

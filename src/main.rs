@@ -2070,6 +2070,7 @@ fn ensure_system_dictation_window_impl(app: &AppHandle) -> Result<(), String> {
     .skip_taskbar(true)
     .always_on_top(true)
     .focusable(false)
+    .focused(false)
     .visible(false)
     .build()
     .map_err(|err| format!("创建系统听写窗口失败: {err}"))?;

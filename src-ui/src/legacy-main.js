@@ -12527,6 +12527,10 @@ if (transferClearButton) {
   transferClearButton.addEventListener('click', clearCurrentTransferList);
 }
 sendTextButton.addEventListener('click', sendText);
+if (speechToTextButton) {
+  // Keep the composer editor focused when dictation is started with the mouse.
+  speechToTextButton.addEventListener('mousedown', (event) => event.preventDefault());
+}
 document.addEventListener('click', (event) => {
   if (event.target?.closest?.('#speech-to-text-toggle')) {
     toggleSpeechRecording();
