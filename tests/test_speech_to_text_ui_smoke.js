@@ -739,8 +739,12 @@ async function run() {
 
     const buttonResult = await evaluate(client, `(async () => {
       let markdownSyncCount = 0;
+      let markdownSyncText = '';
       window.transferGenieComposer = window.transferGenieComposer || {};
-      window.transferGenieComposer._setActiveText = () => { markdownSyncCount += 1; };
+      window.transferGenieComposer._setActiveText = (text) => {
+        markdownSyncCount += 1;
+        markdownSyncText = String(text || '');
+      };
       const cueCountBeforeToggle = window.__speechSmoke.cueSounds.length;
       await new Promise((resolve, reject) => {
         const start = Date.now();
@@ -841,6 +845,7 @@ async function run() {
         fullscreenExitedImmediately,
         longText: window.__speechSmoke.longText,
         markdownSyncCount,
+        markdownSyncText,
         ...liveWaveState,
         buttonClass: document.querySelector('#speech-to-text-toggle').className,
         status: document.querySelector('#sync-status')?.textContent || '',
@@ -852,7 +857,7 @@ async function run() {
       };
     })()`);
     assert.equal(buttonResult.recording, true, `speech button enters recording state: ${JSON.stringify(buttonResult)}`);
-    assert.equal(buttonResult.text, '', 'recognized text is not inserted into the composer draft');
+    assert.equal(buttonResult.text, buttonResult.longText, 'button-triggered recognition retains the final transcript in the composer draft');
     assert.equal(buttonResult.sendRequest?.transcript, buttonResult.longText, 'recognized text is sent as a message');
     assert.equal(buttonResult.clipboardText, buttonResult.longText, 'recognized text is still copied for clipboard convenience');
     assert.equal(buttonResult.speechTaskCount, 1, 'successful transcription creates a retained task');
@@ -874,7 +879,8 @@ async function run() {
     assert.equal(buttonResult.stopClickCueDelta, 1, 'speech button immediately plays cue when closing recording');
     assert.equal(buttonResult.fullscreenBeforeSend, true, 'speech button test starts from fullscreen');
     assert.equal(buttonResult.fullscreenExitedImmediately, true, 'speech button exits fullscreen before message list refresh completes');
-    assert.equal(buttonResult.markdownSyncCount, 0, 'markdown editor is not touched when speech is sent directly');
+    assert.equal(buttonResult.markdownSyncCount, 1, 'speech button syncs the editor once for the final transcript');
+    assert.equal(buttonResult.markdownSyncText, buttonResult.longText, 'speech button editor sync contains the final transcript');
     assert.equal(buttonResult.request.format, 'wav', 'recording is transcoded to WAV before sending to backend');
     assert.equal(buttonResult.request.mimeType, 'audio/wav', 'WAV mime type is sent to backend');
     assert.equal(buttonResult.request.sampleRate, 16000, 'WAV sample rate is sent to backend');
@@ -962,7 +968,7 @@ async function run() {
     assert.ok(longRecordingResult.callsWhileRecording > 0, 'long recording transcribes completed chunks while recording continues');
     assert.equal(longRecordingResult.textWhileRecording, '', 'ordinary long recording does not write chunk text during recording');
     assert.ok(longRecordingResult.chunkCalls >= 3, `long recording is submitted as multiple ASR chunks: ${JSON.stringify(longRecordingResult)}`);
-    assert.equal(longRecordingResult.text, '', 'ordinary long recording does not write merged text into composer');
+    assert.equal(longRecordingResult.text, '分片1\n分片2\n分片3', 'ordinary long recording retains merged text in the composer');
     assert.equal(longRecordingResult.taskCount, 1, 'long recording still creates one visible speech task');
     assert.equal(longRecordingResult.taskTitle, '分片1\n分片2\n分片3', 'long recording task stores combined text');
     assert.equal(longRecordingResult.fullTaskText, '分片1\n分片2\n分片3', 'retained long recording task stores combined transcript');
@@ -1051,7 +1057,11 @@ async function run() {
     assert.equal(polishedLongRecordingResult.textWhileRecording, '', 'polished long recording does not write chunk text during recording');
     assert.equal(polishedLongRecordingResult.aiRequestCount, 1, 'polished long recording runs polish once after all chunks are complete');
     assert.equal(polishedLongRecordingResult.aiRequest.text, '润色分片1\n润色分片2\n润色分片3', 'polished long recording sends the complete transcript to AI');
-    assert.equal(polishedLongRecordingResult.text, '', 'polished long recording does not insert one final polished transcript');
+    assert.equal(
+      polishedLongRecordingResult.text,
+      '润色：润色分片1\n润色分片2\n润色分片3',
+      'polished long recording inserts one final polished transcript into the composer',
+    );
     assert.equal(polishedLongRecordingResult.sendTranscript, '润色：润色分片1\n润色分片2\n润色分片3', 'polished long recording sends one final polished transcript');
 
     const blankAllChunkFallbackResult = await evaluate(client, `(async () => {
@@ -1117,7 +1127,7 @@ async function run() {
       blankAllChunkFallbackResult.requestBytes.at(-1) > Math.min(...blankAllChunkFallbackResult.requestBytes.slice(0, -1)),
       'blank live chunk fallback sends the retained full recording, not another chunk',
     );
-    assert.equal(blankAllChunkFallbackResult.text, '', 'full-audio fallback does not insert text into composer');
+    assert.equal(blankAllChunkFallbackResult.text, blankAllChunkFallbackResult.longText, 'full-audio fallback retains its final transcript in the composer');
     assert.equal(blankAllChunkFallbackResult.sendTranscript, blankAllChunkFallbackResult.longText, 'full-audio fallback sends text when live chunks are blank');
     assert.equal(blankAllChunkFallbackResult.taskTitle, blankAllChunkFallbackResult.longText, 'full-audio fallback stores task text');
 
@@ -1183,7 +1193,7 @@ async function run() {
       return result;
     })()`);
     assert.equal(blankChunkResult.chunkCalls, 3, 'blank middle chunk is still counted as one internal ASR chunk');
-    assert.equal(blankChunkResult.text, '', 'blank middle chunk is not written into the composer');
+    assert.equal(blankChunkResult.text, '有效1\n有效3', 'blank middle chunk result is retained in the composer');
     assert.equal(blankChunkResult.sendTranscript, '有效1\n有效3', 'blank middle chunk is skipped while surrounding chunk text is preserved');
     assert.equal(blankChunkResult.taskCount, blankChunkResult.beforeTaskCount + 1, 'blank middle chunk still adds only one visible speech task');
     assert.equal(blankChunkResult.taskTitle, '有效1\n有效3', 'speech task stores the combined nonblank transcript');
@@ -1236,7 +1246,7 @@ async function run() {
       return result;
     })()`);
     assert.equal(hallucinatedChunkResult.chunkCalls, 4, 'pathological repeated chunks are detected after ASR returns');
-    assert.equal(hallucinatedChunkResult.text, '', 'pathological repeated single-character and phrase text is not inserted');
+    assert.equal(hallucinatedChunkResult.text, '正常1\n正常4', 'filtered pathological chunk result is retained in the composer');
     assert.equal(hallucinatedChunkResult.sendTranscript, '正常1\n正常4', 'pathological repeated single-character and phrase text is sent');
 
     const silentChunkResult = await evaluate(client, `(async () => {
@@ -1707,7 +1717,7 @@ async function run() {
       };
     })()`);
     assert.equal(buttonRecordingResult.requestDelta, 1, 'speech button starts one microphone request');
-    assert.equal(buttonRecordingResult.text, '', 'speech button does not keep recognized text in the composer');
+    assert.equal(buttonRecordingResult.text, buttonRecordingResult.longText, 'speech button keeps recognized text in the composer');
     assert.equal(buttonRecordingResult.sendCall?.transcript, buttonRecordingResult.longText, 'speech completion sends the recognized text');
     assert.equal(buttonRecordingResult.sendCall?.mimeType, 'audio/wav', 'speech completion sends the source audio mime type');
     assert.match(buttonRecordingResult.messagePreview, /语音识别文本/, 'sent speech message shows the transcript in the feed');
@@ -1821,7 +1831,7 @@ async function run() {
     assert.equal(speechPolishResult.saved.polish_action_id, 'formalize', 'speech polish action id is saved');
     assert.equal(speechPolishResult.aiRequest.actionId, 'formalize', 'speech polish uses the selected AI action');
     assert.equal(speechPolishResult.aiRequest.text, '需要润色的语音文本', 'speech polish sends raw transcript to AI');
-    assert.equal(speechPolishResult.text, '', 'speech polish does not insert polished text into composer');
+    assert.equal(speechPolishResult.text, '润色：需要润色的语音文本', 'speech polish inserts completed polished text into the composer');
     assert.equal(speechPolishResult.sendTranscript, '润色：需要润色的语音文本', 'speech polish sends polished text');
     assert.equal(speechPolishResult.sendRawTranscript, '需要润色的语音文本', 'speech polish sends raw transcript metadata');
     assert.equal(speechPolishResult.feedTextBeforeToggle, '润色：需要润色的语音文本', 'speech feed defaults to polished text');

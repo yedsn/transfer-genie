@@ -3919,18 +3919,6 @@ async function finishSpeechRecording() {
       saveSuccessfulSpeechTask(sendResult);
       return sendResult;
     };
-    const clearComposerForBackgroundSpeechSend = () => {
-      const cw = window.transferGenieComposer;
-      if (cw && cw.isActive && cw.isActive() && cw.clearActiveDraftAfterSend) {
-        cw.clearActiveDraftAfterSend();
-        return;
-      }
-      if (currentFormat === 'markdown' && mdEditor) {
-        mdEditor.setMarkdown('');
-      } else if (textInput) {
-        textInput.value = '';
-      }
-    };
     if (isSystemDictation) {
       const copyStartedAt = performance.now();
       await copyThenPasteSpeechTranscript(result?.text || '');
@@ -3966,7 +3954,7 @@ async function finishSpeechRecording() {
       });
       return;
     } else {
-      clearComposerForBackgroundSpeechSend();
+      insertTextIntoComposer(result?.text || '');
       copySpeechTranscriptInBackground(result?.text || '');
     }
     const updateTaskMs = performance.now() - updateTaskStartedAt;
