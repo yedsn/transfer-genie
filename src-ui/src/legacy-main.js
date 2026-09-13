@@ -147,6 +147,66 @@ async function setSystemDictationStatusText(text, options = {}) {
   }
 }
 
+function createSystemDictationAiRequestId() {
+  return `dictation-ai-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function streamSystemDictationPolish(request) {
+  const api = window.transferGenieApi;
+  const tauriInvoke = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
+  const eventApi = api?.event;
+  const tauriListen = window.__TAURI__?.event?.listen;
+  const streamInvoke = api?.ai?.processTextStream
+    ? (requestId, payload) => api.ai.processTextStream(requestId, payload)
+    : tauriInvoke
+      ? (requestId, payload) => tauriInvoke('process_text_with_ai_stream', { requestId, request: payload })
+      : null;
+  const streamListen = eventApi?.listen || tauriListen;
+  if (!streamInvoke || !streamListen) {
+    throw new Error('AI 流式润色不可用');
+  }
+
+  const requestId = createSystemDictationAiRequestId();
+  let output = '';
+  let unlisten = null;
+  let settled = false;
+  let resolveCompletion;
+  let rejectCompletion;
+  const completion = new Promise((resolve, reject) => {
+    resolveCompletion = resolve;
+    rejectCompletion = reject;
+  });
+  const handler = (event) => {
+    const payload = event?.payload || {};
+    if (payload.requestId !== requestId || settled) return;
+    if (payload.eventType === 'output_delta') {
+      output += String(payload.delta || '');
+      return;
+    }
+    if (payload.eventType === 'error') {
+      settled = true;
+      rejectCompletion(new Error(payload.error || 'AI 润色失败'));
+      return;
+    }
+    if (payload.eventType === 'done') {
+      settled = true;
+      resolveCompletion(output.trim());
+    }
+  };
+
+  try {
+    // Register before invoking because a fast provider can emit its first delta immediately.
+    unlisten = await streamListen('ai-text-stream', handler);
+    await Promise.all([streamInvoke(requestId, request), completion]);
+    if (!output.trim()) throw new Error('AI 响应为空');
+    return output.trim();
+  } finally {
+    if (typeof unlisten === 'function') {
+      try { unlisten(); } catch (error) { /* ignore listener cleanup errors */ }
+    }
+  }
+}
+
 async function polishSpeechTranscript(text, options = {}) {
   const value = String(text || '').trim();
   if (!value) return '';
@@ -169,23 +229,22 @@ async function polishSpeechTranscript(text, options = {}) {
     await setSystemDictationStatusText('正在进行润色');
   }
   try {
-    const result = api?.invoke
-      ? await api.invoke('process_text_with_ai', { request })
-      : tauriInvoke
-        ? await tauriInvoke('process_text_with_ai', { request })
-        : null;
-    const output = String(result?.outputText || '').trim();
+    const output = isSystemDictationPolish
+      ? await streamSystemDictationPolish(request)
+      : String((api?.invoke
+        ? await api.invoke('process_text_with_ai', { request })
+        : tauriInvoke
+          ? await tauriInvoke('process_text_with_ai', { request })
+          : null)?.outputText || '').trim();
     if (!output) throw new Error('AI 响应为空');
     if (isSystemDictationPolish) {
       logSystemDictation('polish done', { elapsedMs: Math.round(performance.now() - startedAt), outputChars: output.length, actionId: action.id });
-      await setSystemDictationStatusText('');
     }
     return output;
   } catch (error) {
     console.warn('[speech-to-text] polish failed', error);
     if (isSystemDictationPolish) {
       logSystemDictation('polish failed', { elapsedMs: Math.round(performance.now() - startedAt), error: String(error), actionId: action.id });
-      await setSystemDictationStatusText('');
     }
     return value;
   }
@@ -297,8 +356,8 @@ function defaultAiActions() {
       builtin: true,
       favorite: true,
       enabled: true,
-      system_prompt: '你是一个中文润色助手。你只负责把用户提供的内容整理得更清晰、自然、通顺。无论内容主题、语气、格式或完整度如何，都不要拒绝、不要说无法处理、不要评价内容是否合适，也不要追加说明或免责声明。',
-      user_prompt: '请润色下面的内容，保持原意不变，让表达更清晰、自然、通顺。可以修正错别字、标点、口语停顿和明显的语音转写错误；不要新增事实，不要改变人称、立场和核心意思。如果输入是 Markdown、列表、代码块或结构化文本，请尽量保持原有结构。无论输入内容是什么，都直接输出润色后的文本，不要解释，不要提示内容有问题。\n\n{{text}}',
+      system_prompt: '你是中文语音文本润色助手。只输出整理后的文本。',
+      user_prompt: '润色以下语音转写：修正错别字、标点和口语停顿，保持原意，不新增事实。只输出结果。\n\n{{text}}',
       output_mode: 'preview_replace',
     },
     {
@@ -2068,7 +2127,6 @@ let systemDictationLastLevelUpdateAt = 0;
 let systemDictationLastLevelUpdateSkippedCount = 0;
 let systemDictationLastStartAt = 0;
 let systemDictationOverlayRequestId = 0;
-let systemDictationInputTarget = null;
 const SYSTEM_DICTATION_LEVEL_UPDATE_INTERVAL_MS = 120;
 const SYSTEM_DICTATION_START_TOGGLE_GUARD_MS = 650;
 const SPEECH_RECORDING_STOP_TAIL_MS = 300;
@@ -2086,53 +2144,6 @@ function logSystemDictation(message, detail = {}) {
     };
     console.info('[system-dictation]', message, JSON.stringify(payload), payload);
   } catch (error) { /* ignore */ }
-}
-
-function isSystemDictationEditableTarget(element) {
-  if (!element || !element.isConnected || typeof element.focus !== 'function') return false;
-  if (element instanceof HTMLTextAreaElement) return true;
-  if (element instanceof HTMLInputElement) {
-    return !['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit'].includes(element.type?.toLowerCase() || 'text');
-  }
-  return !!element.isContentEditable;
-}
-
-function captureSystemDictationInputTarget() {
-  systemDictationInputTarget = null;
-  if (!document.hasFocus()) return;
-  const element = document.activeElement;
-  if (!isSystemDictationEditableTarget(element)) return;
-  const selectionStart = Number.isInteger(element.selectionStart) ? element.selectionStart : null;
-  const selectionEnd = Number.isInteger(element.selectionEnd) ? element.selectionEnd : selectionStart;
-  systemDictationInputTarget = { element, selectionStart, selectionEnd };
-  logSystemDictation('input target captured', {
-    selectionStart,
-    selectionEnd,
-    targetClass: String(element.className || ''),
-  });
-}
-
-function consumeSystemDictationInputTarget() {
-  const target = systemDictationInputTarget;
-  systemDictationInputTarget = null;
-  return target;
-}
-
-function restoreSystemDictationInputTarget(target) {
-  if (!target?.element || !target.element.isConnected) return false;
-  target.element.focus({ preventScroll: true });
-  if (
-    target.selectionStart !== null
-    && target.selectionEnd !== null
-    && typeof target.element.setSelectionRange === 'function'
-  ) {
-    try {
-      target.element.setSelectionRange(target.selectionStart, target.selectionEnd);
-    } catch (error) { /* Non-text targets keep their browser-restored caret. */ }
-  }
-  const restored = document.activeElement === target.element;
-  logSystemDictation('input target restored', { restored });
-  return restored;
 }
 
 function setSpeechLevel(level) {
@@ -3313,12 +3324,13 @@ async function pasteDictationTextToFocusedInput(text) {
   }
 }
 
-async function copyThenPasteSpeechTranscript(text, inputTarget) {
+async function copyThenPasteSpeechTranscript(text) {
   const value = String(text || '').trim();
   if (!value) return { copied: false, pasted: false, focusDetected: false };
+  // The native command writes the clipboard immediately before dispatching Ctrl+V.
+  if (invoke) return pasteDictationTextToFocusedInput(value);
   const copied = await copySpeechTranscriptToClipboard(value);
   if (!copied) return { copied: false, pasted: false, focusDetected: false };
-  if (inputTarget) restoreSystemDictationInputTarget(inputTarget);
   return pasteDictationTextToFocusedInput(value);
 }
 
@@ -3642,19 +3654,12 @@ async function startSpeechRecording() {
   }
   const sessionId = speechSessionId + 1;
   speechSessionId = sessionId;
-  if (systemDictationMode) captureSystemDictationInputTarget();
   setSpeechState('preparing');
   setStatus('正在打开麦克风...');
   try {
     speechCapturedSegments = [];
     resetLiveSpeechTranscription();
     if (systemDictationMode) {
-      try {
-        await invoke('capture_system_dictation_focus_window');
-      } catch (error) {
-        console.warn('[speech-to-text] system dictation focus capture failed', error);
-        logSystemDictation('focus capture failed', { error: String(error) });
-      }
       void setSystemDictationOverlayVisible(true);
     }
     if (systemDictationMode) logSystemDictation('opening microphone');
@@ -3758,6 +3763,7 @@ function stopSpeechRecording(options = {}) {
       return;
     }
     if (systemDictationMode) {
+      void setSystemDictationStatusText('正在识别语音...');
       logSystemDictation('overlay kept visible during tail capture', { tailMs: SPEECH_RECORDING_STOP_TAIL_MS });
     }
     speechStopFinalizeTimer = window.setTimeout(() => {
@@ -3807,7 +3813,6 @@ async function finishSpeechRecording() {
   }
   if (!chunks.length) {
     resetLiveSpeechTranscription();
-    consumeSystemDictationInputTarget();
     setSpeechState('idle');
     setErrorStatus('没有可识别的录音数据');
     if (isSystemDictation) setSystemDictationOverlayVisible(false);
@@ -3928,8 +3933,7 @@ async function finishSpeechRecording() {
     };
     if (isSystemDictation) {
       const copyStartedAt = performance.now();
-      const inputTarget = consumeSystemDictationInputTarget();
-      await copyThenPasteSpeechTranscript(result?.text || '', inputTarget);
+      await copyThenPasteSpeechTranscript(result?.text || '');
       copyMs = performance.now() - copyStartedAt;
       pasteMs = copyMs;
       logSystemDictation('paste step done', { pasteMs: Math.round(pasteMs) });
@@ -3957,8 +3961,8 @@ async function finishSpeechRecording() {
         saveSpeechTaskInBackground({ ...pendingSpeechTask, status: 'failed', error: String(error), updatedAtMs: Date.now() }, '保存失败任务');
         console.warn('[speech-to-text] background speech message send failed', error);
         logSystemDictation('background message send failed', { error: String(error) });
-        setErrorStatus(`系统听写已粘贴，消息发送失败：${error}`);
-        showToast(`系统听写已粘贴，消息发送失败：${error}`, 'error');
+        setErrorStatus(`系统听写识别完成，消息发送失败：${error}`);
+        showToast(`系统听写识别完成，消息发送失败：${error}`, 'error');
       });
       return;
     } else {
@@ -4002,7 +4006,6 @@ async function finishSpeechRecording() {
       updateSpeechTaskInBackground(taskId, { status: 'failed', error: String(error) }, '更新失败任务');
     }
     resetLiveSpeechTranscription();
-    consumeSystemDictationInputTarget();
     if (!isSystemDictation || speechState === 'transcribing') setSpeechState('idle');
     setErrorStatus(`语音识别失败：${error}`);
     if (isSystemDictation) logSystemDictation('finish failed', { error: String(error) });

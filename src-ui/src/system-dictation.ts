@@ -30,6 +30,7 @@ let currentCopyText = '';
 let resultAutoCloseTimer = 0;
 let resultHovered = false;
 let latestRequestId = 0;
+let capsuleMode: 'hidden' | 'recording' | 'status' | 'result' = 'hidden';
 
 function clearResultAutoCloseTimer() {
   if (resultAutoCloseTimer) window.clearTimeout(resultAutoCloseTimer);
@@ -38,7 +39,7 @@ function clearResultAutoCloseTimer() {
 
 function closeResult() {
   clearResultAutoCloseTimer();
-  const requestId = latestRequestId + 1;
+  const requestId = latestRequestId;
   setDictationStatusPayload({ text: '', copyText: '', requestId });
   void invoke?.('set_system_dictation_status', { text: '', copyText: '', requestId });
 }
@@ -66,9 +67,11 @@ function setWaveLevel(level: number) {
 function setDictationStatus(text: string) {
   const value = String(text || '').trim();
   if (statusText) statusText.textContent = value;
-  capsule?.classList.toggle('is-status', !!value);
-  capsule?.classList.toggle('is-result', !!value && !!currentCopyText);
-  capsule?.classList.toggle('is-recording', !value && !capsule.classList.contains('is-exiting'));
+  capsuleMode = value ? (currentCopyText ? 'result' : 'status') : 'hidden';
+  capsule?.classList.toggle('is-status', capsuleMode === 'status' || capsuleMode === 'result');
+  capsule?.classList.toggle('is-result', capsuleMode === 'result');
+  capsule?.classList.remove('is-recording');
+  capsule?.classList.toggle('is-exiting', capsuleMode === 'hidden');
   if (value) targetLevel = 0;
 }
 
@@ -102,6 +105,8 @@ function setDictationStatusPayload(payload: any) {
 }
 
 (window as any).__transferGenieSetDictationStatus = setDictationStatusPayload;
+(window as any).__transferGenieShowDictationCapsule = showCapsule;
+(window as any).__transferGenieHideDictationCapsule = hideCapsule;
 
 function paintWave() {
   displayedLevel += (targetLevel - displayedLevel) * 0.34;
@@ -128,8 +133,11 @@ function paintWave() {
 function showCapsule() {
   clearResultAutoCloseTimer();
   resultHovered = false;
+  capsuleMode = 'recording';
+  capsule?.classList.remove('is-entering');
   capsule?.classList.remove('is-exiting');
   capsule?.classList.remove('is-status');
+  capsule?.classList.remove('is-result');
   capsule?.classList.add('is-recording');
   if (statusText) statusText.textContent = '';
   copyButton.hidden = true;
@@ -139,19 +147,21 @@ function showCapsule() {
   if (introPulseTimer) window.clearTimeout(introPulseTimer);
   introPulseTimer = window.setTimeout(() => setWaveLevel(0), 260);
   if (capsule) {
-    capsule.style.animation = 'none';
-    capsule.offsetHeight;
-    capsule.style.animation = '';
+    void capsule.offsetHeight;
+    capsule.classList.add('is-entering');
   }
 }
 
 function hideCapsule() {
   clearResultAutoCloseTimer();
   resultHovered = false;
+  capsuleMode = 'hidden';
   targetLevel = 0;
   if (introPulseTimer) window.clearTimeout(introPulseTimer);
   introPulseTimer = 0;
   capsule?.classList.remove('is-recording');
+  capsule?.classList.remove('is-status');
+  capsule?.classList.remove('is-result');
   capsule?.classList.add('is-exiting');
   copyButton.hidden = true;
   closeButton.hidden = true;
@@ -194,6 +204,18 @@ capsule?.addEventListener('pointerenter', () => {
   if (!currentCopyText) return;
   resultHovered = true;
   clearResultAutoCloseTimer();
+});
+
+capsule?.addEventListener('pointerleave', () => {
+  if (!currentCopyText) return;
+  resultHovered = false;
+  scheduleResultAutoClose();
+});
+
+capsule?.addEventListener('animationend', (event) => {
+  if (event.target === capsule && event.animationName === 'dictation-enter') {
+    capsule.classList.remove('is-entering');
+  }
 });
 
 cancelButton?.addEventListener('mousedown', preventOverlayFocus);

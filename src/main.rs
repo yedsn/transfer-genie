@@ -109,8 +109,6 @@ struct AppState {
     http: Client,
     registered_hotkey: Mutex<Option<Shortcut>>,
     registered_system_dictation_hotkey: Mutex<Option<Shortcut>>,
-    #[cfg(target_os = "windows")]
-    system_dictation_focus_target: Mutex<Option<SystemDictationFocusTarget>>,
     telegram_bridge: Mutex<TelegramBridgeManager>,
     local_http_api: Mutex<LocalHttpApiManager>,
     update_guard: AsyncMutex<()>,
@@ -133,7 +131,7 @@ struct LocalBackupRecord {
     note: String,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LocalSnapshotRecord {
     path: String,
@@ -1722,10 +1720,7 @@ async fn transcribe_speech(
 }
 
 #[tauri::command]
-fn paste_dictation_text(
-    state: State<'_, AppState>,
-    text: String,
-) -> Result<SystemDictationPasteResult, String> {
+fn paste_dictation_text(text: String) -> Result<SystemDictationPasteResult, String> {
     let value = text.trim().to_string();
     if value.is_empty() {
         eprintln!("[system-dictation] paste skipped: empty text");
@@ -1738,23 +1733,11 @@ fn paste_dictation_text(
         "[system-dictation] paste command received: text_chars={}",
         value.chars().count()
     );
-    #[cfg(target_os = "windows")]
-    let focus_target = state
-        .system_dictation_focus_target
-        .lock()
-        .map_err(|_| "系统听写焦点状态不可用".to_string())?
-        .take();
     let paste_result = write_system_clipboard(&value).and_then(|()| {
         eprintln!("[system-dictation] clipboard write done");
-        dispatch_system_paste_shortcut(
-            #[cfg(target_os = "windows")]
-            focus_target,
-        )
+        dispatch_system_paste_shortcut()
     });
-    paste_result.map(|outcome| SystemDictationPasteResult {
-        focus_detected: !matches!(outcome, SystemPasteDispatchOutcome::NoFocusedInput),
-        pasted: matches!(outcome, SystemPasteDispatchOutcome::Pasted),
-    })
+    paste_result.map(system_dictation_paste_result)
 }
 
 #[tauri::command]
@@ -1766,57 +1749,27 @@ fn copy_dictation_text(text: String) -> Result<(), String> {
     write_system_clipboard(&value)
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SystemDictationPasteResult {
     focus_detected: bool,
     pasted: bool,
 }
 
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SystemDictationFocusCaptureResult {
-    focus_detected: bool,
-}
-
-#[cfg(target_os = "windows")]
-#[derive(Clone, Copy)]
-struct SystemDictationFocusTarget {
-    window: isize,
-}
-
+#[derive(Debug, PartialEq, Eq)]
 enum SystemPasteDispatchOutcome {
     Pasted,
     NoFocusedInput,
 }
 
-#[tauri::command]
-fn capture_system_dictation_focus_window(
-    state: State<'_, AppState>,
-) -> Result<SystemDictationFocusCaptureResult, String> {
-    #[cfg(target_os = "windows")]
-    {
-        use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
-
-        let foreground = unsafe { GetForegroundWindow() };
-        let handle = (!foreground.is_null()).then_some(foreground as isize);
-        *state
-            .system_dictation_focus_target
-            .lock()
-            .map_err(|_| "系统听写焦点状态不可用".to_string())? =
-            handle.map(|window| SystemDictationFocusTarget { window });
-        eprintln!("[system-dictation] foreground target captured: hwnd={handle:?}");
-        return Ok(SystemDictationFocusCaptureResult {
-            focus_detected: handle.is_some(),
-        });
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = state;
-        Ok(SystemDictationFocusCaptureResult {
-            focus_detected: true,
-        })
+fn system_dictation_paste_result(
+    outcome: SystemPasteDispatchOutcome,
+) -> SystemDictationPasteResult {
+    SystemDictationPasteResult {
+        focus_detected: !matches!(outcome, SystemPasteDispatchOutcome::NoFocusedInput),
+        // `pasted` describes successful OS shortcut dispatch, not confirmation that a
+        // third-party control accepted and inserted the clipboard contents.
+        pasted: matches!(outcome, SystemPasteDispatchOutcome::Pasted),
     }
 }
 
@@ -1927,13 +1880,11 @@ impl Drop for ClipboardCloseGuard {
     }
 }
 
-fn dispatch_system_paste_shortcut(
-    #[cfg(target_os = "windows")] focus_target: Option<SystemDictationFocusTarget>,
-) -> Result<SystemPasteDispatchOutcome, String> {
+fn dispatch_system_paste_shortcut() -> Result<SystemPasteDispatchOutcome, String> {
     std::thread::sleep(Duration::from_millis(90));
     #[cfg(target_os = "windows")]
     {
-        dispatch_windows_paste_shortcut(focus_target)
+        dispatch_windows_paste_shortcut()
     }
     #[cfg(target_os = "macos")]
     {
@@ -1967,28 +1918,20 @@ fn dispatch_system_paste_shortcut(
 }
 
 #[cfg(target_os = "windows")]
-fn dispatch_windows_paste_shortcut(
-    focus_target: Option<SystemDictationFocusTarget>,
-) -> Result<SystemPasteDispatchOutcome, String> {
+fn dispatch_windows_paste_shortcut() -> Result<SystemPasteDispatchOutcome, String> {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
         VK_CONTROL, VK_V,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
-    let Some(focus_target) = focus_target else {
-        eprintln!("[system-dictation] paste shortcut skipped: no captured input target");
-        return Ok(SystemPasteDispatchOutcome::NoFocusedInput);
-    };
     let foreground = unsafe { GetForegroundWindow() };
-    if foreground.is_null() || foreground as isize != focus_target.window {
-        eprintln!(
-            "[system-dictation] paste shortcut skipped: captured window is no longer foreground"
-        );
+    if foreground.is_null() {
+        eprintln!("[system-dictation] paste shortcut skipped: no current foreground window");
         return Ok(SystemPasteDispatchOutcome::NoFocusedInput);
     }
-    // Paste once into the foreground window captured at dictation start. This deliberately
-    // does not depend on native caret inspection because modern editors often draw it themselves.
+    // Read the foreground window immediately before injection so users can redirect output
+    // while recording, transcribing, or polishing is still in progress.
     eprintln!("[system-dictation] paste shortcut dispatching: ctrl+v");
 
     fn keyboard_input(vk: VIRTUAL_KEY, flags: u32) -> INPUT {
@@ -2152,6 +2095,7 @@ fn show_system_dictation_window_impl(
         let _ = window.show();
         if show_recording_capsule {
             let _ = window.emit("system-dictation-show", request_id.unwrap_or_default());
+            let _ = window.eval("window.__transferGenieShowDictationCapsule?.();");
         }
         let _ = window.set_focusable(false);
         let _ = window.set_shadow(false);
@@ -2192,6 +2136,7 @@ fn hide_system_dictation_window_impl(app: &AppHandle, request_id: Option<u64>) {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
         let _ = window.emit("system-dictation-hide", request_id.unwrap_or_default());
+        let _ = window.eval("window.__transferGenieHideDictationCapsule?.();");
         let app_for_hide = app.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(150));
@@ -10708,8 +10653,6 @@ fn main() {
                     .map_err(|err| format!("创建 HTTP 客户端失败: {err}"))?,
                 registered_hotkey: Mutex::new(None),
                 registered_system_dictation_hotkey: Mutex::new(None),
-                #[cfg(target_os = "windows")]
-                system_dictation_focus_target: Mutex::new(None),
                 telegram_bridge: Mutex::new(TelegramBridgeManager::default()),
                 local_http_api: Mutex::new(LocalHttpApiManager::default()),
                 update_guard: AsyncMutex::new(()),
@@ -11004,7 +10947,6 @@ fn main() {
             save_settings,
             paste_dictation_text,
             copy_dictation_text,
-            capture_system_dictation_focus_window,
             show_system_dictation_window,
             hide_system_dictation_window,
             set_system_dictation_level,
@@ -11157,8 +11099,6 @@ mod tests {
             http: Client::builder().build().expect("create http client"),
             registered_hotkey: Mutex::new(None),
             registered_system_dictation_hotkey: Mutex::new(None),
-            #[cfg(target_os = "windows")]
-            system_dictation_focus_target: Mutex::new(None),
             telegram_bridge: Mutex::new(TelegramBridgeManager::default()),
             local_http_api: Mutex::new(LocalHttpApiManager::default()),
             update_guard: AsyncMutex::new(()),
@@ -12312,6 +12252,38 @@ mod tests {
             assert_eq!(action.output_mode, "preview_replace");
             assert!(action.user_prompt.contains("{{text}}"));
         }
+
+        let polish = settings
+            .actions
+            .iter()
+            .find(|action| action.id == "polish")
+            .expect("missing default polish action");
+        assert_eq!(
+            polish.system_prompt,
+            "你是中文语音文本润色助手。只输出整理后的文本。"
+        );
+        assert_eq!(
+            polish.user_prompt,
+            "润色以下语音转写：修正错别字、标点和口语停顿，保持原意，不新增事实。只输出结果。\n\n{{text}}"
+        );
+    }
+
+    #[test]
+    fn system_dictation_paste_result_reports_dispatch_not_input_insertion() {
+        assert_eq!(
+            system_dictation_paste_result(SystemPasteDispatchOutcome::NoFocusedInput),
+            SystemDictationPasteResult {
+                focus_detected: false,
+                pasted: false,
+            }
+        );
+        assert_eq!(
+            system_dictation_paste_result(SystemPasteDispatchOutcome::Pasted),
+            SystemDictationPasteResult {
+                focus_detected: true,
+                pasted: true,
+            }
+        );
     }
 
     #[test]

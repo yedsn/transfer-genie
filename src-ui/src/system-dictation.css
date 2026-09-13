@@ -45,12 +45,17 @@
   overflow: hidden;
   transform: translateY(0) scale(1);
   opacity: 1;
+}
+
+.dictation-capsule.is-entering {
   animation: dictation-enter 260ms cubic-bezier(0.18, 0.9, 0.22, 1) both;
 }
 
 .dictation-capsule.is-exiting {
   pointer-events: none;
-  animation: dictation-exit 140ms cubic-bezier(0.4, 0, 1, 1) both;
+  opacity: 0;
+  visibility: hidden;
+  animation: none;
 }
 
 .dictation-capsule.is-status {
@@ -144,10 +149,6 @@
   will-change: transform, opacity;
 }
 
-.dictation-capsule.is-exiting .dictation-wave {
-  animation: dictation-wave-exit 95ms cubic-bezier(0.4, 0, 1, 1) both;
-}
-
 .dictation-wave span {
   width: 4px;
   height: 4px;
@@ -238,14 +239,6 @@
   animation: dictation-confirm-enter 220ms cubic-bezier(0.18, 0.9, 0.22, 1) both;
 }
 
-.dictation-capsule.is-exiting .dictation-action.cancel {
-  animation: dictation-cancel-exit 115ms cubic-bezier(0.4, 0, 1, 1) both;
-}
-
-.dictation-capsule.is-exiting .dictation-action.confirm {
-  animation: dictation-confirm-exit 115ms cubic-bezier(0.4, 0, 1, 1) both;
-}
-
 .dictation-action:hover {
   transform: translateY(-1px);
   filter: brightness(1.04);
@@ -290,12 +283,6 @@
   100% { width: var(--dictation-expanded-width); opacity: 1; transform: translateY(0) scale(1); }
 }
 
-@keyframes dictation-exit {
-  0% { width: var(--dictation-expanded-width); opacity: 1; transform: translateY(0) scale(1); }
-  70% { width: var(--dictation-collapsed-width); opacity: 1; transform: translateY(3px) scale(0.98); }
-  100% { width: var(--dictation-collapsed-width); opacity: 0; transform: translateY(9px) scale(0.94); }
-}
-
 @keyframes dictation-status-enter {
   from { width: var(--dictation-collapsed-width); opacity: 0; transform: translateY(5px) scale(0.96); }
   to { width: var(--dictation-expanded-width); opacity: 1; transform: translateY(0) scale(1); }
@@ -311,11 +298,6 @@
   to { opacity: 1; transform: scaleX(1); }
 }
 
-@keyframes dictation-wave-exit {
-  from { opacity: 1; transform: scaleX(1); }
-  to { opacity: 0; transform: scaleX(0.12); }
-}
-
 @keyframes dictation-cancel-enter {
   from { opacity: 0; transform: translateX(20px) scale(0.9); }
   to { opacity: 1; transform: translateX(0) scale(1); }
@@ -324,14 +306,4 @@
 @keyframes dictation-confirm-enter {
   from { opacity: 0; transform: translateX(-20px) scale(0.9); }
   to { opacity: 1; transform: translateX(0) scale(1); }
-}
-
-@keyframes dictation-cancel-exit {
-  from { opacity: 1; transform: translateX(0) scale(1); }
-  to { opacity: 0; transform: translateX(20px) scale(0.88); }
-}
-
-@keyframes dictation-confirm-exit {
-  from { opacity: 1; transform: translateX(0) scale(1); }
-  to { opacity: 0; transform: translateX(-20px) scale(0.88); }
 }

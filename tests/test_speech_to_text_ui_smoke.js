@@ -187,8 +187,8 @@ function preloadScript() {
       cueSounds: [],
       clipboardText: '',
       pastedText: '',
-      focusCaptureCount: 0,
-      focusDetectedAtDictationStart: true,
+      pasteTarget: 'default',
+      pastedTargets: [],
       pasteReturnsNoPaste: false,
       stealFocusOnOverlayShow: false,
       overlayFocusStealCount: 0,
@@ -196,6 +196,7 @@ function preloadScript() {
       downloads: [],
       aiRequests: [],
       failAiPolish: false,
+      aiStreamDelayMs: 0,
       systemDictationStatus: '',
       chunkDurationMs: 0,
       nextSampleCount: 0,
@@ -232,14 +233,12 @@ function preloadScript() {
           if (command === 'paste_dictation_text') {
             const text = String(args?.text || '');
             const pasted = !window.__speechSmoke.pasteWithoutFocus && !window.__speechSmoke.pasteReturnsNoPaste;
-            if (pasted) window.__speechSmoke.pastedText = text;
+            if (pasted) {
+              window.__speechSmoke.pastedText = text;
+              window.__speechSmoke.pastedTargets.push({ target: window.__speechSmoke.pasteTarget, text });
+            }
             window.__speechSmoke.clipboardText = text;
             return { focusDetected: !window.__speechSmoke.pasteWithoutFocus, pasted };
-          }
-          if (command === 'capture_system_dictation_focus_window') {
-            window.__speechSmoke.focusCaptureCount += 1;
-            window.__speechSmoke.capturedFocusTarget = document.activeElement || null;
-            return { focusDetected: window.__speechSmoke.focusDetectedAtDictationStart };
           }
           if (command === 'process_text_with_ai') {
             if (window.__speechSmoke.failAiPolish) throw 'AI 润色失败';
@@ -248,6 +247,28 @@ function preloadScript() {
             const actionId = String(request.actionId || 'polish');
             window.__speechSmoke.aiRequests.push({ actionId, text });
             return { actionId, actionName: actionId, outputText: '润色：' + text, outputMode: 'preview_replace' };
+          }
+          if (command === 'process_text_with_ai_stream') {
+            const request = args?.request || {};
+            const requestId = String(args?.requestId || '');
+            const text = String(request.text || '');
+            const actionId = String(request.actionId || 'polish');
+            window.__speechSmoke.aiRequests.push({ actionId, text, requestId, stream: true });
+            const emit = async (eventType, delta = '', error = '') => {
+              const handler = eventHandlers['ai-text-stream'];
+              if (handler) await handler({ payload: { requestId, eventType, delta, error } });
+            };
+            await emit('start');
+            const delayMs = Number(window.__speechSmoke.aiStreamDelayMs || 0);
+            if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+            if (window.__speechSmoke.failAiPolish) {
+              await emit('error', '', 'AI 润色失败');
+              throw new Error('AI 润色失败');
+            }
+            await emit('output_delta', '润色：');
+            await emit('output_delta', text);
+            await emit('done');
+            return null;
           }
           if (command === 'show_system_dictation_window' || command === 'hide_system_dictation_window') {
             if (window.__speechSmoke.hangOverlayInvokes) return new Promise(() => {});
@@ -510,12 +531,27 @@ async function run() {
     })`);
 
     const dictationPageResult = await (async () => {
-      const { targetId } = await chrome.browserClient.send('Target.createTarget', { url: `${APP_URL}system-dictation.html` });
+      const { targetId } = await chrome.browserClient.send('Target.createTarget', { url: 'about:blank' });
       const targets = await (await fetch(`http://127.0.0.1:${chrome.port}/json/list`)).json();
       const target = targets.find((item) => item.id === targetId);
       const dictationClient = createCdpClient(await connectWebSocket(target.webSocketDebuggerUrl));
       try {
+        await dictationClient.send('Page.enable');
         await dictationClient.send('Runtime.enable');
+        await dictationClient.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+          window.__dictationInvokeCalls = [];
+          window.__TAURI__ = {
+            core: {
+              invoke: async (command, args) => {
+                if (command === 'set_system_dictation_status') {
+                  window.__dictationInvokeCalls.push({ command, args });
+                }
+                return null;
+              },
+            },
+          };
+        })()` });
+        await dictationClient.send('Page.navigate', { url: `${APP_URL}system-dictation.html` });
         await evaluate(dictationClient, `new Promise((resolve, reject) => {
           const start = Date.now();
           const tick = () => {
@@ -532,6 +568,14 @@ async function run() {
           const beforeTransform = getComputedStyle(bar).transform;
           window.__transferGenieSetDictationLevel(0.65);
           await new Promise((resolve) => setTimeout(resolve, 220));
+          window.__transferGenieSetDictationStatus({ text: '', copyText: '' });
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          window.__transferGenieShowDictationCapsule?.();
+          const openingAnimationName = getComputedStyle(document.querySelector('.dictation-capsule')).animationName;
+          const openingHasEnteringClass = document.querySelector('.dictation-capsule')?.classList.contains('is-entering') || false;
+          window.__transferGenieSetDictationStatus({ text: '正在识别语音', copyText: '' });
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          const processingHasRecordingClass = document.querySelector('.dictation-capsule')?.classList.contains('is-recording') || false;
           window.__transferGenieSetDictationStatus({ text: '无焦点识别结果', copyText: '无焦点识别结果' });
           await new Promise((resolve) => setTimeout(resolve, 60));
           const statusElement = document.querySelector('#dictation-status');
@@ -554,21 +598,34 @@ async function run() {
           resultCapsule?.dispatchEvent(new PointerEvent('pointerenter', { bubbles: true }));
            await new Promise((resolve) => setTimeout(resolve, 3100));
            const hoveredStatus = document.querySelector('#dictation-status')?.textContent || '';
-           closeButton?.click();
-           await new Promise((resolve) => setTimeout(resolve, 20));
-           const closedStatus = document.querySelector('#dictation-status')?.textContent || '';
+          resultCapsule?.dispatchEvent(new PointerEvent('pointerleave', { bubbles: true }));
+           await new Promise((resolve) => setTimeout(resolve, 3100));
+           const leftResultStatus = document.querySelector('#dictation-status')?.textContent || '';
+           const hiddenHasRecordingClass = resultCapsule?.classList.contains('is-recording') || false;
+           const hiddenHasExitAnimation = getComputedStyle(resultCapsule).animationName !== 'none';
            window.__transferGenieSetDictationStatus({ text: '自动关闭的识别结果', copyText: '自动关闭的识别结果' });
            await new Promise((resolve) => setTimeout(resolve, 3100));
            const autoClosedStatus = document.querySelector('#dictation-status')?.textContent || '';
            window.__transferGenieSetDictationStatus({ text: '最新识别结果', copyText: '最新识别结果', requestId: 20 });
            window.__transferGenieSetDictationStatus({ text: '延迟的旧状态', copyText: '延迟的旧状态', requestId: 19 });
            const staleStatusIgnored = document.querySelector('#dictation-status')?.textContent || '';
+           window.__dictationInvokeCalls.length = 0;
+           window.__transferGenieSetDictationStatus({ text: '关闭请求编号结果', copyText: '关闭请求编号结果', requestId: 30 });
+           closeButton?.click();
+           await new Promise((resolve) => setTimeout(resolve, 40));
+           const closeStatusRequestId = window.__dictationInvokeCalls.at(-1)?.args?.requestId ?? null;
+           window.__transferGenieShowDictationCapsule?.();
+           const reopenedAnimationName = getComputedStyle(resultCapsule).animationName;
+           const reopenedHasRecordingClass = resultCapsule?.classList.contains('is-recording') || false;
            window.__transferGenieSetDictationStatus({ text: '正在进行润色', copyText: '' });
           await new Promise((resolve) => setTimeout(resolve, 20));
           const progressWidth = document.querySelector('.dictation-capsule')?.getBoundingClientRect().width || 0;
           const copyHiddenDuringProgress = copyButton?.hidden === true;
           return {
             functionReady: typeof window.__transferGenieSetDictationLevel === 'function',
+            openingAnimationName,
+            openingHasEnteringClass,
+            processingHasRecordingClass,
             resultStatus,
             defaultResultBackground,
             defaultResultShadow,
@@ -577,11 +634,16 @@ async function run() {
             resultHoverBackground,
             copyVisible,
             copyDisabled,
-             closeVisible,
-             hoveredStatus,
-             closedStatus,
-             autoClosedStatus,
+            closeVisible,
+            hoveredStatus,
+            leftResultStatus,
+            hiddenHasRecordingClass,
+            hiddenHasExitAnimation,
+            autoClosedStatus,
             staleStatusIgnored,
+            closeStatusRequestId,
+            reopenedAnimationName,
+            reopenedHasRecordingClass,
             resultMode,
             copyHiddenDuringProgress,
             progressWidth,
@@ -597,6 +659,9 @@ async function run() {
       }
     })();
     assert.equal(dictationPageResult.functionReady, true, 'system dictation overlay exposes level update function');
+    assert.equal(dictationPageResult.openingAnimationName, 'dictation-enter', 'opening the recording capsule keeps its enter animation');
+    assert.equal(dictationPageResult.openingHasEnteringClass, true, 'opening the recording capsule uses the explicit entering state');
+    assert.equal(dictationPageResult.processingHasRecordingClass, false, 'processing status replaces the recording capsule as soon as recording ends');
     assert.equal(dictationPageResult.resultStatus, '无焦点识别结果', 'system dictation overlay shows the copied result text');
     assert.equal(dictationPageResult.resultMode, true, 'system dictation overlay enters result mode');
     assert.equal(dictationPageResult.defaultResultBackground, 'rgba(8, 10, 14, 0.62)', 'system dictation result capsule uses a translucent readable background by default');
@@ -608,9 +673,14 @@ async function run() {
     assert.equal(dictationPageResult.copyDisabled, false, 'system dictation copy button is enabled for the result');
     assert.equal(dictationPageResult.closeVisible, true, 'system dictation result exposes a close button');
     assert.equal(dictationPageResult.hoveredStatus, '无焦点识别结果', 'hovering over the result keeps it visible past the automatic close delay');
-    assert.equal(dictationPageResult.closedStatus, '', 'system dictation close button clears the result');
+    assert.equal(dictationPageResult.leftResultStatus, '', 'leaving the result restarts the three-second automatic close delay');
+    assert.equal(dictationPageResult.hiddenHasRecordingClass, false, 'closing the result does not restore the recording capsule state');
+    assert.equal(dictationPageResult.hiddenHasExitAnimation, false, 'closing the result does not replay an exit animation');
     assert.equal(dictationPageResult.autoClosedStatus, '', 'unhovered result automatically closes after three seconds');
     assert.equal(dictationPageResult.staleStatusIgnored, '最新识别结果', 'delayed status from an older overlay request cannot replace the latest result');
+    assert.equal(dictationPageResult.closeStatusRequestId, 30, 'closing a result reuses the current overlay request ID');
+    assert.equal(dictationPageResult.reopenedAnimationName, 'dictation-enter', 'the capsule can reopen with its enter animation after a result closes');
+    assert.equal(dictationPageResult.reopenedHasRecordingClass, true, 'the capsule returns to recording mode after a result closes');
     assert.equal(dictationPageResult.copyHiddenDuringProgress, true, 'system dictation progress status does not expose the copy button');
     assert.ok(dictationPageResult.progressWidth > 0 && dictationPageResult.progressWidth < 160, 'system dictation progress capsule fits its status text without hidden action space');
     assert.notEqual(dictationPageResult.afterMotion, '', 'system dictation overlay writes waveform motion CSS variable');
@@ -1790,6 +1860,7 @@ async function run() {
       window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
       window.__speechSmoke.pastedText = '';
       window.__speechSmoke.clipboardText = '';
+      window.__speechSmoke.pastedTargets = [];
       window.__speechSmoke.calls = [];
       window.__speechSmoke.sendSpeechDelayMs = 120;
       const cueCountBeforeToggle = window.__speechSmoke.cueSounds.length;
@@ -1959,6 +2030,7 @@ async function run() {
     assert.equal(polishedSystemDictationResult.clipboardText, '润色：系统听写润色原文', 'polished shortcut speech copies text before pasting');
     assert.equal(polishedSystemDictationResult.sendTranscript, '润色：系统听写润色原文', 'polished shortcut speech sends polished text as a message');
     assert.equal(polishedSystemDictationResult.aiRequest.actionId, 'polish', 'polished system dictation uses configured polish action');
+    assert.equal(polishedSystemDictationResult.aiRequest.stream, true, 'polished system dictation uses the AI stream command');
     assert.ok(polishedSystemDictationResult.statusCalls.includes('正在进行润色'), 'system dictation shows polishing status');
     assert.equal(polishedSystemDictationResult.statusCalls.at(-1), '润色：系统听写润色原文', 'system dictation displays the final polished result after output');
 
@@ -2050,7 +2122,6 @@ async function run() {
       window.__speechSmoke.calls = [];
       window.__speechSmoke.sentMessages = [];
       window.__speechSmoke.pasteWithoutFocus = true;
-      window.__speechSmoke.focusDetectedAtDictationStart = false;
       window.__speechSmoke.longText = '没有系统焦点的识别结果';
       document.activeElement?.blur?.();
       await window.__speechSmoke.eventHandlers['system-dictation-toggle']({ payload: null });
@@ -2098,7 +2169,6 @@ async function run() {
         )?.args || null,
       };
       window.__speechSmoke.pasteWithoutFocus = false;
-      window.__speechSmoke.focusDetectedAtDictationStart = true;
       window.__speechSmoke.longText = '语音识别文本'.repeat(20);
       return result;
     })()`);
@@ -2123,7 +2193,6 @@ async function run() {
       window.__speechSmoke.clipboardText = '';
       window.__speechSmoke.calls = [];
       window.__speechSmoke.sentMessages = [];
-      window.__speechSmoke.focusDetectedAtDictationStart = true;
       window.__speechSmoke.pasteReturnsNoPaste = true;
       window.__speechSmoke.longText = '粘贴失败时的识别结果';
       document.querySelector('.cw-textarea, #text-input')?.focus();
@@ -2165,7 +2234,7 @@ async function run() {
     })()`);
     assert.equal(failedPasteDictationResult.pastedText, '', 'failed paste does not claim that text reached the input');
     assert.equal(failedPasteDictationResult.clipboardText, '粘贴失败时的识别结果', 'failed paste still copies the result');
-    assert.equal(failedPasteDictationResult.pasteCount, 1, 'failed paste attempts the captured input once');
+    assert.equal(failedPasteDictationResult.pasteCount, 1, 'failed paste attempts one output-time dispatch');
     assert.equal(failedPasteDictationResult.statusCall?.text, '粘贴失败时的识别结果', 'failed paste displays the copied result text');
     assert.equal(failedPasteDictationResult.statusCall?.copyText, '粘贴失败时的识别结果', 'failed paste keeps the result available in the capsule');
 
@@ -2183,6 +2252,7 @@ async function run() {
       window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
       window.__speechSmoke.pastedText = '';
       window.__speechSmoke.clipboardText = '';
+      window.__speechSmoke.pastedTargets = [];
       window.__speechSmoke.calls = [];
       window.__speechSmoke.sendSpeechDelayMs = 120;
       window.__speechSmoke.longText = '当前编辑器焦点识别结果';
@@ -2203,9 +2273,10 @@ async function run() {
       });
       const beforePasteCalls = window.__speechSmoke.calls.filter((call) => call.command === 'paste_dictation_text').length;
       const focusedInput = document.querySelector('.cw-textarea, #text-input');
-      window.__speechSmoke.focusCaptureCount = 0;
       window.__speechSmoke.overlayFocusStealCount = 0;
-      window.__speechSmoke.stealFocusOnOverlayShow = true;
+      window.__speechSmoke.stealFocusOnOverlayShow = false;
+      window.__speechSmoke.pasteTarget = 'A';
+      window.__speechSmoke.aiStreamDelayMs = 220;
       focusedInput?.focus();
       if (typeof focusedInput?.setSelectionRange === 'function') focusedInput.setSelectionRange(0, 0);
       await new Promise((r) => setTimeout(r, 30));
@@ -2223,6 +2294,13 @@ async function run() {
       const activeAfterOverlayShown = document.activeElement;
       await new Promise((r) => setTimeout(r, 80));
       await window.__speechSmoke.eventHandlers['system-dictation-toggle']({ payload: null });
+      const outputTimeInput = document.createElement('input');
+      outputTimeInput.type = 'text';
+      document.body.appendChild(outputTimeInput);
+      outputTimeInput.focus();
+      window.__speechSmoke.pasteTarget = 'B';
+      await new Promise((r) => setTimeout(r, 80));
+      const pastedBeforePolishDone = window.__speechSmoke.pastedTargets.length;
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
@@ -2247,21 +2325,23 @@ async function run() {
         tick();
       });
       const afterPasteCalls = window.__speechSmoke.calls.filter((call) => call.command === 'paste_dictation_text').length;
-      const selectionAfterPaste = typeof focusedInput?.selectionStart === 'number' ? focusedInput.selectionStart : null;
       const result = {
         text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
         pastedText: window.__speechSmoke.pastedText,
         clipboardText: window.__speechSmoke.clipboardText,
         sendTranscript: window.__speechSmoke.calls.filter((call) => call.command === 'send_speech_message').at(-1)?.args?.request?.transcript || '',
         pasteDelta: afterPasteCalls - beforePasteCalls,
-        focusCaptureCount: window.__speechSmoke.focusCaptureCount,
+        pastedTargets: window.__speechSmoke.pastedTargets.slice(),
+        pastedBeforePolishDone,
         overlayFocusStealCount: window.__speechSmoke.overlayFocusStealCount,
         activeAfterOverlayShownIsFocusedInput: activeAfterOverlayShown === focusedInput,
-        activeAfterPasteIsFocusedInput: document.activeElement === focusedInput,
-        selectionAfterPaste,
+        activeAtOutputTimeIsSecondInput: document.activeElement === outputTimeInput,
       };
       window.__speechSmoke.longText = '语音识别文本'.repeat(20);
       window.__speechSmoke.stealFocusOnOverlayShow = false;
+      window.__speechSmoke.aiStreamDelayMs = 0;
+      window.__speechSmoke.pasteTarget = 'default';
+      outputTimeInput.remove();
       return result;
     })()`);
     assert.equal(focusedComposerDictationResult.text, '', 'shortcut dictation does not append text when Transfer Genie composer is focused');
@@ -2269,11 +2349,11 @@ async function run() {
     assert.equal(focusedComposerDictationResult.clipboardText, '润色：当前编辑器焦点识别结果', 'shortcut dictation copies polished text before pasting when focused in Transfer Genie');
     assert.equal(focusedComposerDictationResult.pasteDelta, 1, 'shortcut dictation calls paste when Transfer Genie composer is focused');
     assert.equal(focusedComposerDictationResult.sendTranscript, '润色：当前编辑器焦点识别结果', 'shortcut dictation sends the polished focused composer text as a message');
-    assert.equal(focusedComposerDictationResult.focusCaptureCount, 1, 'shortcut dictation captures the focused window before showing the overlay');
-    assert.equal(focusedComposerDictationResult.overlayFocusStealCount, 1, 'focused-editor test simulates overlay webview focus loss');
-    assert.equal(focusedComposerDictationResult.activeAfterOverlayShownIsFocusedInput, false, 'shortcut dictation records its editor target before overlay focus loss');
-    assert.equal(focusedComposerDictationResult.activeAfterPasteIsFocusedInput, true, 'focused composer remains the paste target after dictation completes');
-    assert.equal(focusedComposerDictationResult.selectionAfterPaste, 0, 'focused composer restores the captured caret before paste');
+    assert.equal(focusedComposerDictationResult.overlayFocusStealCount, 0, 'overlay updates do not steal focus');
+    assert.equal(focusedComposerDictationResult.activeAfterOverlayShownIsFocusedInput, true, 'overlay updates keep the original external input focused');
+    assert.equal(focusedComposerDictationResult.activeAtOutputTimeIsSecondInput, true, 'the second input is focused while polish is still running');
+    assert.equal(focusedComposerDictationResult.pastedBeforePolishDone, 0, 'system dictation does not paste partial or raw text while polish is running');
+    assert.deepEqual(focusedComposerDictationResult.pastedTargets, [{ target: 'B', text: '润色：当前编辑器焦点识别结果' }], 'system dictation pastes once into the output-time target');
 
     const stalledOverlayDictationResult = await evaluate(client, `(async () => {
       await new Promise((resolve, reject) => {
