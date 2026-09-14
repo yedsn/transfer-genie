@@ -1029,10 +1029,6 @@
                       <input id="speech-to-text-polish-temperature" type="number" min="0" max="2" step="0.1" :value="ui.settingsForm.speechToTextPolishTemperature" :disabled="!ui.settingsForm.speechToTextPolishEnabled" @input="updateSettingsFormField('speechToTextPolishTemperature', Number($event.target.value || 0.1))" />
                     </label>
                     <label>
-                      输出上限
-                      <input id="speech-to-text-polish-max-output-tokens" type="number" min="128" max="8192" step="1" :value="ui.settingsForm.speechToTextPolishMaxOutputTokens" :disabled="!ui.settingsForm.speechToTextPolishEnabled" @input="updateSettingsFormField('speechToTextPolishMaxOutputTokens', Number($event.target.value || 256))" />
-                    </label>
-                    <label>
                       超时（秒）
                       <input id="speech-to-text-polish-timeout" type="number" min="5" max="300" step="1" :value="ui.settingsForm.speechToTextPolishTimeoutSecs" :disabled="!ui.settingsForm.speechToTextPolishEnabled" @input="updateSettingsFormField('speechToTextPolishTimeoutSecs', Number($event.target.value || 20))" />
                     </label>

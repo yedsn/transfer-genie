@@ -1,7 +1,7 @@
 ## 1. Settings Model
 
-- [x] 1.1 Add speech-polish model, deep-thinking flag, temperature, max output length, and timeout fields with backward-compatible defaults, and verify focused Rust settings/default tests pass
-- [x] 1.2 Normalize speech-polish performance values, including empty model fallback, bounded temperature, bounded output length, bounded timeout, and boolean deep-thinking handling, and verify invalid settings are normalized or rejected by Rust tests
+- [x] 1.1 Add speech-polish model, deep-thinking flag, temperature, and timeout fields with backward-compatible defaults, and verify focused Rust settings/default tests pass
+- [x] 1.2 Normalize speech-polish performance values, including empty model fallback, bounded temperature, bounded timeout, and boolean deep-thinking handling, and verify invalid settings are normalized or rejected by Rust tests
 - [x] 1.3 Preserve import/export compatibility without adding a second speech-polish API key field, and verify settings export/import tests cover the new non-secret fields
 
 ## 2. AI Request Behavior
@@ -14,7 +14,7 @@
 ## 3. Settings UI
 
 - [x] 3.1 Add speech-polish model and deep-thinking controls beside the existing speech polish action settings, and verify the deep-thinking switch is visually colocated with the model field in the settings UI
-- [x] 3.2 Add UI inputs for speech-polish temperature, max output length, and timeout with clear bounds, and verify settings save serializes the normalized values
+- [x] 3.2 Add UI inputs for speech-polish temperature and timeout with clear bounds, use a dynamic generated-output limit, and verify settings save serializes the normalized values
 - [x] 3.3 Load legacy settings into the UI with low-latency defaults and deep thinking off, and verify existing settings smoke tests still pass
 
 ## 4. Verification

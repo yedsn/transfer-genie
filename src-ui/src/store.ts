@@ -114,7 +114,6 @@ export const transferGenieState = reactive<TransferGenieState>({
     speechToTextPolishModel: "",
     speechToTextPolishDeepThinkingEnabled: false,
     speechToTextPolishTemperature: 0.1,
-    speechToTextPolishMaxOutputTokens: 256,
     speechToTextPolishTimeoutSecs: 20,
   },
   settingsSnapshots: [],

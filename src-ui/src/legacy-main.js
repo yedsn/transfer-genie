@@ -17,7 +17,6 @@ const DEFAULT_SPEECH_CUE_SOUND_KIND = 'system';
 const DEFAULT_SYSTEM_DICTATION_SHORTCUT = 'alt+d';
 const DEFAULT_SPEECH_POLISH_ACTION_ID = 'polish';
 const DEFAULT_SPEECH_POLISH_TEMPERATURE = 0.1;
-const DEFAULT_SPEECH_POLISH_MAX_OUTPUT_TOKENS = 256;
 const DEFAULT_SPEECH_POLISH_TIMEOUT_SECS = 20;
 
 function normalizeEditorFormat(format) {
@@ -134,12 +133,6 @@ function normalizeSpeechPolishTemperature(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return DEFAULT_SPEECH_POLISH_TEMPERATURE;
   return Math.max(0, Math.min(2, number));
-}
-
-function normalizeSpeechPolishMaxOutputTokens(value) {
-  const number = Math.floor(Number(value));
-  if (!Number.isFinite(number) || number <= 0) return DEFAULT_SPEECH_POLISH_MAX_OUTPUT_TOKENS;
-  return Math.max(128, Math.min(8192, number));
 }
 
 function normalizeSpeechPolishTimeoutSecs(value) {
@@ -894,7 +887,6 @@ const speechToTextPolishActionInput = document.getElementById('speech-to-text-po
 const speechToTextPolishModelInput = document.getElementById('speech-to-text-polish-model');
 const speechToTextPolishDeepThinkingInput = document.getElementById('speech-to-text-polish-deep-thinking-enabled');
 const speechToTextPolishTemperatureInput = document.getElementById('speech-to-text-polish-temperature');
-const speechToTextPolishMaxOutputTokensInput = document.getElementById('speech-to-text-polish-max-output-tokens');
 const speechToTextPolishTimeoutInput = document.getElementById('speech-to-text-polish-timeout');
 const speechTaskHistorySummary = document.getElementById('speech-task-history-summary');
 const speechTaskHistoryList = document.getElementById('speech-task-history-list');
@@ -1181,7 +1173,6 @@ let currentSettingsFormState = {
   speechToTextPolishModel: '',
   speechToTextPolishDeepThinkingEnabled: false,
   speechToTextPolishTemperature: DEFAULT_SPEECH_POLISH_TEMPERATURE,
-  speechToTextPolishMaxOutputTokens: DEFAULT_SPEECH_POLISH_MAX_OUTPUT_TOKENS,
   speechToTextPolishTimeoutSecs: DEFAULT_SPEECH_POLISH_TIMEOUT_SECS,
 };
 let currentAutoBackupStatusState = {
@@ -10935,7 +10926,6 @@ function applySettings(settings) {
   if (speechToTextPolishModelInput) speechToTextPolishModelInput.value = speechToText.polish_model || '';
   if (speechToTextPolishDeepThinkingInput) speechToTextPolishDeepThinkingInput.checked = !!speechToText.polish_deep_thinking_enabled;
   if (speechToTextPolishTemperatureInput) speechToTextPolishTemperatureInput.value = normalizeSpeechPolishTemperature(speechToText.polish_temperature ?? DEFAULT_SPEECH_POLISH_TEMPERATURE);
-  if (speechToTextPolishMaxOutputTokensInput) speechToTextPolishMaxOutputTokensInput.value = normalizeSpeechPolishMaxOutputTokens(speechToText.polish_max_output_tokens ?? DEFAULT_SPEECH_POLISH_MAX_OUTPUT_TOKENS);
   if (speechToTextPolishTimeoutInput) speechToTextPolishTimeoutInput.value = normalizeSpeechPolishTimeoutSecs(speechToText.polish_timeout_secs ?? DEFAULT_SPEECH_POLISH_TIMEOUT_SECS);
   currentSettingsFormState = {
     senderName: settings.sender_name || '',
@@ -10991,7 +10981,6 @@ function applySettings(settings) {
     speechToTextPolishModel: speechToText.polish_model || '',
     speechToTextPolishDeepThinkingEnabled: !!speechToText.polish_deep_thinking_enabled,
     speechToTextPolishTemperature: normalizeSpeechPolishTemperature(speechToText.polish_temperature ?? DEFAULT_SPEECH_POLISH_TEMPERATURE),
-    speechToTextPolishMaxOutputTokens: normalizeSpeechPolishMaxOutputTokens(speechToText.polish_max_output_tokens ?? DEFAULT_SPEECH_POLISH_MAX_OUTPUT_TOKENS),
     speechToTextPolishTimeoutSecs: normalizeSpeechPolishTimeoutSecs(speechToText.polish_timeout_secs ?? DEFAULT_SPEECH_POLISH_TIMEOUT_SECS),
   };
   syncVueSettingsForm(currentSettingsFormState);
@@ -11133,7 +11122,6 @@ async function saveSettings(options = {}) {
   const speechToTextPolishModel = (currentSettingsFormState.speechToTextPolishModel || '').trim();
   const speechToTextPolishDeepThinkingEnabled = !!currentSettingsFormState.speechToTextPolishDeepThinkingEnabled;
   const speechToTextPolishTemperature = normalizeSpeechPolishTemperature(currentSettingsFormState.speechToTextPolishTemperature);
-  const speechToTextPolishMaxOutputTokens = normalizeSpeechPolishMaxOutputTokens(currentSettingsFormState.speechToTextPolishMaxOutputTokens);
   const speechToTextPolishTimeoutSecs = normalizeSpeechPolishTimeoutSecs(currentSettingsFormState.speechToTextPolishTimeoutSecs);
   const speechToTextMaxDurationSecs = 60;
   const speechToTextTaskRetentionCount = Math.max(
@@ -11336,7 +11324,6 @@ async function saveSettings(options = {}) {
       polish_model: speechToTextPolishModel,
       polish_deep_thinking_enabled: speechToTextPolishDeepThinkingEnabled,
       polish_temperature: speechToTextPolishTemperature,
-      polish_max_output_tokens: speechToTextPolishMaxOutputTokens,
       polish_timeout_secs: speechToTextPolishTimeoutSecs,
       max_duration_secs: speechToTextMaxDurationSecs,
       task_retention_count: speechToTextTaskRetentionCount,
@@ -12747,15 +12734,6 @@ if (speechToTextPolishTemperatureInput) {
   speechToTextPolishTemperatureInput.addEventListener('change', (event) => {
     const value = normalizeSpeechPolishTemperature(event.target.value);
     currentSettingsFormState = { ...currentSettingsFormState, speechToTextPolishTemperature: value };
-    event.target.value = String(value);
-    syncVueSettingsForm(currentSettingsFormState);
-    queueSettingsAutoSave({ source: 'user' });
-  });
-}
-if (speechToTextPolishMaxOutputTokensInput) {
-  speechToTextPolishMaxOutputTokensInput.addEventListener('change', (event) => {
-    const value = normalizeSpeechPolishMaxOutputTokens(event.target.value);
-    currentSettingsFormState = { ...currentSettingsFormState, speechToTextPolishMaxOutputTokens: value };
     event.target.value = String(value);
     syncVueSettingsForm(currentSettingsFormState);
     queueSettingsAutoSave({ source: 'user' });

@@ -29,13 +29,13 @@ This keeps the user-facing setup understandable and avoids duplicating sensitive
 
 ### Add a small, provider-tolerant performance contract
 
-Extend the common request model with optional output and reasoning controls rather than creating provider-specific request types. The speech path will provide a bounded output limit, a speech-specific temperature, a shorter timeout, and a deep-thinking boolean. The boolean is stored with speech settings and shown beside the dedicated speech-polish model field. Off maps to the provider-compatible disabled or minimal reasoning preference selected by the implementation. On allows the provider's reasoning mode for the speech-polish request.
+Extend the common request model with optional output and reasoning controls rather than creating provider-specific request types. The speech path will provide a text-length-based output limit, a speech-specific temperature, a shorter timeout, and a deep-thinking boolean. The boolean is stored with speech settings and shown beside the dedicated speech-polish model field. Off maps to the provider-compatible disabled or minimal reasoning preference selected by the implementation. On allows the provider's reasoning mode for the speech-polish request.
 
 If a provider rejects a non-standard optional reasoning field, the request is treated as a polish failure and the existing raw-text fallback applies. A provider-specific retry without the optional field can be added only if tests show it is needed; it is not required for the first implementation.
 
 ### Keep defaults conservative and bound values centrally
 
-Use defaults suitable for short Chinese transcript cleanup: low temperature, a bounded output limit, a shorter timeout than the general editor timeout, and deep thinking off. Normalize empty model to fallback and clamp numeric values to finite safe ranges. The exact constants should be shared between Rust defaults/normalization and the settings UI so saved values cannot drift.
+Use defaults suitable for short Chinese transcript cleanup: low temperature, dynamic output limits based on transcript length, a shorter timeout than the general editor timeout, and deep thinking off. Normalize empty model to fallback and clamp numeric settings to finite safe ranges.
 
 ### Apply the override to both speech polish call styles
 
@@ -49,7 +49,7 @@ New fields use serde defaults so old settings load unchanged. Export/import incl
 
 - A fast model may produce weaker corrections or alter wording → Keep the selected action/prompt unchanged, preserve raw transcript metadata, and allow the user to leave the model override empty.
 - Providers differ in support for output-limit and deep-thinking fields → Keep common fields optional, validate locally, and fall back to raw transcript on a rejected polish request.
-- A very small output limit can truncate longer dictation → Use a bounded but practical default and expose the setting for adjustment.
+- A very small output limit can truncate longer dictation → Scale the generated-output limit with transcript length so short dictation remains fast and long recordings have room to finish.
 - A shorter timeout can cause fallback on slow networks → Make it configurable and keep ASR output intact when it triggers.
 - The frontend and backend may disagree on defaults → Add focused normalization/settings tests and UI smoke assertions for the serialized payload.
 

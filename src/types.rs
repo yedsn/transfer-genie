@@ -186,10 +186,6 @@ pub fn default_speech_to_text_polish_temperature() -> f32 {
     0.1
 }
 
-pub fn default_speech_to_text_polish_max_output_tokens() -> u64 {
-    256
-}
-
 pub fn default_speech_to_text_polish_timeout_secs() -> u64 {
     20
 }
@@ -761,8 +757,6 @@ pub struct SpeechToTextSettings {
     pub polish_deep_thinking_enabled: bool,
     #[serde(default = "default_speech_to_text_polish_temperature")]
     pub polish_temperature: f32,
-    #[serde(default = "default_speech_to_text_polish_max_output_tokens")]
-    pub polish_max_output_tokens: u64,
     #[serde(default = "default_speech_to_text_polish_timeout_secs")]
     pub polish_timeout_secs: u64,
 }
@@ -791,7 +785,6 @@ impl Default for SpeechToTextSettings {
             polish_model: default_speech_to_text_polish_model(),
             polish_deep_thinking_enabled: default_speech_to_text_polish_deep_thinking_enabled(),
             polish_temperature: default_speech_to_text_polish_temperature(),
-            polish_max_output_tokens: default_speech_to_text_polish_max_output_tokens(),
             polish_timeout_secs: default_speech_to_text_polish_timeout_secs(),
         }
     }

@@ -166,7 +166,6 @@ function mockSettings() {
       polish_model: '',
       polish_deep_thinking_enabled: false,
       polish_temperature: 0.1,
-      polish_max_output_tokens: 256,
       polish_timeout_secs: 20,
     },
   };
@@ -1764,8 +1763,6 @@ async function run() {
       document.querySelector('#speech-to-text-polish-deep-thinking-enabled').dispatchEvent(new Event('change', { bubbles: true }));
       document.querySelector('#speech-to-text-polish-temperature').value = '0.2';
       document.querySelector('#speech-to-text-polish-temperature').dispatchEvent(new Event('input', { bubbles: true }));
-      document.querySelector('#speech-to-text-polish-max-output-tokens').value = '1536';
-      document.querySelector('#speech-to-text-polish-max-output-tokens').dispatchEvent(new Event('input', { bubbles: true }));
       document.querySelector('#speech-to-text-polish-timeout').value = '18';
       document.querySelector('#speech-to-text-polish-timeout').dispatchEvent(new Event('input', { bubbles: true }));
       document.querySelector('#save-settings')?.click();
@@ -1851,7 +1848,6 @@ async function run() {
     assert.equal(speechPolishResult.saved.polish_model, 'fast-polish-model', 'speech polish model is saved');
     assert.equal(speechPolishResult.saved.polish_deep_thinking_enabled, true, 'speech polish deep-thinking flag is saved');
     assert.equal(speechPolishResult.saved.polish_temperature, 0.2, 'speech polish temperature is saved');
-    assert.equal(speechPolishResult.saved.polish_max_output_tokens, 1536, 'speech polish output limit is saved');
     assert.equal(speechPolishResult.saved.polish_timeout_secs, 18, 'speech polish timeout is saved');
     assert.equal(speechPolishResult.savedAi.provider.deep_thinking_enabled, true, 'AI assistant deep-thinking flag is saved');
     assert.equal(speechPolishResult.deepThinkingColocated, true, 'speech polish deep-thinking switch is beside model field');

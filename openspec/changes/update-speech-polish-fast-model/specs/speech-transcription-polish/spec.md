@@ -25,12 +25,17 @@ When automatic speech polish is enabled, the system SHALL allow the user to conf
 
 ### Requirement: Speech polish performance parameters
 
-The system SHALL allow automatic speech polish to use speech-specific performance parameters for temperature, maximum output length, request timeout, and deep-thinking mode. The system SHALL validate and bound numeric values before sending a request. Deep thinking SHALL be disabled by default for speech polish. When deep thinking is disabled, the system SHALL pass a disabled or minimal reasoning preference through the OpenAI-compatible request contract where supported by the provider. When deep thinking is enabled, the system SHALL allow the provider to use its reasoning mode for the speech polish request.
+The system SHALL allow automatic speech polish to use speech-specific performance parameters for temperature, dynamically computed maximum output length, request timeout, and deep-thinking mode. The system SHALL validate and bound numeric values before sending a request. Deep thinking SHALL be disabled by default for speech polish. When deep thinking is disabled, the system SHALL pass a disabled or minimal reasoning preference through the OpenAI-compatible request contract where supported by the provider. When deep thinking is enabled, the system SHALL allow the provider to use its reasoning mode for the speech polish request.
 
-#### Scenario: Bound the generated output
-- **WHEN** automatic speech polish is requested with a maximum output length configured
-- **THEN** the provider request includes the configured output limit
+#### Scenario: Bound the generated output dynamically
+- **WHEN** automatic speech polish is requested for a short transcript
+- **THEN** the provider request includes a small output limit suitable for short cleanup
 - **AND** the output limit prevents the model from generating an unbounded response for a short transcript
+
+#### Scenario: Allow longer polished output for long recordings
+- **WHEN** automatic speech polish is requested for a long merged transcript
+- **THEN** the provider request includes a larger output limit derived from the transcript length
+- **AND** the long recording is not constrained by the short-transcript output limit
 
 #### Scenario: Use low-latency defaults
 - **WHEN** a new or legacy installation has no speech-polish performance settings

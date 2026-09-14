@@ -1727,7 +1727,8 @@ async fn process_text_with_ai_stream(
     } else {
         None
     };
-    let request_options = resolve_ai_text_request_options(&ai_settings, speech_settings.as_ref())?;
+    let request_options =
+        resolve_ai_text_request_options(&ai_settings, speech_settings.as_ref(), text)?;
     emit_ai_stream_event(
         &app,
         AiTextStreamEvent {
@@ -7257,6 +7258,7 @@ async fn call_openai_compatible_text_action(
 fn resolve_ai_text_request_options(
     settings: &AiSettings,
     speech_settings: Option<&SpeechToTextSettings>,
+    text: &str,
 ) -> Result<AiTextRequestOptions, String> {
     let mut provider = settings.provider.clone();
     let mut max_output_tokens = None;
@@ -7268,7 +7270,7 @@ fn resolve_ai_text_request_options(
         }
         provider.temperature = speech_settings.polish_temperature;
         provider.timeout_secs = speech_settings.polish_timeout_secs;
-        max_output_tokens = Some(speech_settings.polish_max_output_tokens);
+        max_output_tokens = Some(resolve_speech_polish_max_output_tokens(text));
         deep_thinking_enabled = speech_settings.polish_deep_thinking_enabled;
     }
     validate_ai_provider(&provider)?;
@@ -7294,6 +7296,17 @@ fn resolve_ai_text_request_options(
         thinking,
         show_reasoning: deep_thinking_enabled,
     })
+}
+
+fn resolve_speech_polish_max_output_tokens(text: &str) -> u64 {
+    let char_count = text.chars().filter(|ch| !ch.is_whitespace()).count();
+    match char_count {
+        0..=200 => 256,
+        201..=600 => 512,
+        601..=1500 => 1024,
+        1501..=3000 => 2048,
+        _ => 4096,
+    }
 }
 
 fn supports_openai_thinking_control(provider: &AiProviderSettings) -> bool {
@@ -7329,7 +7342,8 @@ async fn process_text_with_ai_impl(
     } else {
         None
     };
-    let request_options = resolve_ai_text_request_options(&ai_settings, speech_settings.as_ref())?;
+    let request_options =
+        resolve_ai_text_request_options(&ai_settings, speech_settings.as_ref(), text)?;
     let raw_output_text = match ai_settings.provider.kind.as_str() {
         "openai_compatible" => {
             call_openai_compatible_text_action(
@@ -8016,11 +8030,6 @@ fn normalize_speech_to_text_settings(settings: &mut SpeechToTextSettings) -> Res
         settings.polish_temperature = crate::types::default_speech_to_text_polish_temperature();
     }
     settings.polish_temperature = settings.polish_temperature.clamp(0.0, 2.0);
-    if settings.polish_max_output_tokens == 0 {
-        settings.polish_max_output_tokens =
-            crate::types::default_speech_to_text_polish_max_output_tokens();
-    }
-    settings.polish_max_output_tokens = settings.polish_max_output_tokens.clamp(128, 8192);
     if settings.polish_timeout_secs == 0 {
         settings.polish_timeout_secs = crate::types::default_speech_to_text_polish_timeout_secs();
     }
@@ -12715,7 +12724,6 @@ mod tests {
         assert_eq!(settings.polish_model, "");
         assert!(!settings.polish_deep_thinking_enabled);
         assert_eq!(settings.polish_temperature, 0.1);
-        assert_eq!(settings.polish_max_output_tokens, 256);
         assert_eq!(settings.polish_timeout_secs, 20);
 
         let legacy = serde_json::json!({
@@ -12728,7 +12736,6 @@ mod tests {
         assert_eq!(loaded.polish_model, "");
         assert!(!loaded.polish_deep_thinking_enabled);
         assert_eq!(loaded.polish_temperature, 0.1);
-        assert_eq!(loaded.polish_max_output_tokens, 256);
         assert_eq!(loaded.polish_timeout_secs, 20);
     }
 
@@ -12737,14 +12744,12 @@ mod tests {
         let mut settings = SpeechToTextSettings::default();
         settings.polish_model = "  fast-model  ".to_string();
         settings.polish_temperature = 9.0;
-        settings.polish_max_output_tokens = 90000;
         settings.polish_timeout_secs = 1;
 
         normalize_speech_to_text_settings(&mut settings).expect("normalize speech settings");
 
         assert_eq!(settings.polish_model, "fast-model");
         assert_eq!(settings.polish_temperature, 2.0);
-        assert_eq!(settings.polish_max_output_tokens, 8192);
         assert_eq!(settings.polish_timeout_secs, 5);
     }
 
@@ -12756,7 +12761,8 @@ mod tests {
         settings.ai.provider.model = "general-model".to_string();
         settings.ai.provider.temperature = 0.6;
         settings.ai.provider.timeout_secs = 60;
-        let general = resolve_ai_text_request_options(&settings.ai, None).expect("general options");
+        let general = resolve_ai_text_request_options(&settings.ai, None, "普通文本")
+            .expect("general options");
         assert_eq!(general.model, "general-model");
         assert_eq!(general.temperature, 0.6);
         assert_eq!(general.timeout_secs, 60);
@@ -12766,16 +12772,16 @@ mod tests {
         settings.speech_to_text.polish_model = "fast-model".to_string();
         settings.speech_to_text.polish_deep_thinking_enabled = true;
         settings.speech_to_text.polish_temperature = 0.1;
-        settings.speech_to_text.polish_max_output_tokens = 512;
         settings.speech_to_text.polish_timeout_secs = 20;
         let mut speech = settings.speech_to_text.clone();
         normalize_speech_to_text_settings(&mut speech).expect("normalize speech options");
         let speech_options =
-            resolve_ai_text_request_options(&settings.ai, Some(&speech)).expect("speech options");
+            resolve_ai_text_request_options(&settings.ai, Some(&speech), &"长录音文本".repeat(250))
+                .expect("speech options");
         assert_eq!(speech_options.model, "fast-model");
         assert_eq!(speech_options.temperature, 0.1);
         assert_eq!(speech_options.timeout_secs, 20);
-        assert_eq!(speech_options.max_output_tokens, Some(512));
+        assert_eq!(speech_options.max_output_tokens, Some(2048));
         assert_eq!(speech_options.reasoning_effort.as_deref(), Some("medium"));
     }
 
@@ -12790,7 +12796,7 @@ mod tests {
 
         let mut speech = settings.speech_to_text.clone();
         normalize_speech_to_text_settings(&mut speech).expect("normalize speech options");
-        let options = resolve_ai_text_request_options(&settings.ai, Some(&speech))
+        let options = resolve_ai_text_request_options(&settings.ai, Some(&speech), "短句润色")
             .expect("doubao speech options");
 
         assert_eq!(options.max_output_tokens, Some(256));
@@ -12812,13 +12818,14 @@ mod tests {
         settings.ai.provider.api_key = "sk-test".to_string();
         settings.ai.provider.model = "general-model".to_string();
 
-        let off = resolve_ai_text_request_options(&settings.ai, None).expect("default AI options");
+        let off = resolve_ai_text_request_options(&settings.ai, None, "普通文本")
+            .expect("default AI options");
         assert!(!off.show_reasoning);
         assert_eq!(off.reasoning_effort, None);
 
         settings.ai.provider.deep_thinking_enabled = true;
-        let on =
-            resolve_ai_text_request_options(&settings.ai, None).expect("deep-thinking AI options");
+        let on = resolve_ai_text_request_options(&settings.ai, None, "普通文本")
+            .expect("deep-thinking AI options");
         assert!(on.show_reasoning);
         assert_eq!(on.reasoning_effort.as_deref(), Some("medium"));
 
@@ -12828,6 +12835,30 @@ mod tests {
         assert!(reasoning.is_some());
         assert!(!off.show_reasoning);
         assert!(on.show_reasoning);
+    }
+
+    #[test]
+    fn speech_polish_output_limit_scales_with_text_length() {
+        assert_eq!(
+            resolve_speech_polish_max_output_tokens("两秒钟的一句话"),
+            256
+        );
+        assert_eq!(
+            resolve_speech_polish_max_output_tokens(&"中".repeat(300)),
+            512
+        );
+        assert_eq!(
+            resolve_speech_polish_max_output_tokens(&"中".repeat(900)),
+            1024
+        );
+        assert_eq!(
+            resolve_speech_polish_max_output_tokens(&"中".repeat(2000)),
+            2048
+        );
+        assert_eq!(
+            resolve_speech_polish_max_output_tokens(&"中".repeat(3500)),
+            4096
+        );
     }
 
     #[test]
