@@ -1007,11 +1007,13 @@
                     <input id="speech-to-text-polish-enabled" type="checkbox" :checked="ui.settingsForm.speechToTextPolishEnabled" @change="updateSettingsFormField('speechToTextPolishEnabled', $event.target.checked)" />
                   </label>
                   <label>
-                    润色提示词动作
+                    润色方式
                     <select id="speech-to-text-polish-action" :value="ui.settingsForm.speechToTextPolishActionId || 'polish'" :disabled="!ui.settingsForm.speechToTextPolishEnabled" @change="updateSettingsFormField('speechToTextPolishActionId', $event.target.value)">
-                      <option v-for="action in enabledAiPromptActions()" :key="action.id" :value="action.id">{{ action.name || action.id }}</option>
+                      <option value="polish">忠实整理</option>
+                      <option value="punctuation">仅加标点</option>
+                      <option value="light-cleanup">轻度清理</option>
                     </select>
-                    <span class="field-hint">使用 AI 助手里的提示词动作处理转录结果；默认使用基础润色。</span>
+                    <span class="field-hint">使用语音专用内置提示词处理转录结果；默认忠实保留内容和数字。</span>
                   </label>
                   <div class="field-row speech-polish-model-row">
                     <label>

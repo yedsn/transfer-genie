@@ -1718,8 +1718,6 @@ async fn process_text_with_ai_stream(
     }
     let mut ai_settings = settings.ai.clone();
     normalize_ai_settings(&mut ai_settings)?;
-    let action = resolve_ai_request_action(&ai_settings, &request)?;
-    let format = normalize_draft_format(request.format.as_deref());
     let speech_settings = if request.speech_polish {
         let mut speech_settings = settings.speech_to_text.clone();
         normalize_speech_to_text_settings(&mut speech_settings)?;
@@ -1727,6 +1725,8 @@ async fn process_text_with_ai_stream(
     } else {
         None
     };
+    let action = resolve_ai_text_process_action(&ai_settings, speech_settings.as_ref(), &request)?;
+    let format = normalize_draft_format(request.format.as_deref());
     let request_options =
         resolve_ai_text_request_options(&ai_settings, speech_settings.as_ref(), text)?;
     emit_ai_stream_event(
@@ -6955,6 +6955,73 @@ fn resolve_ai_request_action(
     Ok(action)
 }
 
+fn speech_polish_actions() -> Vec<AiTextAction> {
+    vec![
+        AiTextAction {
+            id: "polish".to_string(),
+            name: "忠实整理".to_string(),
+            category: "语音润色".to_string(),
+            builtin: true,
+            favorite: true,
+            enabled: true,
+            system_prompt: "你是中文语音转写整理助手。你的首要任务是忠实保留原始语音内容，不改写、不扩写、不总结。".to_string(),
+            user_prompt: "请整理下面的语音转写文本。规则：\n1. 只修正明显的语音识别错字、断句和标点。\n2. 不改变原意，不补充原文没有的信息，不优化成另一种说法。\n3. 数字、编号、金额、日期、时间、代码、命令、URL、型号、专有名词尽量原样保留；例如原文是 1234，就输出 1234，不要改写成其他形式。\n4. 口误、重复、停顿词只有在明显无意义时才轻微清理；不确定时保留原文。\n5. 只输出整理后的文本，不要解释。\n\n{{text}}".to_string(),
+            output_mode: "preview_replace".to_string(),
+        },
+        AiTextAction {
+            id: "punctuation".to_string(),
+            name: "仅加标点".to_string(),
+            category: "语音润色".to_string(),
+            builtin: true,
+            favorite: false,
+            enabled: true,
+            system_prompt: "你是中文语音转写标点整理助手。只做标点、断句和必要换行，不润色表达。".to_string(),
+            user_prompt: "请为下面的语音转写添加标点和必要断句。规则：\n1. 不改词、不改数字、不改编号、不改专有名词。\n2. 原文中的 1234、1 2 3 4、代码、命令、URL 等内容保持原样。\n3. 只输出处理后的文本，不要解释。\n\n{{text}}".to_string(),
+            output_mode: "preview_replace".to_string(),
+        },
+        AiTextAction {
+            id: "light-cleanup".to_string(),
+            name: "轻度清理".to_string(),
+            category: "语音润色".to_string(),
+            builtin: true,
+            favorite: false,
+            enabled: true,
+            system_prompt: "你是中文语音转写清理助手。保持原意和信息完整，只做轻度可读性整理。".to_string(),
+            user_prompt: "请轻度清理下面的语音转写文本。规则：\n1. 可以去掉明显无意义的口头停顿和重复。\n2. 修正明显错别字、标点和断句。\n3. 不总结、不扩写、不重写内容。\n4. 数字、编号、金额、日期、时间、代码、命令、URL、型号、专有名词尽量原样保留。\n5. 只输出处理后的文本，不要解释。\n\n{{text}}".to_string(),
+            output_mode: "preview_replace".to_string(),
+        },
+    ]
+}
+
+fn resolve_speech_polish_action(action_id: Option<&str>) -> AiTextAction {
+    let actions = speech_polish_actions();
+    let target_id = action_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("polish");
+    actions
+        .iter()
+        .find(|action| action.id == target_id)
+        .cloned()
+        .or_else(|| actions.iter().find(|action| action.id == "polish").cloned())
+        .unwrap_or_else(|| actions[0].clone())
+}
+
+fn resolve_ai_text_process_action(
+    ai_settings: &AiSettings,
+    speech_settings: Option<&SpeechToTextSettings>,
+    request: &AiTextProcessRequest,
+) -> Result<AiTextAction, String> {
+    if request.speech_polish {
+        let action_id = request
+            .action_id
+            .as_deref()
+            .or_else(|| speech_settings.map(|settings| settings.polish_action_id.as_str()));
+        return Ok(resolve_speech_polish_action(action_id));
+    }
+    resolve_ai_request_action(ai_settings, request)
+}
+
 fn validate_ai_provider(provider: &AiProviderSettings) -> Result<(), String> {
     if provider.base_url.trim().is_empty() {
         return Err("请先填写 AI Provider Base URL".to_string());
@@ -7305,7 +7372,7 @@ fn resolve_speech_polish_max_output_tokens(text: &str) -> u64 {
         201..=600 => 512,
         601..=1500 => 1024,
         1501..=3000 => 2048,
-        _ => 4096,
+        _ => ((char_count as u64 * 3 / 2 + 127) / 128 * 128).clamp(4096, 16384),
     }
 }
 
@@ -7333,8 +7400,6 @@ async fn process_text_with_ai_impl(
     }
     let mut ai_settings = settings.ai.clone();
     normalize_ai_settings(&mut ai_settings)?;
-    let action = resolve_ai_request_action(&ai_settings, &request)?;
-    let format = normalize_draft_format(request.format.as_deref());
     let speech_settings = if request.speech_polish {
         let mut speech_settings = settings.speech_to_text.clone();
         normalize_speech_to_text_settings(&mut speech_settings)?;
@@ -7342,6 +7407,8 @@ async fn process_text_with_ai_impl(
     } else {
         None
     };
+    let action = resolve_ai_text_process_action(&ai_settings, speech_settings.as_ref(), &request)?;
+    let format = normalize_draft_format(request.format.as_deref());
     let request_options =
         resolve_ai_text_request_options(&ai_settings, speech_settings.as_ref(), text)?;
     let raw_output_text = match ai_settings.provider.kind.as_str() {
@@ -12809,6 +12876,27 @@ mod tests {
             Some("disabled")
         );
         assert!(!options.show_reasoning);
+    }
+
+    #[test]
+    fn speech_polish_uses_builtin_faithful_prompt_instead_of_ai_actions() {
+        let mut settings = test_settings();
+        settings.ai.actions[0].user_prompt = "请总结：{{text}}".to_string();
+        settings.speech_to_text.polish_action_id = "polish".to_string();
+        let request = AiTextProcessRequest {
+            action_id: Some("polish".to_string()),
+            text: "1234".to_string(),
+            format: Some("text".to_string()),
+            temporary_prompt: None,
+            speech_polish: true,
+        };
+        let action =
+            resolve_ai_text_process_action(&settings.ai, Some(&settings.speech_to_text), &request)
+                .expect("resolve built-in speech action");
+
+        assert_eq!(action.name, "忠实整理");
+        assert!(action.user_prompt.contains("1234"));
+        assert!(!action.user_prompt.contains("总结"));
     }
 
     #[test]

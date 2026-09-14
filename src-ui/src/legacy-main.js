@@ -18,6 +18,11 @@ const DEFAULT_SYSTEM_DICTATION_SHORTCUT = 'alt+d';
 const DEFAULT_SPEECH_POLISH_ACTION_ID = 'polish';
 const DEFAULT_SPEECH_POLISH_TEMPERATURE = 0.1;
 const DEFAULT_SPEECH_POLISH_TIMEOUT_SECS = 20;
+const SPEECH_POLISH_ACTIONS = [
+  { id: 'polish', name: '忠实整理' },
+  { id: 'punctuation', name: '仅加标点' },
+  { id: 'light-cleanup', name: '轻度清理' },
+];
 
 function normalizeEditorFormat(format) {
   return format === 'markdown' ? 'markdown' : 'text';
@@ -129,6 +134,24 @@ function getSpeechPolishSettings() {
   return { enabled, actionId };
 }
 
+function normalizeSpeechPolishActionId(value) {
+  const id = String(value || DEFAULT_SPEECH_POLISH_ACTION_ID).trim() || DEFAULT_SPEECH_POLISH_ACTION_ID;
+  return SPEECH_POLISH_ACTIONS.some((action) => action.id === id) ? id : DEFAULT_SPEECH_POLISH_ACTION_ID;
+}
+
+function syncSpeechPolishActionOptions() {
+  if (!speechToTextPolishActionInput) return;
+  const selectedId = normalizeSpeechPolishActionId(speechToTextPolishActionInput.value || currentSettingsFormState.speechToTextPolishActionId);
+  speechToTextPolishActionInput.innerHTML = '';
+  SPEECH_POLISH_ACTIONS.forEach((action) => {
+    const option = document.createElement('option');
+    option.value = action.id;
+    option.textContent = action.name;
+    speechToTextPolishActionInput.appendChild(option);
+  });
+  speechToTextPolishActionInput.value = selectedId;
+}
+
 function normalizeSpeechPolishTemperature(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return DEFAULT_SPEECH_POLISH_TEMPERATURE;
@@ -142,12 +165,8 @@ function normalizeSpeechPolishTimeoutSecs(value) {
 }
 
 function resolveSpeechPolishAction(actionId) {
-  const enabledActions = getEnabledAiActions();
-  const normalizedId = String(actionId || DEFAULT_SPEECH_POLISH_ACTION_ID).trim() || DEFAULT_SPEECH_POLISH_ACTION_ID;
-  const direct = enabledActions.find((action) => action.id === normalizedId);
-  if (direct) return direct;
-  const fallback = enabledActions.find((action) => action.id === DEFAULT_SPEECH_POLISH_ACTION_ID);
-  return fallback || enabledActions[0] || null;
+  const normalizedId = normalizeSpeechPolishActionId(actionId);
+  return SPEECH_POLISH_ACTIONS.find((action) => action.id === normalizedId) || SPEECH_POLISH_ACTIONS[0];
 }
 
 async function setSystemDictationStatusText(text, options = {}) {
@@ -10922,7 +10941,10 @@ function applySettings(settings) {
   if (speechToTextCueSoundEnabledInput) speechToTextCueSoundEnabledInput.checked = speechToText.cue_sound_enabled !== false;
   if (speechToTextCueSoundKindInput) speechToTextCueSoundKindInput.value = normalizeSpeechCueSoundKind(speechToText.cue_sound_kind || DEFAULT_SPEECH_CUE_SOUND_KIND);
   if (speechToTextPolishEnabledInput) speechToTextPolishEnabledInput.checked = !!speechToText.polish_enabled;
-  if (speechToTextPolishActionInput) speechToTextPolishActionInput.value = speechToText.polish_action_id || 'polish';
+  if (speechToTextPolishActionInput) {
+    speechToTextPolishActionInput.value = normalizeSpeechPolishActionId(speechToText.polish_action_id || 'polish');
+    syncSpeechPolishActionOptions();
+  }
   if (speechToTextPolishModelInput) speechToTextPolishModelInput.value = speechToText.polish_model || '';
   if (speechToTextPolishDeepThinkingInput) speechToTextPolishDeepThinkingInput.checked = !!speechToText.polish_deep_thinking_enabled;
   if (speechToTextPolishTemperatureInput) speechToTextPolishTemperatureInput.value = normalizeSpeechPolishTemperature(speechToText.polish_temperature ?? DEFAULT_SPEECH_POLISH_TEMPERATURE);
@@ -10977,7 +10999,7 @@ function applySettings(settings) {
     speechToTextCueSoundEnabled: speechToText.cue_sound_enabled !== false,
     speechToTextCueSoundKind: normalizeSpeechCueSoundKind(speechToText.cue_sound_kind || DEFAULT_SPEECH_CUE_SOUND_KIND),
     speechToTextPolishEnabled: !!speechToText.polish_enabled,
-    speechToTextPolishActionId: speechToText.polish_action_id || 'polish',
+    speechToTextPolishActionId: normalizeSpeechPolishActionId(speechToText.polish_action_id || 'polish'),
     speechToTextPolishModel: speechToText.polish_model || '',
     speechToTextPolishDeepThinkingEnabled: !!speechToText.polish_deep_thinking_enabled,
     speechToTextPolishTemperature: normalizeSpeechPolishTemperature(speechToText.polish_temperature ?? DEFAULT_SPEECH_POLISH_TEMPERATURE),
@@ -11195,12 +11217,7 @@ async function saveSettings(options = {}) {
   const aiDefaultActionId = aiActions.some((action) => action.id === currentSettingsFormState.aiDefaultActionId)
     ? currentSettingsFormState.aiDefaultActionId
     : aiActions[0]?.id || 'polish';
-  const enabledAiActionIds = new Set(aiActions.filter((action) => action.enabled !== false).map((action) => action.id));
-  const speechToTextPolishActionId = enabledAiActionIds.has(currentSettingsFormState.speechToTextPolishActionId)
-    ? currentSettingsFormState.speechToTextPolishActionId
-    : enabledAiActionIds.has(DEFAULT_SPEECH_POLISH_ACTION_ID)
-      ? DEFAULT_SPEECH_POLISH_ACTION_ID
-      : aiDefaultActionId;
+  const speechToTextPolishActionId = normalizeSpeechPolishActionId(currentSettingsFormState.speechToTextPolishActionId);
   if (currentSettingsFormState.aiEnabled) {
     if (!(currentSettingsFormState.aiBaseUrl || '').trim()) {
       setErrorStatus('启用 AI 前请先填写 Provider Base URL');
@@ -12702,7 +12719,7 @@ if (speechToTextPolishActionInput) {
     settingsFormRevision += 1;
     currentSettingsFormState = {
       ...currentSettingsFormState,
-      speechToTextPolishActionId: event.target.value || 'polish',
+      speechToTextPolishActionId: normalizeSpeechPolishActionId(event.target.value || 'polish'),
     };
     syncVueSettingsForm(currentSettingsFormState);
     queueSettingsAutoSave({ source: 'user' });

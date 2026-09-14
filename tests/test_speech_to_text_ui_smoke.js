@@ -1755,7 +1755,7 @@ async function run() {
       document.querySelector('#ai-deep-thinking-enabled').dispatchEvent(new Event('change', { bubbles: true }));
       document.querySelector('#speech-to-text-polish-enabled').checked = true;
       document.querySelector('#speech-to-text-polish-enabled').dispatchEvent(new Event('change', { bubbles: true }));
-      document.querySelector('#speech-to-text-polish-action').value = 'formalize';
+      document.querySelector('#speech-to-text-polish-action').value = 'punctuation';
       document.querySelector('#speech-to-text-polish-action').dispatchEvent(new Event('change', { bubbles: true }));
       document.querySelector('#speech-to-text-polish-model').value = 'fast-polish-model';
       document.querySelector('#speech-to-text-polish-model').dispatchEvent(new Event('input', { bubbles: true }));
@@ -1770,7 +1770,7 @@ async function run() {
         const start = Date.now();
         const tick = () => {
           const saved = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.speech_to_text || {};
-          if (saved.polish_enabled === true && saved.polish_action_id === 'formalize' && saved.polish_model === 'fast-polish-model' && saved.polish_deep_thinking_enabled === true) resolve();
+          if (saved.polish_enabled === true && saved.polish_action_id === 'punctuation' && saved.polish_model === 'fast-polish-model' && saved.polish_deep_thinking_enabled === true) resolve();
           else if (Date.now() - start > 2500) reject(new Error('speech polish settings were not saved'));
           else setTimeout(tick, 20);
         };
@@ -1844,14 +1844,14 @@ async function run() {
       return result;
     })()`);
     assert.equal(speechPolishResult.saved.polish_enabled, true, 'speech polish enabled flag is saved');
-    assert.equal(speechPolishResult.saved.polish_action_id, 'formalize', 'speech polish action id is saved');
+    assert.equal(speechPolishResult.saved.polish_action_id, 'punctuation', 'speech polish built-in action id is saved');
     assert.equal(speechPolishResult.saved.polish_model, 'fast-polish-model', 'speech polish model is saved');
     assert.equal(speechPolishResult.saved.polish_deep_thinking_enabled, true, 'speech polish deep-thinking flag is saved');
     assert.equal(speechPolishResult.saved.polish_temperature, 0.2, 'speech polish temperature is saved');
     assert.equal(speechPolishResult.saved.polish_timeout_secs, 18, 'speech polish timeout is saved');
     assert.equal(speechPolishResult.savedAi.provider.deep_thinking_enabled, true, 'AI assistant deep-thinking flag is saved');
     assert.equal(speechPolishResult.deepThinkingColocated, true, 'speech polish deep-thinking switch is beside model field');
-    assert.equal(speechPolishResult.aiRequest.actionId, 'formalize', 'speech polish uses the selected AI action');
+    assert.equal(speechPolishResult.aiRequest.actionId, 'punctuation', 'speech polish uses the selected built-in action');
     assert.equal(speechPolishResult.aiRequest.speechPolish, true, 'speech polish AI request is marked as speech polish');
     assert.equal(speechPolishResult.aiRequest.text, '需要润色的语音文本', 'speech polish sends raw transcript to AI');
     assert.equal(speechPolishResult.text, '润色：需要润色的语音文本', 'speech polish inserts completed polished text into the composer');
@@ -2291,14 +2291,14 @@ async function run() {
       window.__speechSmoke.longText = '当前编辑器焦点识别结果';
       document.querySelector('#speech-to-text-polish-enabled').checked = true;
       document.querySelector('#speech-to-text-polish-enabled').dispatchEvent(new Event('change', { bubbles: true }));
-      document.querySelector('#speech-to-text-polish-action').value = 'formalize';
+      document.querySelector('#speech-to-text-polish-action').value = 'light-cleanup';
       document.querySelector('#speech-to-text-polish-action').dispatchEvent(new Event('change', { bubbles: true }));
       document.querySelector('#save-settings')?.click();
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
           const saved = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.speech_to_text || {};
-          if (saved.polish_enabled === true && saved.polish_action_id === 'formalize') resolve();
+          if (saved.polish_enabled === true && saved.polish_action_id === 'light-cleanup') resolve();
           else if (Date.now() - start > 2500) reject(new Error('speech polish setting was not enabled before focused composer dictation test'));
           else setTimeout(tick, 20);
         };

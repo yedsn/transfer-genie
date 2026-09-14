@@ -23,6 +23,20 @@ When automatic speech polish is enabled, the system SHALL allow the user to conf
 - **THEN** the system preserves the raw transcript as the final speech result
 - **AND** the failure does not block later speech transcription attempts
 
+### Requirement: Built-in speech polish prompts
+
+Automatic speech polish SHALL provide a built-in selectable prompt library independent of the general AI assistant actions. The default prompt SHALL prioritize complete, faithful transcript output: it SHALL allow correction of obvious recognition errors, punctuation, and sentence breaks, but SHALL preserve the original meaning and preserve numbers, identifiers, code, URLs, proper nouns, and uncertain wording whenever possible. The built-in prompt SHALL instruct the provider to output only the processed transcript without explanations.
+
+#### Scenario: Use the faithful built-in prompt
+- **WHEN** the user selects the default speech polish mode
+- **THEN** the request uses the built-in faithful transcript prompt
+- **AND** a spoken value such as `1234` remains `1234` rather than being rewritten or explained
+
+#### Scenario: Speech polish does not reuse assistant actions
+- **WHEN** the general AI assistant action library is changed or contains a summarization action
+- **THEN** automatic speech polish continues to use only the selected built-in speech prompt
+- **AND** the transcript is not summarized or rewritten by an unrelated assistant action
+
 ### Requirement: Speech polish performance parameters
 
 The system SHALL allow automatic speech polish to use speech-specific performance parameters for temperature, dynamically computed maximum output length, request timeout, and deep-thinking mode. The system SHALL validate and bound numeric values before sending a request. Deep thinking SHALL be disabled by default for speech polish. When deep thinking is disabled, the system SHALL pass a disabled or minimal reasoning preference through the OpenAI-compatible request contract where supported by the provider. When deep thinking is enabled, the system SHALL allow the provider to use its reasoning mode for the speech polish request.

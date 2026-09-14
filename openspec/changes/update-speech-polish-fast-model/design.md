@@ -7,6 +7,7 @@ The current automatic speech-polish path calls the existing OpenAI-compatible AI
 **Goals:**
 
 - Give automatic speech polish a separate fast-model selector without duplicating provider credentials or connection settings.
+- Keep speech-polish prompt choices in a small built-in library rather than reusing the general AI assistant action library.
 - Bound speech-polish generation and request duration with speech-specific defaults and validation.
 - Place an explicit deep-thinking switch next to the speech-polish model setting, defaulting to off.
 - Preserve the existing raw-transcript fallback and single-final-output behavior.
@@ -40,6 +41,10 @@ Use defaults suitable for short Chinese transcript cleanup: low temperature, dyn
 ### Apply the override to both speech polish call styles
 
 The existing implementation has a buffered request for in-app speech and a streaming request for system dictation. Both request builders must resolve the same speech-specific model and performance settings. Streaming remains a delivery mechanism for system dictation; it does not change the rule that final paste waits for completed polished output.
+
+### Keep speech-polish prompts independent and content-preserving
+
+Speech polish exposes a small built-in prompt library. The default prompt prioritizes transcript fidelity: it may repair obvious recognition errors, punctuation, and sentence breaks, but must preserve numbers, identifiers, code, URLs, proper nouns, and uncertain wording. General AI assistant actions are not used for automatic speech polish, so unrelated assistant prompts cannot rewrite or summarize dictated content.
 
 ### Preserve compatibility and secrets behavior
 
