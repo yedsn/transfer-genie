@@ -94,6 +94,10 @@ fn default_ai_temperature() -> f32 {
     0.3
 }
 
+fn default_ai_deep_thinking_enabled() -> bool {
+    false
+}
+
 fn default_ai_action_output_mode() -> String {
     "preview_replace".to_string()
 }
@@ -168,6 +172,26 @@ pub fn default_speech_to_text_polish_enabled() -> bool {
 
 pub fn default_speech_to_text_polish_action_id() -> String {
     "polish".to_string()
+}
+
+pub fn default_speech_to_text_polish_model() -> String {
+    String::new()
+}
+
+pub fn default_speech_to_text_polish_deep_thinking_enabled() -> bool {
+    false
+}
+
+pub fn default_speech_to_text_polish_temperature() -> f32 {
+    0.1
+}
+
+pub fn default_speech_to_text_polish_max_output_tokens() -> u64 {
+    256
+}
+
+pub fn default_speech_to_text_polish_timeout_secs() -> u64 {
+    20
 }
 
 fn default_ai_actions() -> Vec<AiTextAction> {
@@ -632,6 +656,8 @@ pub struct AiProviderSettings {
     pub temperature: f32,
     #[serde(default = "default_ai_timeout_secs")]
     pub timeout_secs: u64,
+    #[serde(default = "default_ai_deep_thinking_enabled")]
+    pub deep_thinking_enabled: bool,
 }
 
 impl Default for AiProviderSettings {
@@ -643,6 +669,7 @@ impl Default for AiProviderSettings {
             model: String::new(),
             temperature: default_ai_temperature(),
             timeout_secs: default_ai_timeout_secs(),
+            deep_thinking_enabled: default_ai_deep_thinking_enabled(),
         }
     }
 }
@@ -690,7 +717,7 @@ impl Default for AiSettings {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct SpeechToTextSettings {
     #[serde(default)]
     pub enabled: bool,
@@ -728,6 +755,16 @@ pub struct SpeechToTextSettings {
     pub polish_enabled: bool,
     #[serde(default = "default_speech_to_text_polish_action_id")]
     pub polish_action_id: String,
+    #[serde(default = "default_speech_to_text_polish_model")]
+    pub polish_model: String,
+    #[serde(default = "default_speech_to_text_polish_deep_thinking_enabled")]
+    pub polish_deep_thinking_enabled: bool,
+    #[serde(default = "default_speech_to_text_polish_temperature")]
+    pub polish_temperature: f32,
+    #[serde(default = "default_speech_to_text_polish_max_output_tokens")]
+    pub polish_max_output_tokens: u64,
+    #[serde(default = "default_speech_to_text_polish_timeout_secs")]
+    pub polish_timeout_secs: u64,
 }
 
 impl Default for SpeechToTextSettings {
@@ -751,6 +788,11 @@ impl Default for SpeechToTextSettings {
             system_audio_device_id: default_speech_to_text_system_audio_device_id(),
             polish_enabled: default_speech_to_text_polish_enabled(),
             polish_action_id: default_speech_to_text_polish_action_id(),
+            polish_model: default_speech_to_text_polish_model(),
+            polish_deep_thinking_enabled: default_speech_to_text_polish_deep_thinking_enabled(),
+            polish_temperature: default_speech_to_text_polish_temperature(),
+            polish_max_output_tokens: default_speech_to_text_polish_max_output_tokens(),
+            polish_timeout_secs: default_speech_to_text_polish_timeout_secs(),
         }
     }
 }

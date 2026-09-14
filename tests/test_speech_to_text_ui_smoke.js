@@ -163,6 +163,11 @@ function mockSettings() {
       cue_sound_kind: 'system',
       polish_enabled: false,
       polish_action_id: 'polish',
+      polish_model: '',
+      polish_deep_thinking_enabled: false,
+      polish_temperature: 0.1,
+      polish_max_output_tokens: 256,
+      polish_timeout_secs: 20,
     },
   };
 }
@@ -245,7 +250,7 @@ function preloadScript() {
             const request = args?.request || {};
             const text = String(request.text || '');
             const actionId = String(request.actionId || 'polish');
-            window.__speechSmoke.aiRequests.push({ actionId, text });
+            window.__speechSmoke.aiRequests.push({ ...request, actionId, text });
             return { actionId, actionName: actionId, outputText: '润色：' + text, outputMode: 'preview_replace' };
           }
           if (command === 'process_text_with_ai_stream') {
@@ -253,7 +258,7 @@ function preloadScript() {
             const requestId = String(args?.requestId || '');
             const text = String(request.text || '');
             const actionId = String(request.actionId || 'polish');
-            window.__speechSmoke.aiRequests.push({ actionId, text, requestId, stream: true });
+            window.__speechSmoke.aiRequests.push({ ...request, actionId, text, requestId, stream: true });
             const emit = async (eventType, delta = '', error = '') => {
               const handler = eventHandlers['ai-text-stream'];
               if (handler) await handler({ payload: { requestId, eventType, delta, error } });
@@ -1747,16 +1752,28 @@ async function run() {
       window.transferGenieActions?.updateSettingsFormField?.('aiBaseUrl', 'https://example.test/v1');
       window.transferGenieActions?.updateSettingsFormField?.('aiApiKey', 'ai-key');
       window.transferGenieActions?.updateSettingsFormField?.('aiModel', 'smoke-model');
+      document.querySelector('#ai-deep-thinking-enabled').checked = true;
+      document.querySelector('#ai-deep-thinking-enabled').dispatchEvent(new Event('change', { bubbles: true }));
       document.querySelector('#speech-to-text-polish-enabled').checked = true;
       document.querySelector('#speech-to-text-polish-enabled').dispatchEvent(new Event('change', { bubbles: true }));
       document.querySelector('#speech-to-text-polish-action').value = 'formalize';
       document.querySelector('#speech-to-text-polish-action').dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#speech-to-text-polish-model').value = 'fast-polish-model';
+      document.querySelector('#speech-to-text-polish-model').dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('#speech-to-text-polish-deep-thinking-enabled').checked = true;
+      document.querySelector('#speech-to-text-polish-deep-thinking-enabled').dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#speech-to-text-polish-temperature').value = '0.2';
+      document.querySelector('#speech-to-text-polish-temperature').dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('#speech-to-text-polish-max-output-tokens').value = '1536';
+      document.querySelector('#speech-to-text-polish-max-output-tokens').dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('#speech-to-text-polish-timeout').value = '18';
+      document.querySelector('#speech-to-text-polish-timeout').dispatchEvent(new Event('input', { bubbles: true }));
       document.querySelector('#save-settings')?.click();
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
           const saved = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.speech_to_text || {};
-          if (saved.polish_enabled === true && saved.polish_action_id === 'formalize') resolve();
+          if (saved.polish_enabled === true && saved.polish_action_id === 'formalize' && saved.polish_model === 'fast-polish-model' && saved.polish_deep_thinking_enabled === true) resolve();
           else if (Date.now() - start > 2500) reject(new Error('speech polish settings were not saved'));
           else setTimeout(tick, 20);
         };
@@ -1802,10 +1819,12 @@ async function run() {
         sendTranscript: window.__speechSmoke.calls.filter((call) => call.command === 'send_speech_message').at(-1)?.args?.request?.transcript || '',
         sendRawTranscript: window.__speechSmoke.calls.filter((call) => call.command === 'send_speech_message').at(-1)?.args?.request?.rawTranscript || '',
         clipboardText: window.__speechSmoke.clipboardText,
+        savedAi: window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.ai || {},
         aiRequest: window.__speechSmoke.aiRequests.at(-1),
         feedTextBeforeToggle: document.querySelector('.message-card[data-filename="speech-message.wav"] .message-body')?.textContent || '',
         hasTranscriptToggle: !!document.querySelector('.message-card[data-filename="speech-message.wav"] .speech-transcript-toggle'),
         saved,
+        deepThinkingColocated: document.querySelector('#speech-to-text-polish-model')?.closest('.field-row') === document.querySelector('#speech-to-text-polish-deep-thinking-enabled')?.closest('.field-row'),
         selectDisabled: document.querySelector('#speech-to-text-polish-action').disabled,
       };
       const speechCard = document.querySelector('.message-card[data-filename="speech-message.wav"]');
@@ -1829,7 +1848,15 @@ async function run() {
     })()`);
     assert.equal(speechPolishResult.saved.polish_enabled, true, 'speech polish enabled flag is saved');
     assert.equal(speechPolishResult.saved.polish_action_id, 'formalize', 'speech polish action id is saved');
+    assert.equal(speechPolishResult.saved.polish_model, 'fast-polish-model', 'speech polish model is saved');
+    assert.equal(speechPolishResult.saved.polish_deep_thinking_enabled, true, 'speech polish deep-thinking flag is saved');
+    assert.equal(speechPolishResult.saved.polish_temperature, 0.2, 'speech polish temperature is saved');
+    assert.equal(speechPolishResult.saved.polish_max_output_tokens, 1536, 'speech polish output limit is saved');
+    assert.equal(speechPolishResult.saved.polish_timeout_secs, 18, 'speech polish timeout is saved');
+    assert.equal(speechPolishResult.savedAi.provider.deep_thinking_enabled, true, 'AI assistant deep-thinking flag is saved');
+    assert.equal(speechPolishResult.deepThinkingColocated, true, 'speech polish deep-thinking switch is beside model field');
     assert.equal(speechPolishResult.aiRequest.actionId, 'formalize', 'speech polish uses the selected AI action');
+    assert.equal(speechPolishResult.aiRequest.speechPolish, true, 'speech polish AI request is marked as speech polish');
     assert.equal(speechPolishResult.aiRequest.text, '需要润色的语音文本', 'speech polish sends raw transcript to AI');
     assert.equal(speechPolishResult.text, '润色：需要润色的语音文本', 'speech polish inserts completed polished text into the composer');
     assert.equal(speechPolishResult.sendTranscript, '润色：需要润色的语音文本', 'speech polish sends polished text');

@@ -2692,6 +2692,21 @@ label {
   flex: 1;
 }
 
+.speech-polish-model-row {
+  align-items: flex-start;
+}
+
+.speech-polish-deep-thinking-toggle,
+.ai-deep-thinking-toggle {
+  align-self: flex-start;
+  margin-top: 25px;
+  min-height: 40px;
+}
+
+.ai-model-row {
+  align-items: flex-start;
+}
+
 .field-hint {
   font-size: 12px;
   color: var(--muted);

@@ -16,6 +16,9 @@ const HOME_LAYOUT_STORAGE_KEY = 'transfer-genie.home-layout';
 const DEFAULT_SPEECH_CUE_SOUND_KIND = 'system';
 const DEFAULT_SYSTEM_DICTATION_SHORTCUT = 'alt+d';
 const DEFAULT_SPEECH_POLISH_ACTION_ID = 'polish';
+const DEFAULT_SPEECH_POLISH_TEMPERATURE = 0.1;
+const DEFAULT_SPEECH_POLISH_MAX_OUTPUT_TOKENS = 256;
+const DEFAULT_SPEECH_POLISH_TIMEOUT_SECS = 20;
 
 function normalizeEditorFormat(format) {
   return format === 'markdown' ? 'markdown' : 'text';
@@ -127,6 +130,24 @@ function getSpeechPolishSettings() {
   return { enabled, actionId };
 }
 
+function normalizeSpeechPolishTemperature(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return DEFAULT_SPEECH_POLISH_TEMPERATURE;
+  return Math.max(0, Math.min(2, number));
+}
+
+function normalizeSpeechPolishMaxOutputTokens(value) {
+  const number = Math.floor(Number(value));
+  if (!Number.isFinite(number) || number <= 0) return DEFAULT_SPEECH_POLISH_MAX_OUTPUT_TOKENS;
+  return Math.max(128, Math.min(8192, number));
+}
+
+function normalizeSpeechPolishTimeoutSecs(value) {
+  const number = Math.floor(Number(value));
+  if (!Number.isFinite(number) || number <= 0) return DEFAULT_SPEECH_POLISH_TIMEOUT_SECS;
+  return Math.max(5, Math.min(300, number));
+}
+
 function resolveSpeechPolishAction(actionId) {
   const enabledActions = getEnabledAiActions();
   const normalizedId = String(actionId || DEFAULT_SPEECH_POLISH_ACTION_ID).trim() || DEFAULT_SPEECH_POLISH_ACTION_ID;
@@ -221,6 +242,7 @@ async function polishSpeechTranscript(text, options = {}) {
     text: value,
     format: currentFormat || 'text',
     actionId: action.id,
+    speechPolish: true,
   };
   const startedAt = performance.now();
   setStatus('正在进行润色...');
@@ -869,6 +891,11 @@ const speechToTextCueSoundKindInput = document.getElementById('speech-to-text-cu
 const speechToTextCueSoundPreviewButton = document.getElementById('speech-to-text-cue-sound-preview');
 const speechToTextPolishEnabledInput = document.getElementById('speech-to-text-polish-enabled');
 const speechToTextPolishActionInput = document.getElementById('speech-to-text-polish-action');
+const speechToTextPolishModelInput = document.getElementById('speech-to-text-polish-model');
+const speechToTextPolishDeepThinkingInput = document.getElementById('speech-to-text-polish-deep-thinking-enabled');
+const speechToTextPolishTemperatureInput = document.getElementById('speech-to-text-polish-temperature');
+const speechToTextPolishMaxOutputTokensInput = document.getElementById('speech-to-text-polish-max-output-tokens');
+const speechToTextPolishTimeoutInput = document.getElementById('speech-to-text-polish-timeout');
 const speechTaskHistorySummary = document.getElementById('speech-task-history-summary');
 const speechTaskHistoryList = document.getElementById('speech-task-history-list');
 const sendHotkeyInputs = document.querySelectorAll('input[name="send-hotkey"]');
@@ -1132,6 +1159,7 @@ let currentSettingsFormState = {
   aiBaseUrl: '',
   aiApiKey: '',
   aiModel: '',
+  aiDeepThinkingEnabled: false,
   aiTemperature: 0.3,
   aiTimeoutSecs: 60,
   aiDefaultActionId: 'polish',
@@ -1150,6 +1178,11 @@ let currentSettingsFormState = {
   speechToTextCueSoundKind: DEFAULT_SPEECH_CUE_SOUND_KIND,
   speechToTextPolishEnabled: false,
   speechToTextPolishActionId: 'polish',
+  speechToTextPolishModel: '',
+  speechToTextPolishDeepThinkingEnabled: false,
+  speechToTextPolishTemperature: DEFAULT_SPEECH_POLISH_TEMPERATURE,
+  speechToTextPolishMaxOutputTokens: DEFAULT_SPEECH_POLISH_MAX_OUTPUT_TOKENS,
+  speechToTextPolishTimeoutSecs: DEFAULT_SPEECH_POLISH_TIMEOUT_SECS,
 };
 let currentAutoBackupStatusState = {
   enabled: false,
@@ -10899,6 +10932,11 @@ function applySettings(settings) {
   if (speechToTextCueSoundKindInput) speechToTextCueSoundKindInput.value = normalizeSpeechCueSoundKind(speechToText.cue_sound_kind || DEFAULT_SPEECH_CUE_SOUND_KIND);
   if (speechToTextPolishEnabledInput) speechToTextPolishEnabledInput.checked = !!speechToText.polish_enabled;
   if (speechToTextPolishActionInput) speechToTextPolishActionInput.value = speechToText.polish_action_id || 'polish';
+  if (speechToTextPolishModelInput) speechToTextPolishModelInput.value = speechToText.polish_model || '';
+  if (speechToTextPolishDeepThinkingInput) speechToTextPolishDeepThinkingInput.checked = !!speechToText.polish_deep_thinking_enabled;
+  if (speechToTextPolishTemperatureInput) speechToTextPolishTemperatureInput.value = normalizeSpeechPolishTemperature(speechToText.polish_temperature ?? DEFAULT_SPEECH_POLISH_TEMPERATURE);
+  if (speechToTextPolishMaxOutputTokensInput) speechToTextPolishMaxOutputTokensInput.value = normalizeSpeechPolishMaxOutputTokens(speechToText.polish_max_output_tokens ?? DEFAULT_SPEECH_POLISH_MAX_OUTPUT_TOKENS);
+  if (speechToTextPolishTimeoutInput) speechToTextPolishTimeoutInput.value = normalizeSpeechPolishTimeoutSecs(speechToText.polish_timeout_secs ?? DEFAULT_SPEECH_POLISH_TIMEOUT_SECS);
   currentSettingsFormState = {
     senderName: settings.sender_name || '',
     refreshIntervalSecs: Number(settings.refresh_interval_secs || 5),
@@ -10930,6 +10968,7 @@ function applySettings(settings) {
     aiBaseUrl: aiProvider.base_url || '',
     aiApiKey: aiProvider.api_key || '',
     aiModel: aiProvider.model || '',
+    aiDeepThinkingEnabled: !!aiProvider.deep_thinking_enabled,
     aiTemperature: Number(aiProvider.temperature ?? 0.3),
     aiTimeoutSecs: Number(aiProvider.timeout_secs || 60),
     aiDefaultActionId: ai.default_action_id || aiActions[0]?.id || 'polish',
@@ -10949,6 +10988,11 @@ function applySettings(settings) {
     speechToTextCueSoundKind: normalizeSpeechCueSoundKind(speechToText.cue_sound_kind || DEFAULT_SPEECH_CUE_SOUND_KIND),
     speechToTextPolishEnabled: !!speechToText.polish_enabled,
     speechToTextPolishActionId: speechToText.polish_action_id || 'polish',
+    speechToTextPolishModel: speechToText.polish_model || '',
+    speechToTextPolishDeepThinkingEnabled: !!speechToText.polish_deep_thinking_enabled,
+    speechToTextPolishTemperature: normalizeSpeechPolishTemperature(speechToText.polish_temperature ?? DEFAULT_SPEECH_POLISH_TEMPERATURE),
+    speechToTextPolishMaxOutputTokens: normalizeSpeechPolishMaxOutputTokens(speechToText.polish_max_output_tokens ?? DEFAULT_SPEECH_POLISH_MAX_OUTPUT_TOKENS),
+    speechToTextPolishTimeoutSecs: normalizeSpeechPolishTimeoutSecs(speechToText.polish_timeout_secs ?? DEFAULT_SPEECH_POLISH_TIMEOUT_SECS),
   };
   syncVueSettingsForm(currentSettingsFormState);
   syncShortcutsEnabledState();
@@ -11086,6 +11130,11 @@ async function saveSettings(options = {}) {
   const speechToTextCueSoundEnabled = !!currentSettingsFormState.speechToTextCueSoundEnabled;
   const speechToTextCueSoundKind = normalizeSpeechCueSoundKind(currentSettingsFormState.speechToTextCueSoundKind || DEFAULT_SPEECH_CUE_SOUND_KIND);
   const speechToTextPolishEnabled = !!currentSettingsFormState.speechToTextPolishEnabled;
+  const speechToTextPolishModel = (currentSettingsFormState.speechToTextPolishModel || '').trim();
+  const speechToTextPolishDeepThinkingEnabled = !!currentSettingsFormState.speechToTextPolishDeepThinkingEnabled;
+  const speechToTextPolishTemperature = normalizeSpeechPolishTemperature(currentSettingsFormState.speechToTextPolishTemperature);
+  const speechToTextPolishMaxOutputTokens = normalizeSpeechPolishMaxOutputTokens(currentSettingsFormState.speechToTextPolishMaxOutputTokens);
+  const speechToTextPolishTimeoutSecs = normalizeSpeechPolishTimeoutSecs(currentSettingsFormState.speechToTextPolishTimeoutSecs);
   const speechToTextMaxDurationSecs = 60;
   const speechToTextTaskRetentionCount = Math.max(
     1,
@@ -11262,6 +11311,7 @@ async function saveSettings(options = {}) {
         base_url: (currentSettingsFormState.aiBaseUrl || '').trim(),
         api_key: (currentSettingsFormState.aiApiKey || '').trim(),
         model: (currentSettingsFormState.aiModel || '').trim(),
+        deep_thinking_enabled: !!currentSettingsFormState.aiDeepThinkingEnabled,
         temperature: Number(currentSettingsFormState.aiTemperature ?? 0.3),
         timeout_secs: Number(currentSettingsFormState.aiTimeoutSecs || 60),
       },
@@ -11283,6 +11333,11 @@ async function saveSettings(options = {}) {
       system_dictation_shortcut: normalizedSystemDictationShortcut,
       polish_enabled: speechToTextPolishEnabled,
       polish_action_id: speechToTextPolishActionId || DEFAULT_SPEECH_POLISH_ACTION_ID,
+      polish_model: speechToTextPolishModel,
+      polish_deep_thinking_enabled: speechToTextPolishDeepThinkingEnabled,
+      polish_temperature: speechToTextPolishTemperature,
+      polish_max_output_tokens: speechToTextPolishMaxOutputTokens,
+      polish_timeout_secs: speechToTextPolishTimeoutSecs,
       max_duration_secs: speechToTextMaxDurationSecs,
       task_retention_count: speechToTextTaskRetentionCount,
       cue_sound_enabled: speechToTextCueSoundEnabled,
@@ -12662,6 +12717,55 @@ if (speechToTextPolishActionInput) {
       ...currentSettingsFormState,
       speechToTextPolishActionId: event.target.value || 'polish',
     };
+    syncVueSettingsForm(currentSettingsFormState);
+    queueSettingsAutoSave({ source: 'user' });
+  });
+}
+if (speechToTextPolishModelInput) {
+  speechToTextPolishModelInput.addEventListener('input', (event) => {
+    settingsFormRevision += 1;
+    currentSettingsFormState = {
+      ...currentSettingsFormState,
+      speechToTextPolishModel: event.target.value || '',
+    };
+    syncVueSettingsForm(currentSettingsFormState);
+    queueSettingsAutoSave({ source: 'user' });
+  });
+}
+if (speechToTextPolishDeepThinkingInput) {
+  speechToTextPolishDeepThinkingInput.addEventListener('change', (event) => {
+    settingsFormRevision += 1;
+    currentSettingsFormState = {
+      ...currentSettingsFormState,
+      speechToTextPolishDeepThinkingEnabled: !!event.target.checked,
+    };
+    syncVueSettingsForm(currentSettingsFormState);
+    queueSettingsAutoSave({ source: 'user' });
+  });
+}
+if (speechToTextPolishTemperatureInput) {
+  speechToTextPolishTemperatureInput.addEventListener('change', (event) => {
+    const value = normalizeSpeechPolishTemperature(event.target.value);
+    currentSettingsFormState = { ...currentSettingsFormState, speechToTextPolishTemperature: value };
+    event.target.value = String(value);
+    syncVueSettingsForm(currentSettingsFormState);
+    queueSettingsAutoSave({ source: 'user' });
+  });
+}
+if (speechToTextPolishMaxOutputTokensInput) {
+  speechToTextPolishMaxOutputTokensInput.addEventListener('change', (event) => {
+    const value = normalizeSpeechPolishMaxOutputTokens(event.target.value);
+    currentSettingsFormState = { ...currentSettingsFormState, speechToTextPolishMaxOutputTokens: value };
+    event.target.value = String(value);
+    syncVueSettingsForm(currentSettingsFormState);
+    queueSettingsAutoSave({ source: 'user' });
+  });
+}
+if (speechToTextPolishTimeoutInput) {
+  speechToTextPolishTimeoutInput.addEventListener('change', (event) => {
+    const value = normalizeSpeechPolishTimeoutSecs(event.target.value);
+    currentSettingsFormState = { ...currentSettingsFormState, speechToTextPolishTimeoutSecs: value };
+    event.target.value = String(value);
     syncVueSettingsForm(currentSettingsFormState);
     queueSettingsAutoSave({ source: 'user' });
   });

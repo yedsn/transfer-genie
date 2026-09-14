@@ -459,6 +459,8 @@ struct AiTextProcessRequest {
     format: Option<String>,
     #[serde(default)]
     temporary_prompt: Option<AiTemporaryPrompt>,
+    #[serde(default)]
+    speech_polish: bool,
 }
 
 #[derive(Deserialize)]
@@ -579,13 +581,36 @@ struct OpenAiCompatibleRequestMessage {
     content: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct OpenAiThinkingControl {
+    #[serde(rename = "type")]
+    mode: String,
+}
+
 #[derive(Serialize)]
 struct OpenAiCompatibleRequest {
     model: String,
     messages: Vec<OpenAiCompatibleRequestMessage>,
     temperature: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<OpenAiThinkingControl>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct AiTextRequestOptions {
+    model: String,
+    temperature: f32,
+    timeout_secs: u64,
+    max_output_tokens: Option<u64>,
+    reasoning_effort: Option<String>,
+    thinking: Option<OpenAiThinkingControl>,
+    show_reasoning: bool,
 }
 
 #[derive(Deserialize)]
@@ -1695,6 +1720,14 @@ async fn process_text_with_ai_stream(
     normalize_ai_settings(&mut ai_settings)?;
     let action = resolve_ai_request_action(&ai_settings, &request)?;
     let format = normalize_draft_format(request.format.as_deref());
+    let speech_settings = if request.speech_polish {
+        let mut speech_settings = settings.speech_to_text.clone();
+        normalize_speech_to_text_settings(&mut speech_settings)?;
+        Some(speech_settings)
+    } else {
+        None
+    };
+    let request_options = resolve_ai_text_request_options(&ai_settings, speech_settings.as_ref())?;
     emit_ai_stream_event(
         &app,
         AiTextStreamEvent {
@@ -1717,6 +1750,7 @@ async fn process_text_with_ai_stream(
                 &request_id,
                 text,
                 &format,
+                &request_options,
             )
             .await
         }
@@ -7040,9 +7074,17 @@ fn split_stream_delta(delta: &str, splitter: &mut AiThinkStreamSplitter) -> Vec<
     events
 }
 
-fn emit_ai_stream_deltas(app: &AppHandle, request_id: &str, events: Vec<(String, String)>) {
+fn emit_ai_stream_deltas(
+    app: &AppHandle,
+    request_id: &str,
+    events: Vec<(String, String)>,
+    show_reasoning: bool,
+) {
     for (event_type, delta) in events {
         if delta.is_empty() {
+            continue;
+        }
+        if event_type == "reasoning_delta" && !show_reasoning {
             continue;
         }
         emit_ai_stream_event(
@@ -7068,22 +7110,25 @@ async fn stream_openai_compatible_text_action(
     request_id: &str,
     text: &str,
     format: &str,
+    options: &AiTextRequestOptions,
 ) -> Result<(), String> {
     use futures_util::StreamExt;
 
     let provider = &settings.provider;
-    validate_ai_provider(provider)?;
     let request = OpenAiCompatibleRequest {
-        model: provider.model.clone(),
+        model: options.model.clone(),
         messages: build_ai_request_messages(action, text, format),
-        temperature: provider.temperature,
+        temperature: options.temperature,
+        max_tokens: options.max_output_tokens,
+        reasoning_effort: options.reasoning_effort.clone(),
+        thinking: options.thinking.clone(),
         stream: Some(true),
     };
     let url = chat_completions_url(&provider.base_url)?;
     let response = http
         .post(url)
         .bearer_auth(&provider.api_key)
-        .timeout(Duration::from_secs(provider.timeout_secs))
+        .timeout(Duration::from_secs(options.timeout_secs))
         .json(&request)
         .send()
         .await
@@ -7127,7 +7172,7 @@ async fn stream_openai_compatible_text_action(
             };
             let data = data.trim();
             if data == "[DONE]" {
-                emit_ai_stream_deltas(app, request_id, splitter.finish());
+                emit_ai_stream_deltas(app, request_id, splitter.finish(), options.show_reasoning);
                 return Ok(());
             }
             let parsed: OpenAiCompatibleStreamResponse =
@@ -7136,11 +7181,16 @@ async fn stream_openai_compatible_text_action(
                 let Some(delta) = choice.delta.content else {
                     continue;
                 };
-                emit_ai_stream_deltas(app, request_id, splitter.push(&delta));
+                emit_ai_stream_deltas(
+                    app,
+                    request_id,
+                    splitter.push(&delta),
+                    options.show_reasoning,
+                );
             }
         }
     }
-    emit_ai_stream_deltas(app, request_id, splitter.finish());
+    emit_ai_stream_deltas(app, request_id, splitter.finish(), options.show_reasoning);
     Ok(())
 }
 
@@ -7150,21 +7200,24 @@ async fn call_openai_compatible_text_action(
     action: &AiTextAction,
     text: &str,
     format: &str,
+    options: &AiTextRequestOptions,
 ) -> Result<String, String> {
     let provider = &settings.provider;
-    validate_ai_provider(provider)?;
 
     let request = OpenAiCompatibleRequest {
-        model: provider.model.clone(),
+        model: options.model.clone(),
         messages: build_ai_request_messages(action, text, format),
-        temperature: provider.temperature,
+        temperature: options.temperature,
+        max_tokens: options.max_output_tokens,
+        reasoning_effort: options.reasoning_effort.clone(),
+        thinking: options.thinking.clone(),
         stream: None,
     };
     let url = chat_completions_url(&provider.base_url)?;
     let response = http
         .post(url)
         .bearer_auth(&provider.api_key)
-        .timeout(Duration::from_secs(provider.timeout_secs))
+        .timeout(Duration::from_secs(options.timeout_secs))
         .json(&request)
         .send()
         .await
@@ -7201,6 +7254,58 @@ async fn call_openai_compatible_text_action(
     Ok(output)
 }
 
+fn resolve_ai_text_request_options(
+    settings: &AiSettings,
+    speech_settings: Option<&SpeechToTextSettings>,
+) -> Result<AiTextRequestOptions, String> {
+    let mut provider = settings.provider.clone();
+    let mut max_output_tokens = None;
+    let mut deep_thinking_enabled = provider.deep_thinking_enabled;
+    if let Some(speech_settings) = speech_settings {
+        let speech_model = speech_settings.polish_model.trim();
+        if !speech_model.is_empty() {
+            provider.model = speech_model.to_string();
+        }
+        provider.temperature = speech_settings.polish_temperature;
+        provider.timeout_secs = speech_settings.polish_timeout_secs;
+        max_output_tokens = Some(speech_settings.polish_max_output_tokens);
+        deep_thinking_enabled = speech_settings.polish_deep_thinking_enabled;
+    }
+    validate_ai_provider(&provider)?;
+    let supports_thinking = supports_openai_thinking_control(&provider);
+    let reasoning_effort = if supports_thinking {
+        None
+    } else {
+        deep_thinking_enabled.then(|| "medium".to_string())
+    };
+    let thinking = supports_thinking.then(|| OpenAiThinkingControl {
+        mode: if deep_thinking_enabled {
+            "auto".to_string()
+        } else {
+            "disabled".to_string()
+        },
+    });
+    Ok(AiTextRequestOptions {
+        model: provider.model,
+        temperature: provider.temperature,
+        timeout_secs: provider.timeout_secs,
+        max_output_tokens,
+        reasoning_effort,
+        thinking,
+        show_reasoning: deep_thinking_enabled,
+    })
+}
+
+fn supports_openai_thinking_control(provider: &AiProviderSettings) -> bool {
+    let model = provider.model.to_ascii_lowercase();
+    let base_url = provider.base_url.to_ascii_lowercase();
+    model.contains("doubao")
+        || model.contains("seed")
+        || base_url.contains("volces.com")
+        || base_url.contains("volcengine")
+        || base_url.contains("ark")
+}
+
 async fn process_text_with_ai_impl(
     http: &Client,
     settings: &Settings,
@@ -7217,13 +7322,34 @@ async fn process_text_with_ai_impl(
     normalize_ai_settings(&mut ai_settings)?;
     let action = resolve_ai_request_action(&ai_settings, &request)?;
     let format = normalize_draft_format(request.format.as_deref());
+    let speech_settings = if request.speech_polish {
+        let mut speech_settings = settings.speech_to_text.clone();
+        normalize_speech_to_text_settings(&mut speech_settings)?;
+        Some(speech_settings)
+    } else {
+        None
+    };
+    let request_options = resolve_ai_text_request_options(&ai_settings, speech_settings.as_ref())?;
     let raw_output_text = match ai_settings.provider.kind.as_str() {
         "openai_compatible" => {
-            call_openai_compatible_text_action(http, &ai_settings, &action, text, &format).await?
+            call_openai_compatible_text_action(
+                http,
+                &ai_settings,
+                &action,
+                text,
+                &format,
+                &request_options,
+            )
+            .await?
         }
         other => return Err(format!("不支持的 AI Provider: {other}")),
     };
     let (output_text, reasoning_text) = split_ai_think_blocks(&raw_output_text);
+    let reasoning_text = if request_options.show_reasoning {
+        reasoning_text
+    } else {
+        None
+    };
     if output_text.is_empty() {
         return Err("AI 响应只包含思考过程，没有可应用的正文".to_string());
     }
@@ -7881,6 +8007,24 @@ fn normalize_speech_to_text_settings(settings: &mut SpeechToTextSettings) -> Res
     };
     settings.microphone_device_id = settings.microphone_device_id.trim().to_string();
     settings.system_audio_device_id = settings.system_audio_device_id.trim().to_string();
+    settings.polish_action_id = settings.polish_action_id.trim().to_string();
+    if settings.polish_action_id.is_empty() {
+        settings.polish_action_id = crate::types::default_speech_to_text_polish_action_id();
+    }
+    settings.polish_model = settings.polish_model.trim().to_string();
+    if !settings.polish_temperature.is_finite() {
+        settings.polish_temperature = crate::types::default_speech_to_text_polish_temperature();
+    }
+    settings.polish_temperature = settings.polish_temperature.clamp(0.0, 2.0);
+    if settings.polish_max_output_tokens == 0 {
+        settings.polish_max_output_tokens =
+            crate::types::default_speech_to_text_polish_max_output_tokens();
+    }
+    settings.polish_max_output_tokens = settings.polish_max_output_tokens.clamp(128, 8192);
+    if settings.polish_timeout_secs == 0 {
+        settings.polish_timeout_secs = crate::types::default_speech_to_text_polish_timeout_secs();
+    }
+    settings.polish_timeout_secs = settings.polish_timeout_secs.clamp(5, 300);
     Ok(())
 }
 
@@ -12565,6 +12709,162 @@ mod tests {
     }
 
     #[test]
+    fn speech_polish_defaults_are_low_latency_and_backward_compatible() {
+        let settings = SpeechToTextSettings::default();
+
+        assert_eq!(settings.polish_model, "");
+        assert!(!settings.polish_deep_thinking_enabled);
+        assert_eq!(settings.polish_temperature, 0.1);
+        assert_eq!(settings.polish_max_output_tokens, 256);
+        assert_eq!(settings.polish_timeout_secs, 20);
+
+        let legacy = serde_json::json!({
+            "enabled": false,
+            "polish_enabled": true,
+            "polish_action_id": "polish"
+        });
+        let loaded: SpeechToTextSettings =
+            serde_json::from_value(legacy).expect("load legacy speech settings");
+        assert_eq!(loaded.polish_model, "");
+        assert!(!loaded.polish_deep_thinking_enabled);
+        assert_eq!(loaded.polish_temperature, 0.1);
+        assert_eq!(loaded.polish_max_output_tokens, 256);
+        assert_eq!(loaded.polish_timeout_secs, 20);
+    }
+
+    #[test]
+    fn normalize_speech_polish_settings_clamps_performance_values() {
+        let mut settings = SpeechToTextSettings::default();
+        settings.polish_model = "  fast-model  ".to_string();
+        settings.polish_temperature = 9.0;
+        settings.polish_max_output_tokens = 90000;
+        settings.polish_timeout_secs = 1;
+
+        normalize_speech_to_text_settings(&mut settings).expect("normalize speech settings");
+
+        assert_eq!(settings.polish_model, "fast-model");
+        assert_eq!(settings.polish_temperature, 2.0);
+        assert_eq!(settings.polish_max_output_tokens, 8192);
+        assert_eq!(settings.polish_timeout_secs, 5);
+    }
+
+    #[test]
+    fn speech_polish_request_options_override_only_speech_requests() {
+        let mut settings = test_settings();
+        settings.ai.provider.base_url = "https://api.example.com/v1".to_string();
+        settings.ai.provider.api_key = "sk-test".to_string();
+        settings.ai.provider.model = "general-model".to_string();
+        settings.ai.provider.temperature = 0.6;
+        settings.ai.provider.timeout_secs = 60;
+        let general = resolve_ai_text_request_options(&settings.ai, None).expect("general options");
+        assert_eq!(general.model, "general-model");
+        assert_eq!(general.temperature, 0.6);
+        assert_eq!(general.timeout_secs, 60);
+        assert_eq!(general.max_output_tokens, None);
+        assert_eq!(general.reasoning_effort, None);
+
+        settings.speech_to_text.polish_model = "fast-model".to_string();
+        settings.speech_to_text.polish_deep_thinking_enabled = true;
+        settings.speech_to_text.polish_temperature = 0.1;
+        settings.speech_to_text.polish_max_output_tokens = 512;
+        settings.speech_to_text.polish_timeout_secs = 20;
+        let mut speech = settings.speech_to_text.clone();
+        normalize_speech_to_text_settings(&mut speech).expect("normalize speech options");
+        let speech_options =
+            resolve_ai_text_request_options(&settings.ai, Some(&speech)).expect("speech options");
+        assert_eq!(speech_options.model, "fast-model");
+        assert_eq!(speech_options.temperature, 0.1);
+        assert_eq!(speech_options.timeout_secs, 20);
+        assert_eq!(speech_options.max_output_tokens, Some(512));
+        assert_eq!(speech_options.reasoning_effort.as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn doubao_speech_polish_disables_thinking_when_deep_thinking_is_off() {
+        let mut settings = test_settings();
+        settings.ai.provider.base_url = "https://ark.cn-beijing.volces.com/api/v3".to_string();
+        settings.ai.provider.api_key = "sk-test".to_string();
+        settings.ai.provider.model = "general-model".to_string();
+        settings.speech_to_text.polish_model = "doubao-seed-2.0-mini".to_string();
+        settings.speech_to_text.polish_deep_thinking_enabled = false;
+
+        let mut speech = settings.speech_to_text.clone();
+        normalize_speech_to_text_settings(&mut speech).expect("normalize speech options");
+        let options = resolve_ai_text_request_options(&settings.ai, Some(&speech))
+            .expect("doubao speech options");
+
+        assert_eq!(options.max_output_tokens, Some(256));
+        assert_eq!(options.reasoning_effort, None);
+        assert_eq!(
+            options
+                .thinking
+                .as_ref()
+                .map(|control| control.mode.as_str()),
+            Some("disabled")
+        );
+        assert!(!options.show_reasoning);
+    }
+
+    #[test]
+    fn general_ai_deep_thinking_defaults_off_and_controls_reasoning_visibility() {
+        let mut settings = test_settings();
+        settings.ai.provider.base_url = "https://api.example.com/v1".to_string();
+        settings.ai.provider.api_key = "sk-test".to_string();
+        settings.ai.provider.model = "general-model".to_string();
+
+        let off = resolve_ai_text_request_options(&settings.ai, None).expect("default AI options");
+        assert!(!off.show_reasoning);
+        assert_eq!(off.reasoning_effort, None);
+
+        settings.ai.provider.deep_thinking_enabled = true;
+        let on =
+            resolve_ai_text_request_options(&settings.ai, None).expect("deep-thinking AI options");
+        assert!(on.show_reasoning);
+        assert_eq!(on.reasoning_effort.as_deref(), Some("medium"));
+
+        let raw = "开头<think>内部分析</think>正文";
+        let (output, reasoning) = split_ai_think_blocks(raw);
+        assert_eq!(output, "开头正文");
+        assert!(reasoning.is_some());
+        assert!(!off.show_reasoning);
+        assert!(on.show_reasoning);
+    }
+
+    #[test]
+    fn openai_request_serialization_omits_optional_fields_for_general_ai() {
+        let request = OpenAiCompatibleRequest {
+            model: "general-model".to_string(),
+            messages: Vec::new(),
+            temperature: 0.3,
+            max_tokens: None,
+            reasoning_effort: None,
+            thinking: None,
+            stream: None,
+        };
+        let value = serde_json::to_value(request).expect("serialize general request");
+        assert!(value.get("max_tokens").is_none());
+        assert!(value.get("reasoning_effort").is_none());
+        assert!(value.get("thinking").is_none());
+
+        let speech_request = OpenAiCompatibleRequest {
+            model: "fast-model".to_string(),
+            messages: Vec::new(),
+            temperature: 0.1,
+            max_tokens: Some(256),
+            reasoning_effort: None,
+            thinking: Some(OpenAiThinkingControl {
+                mode: "disabled".to_string(),
+            }),
+            stream: Some(true),
+        };
+        let speech_value = serde_json::to_value(speech_request).expect("serialize speech request");
+        assert_eq!(speech_value["max_tokens"], 256);
+        assert!(speech_value.get("reasoning_effort").is_none());
+        assert_eq!(speech_value["thinking"]["type"], "disabled");
+        assert_eq!(speech_value["stream"], true);
+    }
+
+    #[test]
     fn render_ai_prompt_replaces_known_variables() {
         let rendered = render_ai_prompt("格式: {{format}}\n{{text}}", "你好", "markdown");
 
@@ -12666,6 +12966,7 @@ mod tests {
             text: "需要润色".to_string(),
             format: Some("text".to_string()),
             temporary_prompt: None,
+            speech_polish: false,
         };
 
         let error = process_text_with_ai_impl(&Client::new(), &settings, request)
@@ -12684,6 +12985,7 @@ mod tests {
             text: "需要润色".to_string(),
             format: Some("markdown".to_string()),
             temporary_prompt: None,
+            speech_polish: false,
         };
 
         let error = process_text_with_ai_impl(&Client::new(), &settings, request)
@@ -12708,6 +13010,7 @@ mod tests {
                 user_prompt: " 请处理：{{text}} ".to_string(),
                 output_mode: None,
             }),
+            speech_polish: false,
         };
 
         let action = resolve_ai_request_action(&settings.ai, &request).expect("temporary prompt");
@@ -12735,6 +13038,7 @@ mod tests {
                 user_prompt: "   ".to_string(),
                 output_mode: None,
             }),
+            speech_polish: false,
         };
 
         let error = match resolve_ai_request_action(&settings.ai, &request) {

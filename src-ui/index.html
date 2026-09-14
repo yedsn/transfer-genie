@@ -1013,6 +1013,30 @@
                     </select>
                     <span class="field-hint">使用 AI 助手里的提示词动作处理转录结果；默认使用基础润色。</span>
                   </label>
+                  <div class="field-row speech-polish-model-row">
+                    <label>
+                      润色模型
+                      <input id="speech-to-text-polish-model" type="text" placeholder="留空使用 AI 助手模型" :value="ui.settingsForm.speechToTextPolishModel" :disabled="!ui.settingsForm.speechToTextPolishEnabled" @input="updateSettingsFormField('speechToTextPolishModel', $event.target.value)" />
+                    </label>
+                    <label class="toggle-left speech-polish-deep-thinking-toggle">
+                      <span class="toggle-label">深度思考</span>
+                      <input id="speech-to-text-polish-deep-thinking-enabled" type="checkbox" :checked="ui.settingsForm.speechToTextPolishDeepThinkingEnabled" :disabled="!ui.settingsForm.speechToTextPolishEnabled" @change="updateSettingsFormField('speechToTextPolishDeepThinkingEnabled', $event.target.checked)" />
+                    </label>
+                  </div>
+                  <div class="field-row">
+                    <label>
+                      润色温度
+                      <input id="speech-to-text-polish-temperature" type="number" min="0" max="2" step="0.1" :value="ui.settingsForm.speechToTextPolishTemperature" :disabled="!ui.settingsForm.speechToTextPolishEnabled" @input="updateSettingsFormField('speechToTextPolishTemperature', Number($event.target.value || 0.1))" />
+                    </label>
+                    <label>
+                      输出上限
+                      <input id="speech-to-text-polish-max-output-tokens" type="number" min="128" max="8192" step="1" :value="ui.settingsForm.speechToTextPolishMaxOutputTokens" :disabled="!ui.settingsForm.speechToTextPolishEnabled" @input="updateSettingsFormField('speechToTextPolishMaxOutputTokens', Number($event.target.value || 256))" />
+                    </label>
+                    <label>
+                      超时（秒）
+                      <input id="speech-to-text-polish-timeout" type="number" min="5" max="300" step="1" :value="ui.settingsForm.speechToTextPolishTimeoutSecs" :disabled="!ui.settingsForm.speechToTextPolishEnabled" @input="updateSettingsFormField('speechToTextPolishTimeoutSecs', Number($event.target.value || 20))" />
+                    </label>
+                  </div>
                   <label class="toggle-left">
                     <span class="toggle-label">启用录音提示音</span>
                     <input id="speech-to-text-cue-sound-enabled" type="checkbox" :checked="ui.settingsForm.speechToTextCueSoundEnabled !== false" @change="updateSettingsFormField('speechToTextCueSoundEnabled', $event.target.checked)" />
@@ -1068,10 +1092,16 @@
                     <input type="password" :value="ui.settingsForm.aiApiKey" @input="updateSettingsFormField('aiApiKey', $event.target.value)" />
                     <span class="field-hint">导出配置时会作为敏感字段加密处理。</span>
                   </label>
-                  <label>
-                    模型
-                    <input type="text" placeholder="gpt-4.1-mini" :value="ui.settingsForm.aiModel" @input="updateSettingsFormField('aiModel', $event.target.value)" />
-                  </label>
+                  <div class="field-row ai-model-row">
+                    <label>
+                      模型
+                      <input type="text" placeholder="gpt-4.1-mini" :value="ui.settingsForm.aiModel" @input="updateSettingsFormField('aiModel', $event.target.value)" />
+                    </label>
+                    <label class="toggle-left ai-deep-thinking-toggle">
+                      <span class="toggle-label">深度思考</span>
+                      <input id="ai-deep-thinking-enabled" type="checkbox" :checked="ui.settingsForm.aiDeepThinkingEnabled" @change="updateSettingsFormField('aiDeepThinkingEnabled', $event.target.checked)" />
+                    </label>
+                  </div>
                   <div class="field-row">
                     <label>
                       温度
