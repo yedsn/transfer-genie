@@ -72,6 +72,7 @@ export const transferGenieState = reactive<TransferGenieState>({
     downloadDir: "",
     autoStart: false,
     autoUpdateEnabled: false,
+    shortcutsEnabled: true,
     globalHotkeyEnabled: true,
     globalHotkey: "alt+t",
     localHttpApiEnabled: false,

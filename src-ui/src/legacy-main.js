@@ -334,6 +334,9 @@ function updateSettingsFormField(field, value, options = {}) {
     ...currentSettingsFormState,
     [field]: value,
   };
+  if (field === 'shortcutsEnabled') {
+    currentSettingsFormState.globalHotkeyEnabled = value !== false;
+  }
   settingsFormRevision += 1;
   if (field === 'defaultEditorFormat') {
     saveDefaultEditorFormat(value);
@@ -341,6 +344,9 @@ function updateSettingsFormField(field, value, options = {}) {
   }
   if (field === 'speechToTextCueSoundEnabled' || field === 'speechToTextCueSoundKind') {
     syncSpeechCueSoundControls();
+  }
+  if (field === 'shortcutsEnabled') {
+    syncShortcutsEnabledState();
   }
   syncVueSettingsForm(currentSettingsFormState);
   syncSendOptionsMenuState();
@@ -842,8 +848,10 @@ const telegramStartServiceButton = document.getElementById('telegram-start-servi
 const telegramStopServiceButton = document.getElementById('telegram-stop-service');
 const telegramBridgeStatusLabel = document.getElementById('telegram-bridge-status');
 const telegramBridgeLastErrorLabel = document.getElementById('telegram-bridge-last-error');
+const shortcutsEnabledInput = document.getElementById('shortcuts-enabled');
 const globalHotkeyInput = document.getElementById('global-hotkey');
-const globalHotkeyEnabledInput = document.getElementById('global-hotkey-enabled');
+const globalHotkeyClearButton = document.getElementById('global-hotkey-clear');
+const globalHotkeyResetButton = document.getElementById('global-hotkey-reset');
 const speechToTextEnabledInput = document.getElementById('speech-to-text-enabled');
 const speechToTextApiKeyInput = document.getElementById('speech-to-text-api-key');
 const speechToTextResourceIdInput = document.getElementById('speech-to-text-resource-id');
@@ -853,6 +861,8 @@ const speechToTextCaptureSystemAudioInput = document.getElementById('speech-to-t
 const speechToTextSystemAudioDeviceInput = document.getElementById('speech-to-text-system-audio-device');
 const systemDictationEnabledInput = document.getElementById('system-dictation-enabled');
 const systemDictationShortcutInput = document.getElementById('system-dictation-shortcut');
+const systemDictationShortcutClearButton = document.getElementById('system-dictation-shortcut-clear');
+const systemDictationShortcutResetButton = document.getElementById('system-dictation-shortcut-reset');
 const speechToTextTaskRetentionInput = document.getElementById('speech-to-text-task-retention');
 const speechToTextCueSoundEnabledInput = document.getElementById('speech-to-text-cue-sound-enabled');
 const speechToTextCueSoundKindInput = document.getElementById('speech-to-text-cue-sound-kind');
@@ -862,6 +872,8 @@ const speechToTextPolishActionInput = document.getElementById('speech-to-text-po
 const speechTaskHistorySummary = document.getElementById('speech-task-history-summary');
 const speechTaskHistoryList = document.getElementById('speech-task-history-list');
 const sendHotkeyInputs = document.querySelectorAll('input[name="send-hotkey"]');
+const sendHotkeyClearButton = document.getElementById('send-hotkey-clear');
+const sendHotkeyResetButton = document.getElementById('send-hotkey-reset');
 const toggleSelectionButton = document.getElementById('toggle-selection');
 const selectionBar = document.getElementById('selection-bar');
 const selectionCount = document.getElementById('selection-count');
@@ -932,6 +944,8 @@ let updateInstallDialogController = null;
 
 const APP_UPDATE_EVENT = 'app-update-event';
 const TRAY_CHECK_UPDATE_EVENT = 'tray-check-update';
+const SHORTCUT_SETTINGS_CHANGED_EVENT = 'shortcut-settings-changed';
+const SETTINGS_CHANGED_EVENT = 'settings-changed';
 
 function cancelPendingAutoUpdateCheck() {
   if (autoUpdateCheckTimer) {
@@ -1099,6 +1113,7 @@ let currentSettingsFormState = {
   downloadDir: '',
   autoStart: false,
   autoUpdateEnabled: false,
+  shortcutsEnabled: true,
   globalHotkeyEnabled: true,
   globalHotkey: 'alt+t',
   localHttpApiEnabled: false,
@@ -1644,20 +1659,30 @@ function updateInstallProgressMessage(payload = {}) {
 }
 
 function normalizeSendHotkey(value) {
-  const normalized = (value || '').toLowerCase().trim();
+  const normalized = String(value ?? '').toLowerCase().trim();
+  if (!normalized) return '';
   if (normalized === SEND_HOTKEY.CTRL_ENTER || normalized === 'ctrl+enter') {
     return SEND_HOTKEY.CTRL_ENTER;
   }
   return SEND_HOTKEY.ENTER;
 }
 
+function syncShortcutsEnabledState() {
+  const enabled = currentSettingsFormState.shortcutsEnabled !== false;
+  window.transferGenieShortcutsEnabled = enabled;
+  window.dispatchEvent(new CustomEvent('transfer-genie:shortcuts-enabled-change', { detail: { shortcutsEnabled: enabled } }));
+}
+
 function sendHotkeyLabel() {
+  if (!sendHotkey) return '点击发送';
   return sendHotkey === SEND_HOTKEY.CTRL_ENTER ? 'Ctrl+Enter' : 'Enter';
 }
 
 function updateComposerHint() {
   if (!textInput) return;
-  if (sendHotkey === SEND_HOTKEY.CTRL_ENTER) {
+  if (!sendHotkey) {
+    textInput.placeholder = '输入消息...（点击发送按钮发送）';
+  } else if (sendHotkey === SEND_HOTKEY.CTRL_ENTER) {
     textInput.placeholder = '输入消息...（Enter 换行，Ctrl+Enter 发送）';
   } else {
     textInput.placeholder = '输入消息...（Enter 发送，Ctrl+Enter 换行）';
@@ -2057,7 +2082,7 @@ function setSystemDictationShortcutCapture(active) {
   if (capturingSystemDictationShortcut) {
     systemDictationShortcutInput.value = '请按下快捷键...';
   } else {
-    systemDictationShortcutInput.value = currentSettingsFormState.systemDictationShortcut || DEFAULT_SYSTEM_DICTATION_SHORTCUT;
+    systemDictationShortcutInput.value = currentSettingsFormState.systemDictationShortcut ?? '';
   }
 }
 
@@ -2072,7 +2097,7 @@ function handleSystemDictationShortcutCapture(event) {
   }
 
   if (event.key === 'Backspace' || event.key === 'Delete') {
-    updateSettingsFormField('systemDictationShortcut', DEFAULT_SYSTEM_DICTATION_SHORTCUT, { delayMs: 0 });
+    updateSettingsFormField('systemDictationShortcut', '', { delayMs: 0 });
     setSystemDictationShortcutCapture(false);
     return;
   }
@@ -4031,8 +4056,16 @@ function finishSystemDictationRecording(confirmed) {
 }
 
 function toggleSystemDictationRecording() {
-  logSystemDictation('toggle event received', { enabled: !!currentSettingsFormState.systemDictationEnabled });
-  if (!currentSettingsFormState.systemDictationEnabled) return;
+  logSystemDictation('toggle event received', {
+    enabled: !!currentSettingsFormState.systemDictationEnabled,
+    shortcutsEnabled: currentSettingsFormState.shortcutsEnabled !== false,
+    shortcut: currentSettingsFormState.systemDictationShortcut || '',
+  });
+  if (
+    currentSettingsFormState.shortcutsEnabled === false ||
+    !currentSettingsFormState.systemDictationEnabled ||
+    !String(currentSettingsFormState.systemDictationShortcut || '').trim()
+  ) return;
   if (speechState === 'preparing') {
     systemDictationMode = true;
     if (performance.now() - systemDictationLastStartAt < SYSTEM_DICTATION_START_TOGGLE_GUARD_MS) {
@@ -4075,8 +4108,10 @@ function isValidGlobalHotkey(value) {
 }
 
 function syncGlobalHotkeyInputState() {
-  if (!globalHotkeyInput || !globalHotkeyEnabledInput) return;
-  globalHotkeyInput.disabled = !currentSettingsFormState.globalHotkeyEnabled;
+  const enabled = currentSettingsFormState.shortcutsEnabled !== false;
+  if (shortcutsEnabledInput) shortcutsEnabledInput.checked = enabled;
+  if (globalHotkeyInput) globalHotkeyInput.disabled = false;
+  if (systemDictationShortcutInput) systemDictationShortcutInput.disabled = false;
 }
 
 async function minimizeAppWindow() {
@@ -10841,11 +10876,14 @@ function applySettings(settings) {
       ? '状态：正在获取...'
       : '状态：已关闭';
   }
+  const shortcutsEnabled = settings.shortcuts_enabled ?? settings.global_hotkey_enabled ?? true;
+  const appliedGlobalHotkey = settings.global_hotkey ?? DEFAULT_GLOBAL_HOTKEY;
+  const appliedSystemDictationShortcut = speechToText.system_dictation_shortcut ?? DEFAULT_SYSTEM_DICTATION_SHORTCUT;
   if (globalHotkeyInput) {
-    globalHotkeyInput.value = (settings.global_hotkey || DEFAULT_GLOBAL_HOTKEY).toLowerCase();
+    globalHotkeyInput.value = String(appliedGlobalHotkey).toLowerCase();
   }
-  if (globalHotkeyEnabledInput) {
-    globalHotkeyEnabledInput.checked = settings.global_hotkey_enabled !== false;
+  if (shortcutsEnabledInput) {
+    shortcutsEnabledInput.checked = shortcutsEnabled !== false;
   }
   if (speechToTextEnabledInput) speechToTextEnabledInput.checked = !!speechToText.enabled;
   if (speechToTextApiKeyInput) speechToTextApiKeyInput.value = speechToText.api_key || '';
@@ -10855,7 +10893,7 @@ function applySettings(settings) {
   if (speechToTextCaptureSystemAudioInput) speechToTextCaptureSystemAudioInput.checked = !!speechToText.capture_system_audio;
   if (speechToTextSystemAudioDeviceInput) speechToTextSystemAudioDeviceInput.value = speechToText.system_audio_device_id || '';
   if (systemDictationEnabledInput) systemDictationEnabledInput.checked = !!speechToText.system_dictation_enabled;
-  if (systemDictationShortcutInput) systemDictationShortcutInput.value = (speechToText.system_dictation_shortcut || DEFAULT_SYSTEM_DICTATION_SHORTCUT).toLowerCase();
+  if (systemDictationShortcutInput) systemDictationShortcutInput.value = String(appliedSystemDictationShortcut).toLowerCase();
   if (speechToTextTaskRetentionInput) speechToTextTaskRetentionInput.value = Number(speechToText.task_retention_count || 14);
   if (speechToTextCueSoundEnabledInput) speechToTextCueSoundEnabledInput.checked = speechToText.cue_sound_enabled !== false;
   if (speechToTextCueSoundKindInput) speechToTextCueSoundKindInput.value = normalizeSpeechCueSoundKind(speechToText.cue_sound_kind || DEFAULT_SPEECH_CUE_SOUND_KIND);
@@ -10871,8 +10909,9 @@ function applySettings(settings) {
     saveFilenameRule: settings.save_filename_rule || DEFAULT_SAVE_FILENAME_RULE,
     autoStart: !!settings.auto_start,
     autoUpdateEnabled: !!settings.auto_update_enabled,
-    globalHotkeyEnabled: settings.global_hotkey_enabled !== false,
-    globalHotkey: (settings.global_hotkey || DEFAULT_GLOBAL_HOTKEY).toLowerCase(),
+    shortcutsEnabled: shortcutsEnabled !== false,
+    globalHotkeyEnabled: shortcutsEnabled !== false,
+    globalHotkey: String(appliedGlobalHotkey).toLowerCase(),
     localHttpApiEnabled: !!settings.local_http_api?.enabled,
     localHttpApiBindAddress:
       settings.local_http_api?.bind_address || DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS,
@@ -10904,7 +10943,7 @@ function applySettings(settings) {
     speechToTextCaptureSystemAudio: !!speechToText.capture_system_audio,
     speechToTextSystemAudioDeviceId: speechToText.system_audio_device_id || '',
     systemDictationEnabled: !!speechToText.system_dictation_enabled,
-    systemDictationShortcut: (speechToText.system_dictation_shortcut || DEFAULT_SYSTEM_DICTATION_SHORTCUT).toLowerCase(),
+    systemDictationShortcut: String(appliedSystemDictationShortcut).toLowerCase(),
     speechToTextTaskRetentionCount: Number(speechToText.task_retention_count || 14),
     speechToTextCueSoundEnabled: speechToText.cue_sound_enabled !== false,
     speechToTextCueSoundKind: normalizeSpeechCueSoundKind(speechToText.cue_sound_kind || DEFAULT_SPEECH_CUE_SOUND_KIND),
@@ -10912,6 +10951,7 @@ function applySettings(settings) {
     speechToTextPolishActionId: speechToText.polish_action_id || 'polish',
   };
   syncVueSettingsForm(currentSettingsFormState);
+  syncShortcutsEnabledState();
   syncSpeechCueSoundControls();
   void refreshSpeechMicrophoneOptions();
   void renderSpeechTaskHistory();
@@ -10959,7 +10999,7 @@ function applySettings(settings) {
   }
   syncVueSettingsAutoBackup(currentAutoBackupStatusState);
   syncGlobalHotkeyInputState();
-  setSendHotkey(settings.send_hotkey || SEND_HOTKEY.ENTER);
+  setSendHotkey(settings.send_hotkey ?? SEND_HOTKEY.ENTER);
   applyTransferTabLabels();
   renderWebdavEndpoints();
   renderEndpointSelect();
@@ -11024,11 +11064,10 @@ async function saveSettings(options = {}) {
       return;
     }
   }
-  const globalHotkeyEnabled = !!currentSettingsFormState.globalHotkeyEnabled;
-  const normalizedGlobalHotkey = normalizeGlobalHotkey(
-    (currentSettingsFormState.globalHotkey || DEFAULT_GLOBAL_HOTKEY) || '',
-  );
-  if (globalHotkeyEnabled && !normalizedGlobalHotkey) {
+  const shortcutsEnabled = currentSettingsFormState.shortcutsEnabled !== false;
+  const globalHotkeyRaw = String(currentSettingsFormState.globalHotkey ?? '').trim();
+  const normalizedGlobalHotkey = globalHotkeyRaw ? normalizeGlobalHotkey(globalHotkeyRaw) : '';
+  if (globalHotkeyRaw && !normalizedGlobalHotkey) {
     setErrorStatus('全局快捷键需包含修饰键，例如 Ctrl+Alt+T');
     return;
   }
@@ -11040,9 +11079,10 @@ async function saveSettings(options = {}) {
   const speechToTextMicrophoneDeviceId = (currentSettingsFormState.speechToTextMicrophoneDeviceId || '').trim();
   const speechToTextCaptureSystemAudio = !!currentSettingsFormState.speechToTextCaptureSystemAudio;
   const speechToTextSystemAudioDeviceId = (currentSettingsFormState.speechToTextSystemAudioDeviceId || '').trim();
-  const normalizedSystemDictationShortcut = normalizeSpeechHotkey(
-    currentSettingsFormState.systemDictationShortcut || DEFAULT_SYSTEM_DICTATION_SHORTCUT,
-  );
+  const systemDictationShortcutRaw = String(currentSettingsFormState.systemDictationShortcut ?? '').trim();
+  const normalizedSystemDictationShortcut = systemDictationShortcutRaw
+    ? normalizeSpeechHotkey(systemDictationShortcutRaw)
+    : '';
   const speechToTextCueSoundEnabled = !!currentSettingsFormState.speechToTextCueSoundEnabled;
   const speechToTextCueSoundKind = normalizeSpeechCueSoundKind(currentSettingsFormState.speechToTextCueSoundKind || DEFAULT_SPEECH_CUE_SOUND_KIND);
   const speechToTextPolishEnabled = !!currentSettingsFormState.speechToTextPolishEnabled;
@@ -11063,11 +11103,17 @@ async function saveSettings(options = {}) {
     setErrorStatus('语音转文字接口地址无效，需要使用 Agent Plan ASR WebSocket 地址');
     return;
   }
-  if (systemDictationEnabled && !normalizedSystemDictationShortcut) {
+  if (systemDictationEnabled && systemDictationShortcutRaw && !normalizedSystemDictationShortcut) {
     setErrorStatus('系统听写快捷键格式无效，可填写 right-alt、left-alt 或 Alt+D');
     return;
   }
-  if (systemDictationEnabled && globalHotkeyEnabled && normalizedSystemDictationShortcut === normalizedGlobalHotkey) {
+  if (
+    systemDictationEnabled &&
+    shortcutsEnabled &&
+    normalizedSystemDictationShortcut &&
+    normalizedGlobalHotkey &&
+    normalizedSystemDictationShortcut === normalizedGlobalHotkey
+  ) {
     setErrorStatus('系统听写快捷键不能和显示窗口快捷键相同');
     return;
   }
@@ -11176,8 +11222,9 @@ async function saveSettings(options = {}) {
           DEFAULT_SAVE_FILENAME_RULE,
         )
       : (currentSettingsFormState.saveFilenameRule || DEFAULT_SAVE_FILENAME_RULE).trim(),
-    global_hotkey_enabled: globalHotkeyEnabled,
-    global_hotkey: normalizedGlobalHotkey || DEFAULT_GLOBAL_HOTKEY,
+    shortcuts_enabled: shortcutsEnabled,
+    global_hotkey_enabled: shortcutsEnabled,
+    global_hotkey: normalizedGlobalHotkey,
     send_hotkey: sendHotkey,
     auto_start: !!currentSettingsFormState.autoStart,
     auto_update_enabled: !!currentSettingsFormState.autoUpdateEnabled,
@@ -11233,7 +11280,7 @@ async function saveSettings(options = {}) {
       shortcut_enabled: false,
       shortcut: 'right-alt',
       system_dictation_enabled: systemDictationEnabled,
-      system_dictation_shortcut: normalizedSystemDictationShortcut || DEFAULT_SYSTEM_DICTATION_SHORTCUT,
+      system_dictation_shortcut: normalizedSystemDictationShortcut,
       polish_enabled: speechToTextPolishEnabled,
       polish_action_id: speechToTextPolishActionId || DEFAULT_SPEECH_POLISH_ACTION_ID,
       max_duration_secs: speechToTextMaxDurationSecs,
@@ -12731,8 +12778,29 @@ if (addWebdavButton) {
 if (batchSpeedTestButton) {
   batchSpeedTestButton.addEventListener('click', batchSpeedTest);
 }
-if (globalHotkeyEnabledInput) {
-  globalHotkeyEnabledInput.addEventListener('change', syncGlobalHotkeyInputState);
+if (globalHotkeyClearButton) {
+  globalHotkeyClearButton.addEventListener('click', () => updateSettingsFormField('globalHotkey', ''));
+}
+if (globalHotkeyResetButton) {
+  globalHotkeyResetButton.addEventListener('click', () => updateSettingsFormField('globalHotkey', DEFAULT_GLOBAL_HOTKEY));
+}
+if (systemDictationShortcutClearButton) {
+  systemDictationShortcutClearButton.addEventListener('click', () => updateSettingsFormField('systemDictationShortcut', ''));
+}
+if (systemDictationShortcutResetButton) {
+  systemDictationShortcutResetButton.addEventListener('click', () => updateSettingsFormField('systemDictationShortcut', DEFAULT_SYSTEM_DICTATION_SHORTCUT));
+}
+if (sendHotkeyClearButton) {
+  sendHotkeyClearButton.addEventListener('click', async () => {
+    setSendHotkey('');
+    await persistSendHotkeySetting();
+  });
+}
+if (sendHotkeyResetButton) {
+  sendHotkeyResetButton.addEventListener('click', async () => {
+    setSendHotkey(SEND_HOTKEY.ENTER);
+    await persistSendHotkeySetting();
+  });
 }
 if (localHttpApiEnabledInput) {
   localHttpApiEnabledInput.addEventListener('change', () => {
@@ -12980,6 +13048,7 @@ window.transferGenieLegacyFullscreen = {
   },
 };
 window.transferGenieSendHotkey = sendHotkey;
+window.transferGenieShortcutsEnabled = currentSettingsFormState.shortcutsEnabled !== false;
 window.transferGenieSendActiveDraft = function () { sendText(); };
 
 if (feedContent) {
@@ -13073,6 +13142,9 @@ if (textInput) {
     if (event.key !== 'Enter') {
       return;
     }
+    if (window.transferGenieShortcutsEnabled === false || !sendHotkey) {
+      return;
+    }
     const isCtrlLike = event.ctrlKey || event.metaKey;
     const isAlt = event.altKey;
     const isShift = event.shiftKey;
@@ -13107,6 +13179,9 @@ document.addEventListener('keydown', (event) => {
   const isCtrlLike = event.ctrlKey || event.metaKey;
   const isAlt = event.altKey;
   const isShift = event.shiftKey;
+  if (window.transferGenieShortcutsEnabled === false || !sendHotkey) {
+    return;
+  }
 
   if (sendHotkey === SEND_HOTKEY.ENTER) {
     if (!isCtrlLike && !isAlt && !isShift) {
@@ -13390,6 +13465,21 @@ if (listen) {
   });
   listen(TRAY_CHECK_UPDATE_EVENT, () => {
     checkForAppUpdate({ source: 'tray' });
+  });
+  listen(SHORTCUT_SETTINGS_CHANGED_EVENT, (event) => {
+    const enabled = event?.payload !== false;
+    currentSettingsFormState = {
+      ...currentSettingsFormState,
+      shortcutsEnabled: enabled,
+      globalHotkeyEnabled: enabled,
+    };
+    syncVueSettingsForm(currentSettingsFormState);
+    syncShortcutsEnabledState();
+    syncGlobalHotkeyInputState();
+    void loadSettings();
+  });
+  listen(SETTINGS_CHANGED_EVENT, () => {
+    void loadSettings();
   });
 
   // 用于非侵入性操作的通用焦点监听器

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import '../src-ui/src/utils/settings-form-runtime.js';
 
 const runtime = globalThis.transferGenieSettingsFormRuntime;
@@ -128,6 +129,36 @@ function testManualBackupDialogState() {
   assert.equal(fallback.loading, true);
 }
 
+function sectionHtml(html, id) {
+  const marker = `id="${id}"`;
+  const start = html.indexOf(marker);
+  assert.notEqual(start, -1, `missing ${id}`);
+  const next = html.indexOf('settings-section-anchor', start + marker.length);
+  return next === -1 ? html.slice(start) : html.slice(start, next);
+}
+
+function testShortcutSettingsMarkup() {
+  const html = readFileSync(new URL('../src-ui/index.html', import.meta.url), 'utf8');
+  assert.match(html, /data-settings-nav-target="settings-section-shortcuts"[^>]*>快捷键</);
+
+  const shortcuts = sectionHtml(html, 'settings-section-shortcuts');
+  assert.match(shortcuts, /id="shortcuts-enabled"/);
+  assert.match(shortcuts, /id="global-hotkey"/);
+  assert.match(shortcuts, /id="global-hotkey-clear"/);
+  assert.match(shortcuts, /id="global-hotkey-reset"/);
+  assert.match(shortcuts, /id="system-dictation-shortcut"/);
+  assert.match(shortcuts, /id="system-dictation-shortcut-clear"/);
+  assert.match(shortcuts, /id="system-dictation-shortcut-reset"/);
+  assert.match(shortcuts, /name="send-hotkey" value="enter"/);
+  assert.match(shortcuts, /name="send-hotkey" value="ctrl_enter"/);
+  assert.match(shortcuts, /id="send-hotkey-clear"/);
+  assert.match(shortcuts, /id="send-hotkey-reset"/);
+
+  assert.doesNotMatch(sectionHtml(html, 'settings-section-send'), /name="send-hotkey"|发送快捷键/);
+  assert.doesNotMatch(sectionHtml(html, 'settings-section-system'), /global-hotkey|全局快捷键|启用全局快捷键/);
+  assert.doesNotMatch(sectionHtml(html, 'settings-section-speech'), /system-dictation-shortcut|系统听写快捷键/);
+}
+
 testNormalizeTelegramPollInterval();
 testGetTelegramBridgeFormState();
 testNormalizeLocalHttpApiBindPort();
@@ -136,5 +167,6 @@ testGetCurrentSenderName();
 testSendSettingsPayload();
 testNormalizeSaveFilenameRule();
 testManualBackupDialogState();
+testShortcutSettingsMarkup();
 
 console.log('settings-form-runtime tests passed');

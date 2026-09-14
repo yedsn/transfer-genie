@@ -677,6 +677,7 @@
                 <div class="settings-nav-list">
                   <button class="settings-nav-button is-active" type="button" data-settings-nav-target="settings-section-webdav">WebDAV 端点</button>
                   <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-basic">基本设置</button>
+                  <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-shortcuts">快捷键</button>
                   <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-send">发送设置</button>
                   <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-system">系统设置</button>
                   <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-api">API 接口</button>
@@ -794,32 +795,81 @@
                 </div>
               </div>
 
-              <div class="settings-section-anchor" id="settings-section-send" data-settings-section aria-hidden="true"></div>
+              <div class="settings-section-anchor" id="settings-section-shortcuts" data-settings-section aria-hidden="true"></div>
               <div class="settings-group">
-                <h3 class="settings-group-title">发送设置</h3>
+                <h3 class="settings-group-title">快捷键</h3>
                 <div class="settings-group-content">
-                  <div class="settings-choice">
+                  <label class="toggle-left">
+                    <span class="toggle-label">启用快捷键</span>
+                    <input id="shortcuts-enabled" type="checkbox" :checked="ui.settingsForm.shortcutsEnabled !== false" @change="updateSettingsFormField('shortcutsEnabled', $event.target.checked)" />
+                  </label>
+                  <span class="field-hint">关闭后暂停所有快捷键，但不会清空下面的配置。</span>
+
+                  <div class="settings-choice shortcut-setting">
                     <div class="settings-choice-header">
-                      <span class="settings-choice-title">发送快捷键</span>
-                      <span class="settings-choice-subtitle">选择发送与换行的组合</span>
+                      <span class="settings-choice-title">显示/隐藏窗口</span>
+                      <span class="settings-choice-subtitle">默认 Alt+T；留空表示不使用这个快捷键</span>
+                    </div>
+                    <label>
+                      快捷键
+                      <div class="field-inline-actions">
+                        <input id="global-hotkey" type="text" placeholder="Alt+T" :value="ui.settingsForm.globalHotkey" @input="updateSettingsFormField('globalHotkey', $event.target.value)" />
+                        <button id="global-hotkey-clear" class="button ghost small" type="button">清空</button>
+                        <button id="global-hotkey-reset" class="button ghost small" type="button">重置</button>
+                      </div>
+                      <span class="field-hint">需包含修饰键，例如 Ctrl+Alt+T。</span>
+                    </label>
+                  </div>
+
+                  <div class="settings-choice shortcut-setting">
+                    <div class="settings-choice-header">
+                      <span class="settings-choice-title">系统听写</span>
+                      <span class="settings-choice-subtitle">默认 Alt+D；需在“语音输入”里启用系统听写</span>
+                    </div>
+                    <label>
+                      快捷键
+                      <div class="field-inline-actions">
+                        <input id="system-dictation-shortcut" type="text" placeholder="点击后按下快捷键" :value="ui.settingsForm.systemDictationShortcut" readonly />
+                        <button id="system-dictation-shortcut-clear" class="button ghost small" type="button">清空</button>
+                        <button id="system-dictation-shortcut-reset" class="button ghost small" type="button">重置</button>
+                      </div>
+                      <span class="field-hint">点击输入框后按下快捷键；支持 right-alt / left-alt 或 Alt+D。</span>
+                    </label>
+                  </div>
+
+                  <div class="settings-choice shortcut-setting">
+                    <div class="settings-choice-header">
+                      <span class="settings-choice-title">发送消息</span>
+                      <span class="settings-choice-subtitle">第一版仅支持 Enter、Ctrl+Enter 或清空</span>
                     </div>
                     <div class="settings-choice-row">
                       <label class="radio-card">
                         <input type="radio" name="send-hotkey" value="enter" checked />
                         <div class="radio-card-text">
-                          <span class="radio-card-title">回车发送</span>
-                          <span class="radio-card-sub">Ctrl+Enter 换行</span>
+                          <span class="radio-card-title">Enter</span>
+                          <span class="radio-card-sub">Enter 发送，Ctrl+Enter 换行</span>
                         </div>
                       </label>
                       <label class="radio-card">
                         <input type="radio" name="send-hotkey" value="ctrl_enter" />
                         <div class="radio-card-text">
-                          <span class="radio-card-title">Ctrl+Enter 发送</span>
-                          <span class="radio-card-sub">Enter 换行</span>
+                          <span class="radio-card-title">Ctrl+Enter</span>
+                          <span class="radio-card-sub">Ctrl+Enter 发送，Enter 换行</span>
                         </div>
                       </label>
                     </div>
+                    <div class="settings-actions-row">
+                      <button id="send-hotkey-clear" class="button ghost small" type="button">清空</button>
+                      <button id="send-hotkey-reset" class="button ghost small" type="button">重置</button>
+                    </div>
                   </div>
+                </div>
+              </div>
+
+              <div class="settings-section-anchor" id="settings-section-send" data-settings-section aria-hidden="true"></div>
+              <div class="settings-group">
+                <h3 class="settings-group-title">发送设置</h3>
+                <div class="settings-group-content">
                   <div class="settings-choice settings-default-editor-format">
                     <div class="settings-choice-header">
                       <span class="settings-choice-title">编辑器默认格式</span>
@@ -857,15 +907,6 @@
                   <label class="toggle-left">
                     <span class="toggle-label">自动更新</span>
                     <input id="auto-update-enabled" type="checkbox" :checked="ui.settingsForm.autoUpdateEnabled" @change="updateSettingsFormField('autoUpdateEnabled', $event.target.checked)" />
-                  </label>
-                  <label class="toggle-left">
-                    <span class="toggle-label">启用全局快捷键</span>
-                    <input id="global-hotkey-enabled" type="checkbox" :checked="ui.settingsForm.globalHotkeyEnabled" @change="updateSettingsFormField('globalHotkeyEnabled', $event.target.checked)" />
-                  </label>
-                  <label>
-                    全局快捷键
-                    <input id="global-hotkey" type="text" placeholder="Alt+T" :value="ui.settingsForm.globalHotkey" @input="updateSettingsFormField('globalHotkey', $event.target.value)" />
-                    <span class="field-hint">需包含修饰键，如 Ctrl+Alt+T；关闭开关可禁用</span>
                   </label>
                   <div class="settings-actions">
                     <div class="settings-actions-row">
@@ -955,13 +996,6 @@
                     <span class="toggle-label">启用系统听写</span>
                     <input id="system-dictation-enabled" type="checkbox" :checked="ui.settingsForm.systemDictationEnabled" @change="updateSettingsFormField('systemDictationEnabled', $event.target.checked)" />
                   </label>
-                  <div class="field-row">
-                    <label>
-                      系统听写快捷键
-                      <input id="system-dictation-shortcut" type="text" placeholder="点击后按下快捷键" :value="ui.settingsForm.systemDictationShortcut" :disabled="!ui.settingsForm.systemDictationEnabled" readonly />
-                      <span class="field-hint">点击输入框后按下快捷键；支持 right-alt / left-alt（Mac 为右/左 Option）或 Alt+D。</span>
-                    </label>
-                  </div>
                   <div class="field-row">
                     <label>
                       转录任务保留数量

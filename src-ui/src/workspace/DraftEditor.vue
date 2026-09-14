@@ -35,6 +35,7 @@ const aiPromptSaveCategory = ref("自定义");
 const aiPromptSaveBusy = ref(false);
 const aiPromptSaveError = ref("");
 const sendHotkeyValue = ref("enter");
+const shortcutsEnabledValue = ref(true);
 let activeAiRequestId = "";
 const aiPreview = ref<{
   title: string;
@@ -50,6 +51,7 @@ let initRetry = 0;
 let fullscreenListener: ((event: Event) => void) | null = null;
 let visibilityListener: ((event: Event) => void) | null = null;
 let sendHotkeyListener: ((event: Event) => void) | null = null;
+let shortcutsEnabledListener: ((event: Event) => void) | null = null;
 let resizeListener: (() => void) | null = null;
 let syncingMarkdownFromDraft = false;
 
@@ -102,8 +104,14 @@ function isComposerFullscreen() {
 
 function syncSendHotkey(value?: string) {
   const bridge = (window as any).transferGenieComposer;
-  const next = value || bridge?.getSendHotkey?.() || (window as any).transferGenieSendHotkey || "enter";
-  sendHotkeyValue.value = next === "ctrl_enter" ? "ctrl_enter" : "enter";
+  const raw = value ?? bridge?.getSendHotkey?.() ?? (window as any).transferGenieSendHotkey ?? "enter";
+  sendHotkeyValue.value = raw === "ctrl_enter" ? "ctrl_enter" : raw === "" ? "" : "enter";
+}
+
+function syncShortcutsEnabled(value?: boolean) {
+  const bridge = (window as any).transferGenieComposer;
+  const raw = typeof value === "boolean" ? value : bridge?.getShortcutsEnabled?.() ?? (window as any).transferGenieShortcutsEnabled;
+  shortcutsEnabledValue.value = raw !== false;
 }
 
 function registerFocus() {
@@ -228,6 +236,7 @@ const aiPreviewRows = computed(() => {
 });
 
 const sendHotkeyTitle = computed(() => {
+  if (!shortcutsEnabledValue.value || !sendHotkeyValue.value) return "点击发送";
   return sendHotkeyValue.value === "ctrl_enter" ? "Ctrl+Enter" : "Enter";
 });
 
@@ -696,7 +705,11 @@ function onTextInput(event: Event) {
 function shouldSendForEnter(event: KeyboardEvent) {
   if (event.defaultPrevented || event.key !== "Enter" || event.isComposing) return false;
   const bridge = (window as any).transferGenieComposer;
-  const hotkey = bridge?.getSendHotkey?.() === "ctrl_enter" ? "ctrl_enter" : "enter";
+  const shortcutsEnabled = bridge?.getShortcutsEnabled?.() ?? (window as any).transferGenieShortcutsEnabled;
+  if (shortcutsEnabled === false) return false;
+  const rawHotkey = bridge?.getSendHotkey?.() ?? (window as any).transferGenieSendHotkey ?? "enter";
+  const hotkey = rawHotkey === "ctrl_enter" ? "ctrl_enter" : rawHotkey === "" ? "" : "enter";
+  if (!hotkey) return false;
   const isCtrlLike = event.ctrlKey || event.metaKey;
   const isAlt = event.altKey;
   const isShift = event.shiftKey;
@@ -706,15 +719,17 @@ function shouldSendForEnter(event: KeyboardEvent) {
 
 function preserveFocusForAltDictation(event: KeyboardEvent) {
   if (event.isComposing) return false;
+  const settings = aiSettings.value;
+  const shortcutsEnabled = settings.shortcutsEnabled !== false && (window as any).transferGenieShortcutsEnabled !== false;
+  if (!shortcutsEnabled || !settings.systemDictationEnabled) return false;
+  const shortcut = String(settings.systemDictationShortcut || "").trim().toLowerCase();
+  if (!shortcut) return false;
   if (event.key === "Alt" || event.key === "AltGraph") {
     event.preventDefault();
     event.stopPropagation();
     return true;
   }
 
-  const settings = aiSettings.value;
-  if (!settings.systemDictationEnabled) return false;
-  const shortcut = String(settings.systemDictationShortcut || "").trim().toLowerCase();
   if (!shortcut.includes("alt")) return false;
 
   const mainKey = shortcut.split("+").pop() || "";
@@ -838,9 +853,14 @@ onMounted(() => {
   if (isMarkdown.value) initMarkdown();
   registerFocus();
   syncSendHotkey();
+  syncShortcutsEnabled();
   sendHotkeyListener = (event: Event) => {
     const custom = event as CustomEvent<{ sendHotkey?: string }>;
     syncSendHotkey(custom.detail?.sendHotkey);
+  };
+  shortcutsEnabledListener = (event: Event) => {
+    const custom = event as CustomEvent<{ shortcutsEnabled?: boolean }>;
+    syncShortcutsEnabled(custom.detail?.shortcutsEnabled);
   };
   fullscreenListener = (event: Event) => {
     const custom = event as CustomEvent<{ enabled?: boolean }>;
@@ -856,6 +876,7 @@ onMounted(() => {
   };
   resizeListener = () => refreshMarkdownLayout();
   window.addEventListener("transfer-genie:send-hotkey-change", sendHotkeyListener as EventListener);
+  if (shortcutsEnabledListener) window.addEventListener("transfer-genie:shortcuts-enabled-change", shortcutsEnabledListener as EventListener);
   window.addEventListener("transfer-genie:composer-fullscreen-change", fullscreenListener as EventListener);
   window.addEventListener("transfer-genie:composer-visibility-change", visibilityListener as EventListener);
   window.addEventListener("resize", resizeListener);
@@ -883,6 +904,7 @@ watch(() => props.draft.text, (text) => {
 onBeforeUnmount(() => {
   destroyMarkdown();
   if (sendHotkeyListener) window.removeEventListener("transfer-genie:send-hotkey-change", sendHotkeyListener as EventListener);
+  if (shortcutsEnabledListener) window.removeEventListener("transfer-genie:shortcuts-enabled-change", shortcutsEnabledListener as EventListener);
   if (fullscreenListener) window.removeEventListener("transfer-genie:composer-fullscreen-change", fullscreenListener as EventListener);
   if (visibilityListener) window.removeEventListener("transfer-genie:composer-visibility-change", visibilityListener as EventListener);
   if (resizeListener) window.removeEventListener("resize", resizeListener);

@@ -15,6 +15,10 @@ fn default_global_hotkey_enabled() -> bool {
     true
 }
 
+pub fn default_shortcuts_enabled() -> bool {
+    true
+}
+
 fn default_global_hotkey() -> String {
     "alt+t".to_string()
 }
@@ -773,6 +777,8 @@ pub struct Settings {
     pub save_filename_rule: String,
     #[serde(default = "default_send_hotkey")]
     pub send_hotkey: String,
+    #[serde(default = "default_shortcuts_enabled")]
+    pub shortcuts_enabled: bool,
     #[serde(default = "default_global_hotkey_enabled")]
     pub global_hotkey_enabled: bool,
     #[serde(default = "default_global_hotkey")]

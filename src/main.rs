@@ -226,6 +226,7 @@ const EXPORT_VERSION: u8 = 1;
 const EXPORT_KDF_ITERATIONS: u32 = 100_000;
 const DEFAULT_GLOBAL_HOTKEY: &str = "alt+t";
 const HOTKEY_MENU_ID: &str = "toggle-hotkey";
+const SYSTEM_DICTATION_MENU_ID: &str = "toggle-system-dictation";
 const CHECK_UPDATE_MENU_ID: &str = "check-update";
 const DEFAULT_SEND_HOTKEY: &str = "enter";
 const SEND_HOTKEY_CTRL_ENTER: &str = "ctrl_enter";
@@ -238,6 +239,8 @@ const LOCAL_HTTP_API_ROUTE: &str = "/api/send-file";
 const LOCAL_HTTP_TEXT_API_ROUTE: &str = "/api/send-text";
 const APP_UPDATE_EVENT: &str = "app-update-event";
 const TRAY_CHECK_UPDATE_EVENT: &str = "tray-check-update";
+const SHORTCUT_SETTINGS_CHANGED_EVENT: &str = "shortcut-settings-changed";
+const SETTINGS_CHANGED_EVENT: &str = "settings-changed";
 const SYSTEM_DICTATION_WINDOW_LABEL: &str = "system-dictation";
 const SYSTEM_DICTATION_WINDOW_WIDTH: f64 = 340.0;
 const SYSTEM_DICTATION_WINDOW_HEIGHT: f64 = 108.0;
@@ -298,6 +301,8 @@ struct ExportSettings {
     refresh_interval_secs: u64,
     #[serde(default = "crate::types::default_save_filename_rule")]
     save_filename_rule: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shortcuts_enabled: Option<bool>,
     #[serde(default = "default_export_global_hotkey_enabled")]
     global_hotkey_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1614,6 +1619,54 @@ fn save_send_hotkey(state: State<'_, AppState>, send_hotkey: String) -> Result<S
     Ok(persisted)
 }
 
+fn toggle_shortcuts_enabled_setting(settings: &mut Settings) {
+    settings.shortcuts_enabled = !settings.shortcuts_enabled;
+    settings.global_hotkey_enabled = settings.shortcuts_enabled;
+}
+
+fn toggle_system_dictation_enabled_setting(settings: &mut Settings) {
+    settings.speech_to_text.system_dictation_enabled =
+        !settings.speech_to_text.system_dictation_enabled;
+}
+
+#[cfg(desktop)]
+fn persist_tray_settings_toggle<F>(
+    app: &AppHandle,
+    state: &AppState,
+    apply: F,
+) -> Result<Settings, String>
+where
+    F: FnOnce(&mut Settings),
+{
+    let mut settings = current_settings(state)?;
+    apply(&mut settings);
+    let normalized = normalize_settings(settings, &state.default_download_dir)?;
+    update_hotkey_registrations(app, state, &normalized)?;
+    write_settings_audited(&state.settings_path, &normalized)?;
+    {
+        let mut guard = state
+            .settings
+            .lock()
+            .map_err(|_| "写入设置失败".to_string())?;
+        *guard = normalized.clone();
+    }
+    Ok(normalized)
+}
+
+#[cfg(desktop)]
+fn emit_settings_changed(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.emit(SETTINGS_CHANGED_EVENT, ());
+    }
+}
+
+#[cfg(desktop)]
+fn emit_shortcut_settings_changed(app: &AppHandle, shortcuts_enabled: bool) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.emit(SHORTCUT_SETTINGS_CHANGED_EVENT, shortcuts_enabled);
+    }
+}
+
 #[tauri::command]
 async fn process_text_with_ai(
     state: State<'_, AppState>,
@@ -2241,6 +2294,7 @@ fn export_settings(
         active_webdav_id: settings.active_webdav_id.clone(),
         refresh_interval_secs: settings.refresh_interval_secs,
         save_filename_rule: settings.save_filename_rule.clone(),
+        shortcuts_enabled: Some(settings.shortcuts_enabled),
         global_hotkey_enabled: settings.global_hotkey_enabled,
         global_hotkey: Some(settings.global_hotkey.clone()),
         send_hotkey: Some(settings.send_hotkey.clone()),
@@ -2307,6 +2361,10 @@ async fn import_settings(
         sender_name: existing.sender_name,
         refresh_interval_secs: bundle.settings.refresh_interval_secs,
         save_filename_rule: bundle.settings.save_filename_rule,
+        shortcuts_enabled: bundle
+            .settings
+            .shortcuts_enabled
+            .unwrap_or(bundle.settings.global_hotkey_enabled),
         global_hotkey_enabled: bundle.settings.global_hotkey_enabled,
         global_hotkey: bundle
             .settings
@@ -6613,36 +6671,43 @@ fn normalize_settings(
         settings.sender_name = random_sender_name();
     }
     let normalized_hotkey = normalize_global_hotkey(&settings.global_hotkey);
-    if settings.global_hotkey_enabled {
-        let Some(hotkey) = normalized_hotkey else {
-            return Err("全局快捷键格式无效，需要包含修饰键，例如 Ctrl+Alt+T".to_string());
-        };
-        settings.global_hotkey = hotkey;
+    settings.global_hotkey = if settings.global_hotkey.trim().is_empty() {
+        String::new()
     } else {
-        settings.global_hotkey =
-            normalized_hotkey.unwrap_or_else(|| DEFAULT_GLOBAL_HOTKEY.to_string());
-    }
+        normalized_hotkey
+            .ok_or_else(|| "全局快捷键格式无效，需要包含修饰键，例如 Ctrl+Alt+T".to_string())?
+    };
     let normalized_system_dictation_hotkey =
         normalize_system_dictation_hotkey(&settings.speech_to_text.system_dictation_shortcut);
-    if settings.speech_to_text.system_dictation_enabled {
-        let Some(hotkey) = normalized_system_dictation_hotkey else {
-            return Err("系统听写快捷键格式无效，可填写 right-alt、left-alt 或 Alt+D".to_string());
-        };
-        if settings.global_hotkey_enabled && hotkey == settings.global_hotkey {
-            return Err("系统听写快捷键不能和显示窗口快捷键相同".to_string());
-        }
-        settings.speech_to_text.system_dictation_shortcut = hotkey;
+    settings.speech_to_text.system_dictation_shortcut = if settings
+        .speech_to_text
+        .system_dictation_shortcut
+        .trim()
+        .is_empty()
+    {
+        String::new()
     } else {
-        settings.speech_to_text.system_dictation_shortcut = normalized_system_dictation_hotkey
-            .unwrap_or_else(crate::types::default_system_dictation_shortcut);
+        normalized_system_dictation_hotkey.ok_or_else(|| {
+            "系统听写快捷键格式无效，可填写 right-alt、left-alt 或 Alt+D".to_string()
+        })?
+    };
+    if settings.speech_to_text.system_dictation_enabled
+        && settings.shortcuts_enabled
+        && !settings.global_hotkey.is_empty()
+        && !settings.speech_to_text.system_dictation_shortcut.is_empty()
+        && settings.speech_to_text.system_dictation_shortcut == settings.global_hotkey
+    {
+        return Err("系统听写快捷键不能和显示窗口快捷键相同".to_string());
     }
     let hotkey_raw = settings.send_hotkey.trim().to_lowercase();
     settings.send_hotkey = match hotkey_raw.as_str() {
+        "" => String::new(),
         DEFAULT_SEND_HOTKEY => DEFAULT_SEND_HOTKEY.to_string(),
         SEND_HOTKEY_CTRL_ENTER => SEND_HOTKEY_CTRL_ENTER.to_string(),
         "ctrl+enter" => SEND_HOTKEY_CTRL_ENTER.to_string(),
         _ => DEFAULT_SEND_HOTKEY.to_string(),
     };
+    settings.global_hotkey_enabled = settings.shortcuts_enabled;
     settings.download_dir = normalize_download_dir(&settings.download_dir, default_download_dir);
     settings.save_filename_rule = normalize_save_filename_rule(&settings.save_filename_rule);
 
@@ -7983,8 +8048,16 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
         let value = serde_json::from_str::<serde_json::Value>(&data)
             .map_err(|err| format!("解析设置失败: {err}"))?;
         let settings = if value.get("webdav_endpoints").is_some() {
-            serde_json::from_value::<Settings>(value)
-                .map_err(|err| format!("解析设置失败: {err}"))?
+            let has_shortcuts_enabled = value.get("shortcuts_enabled").is_some();
+            let mut settings = serde_json::from_value::<Settings>(value.clone())
+                .map_err(|err| format!("解析设置失败: {err}"))?;
+            if !has_shortcuts_enabled {
+                settings.shortcuts_enabled = value
+                    .get("global_hotkey_enabled")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(true);
+            }
+            settings
         } else {
             let legacy = serde_json::from_value::<LegacySettings>(value)
                 .map_err(|err| format!("解析设置失败: {err}"))?;
@@ -8015,6 +8088,7 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
                 refresh_interval_secs: legacy.refresh_interval_secs,
                 download_dir: legacy.download_dir,
                 save_filename_rule: crate::types::default_save_filename_rule(),
+                shortcuts_enabled: true,
                 global_hotkey_enabled: true,
                 global_hotkey: DEFAULT_GLOBAL_HOTKEY.to_string(),
                 send_hotkey: DEFAULT_SEND_HOTKEY.to_string(),
@@ -8039,6 +8113,7 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
             refresh_interval_secs: 5,
             download_dir: normalize_download_dir("", fallback_download_dir),
             save_filename_rule: crate::types::default_save_filename_rule(),
+            shortcuts_enabled: true,
             global_hotkey_enabled: true,
             global_hotkey: DEFAULT_GLOBAL_HOTKEY.to_string(),
             send_hotkey: DEFAULT_SEND_HOTKEY.to_string(),
@@ -10203,7 +10278,7 @@ fn update_global_hotkey_registration(
         }
     }
 
-    if settings.global_hotkey_enabled {
+    if settings.shortcuts_enabled && !settings.global_hotkey.trim().is_empty() {
         let hotkey = normalize_global_hotkey(&settings.global_hotkey)
             .ok_or_else(|| "全局快捷键格式无效，需要包含修饰键（如 Ctrl+Alt+T）".to_string())?;
         let shortcut = hotkey
@@ -10246,7 +10321,14 @@ fn update_system_dictation_hotkey_registration(
     #[cfg(target_os = "macos")]
     update_macos_side_alt_dictation_config(settings);
 
-    if settings.speech_to_text.system_dictation_enabled {
+    if settings.shortcuts_enabled
+        && settings.speech_to_text.system_dictation_enabled
+        && !settings
+            .speech_to_text
+            .system_dictation_shortcut
+            .trim()
+            .is_empty()
+    {
         let hotkey =
             normalize_system_dictation_hotkey(&settings.speech_to_text.system_dictation_shortcut)
                 .ok_or_else(|| {
@@ -10513,7 +10595,7 @@ fn start_system_dictation_side_alt_monitor(app: AppHandle) {
 fn update_windows_side_alt_dictation_config(settings: &Settings) {
     use std::sync::atomic::Ordering;
 
-    let value = if settings.speech_to_text.system_dictation_enabled {
+    let value = if settings.shortcuts_enabled && settings.speech_to_text.system_dictation_enabled {
         match normalize_speech_hotkey(&settings.speech_to_text.system_dictation_shortcut).as_deref()
         {
             Some("left-alt") => 1,
@@ -10531,7 +10613,7 @@ fn update_windows_side_alt_dictation_config(settings: &Settings) {
 fn update_macos_side_alt_dictation_config(settings: &Settings) {
     use std::sync::atomic::Ordering;
 
-    let value = if settings.speech_to_text.system_dictation_enabled {
+    let value = if settings.shortcuts_enabled && settings.speech_to_text.system_dictation_enabled {
         match normalize_speech_hotkey(&settings.speech_to_text.system_dictation_shortcut).as_deref()
         {
             Some("left-alt") => 1,
@@ -10669,38 +10751,52 @@ fn main() {
 
             #[cfg(desktop)]
             {
-                use tauri::menu::{Menu, MenuItem};
+                use tauri::menu::{CheckMenuItem, Menu, MenuItem};
                 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
                 use tauri_plugin_global_shortcut::ShortcutState;
 
                 let show_item = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
                 let check_update_item =
                     MenuItem::with_id(app, CHECK_UPDATE_MENU_ID, "检查更新", true, None::<&str>)?;
-                let initial_hotkey_label = {
+                let (initial_shortcuts_enabled, initial_system_dictation_enabled) = {
                     let state = app.state::<AppState>();
                     state
                         .settings
                         .lock()
                         .map(|settings| {
-                            if settings.global_hotkey_enabled {
-                                "禁用快捷键"
-                            } else {
-                                "启用快捷键"
-                            }
+                            (
+                                settings.shortcuts_enabled,
+                                settings.speech_to_text.system_dictation_enabled,
+                            )
                         })
-                        .unwrap_or("禁用快捷键")
+                        .unwrap_or((true, false))
                 };
-                let hotkey_item = MenuItem::with_id(
+                let hotkey_item = CheckMenuItem::with_id(
                     app,
                     HOTKEY_MENU_ID,
-                    initial_hotkey_label,
+                    "启用快捷键",
                     true,
+                    initial_shortcuts_enabled,
+                    None::<&str>,
+                )?;
+                let system_dictation_item = CheckMenuItem::with_id(
+                    app,
+                    SYSTEM_DICTATION_MENU_ID,
+                    "启用系统听写",
+                    true,
+                    initial_system_dictation_enabled,
                     None::<&str>,
                 )?;
                 let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
                 let tray_menu = Menu::with_items(
                     app,
-                    &[&show_item, &check_update_item, &hotkey_item, &quit_item],
+                    &[
+                        &show_item,
+                        &check_update_item,
+                        &hotkey_item,
+                        &system_dictation_item,
+                        &quit_item,
+                    ],
                 )?;
                 let app_icon = load_app_icon().ok();
 
@@ -10722,36 +10818,54 @@ fn main() {
                             "quit" => app.exit(0),
                             HOTKEY_MENU_ID => {
                                 let state = app.state::<AppState>();
-                                let (mut settings_copy, settings_path) = {
-                                    let Ok(settings) = state.settings.lock() else {
-                                        return;
-                                    };
-                                    (settings.clone(), state.settings_path.clone())
-                                };
-                                settings_copy.global_hotkey_enabled =
-                                    !settings_copy.global_hotkey_enabled;
-
-                                if let Err(err) =
-                                    update_global_hotkey_registration(app, &state, &settings_copy)
-                                {
-                                    eprintln!("更新全局快捷键失败: {err}");
-                                    return;
-                                };
-
-                                if let Err(err) =
-                                    write_settings_audited(&settings_path, &settings_copy)
-                                {
-                                    eprintln!("写入快捷键设置失败: {err}");
-                                } else if let Ok(mut guard) = state.settings.lock() {
-                                    *guard = settings_copy.clone();
+                                match persist_tray_settings_toggle(
+                                    app,
+                                    &state,
+                                    toggle_shortcuts_enabled_setting,
+                                ) {
+                                    Ok(settings) => {
+                                        let _ = hotkey_item.set_checked(settings.shortcuts_enabled);
+                                        let _ = system_dictation_item.set_checked(
+                                            settings.speech_to_text.system_dictation_enabled,
+                                        );
+                                        emit_shortcut_settings_changed(
+                                            app,
+                                            settings.shortcuts_enabled,
+                                        );
+                                        emit_settings_changed(app);
+                                    }
+                                    Err(err) => {
+                                        eprintln!("写入快捷键设置失败: {err}");
+                                        if let Ok(settings) = current_settings(&state) {
+                                            let _ =
+                                                hotkey_item.set_checked(settings.shortcuts_enabled);
+                                        }
+                                    }
                                 }
-
-                                let label = if settings_copy.global_hotkey_enabled {
-                                    "禁用快捷键"
-                                } else {
-                                    "启用快捷键"
-                                };
-                                let _ = hotkey_item.set_text(label);
+                            }
+                            SYSTEM_DICTATION_MENU_ID => {
+                                let state = app.state::<AppState>();
+                                match persist_tray_settings_toggle(
+                                    app,
+                                    &state,
+                                    toggle_system_dictation_enabled_setting,
+                                ) {
+                                    Ok(settings) => {
+                                        let _ = hotkey_item.set_checked(settings.shortcuts_enabled);
+                                        let _ = system_dictation_item.set_checked(
+                                            settings.speech_to_text.system_dictation_enabled,
+                                        );
+                                        emit_settings_changed(app);
+                                    }
+                                    Err(err) => {
+                                        eprintln!("写入系统听写设置失败: {err}");
+                                        if let Ok(settings) = current_settings(&state) {
+                                            let _ = system_dictation_item.set_checked(
+                                                settings.speech_to_text.system_dictation_enabled,
+                                            );
+                                        }
+                                    }
+                                }
                             }
                             _ => {}
                         }
@@ -10782,6 +10896,14 @@ fn main() {
                                 return;
                             }
                             let state = app.state::<AppState>();
+                            let shortcuts_enabled = state
+                                .settings
+                                .lock()
+                                .map(|settings| settings.shortcuts_enabled)
+                                .unwrap_or(false);
+                            if !shortcuts_enabled {
+                                return;
+                            }
                             let window_shortcut = state
                                 .registered_hotkey
                                 .lock()
@@ -11066,8 +11188,9 @@ mod tests {
             refresh_interval_secs: 5,
             download_dir: String::new(),
             save_filename_rule: crate::types::default_save_filename_rule(),
+            shortcuts_enabled: true,
             send_hotkey: DEFAULT_SEND_HOTKEY.to_string(),
-            global_hotkey_enabled: false,
+            global_hotkey_enabled: true,
             global_hotkey: DEFAULT_GLOBAL_HOTKEY.to_string(),
             auto_start: false,
             auto_update_enabled: false,
@@ -11592,7 +11715,22 @@ mod tests {
         let normalized = normalize_settings(settings, &download_dir).unwrap();
 
         assert!(!normalized.speech_to_text.system_dictation_enabled);
-        assert_eq!(normalized.speech_to_text.system_dictation_shortcut, "alt+d");
+        assert_eq!(normalized.speech_to_text.system_dictation_shortcut, "");
+    }
+
+    #[test]
+    fn normalize_settings_preserves_cleared_shortcut_values() {
+        let mut settings = test_settings();
+        settings.global_hotkey.clear();
+        settings.send_hotkey.clear();
+        settings.speech_to_text.system_dictation_shortcut.clear();
+        let download_dir = std::env::temp_dir().join("transfer-genie-settings-test");
+
+        let normalized = normalize_settings(settings, &download_dir).unwrap();
+
+        assert_eq!(normalized.global_hotkey, "");
+        assert_eq!(normalized.send_hotkey, "");
+        assert_eq!(normalized.speech_to_text.system_dictation_shortcut, "");
     }
 
     #[test]
@@ -11630,6 +11768,7 @@ mod tests {
     #[test]
     fn normalize_settings_rejects_conflicting_system_dictation_shortcut() {
         let mut settings = test_settings();
+        settings.shortcuts_enabled = true;
         settings.global_hotkey_enabled = true;
         settings.global_hotkey = "ctrl+alt+d".to_string();
         settings.speech_to_text.system_dictation_enabled = true;
@@ -11642,6 +11781,53 @@ mod tests {
         };
 
         assert!(error.contains("系统听写快捷键不能和显示窗口快捷键相同"));
+    }
+
+    #[test]
+    fn normalize_settings_allows_shortcut_conflict_when_master_switch_is_off() {
+        let mut settings = test_settings();
+        settings.shortcuts_enabled = false;
+        settings.global_hotkey = "ctrl+alt+d".to_string();
+        settings.speech_to_text.api_key = "speech-key".to_string();
+        settings.speech_to_text.system_dictation_enabled = true;
+        settings.speech_to_text.system_dictation_shortcut = "ctrl+alt+d".to_string();
+        let download_dir = std::env::temp_dir().join("transfer-genie-settings-test");
+
+        let normalized = normalize_settings(settings, &download_dir).unwrap();
+
+        assert!(!normalized.shortcuts_enabled);
+        assert!(!normalized.global_hotkey_enabled);
+        assert_eq!(normalized.global_hotkey, "ctrl+alt+d");
+        assert_eq!(
+            normalized.speech_to_text.system_dictation_shortcut,
+            "ctrl+alt+d"
+        );
+    }
+
+    #[test]
+    fn tray_shortcut_toggle_updates_master_switch_and_legacy_mirror() {
+        let mut settings = test_settings();
+        settings.shortcuts_enabled = true;
+        settings.global_hotkey_enabled = true;
+
+        toggle_shortcuts_enabled_setting(&mut settings);
+
+        assert!(!settings.shortcuts_enabled);
+        assert!(!settings.global_hotkey_enabled);
+        assert_eq!(settings.global_hotkey, DEFAULT_GLOBAL_HOTKEY);
+        assert_eq!(settings.send_hotkey, DEFAULT_SEND_HOTKEY);
+    }
+
+    #[test]
+    fn tray_system_dictation_toggle_changes_only_feature_switch() {
+        let mut settings = test_settings();
+        settings.speech_to_text.system_dictation_enabled = false;
+        settings.speech_to_text.system_dictation_shortcut = "alt+d".to_string();
+
+        toggle_system_dictation_enabled_setting(&mut settings);
+
+        assert!(settings.speech_to_text.system_dictation_enabled);
+        assert_eq!(settings.speech_to_text.system_dictation_shortcut, "alt+d");
     }
 
     #[test]
@@ -12214,6 +12400,54 @@ mod tests {
     }
 
     #[test]
+    fn load_settings_maps_missing_shortcuts_enabled_from_legacy_hotkey_switch() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-shortcuts-legacy-{}", now_ms()));
+        let settings_path = temp_dir.join("settings.json");
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        fs::write(
+            &settings_path,
+            r#"{
+                "webdav_endpoints": [],
+                "active_webdav_id": null,
+                "sender_name": "legacy",
+                "refresh_interval_secs": 5,
+                "download_dir": "/tmp",
+                "send_hotkey": "enter",
+                "global_hotkey_enabled": false,
+                "global_hotkey": "alt+t",
+                "auto_start": false,
+                "auto_update_enabled": false,
+                "local_http_api": {
+                    "enabled": false,
+                    "bind_address": "127.0.0.1",
+                    "bind_port": 6011
+                },
+                "telegram": {
+                    "enabled": false,
+                    "auto_start": false,
+                    "sender_name": "",
+                    "bot_token": "",
+                    "chat_id": "",
+                    "proxy_enabled": false,
+                    "proxy_url": "http://127.0.0.1:7890",
+                    "poll_interval_secs": 5
+                }
+            }"#,
+        )
+        .expect("write legacy settings");
+
+        let loaded = load_settings(&settings_path, &temp_dir).expect("load settings");
+
+        assert!(!loaded.shortcuts_enabled);
+        assert!(!loaded.global_hotkey_enabled);
+        assert_eq!(loaded.global_hotkey, "alt+t");
+
+        let _ = fs::remove_file(&settings_path);
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
     fn default_ai_actions_include_expanded_prompt_library() {
         let settings = AiSettings::default();
         let expected_actions = [
@@ -12551,6 +12785,36 @@ mod tests {
         export_speech.api_key.clear();
         let exported = serde_json::to_string(&export_speech).expect("serialize export speech");
         assert!(!exported.contains("speech-secret"));
+    }
+
+    #[test]
+    fn export_settings_payload_preserves_shortcuts_and_cleared_values() {
+        let mut speech_to_text = SpeechToTextSettings::default();
+        speech_to_text.system_dictation_shortcut.clear();
+        let settings = ExportSettings {
+            webdav_endpoints: Vec::new(),
+            active_webdav_id: None,
+            refresh_interval_secs: 5,
+            save_filename_rule: crate::types::default_save_filename_rule(),
+            shortcuts_enabled: Some(false),
+            global_hotkey_enabled: false,
+            global_hotkey: Some(String::new()),
+            send_hotkey: Some(String::new()),
+            auto_update_enabled: false,
+            local_http_api: LocalHttpApiSettings::default(),
+            send: SendSettings::default(),
+            telegram: ExportTelegramSettings::default(),
+            ai: AiSettings::default(),
+            speech_to_text,
+        };
+
+        let value = serde_json::to_value(settings).expect("serialize export settings");
+
+        assert_eq!(value["shortcuts_enabled"], false);
+        assert_eq!(value["global_hotkey_enabled"], false);
+        assert_eq!(value["global_hotkey"], "");
+        assert_eq!(value["send_hotkey"], "");
+        assert_eq!(value["speech_to_text"]["system_dictation_shortcut"], "");
     }
 
     #[test]

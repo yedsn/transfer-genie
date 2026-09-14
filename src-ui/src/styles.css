@@ -2960,6 +2960,22 @@ input.is-capturing-shortcut {
   gap: 8px;
 }
 
+.shortcut-setting {
+  padding-top: 4px;
+}
+
+.field-inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.field-inline-actions input {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
 .settings-choice-header {
   display: flex;
   flex-direction: column;

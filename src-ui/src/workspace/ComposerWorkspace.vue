@@ -242,7 +242,8 @@ onMounted(() => {
     composerStore.clearActiveDraftAfterSend();
     if (bridge._clearActive) bridge._clearActive();
   };
-  bridge.getSendHotkey = () => (window as any).transferGenieSendHotkey || "enter";
+  bridge.getSendHotkey = () => (window as any).transferGenieSendHotkey ?? "enter";
+  bridge.getShortcutsEnabled = () => (window as any).transferGenieShortcutsEnabled !== false;
   bridge.sendActiveDraft = () => {
     const send = (window as any).transferGenieSendActiveDraft;
     if (typeof send === "function") send();
