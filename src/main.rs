@@ -2003,11 +2003,12 @@ fn dispatch_system_paste() -> Result<SystemPasteDispatchOutcome, String> {
     }
     #[cfg(target_os = "macos")]
     {
-        dispatch_macos_paste_command().or_else(|err| {
+        let target_pid = resolve_macos_system_dictation_paste_target_pid();
+        dispatch_macos_paste_command(target_pid).or_else(|err| {
             eprintln!(
                 "[system-dictation] mac paste command failed, falling back to shortcut: {err}"
             );
-            dispatch_macos_paste_shortcut("cmd+v")
+            dispatch_macos_paste_shortcut("cmd+v", target_pid)
         })
     }
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -2026,26 +2027,37 @@ fn dispatch_system_paste() -> Result<SystemPasteDispatchOutcome, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn dispatch_macos_paste_command() -> Result<SystemPasteDispatchOutcome, String> {
+fn dispatch_macos_paste_command(
+    target_pid: Option<i32>,
+) -> Result<SystemPasteDispatchOutcome, String> {
     ensure_macos_accessibility_permission("粘贴听写结果")?;
-    restore_macos_system_dictation_target_app_before_paste();
+    restore_macos_system_dictation_target_app_before_paste(target_pid);
 
-    let script = r#"
+    let process_selector = target_pid
+        .map(|pid| format!("whose unix id is {pid}"))
+        .unwrap_or_else(|| "whose frontmost is true".to_string());
+    let script = format!(
+        r#"
 tell application "System Events"
-  set frontApp to first application process whose frontmost is true
+  set targetApp to first application process {process_selector}
+  set frontmost of targetApp to true
   try
-    click menu item "Paste" of menu "Edit" of menu bar 1 of frontApp
+    click menu item "Paste" of menu "Edit" of menu bar 1 of targetApp
   on error firstError
     try
-      click menu item "粘贴" of menu "编辑" of menu bar 1 of frontApp
+      click menu item "粘贴" of menu "编辑" of menu bar 1 of targetApp
     on error secondError
       error (firstError & " / " & secondError)
     end try
   end try
 end tell
-"#;
+"#
+    );
 
-    eprintln!("[system-dictation] paste command dispatching: app menu Paste");
+    eprintln!(
+        "[system-dictation] paste command dispatching: app menu Paste target_pid={:?}",
+        target_pid
+    );
     let output = std::process::Command::new("osascript")
         .arg("-e")
         .arg(script)
@@ -2066,12 +2078,15 @@ end tell
 }
 
 #[cfg(target_os = "macos")]
-fn dispatch_macos_paste_shortcut(shortcut: &str) -> Result<SystemPasteDispatchOutcome, String> {
+fn dispatch_macos_paste_shortcut(
+    shortcut: &str,
+    target_pid: Option<i32>,
+) -> Result<SystemPasteDispatchOutcome, String> {
     use core_graphics::event::{CGEvent, CGEventTapLocation};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
     ensure_macos_accessibility_permission("粘贴听写结果")?;
-    restore_macos_system_dictation_target_app_before_paste();
+    restore_macos_system_dictation_target_app_before_paste(target_pid);
 
     let shortcut = normalize_macos_keyboard_shortcut(shortcut)
         .ok_or_else(|| "系统听写结果粘贴快捷键格式无效".to_string())?;
@@ -2213,14 +2228,43 @@ fn record_macos_system_dictation_target_app() {
 }
 
 #[cfg(target_os = "macos")]
-fn restore_macos_system_dictation_target_app_before_paste() {
-    use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
+fn take_macos_system_dictation_target_app_pid() -> Option<i32> {
     use std::sync::atomic::Ordering;
 
     let target_pid = SYSTEM_DICTATION_TARGET_APP_PID.swap(0, Ordering::SeqCst);
-    if target_pid <= 0 {
-        return;
+    (target_pid > 0).then_some(target_pid)
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_macos_system_dictation_paste_target_pid() -> Option<i32> {
+    use std::sync::atomic::Ordering;
+
+    let current_pid = std::process::id() as i32;
+    if let Some(frontmost_pid) = current_macos_frontmost_app_pid() {
+        if frontmost_pid != current_pid {
+            SYSTEM_DICTATION_TARGET_APP_PID.store(0, Ordering::SeqCst);
+            eprintln!(
+                "[system-dictation] mac paste target resolved from current frontmost app: pid={frontmost_pid}"
+            );
+            return Some(frontmost_pid);
+        }
     }
+
+    let fallback_pid = take_macos_system_dictation_target_app_pid();
+    eprintln!(
+        "[system-dictation] mac paste target resolved from recorded fallback: pid={:?}",
+        fallback_pid
+    );
+    fallback_pid
+}
+
+#[cfg(target_os = "macos")]
+fn restore_macos_system_dictation_target_app_before_paste(target_pid: Option<i32>) {
+    use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
+
+    let Some(target_pid) = target_pid else {
+        return;
+    };
     if let Some(application) =
         NSRunningApplication::runningApplicationWithProcessIdentifier(target_pid)
     {
