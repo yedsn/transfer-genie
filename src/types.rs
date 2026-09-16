@@ -171,7 +171,7 @@ pub fn default_speech_to_text_polish_enabled() -> bool {
 }
 
 pub fn default_speech_to_text_polish_action_id() -> String {
-    "polish".to_string()
+    "general-cleanup".to_string()
 }
 
 pub fn default_speech_to_text_polish_model() -> String {

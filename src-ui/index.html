@@ -1008,12 +1008,18 @@
                   </label>
                   <label>
                     润色方式
-                    <select id="speech-to-text-polish-action" :value="ui.settingsForm.speechToTextPolishActionId || 'polish'" :disabled="!ui.settingsForm.speechToTextPolishEnabled" @change="updateSettingsFormField('speechToTextPolishActionId', $event.target.value)">
+                    <select id="speech-to-text-polish-action" :value="ui.settingsForm.speechToTextPolishActionId || 'general-cleanup'" :disabled="!ui.settingsForm.speechToTextPolishEnabled" @change="updateSettingsFormField('speechToTextPolishActionId', $event.target.value)">
+                      <option value="general-cleanup">通用整理</option>
                       <option value="polish">忠实整理</option>
                       <option value="punctuation">仅加标点</option>
                       <option value="light-cleanup">轻度清理</option>
+                      <option value="smooth-speech">流畅口语</option>
+                      <option value="formal-writing">正式书面</option>
+                      <option value="key-points">要点整理</option>
+                      <option value="meeting-notes">会议纪要</option>
+                      <option value="chat-message">消息发送</option>
                     </select>
-                    <span class="field-hint">使用语音专用内置提示词处理转录结果；默认忠实保留内容和数字。</span>
+                    <span class="field-hint">使用语音专用内置提示词处理转录结果；默认通用整理会清理口头禅并保持原意。</span>
                   </label>
                   <div class="field-row speech-polish-model-row">
                     <label>

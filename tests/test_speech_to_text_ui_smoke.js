@@ -1823,6 +1823,7 @@ async function run() {
         saved,
         deepThinkingColocated: document.querySelector('#speech-to-text-polish-model')?.closest('.field-row') === document.querySelector('#speech-to-text-polish-deep-thinking-enabled')?.closest('.field-row'),
         selectDisabled: document.querySelector('#speech-to-text-polish-action').disabled,
+        polishOptions: Array.from(document.querySelectorAll('#speech-to-text-polish-action option')).map((option) => ({ value: option.value, text: option.textContent })),
       };
       const speechCard = document.querySelector('.message-card[data-filename="speech-message.wav"]');
       const copySpeechText = async () => {
@@ -1865,6 +1866,11 @@ async function run() {
     assert.equal(speechPolishResult.copiedRawText, '需要润色的语音文本', 'copy action follows the raw transcript mode');
     assert.equal(speechPolishResult.copiedPolishedAgainText, '润色：需要润色的语音文本', 'copy action returns to polished text after switching back');
     assert.equal(speechPolishResult.selectDisabled, false, 'speech polish action selector is enabled when polish is enabled');
+    assert.deepEqual(
+      speechPolishResult.polishOptions.map((option) => option.value),
+      ['general-cleanup', 'polish', 'punctuation', 'light-cleanup', 'smooth-speech', 'formal-writing', 'key-points', 'meeting-notes', 'chat-message'],
+      'speech polish exposes all built-in style templates',
+    );
 
     const systemDictationResult = await evaluate(client, `(async () => {
       document.querySelector('#speech-to-text-polish-enabled').checked = false;
@@ -1966,6 +1972,52 @@ async function run() {
     assert.ok(systemDictationResult.showCount >= 1, 'system dictation shows the capsule window');
     assert.ok(systemDictationResult.hideCount >= 1, 'system dictation hides the capsule window after confirm');
     assert.ok(systemDictationResult.levelCount >= 1, 'system dictation updates waveform level');
+
+    const immediateStopDictationResult = await evaluate(client, `(async () => {
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const button = document.querySelector('#speech-to-text-toggle');
+          if (!button.classList.contains('is-recording') && !button.classList.contains('is-transcribing') && !button.classList.contains('is-preparing')) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('speech button did not return to idle before immediate-stop dictation test'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      window.transferGenieComposerStore?.clearActiveDraftAfterSend?.();
+      window.__speechSmoke.pastedText = '';
+      window.__speechSmoke.clipboardText = '';
+      window.__speechSmoke.calls = [];
+      window.__speechSmoke.sentMessages = [];
+      window.__speechSmoke.getUserMediaDelayMs = 180;
+      window.__speechSmoke.longText = '准备阶段立即结束';
+      document.activeElement?.blur?.();
+      document.querySelector('.tab-button[data-tab-target="home"]')?.focus();
+      await window.__speechSmoke.eventHandlers['system-dictation-toggle']({ payload: null });
+      await window.__speechSmoke.eventHandlers['system-dictation-toggle']({ payload: null });
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (window.__speechSmoke.pastedText === '准备阶段立即结束') resolve();
+          else if (Date.now() - start > 2500) reject(new Error('immediate-stop system dictation did not finish: ' + JSON.stringify({
+            pastedText: window.__speechSmoke.pastedText,
+            speechClasses: document.querySelector('#speech-to-text-toggle')?.className || '',
+            lastCommands: window.__speechSmoke.calls.slice(-12).map((call) => call.command),
+          })));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      window.__speechSmoke.getUserMediaDelayMs = 0;
+      return {
+        pastedText: window.__speechSmoke.pastedText,
+        sendTranscript: window.__speechSmoke.calls.filter((call) => call.command === 'send_speech_message').at(-1)?.args?.request?.transcript || '',
+        text: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
+      };
+    })()`);
+    assert.equal(immediateStopDictationResult.pastedText, '准备阶段立即结束', 'system dictation can stop while microphone startup is still preparing');
+    assert.equal(immediateStopDictationResult.sendTranscript, '准备阶段立即结束', 'immediate-stop system dictation sends the recognized text');
+    assert.equal(immediateStopDictationResult.text, '', 'immediate-stop system dictation does not append to the Transfer Genie composer');
 
     const polishedSystemDictationResult = await evaluate(client, `(async () => {
       await new Promise((resolve, reject) => {

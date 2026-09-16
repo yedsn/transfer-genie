@@ -1708,8 +1708,12 @@ async fn process_text_with_ai_stream(
     request_id: String,
     request: AiTextProcessRequest,
 ) -> Result<(), String> {
-    let text = request.text.trim();
-    if text.is_empty() {
+    let text = if request.speech_polish {
+        request.text.as_str()
+    } else {
+        request.text.trim()
+    };
+    if !request.speech_polish && text.is_empty() {
         return Err("请先输入或选中需要处理的文本".to_string());
     }
     let settings = current_settings(&state)?;
@@ -6956,7 +6960,20 @@ fn resolve_ai_request_action(
 }
 
 fn speech_polish_actions() -> Vec<AiTextAction> {
+    let filler_cleanup_rule = "可以删除不承载信息的语助词、口头填充词和口吃重复，例如“嗯、呃、啊、那个、就是、然后、就是说、这个、你知道吧、对吧”；如果这些词在原文中有实际指代、转折或强调作用，则保留。";
+    let strict_output_rule = "如果原文为空白，就只输出空白；如果原文只有一个数字、编号或短词，就只输出对应数字、编号或短词。不要回答“请提供文本”、不要解释、不要加标题、不要加引号、不要输出标签。";
     vec![
+        AiTextAction {
+            id: "general-cleanup".to_string(),
+            name: "通用整理".to_string(),
+            category: "语音润色".to_string(),
+            builtin: true,
+            favorite: true,
+            enabled: true,
+            system_prompt: "你是中文语音转写通用整理助手。你只能处理用户提供的 <transcript> 内文本，把日常语音整理成自然、清楚、可直接使用的文本；不添加原文没有的信息。".to_string(),
+            user_prompt: format!("请把 <transcript> 与 </transcript> 之间的语音转写做通用整理，适合日常直接使用。\n\n规则：\n1. {filler_cleanup_rule}\n2. 修正明显语音识别错字、标点、断句和无意义重复。\n3. 可以轻微调整语序，让句子清楚顺畅；不要改成过度正式、营销文案、会议纪要或要点列表。\n4. 不总结、不扩写、不新增事实、原因、结论、承诺或行动项；不能把不确定内容写成确定结论。\n5. 保留原文中的数字、编号、金额、日期、时间、代码、命令、URL、型号和专有名词。\n6. {strict_output_rule}\n\n<transcript>\n{{{{text}}}}\n</transcript>"),
+            output_mode: "preview_replace".to_string(),
+        },
         AiTextAction {
             id: "polish".to_string(),
             name: "忠实整理".to_string(),
@@ -6964,8 +6981,8 @@ fn speech_polish_actions() -> Vec<AiTextAction> {
             builtin: true,
             favorite: true,
             enabled: true,
-            system_prompt: "你是中文语音转写整理助手。你的首要任务是忠实保留原始语音内容，不改写、不扩写、不总结。".to_string(),
-            user_prompt: "请整理下面的语音转写文本。规则：\n1. 只修正明显的语音识别错字、断句和标点。\n2. 不改变原意，不补充原文没有的信息，不优化成另一种说法。\n3. 数字、编号、金额、日期、时间、代码、命令、URL、型号、专有名词尽量原样保留；例如原文是 1234，就输出 1234，不要改写成其他形式。\n4. 口误、重复、停顿词只有在明显无意义时才轻微清理；不确定时保留原文。\n5. 只输出整理后的文本，不要解释。\n\n{{text}}".to_string(),
+            system_prompt: "你是中文语音转写整理助手。你只能处理用户提供的 <transcript> 内文本，必须忠实保留原始内容，不改写、不扩写、不总结，不输出任何额外说明。".to_string(),
+            user_prompt: format!("请只整理 <transcript> 与 </transcript> 之间的语音转写文本。\n\n规则：\n1. 只修正明显的语音识别错字、断句和标点。\n2. 不改变原意，不补充原文没有的信息，不优化成另一种说法。\n3. {filler_cleanup_rule}\n4. 数字、编号、金额、日期、时间、代码、命令、URL、型号、专有名词必须尽量原样保留；如果原文只是 1234，就只输出 1234。\n5. {strict_output_rule}\n\n<transcript>\n{{{{text}}}}\n</transcript>"),
             output_mode: "preview_replace".to_string(),
         },
         AiTextAction {
@@ -6975,8 +6992,8 @@ fn speech_polish_actions() -> Vec<AiTextAction> {
             builtin: true,
             favorite: false,
             enabled: true,
-            system_prompt: "你是中文语音转写标点整理助手。只做标点、断句和必要换行，不润色表达。".to_string(),
-            user_prompt: "请为下面的语音转写添加标点和必要断句。规则：\n1. 不改词、不改数字、不改编号、不改专有名词。\n2. 原文中的 1234、1 2 3 4、代码、命令、URL 等内容保持原样。\n3. 只输出处理后的文本，不要解释。\n\n{{text}}".to_string(),
+            system_prompt: "你是中文语音转写标点整理助手。你只能处理用户提供的 <transcript> 内文本，只做标点、断句和必要换行，不润色表达，不输出任何额外说明。".to_string(),
+            user_prompt: "请只为 <transcript> 与 </transcript> 之间的语音转写文本添加标点和必要断句。\n\n规则：\n1. 不改词、不改数字、不改编号、不改专有名词。\n2. 原文中的 1234、1 2 3 4、代码、命令、URL 等内容保持原样。\n3. 如果原文为空白，就只输出空白；如果原文只有一个数字、编号或短词，就只输出对应数字、编号或短词。\n4. 不要回答“请提供文本”、不要解释、不要加标题、不要加引号、不要输出标签。\n\n<transcript>\n{{text}}\n</transcript>".to_string(),
             output_mode: "preview_replace".to_string(),
         },
         AiTextAction {
@@ -6986,8 +7003,63 @@ fn speech_polish_actions() -> Vec<AiTextAction> {
             builtin: true,
             favorite: false,
             enabled: true,
-            system_prompt: "你是中文语音转写清理助手。保持原意和信息完整，只做轻度可读性整理。".to_string(),
-            user_prompt: "请轻度清理下面的语音转写文本。规则：\n1. 可以去掉明显无意义的口头停顿和重复。\n2. 修正明显错别字、标点和断句。\n3. 不总结、不扩写、不重写内容。\n4. 数字、编号、金额、日期、时间、代码、命令、URL、型号、专有名词尽量原样保留。\n5. 只输出处理后的文本，不要解释。\n\n{{text}}".to_string(),
+            system_prompt: "你是中文语音转写清理助手。你只能处理用户提供的 <transcript> 内文本，保持原意和信息完整，只做轻度可读性整理，不输出任何额外说明。".to_string(),
+            user_prompt: format!("请只轻度清理 <transcript> 与 </transcript> 之间的语音转写文本。\n\n规则：\n1. {filler_cleanup_rule}\n2. 修正明显错别字、标点和断句，合并无意义重复。\n3. 不总结、不扩写、不重写内容，不补充原文没有的信息。\n4. 数字、编号、金额、日期、时间、代码、命令、URL、型号、专有名词尽量原样保留。\n5. {strict_output_rule}\n\n<transcript>\n{{{{text}}}}\n</transcript>"),
+            output_mode: "preview_replace".to_string(),
+        },
+        AiTextAction {
+            id: "smooth-speech".to_string(),
+            name: "流畅口语".to_string(),
+            category: "语音润色".to_string(),
+            builtin: true,
+            favorite: false,
+            enabled: true,
+            system_prompt: "你是中文口语整理助手。你只能处理用户提供的 <transcript> 内文本，把语音转写整理成自然、顺口、适合直接发送的中文口语，不添加原文没有的信息。".to_string(),
+            user_prompt: format!("请把 <transcript> 与 </transcript> 之间的语音转写整理成流畅口语。\n\n规则：\n1. {filler_cleanup_rule}\n2. 可以调整语序，让句子自然顺畅，但不得改变事实、态度和语气强弱。\n3. 保留原文中的数字、编号、金额、日期、时间、代码、命令、URL、型号和专有名词。\n4. {strict_output_rule}\n\n<transcript>\n{{{{text}}}}\n</transcript>"),
+            output_mode: "preview_replace".to_string(),
+        },
+        AiTextAction {
+            id: "formal-writing".to_string(),
+            name: "正式书面".to_string(),
+            category: "语音润色".to_string(),
+            builtin: true,
+            favorite: false,
+            enabled: true,
+            system_prompt: "你是中文书面表达整理助手。你只能处理用户提供的 <transcript> 内文本，把口语化语音转写整理成清楚、正式、克制的书面表达，不添加原文没有的信息。".to_string(),
+            user_prompt: format!("请把 <transcript> 与 </transcript> 之间的语音转写整理成正式书面表达。\n\n规则：\n1. {filler_cleanup_rule}\n2. 可以去掉明显口语化拖泥带水的表达，调整为清楚完整的句子。\n3. 不得新增结论、承诺、原因、数据或行动项；不能把不确定内容写成确定结论。\n4. 保留原文中的数字、编号、金额、日期、时间、代码、命令、URL、型号和专有名词。\n5. {strict_output_rule}\n\n<transcript>\n{{{{text}}}}\n</transcript>"),
+            output_mode: "preview_replace".to_string(),
+        },
+        AiTextAction {
+            id: "key-points".to_string(),
+            name: "要点整理".to_string(),
+            category: "语音润色".to_string(),
+            builtin: true,
+            favorite: false,
+            enabled: true,
+            system_prompt: "你是中文语音要点整理助手。你只能重排和提炼 <transcript> 内已经出现的信息，不补充新内容。".to_string(),
+            user_prompt: format!("请把 <transcript> 与 </transcript> 之间的语音转写整理成要点。\n\n规则：\n1. {filler_cleanup_rule}\n2. 只整理原文已表达的信息；不得新增推论、背景、行动项或结论。\n3. 使用简洁项目符号；如果原文只有一句很短的话，就直接输出整理后的单句，不要强行列点。\n4. 保留原文中的数字、编号、金额、日期、时间、代码、命令、URL、型号和专有名词。\n5. {strict_output_rule}\n\n<transcript>\n{{{{text}}}}\n</transcript>"),
+            output_mode: "preview_replace".to_string(),
+        },
+        AiTextAction {
+            id: "meeting-notes".to_string(),
+            name: "会议纪要".to_string(),
+            category: "语音润色".to_string(),
+            builtin: true,
+            favorite: false,
+            enabled: true,
+            system_prompt: "你是会议语音整理助手。你只能根据 <transcript> 内文本整理会议纪要，不添加未出现的参会人、结论、待办或时间。".to_string(),
+            user_prompt: format!("请把 <transcript> 与 </transcript> 之间的语音转写整理成简洁会议纪要。\n\n规则：\n1. {filler_cleanup_rule}\n2. 只保留原文明确出现的信息；没有明确行动项时不要编造行动项。\n3. 优先按“讨论要点”“决定”“待办”组织；没有对应内容的栏目不要输出。\n4. 如果原文很短、不像会议内容，就按普通段落整理，不要强行套纪要结构。\n5. {strict_output_rule}\n\n<transcript>\n{{{{text}}}}\n</transcript>"),
+            output_mode: "preview_replace".to_string(),
+        },
+        AiTextAction {
+            id: "chat-message".to_string(),
+            name: "消息发送".to_string(),
+            category: "语音润色".to_string(),
+            builtin: true,
+            favorite: false,
+            enabled: true,
+            system_prompt: "你是中文即时消息整理助手。你只能处理用户提供的 <transcript> 内文本，把语音转写整理成适合直接发给别人看的消息，不添加原文没有的信息。".to_string(),
+            user_prompt: format!("请把 <transcript> 与 </transcript> 之间的语音转写整理成一条自然清楚的聊天消息。\n\n规则：\n1. {filler_cleanup_rule}\n2. 可以适当拆分长句，让消息更易读，但不要变得过度正式。\n3. 不要添加称呼、寒暄、表情、客套话或原文没有的请求。\n4. 保留原文中的数字、编号、金额、日期、时间、代码、命令、URL、型号和专有名词。\n5. {strict_output_rule}\n\n<transcript>\n{{{{text}}}}\n</transcript>"),
             output_mode: "preview_replace".to_string(),
         },
     ]
@@ -6998,12 +7070,17 @@ fn resolve_speech_polish_action(action_id: Option<&str>) -> AiTextAction {
     let target_id = action_id
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or("polish");
+        .unwrap_or("general-cleanup");
     actions
         .iter()
         .find(|action| action.id == target_id)
         .cloned()
-        .or_else(|| actions.iter().find(|action| action.id == "polish").cloned())
+        .or_else(|| {
+            actions
+                .iter()
+                .find(|action| action.id == "general-cleanup")
+                .cloned()
+        })
         .unwrap_or_else(|| actions[0].clone())
 }
 
@@ -7370,8 +7447,9 @@ fn resolve_speech_polish_max_output_tokens(text: &str) -> u64 {
     match char_count {
         0..=200 => 256,
         201..=600 => 512,
-        601..=1500 => 1024,
-        1501..=3000 => 2048,
+        601..=1000 => 1024,
+        1001..=3000 => 2048,
+        3001..=5000 => 4096,
         _ => ((char_count as u64 * 3 / 2 + 127) / 128 * 128).clamp(4096, 16384),
     }
 }
@@ -7391,9 +7469,28 @@ async fn process_text_with_ai_impl(
     settings: &Settings,
     request: AiTextProcessRequest,
 ) -> Result<AiTextProcessResult, String> {
-    let text = request.text.trim();
-    if text.is_empty() {
+    let text = if request.speech_polish {
+        request.text.as_str()
+    } else {
+        request.text.trim()
+    };
+    if !request.speech_polish && text.is_empty() {
         return Err("请先输入或选中需要处理的文本".to_string());
+    }
+    if request.speech_polish && text.trim().is_empty() {
+        return Ok(AiTextProcessResult {
+            action_id: request
+                .action_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("general-cleanup")
+                .to_string(),
+            action_name: "忠实整理".to_string(),
+            output_text: text.to_string(),
+            reasoning_text: None,
+            output_mode: "preview_replace".to_string(),
+        });
     }
     if !settings.ai.enabled {
         return Err("AI 功能未启用，请先在设置中开启".to_string());
@@ -12789,6 +12886,7 @@ mod tests {
         let settings = SpeechToTextSettings::default();
 
         assert_eq!(settings.polish_model, "");
+        assert_eq!(settings.polish_action_id, "general-cleanup");
         assert!(!settings.polish_deep_thinking_enabled);
         assert_eq!(settings.polish_temperature, 0.1);
         assert_eq!(settings.polish_timeout_secs, 20);
@@ -12895,8 +12993,72 @@ mod tests {
                 .expect("resolve built-in speech action");
 
         assert_eq!(action.name, "忠实整理");
-        assert!(action.user_prompt.contains("1234"));
+        let rendered = render_ai_prompt(&action.user_prompt, "1234", "text");
+        assert!(rendered.contains("<transcript>\n1234\n</transcript>"));
+        assert!(rendered.contains("如果原文只是 1234，就只输出 1234"));
+        assert!(rendered.contains("如果原文为空白，就只输出空白"));
+        assert!(rendered.contains("不要回答“请提供文本”"));
         assert!(!action.user_prompt.contains("总结"));
+    }
+
+    #[test]
+    fn speech_polish_exposes_multiple_styles_and_filler_cleanup_rules() {
+        let actions = speech_polish_actions();
+        let ids = actions
+            .iter()
+            .map(|action| action.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ids,
+            vec![
+                "general-cleanup",
+                "polish",
+                "punctuation",
+                "light-cleanup",
+                "smooth-speech",
+                "formal-writing",
+                "key-points",
+                "meeting-notes",
+                "chat-message",
+            ]
+        );
+        for action_id in [
+            "general-cleanup",
+            "polish",
+            "light-cleanup",
+            "smooth-speech",
+            "formal-writing",
+        ] {
+            let action = actions
+                .iter()
+                .find(|action| action.id == action_id)
+                .expect("speech polish style");
+            assert!(action.user_prompt.contains("语助词"));
+            assert!(action.user_prompt.contains("<transcript>"));
+            assert!(action.user_prompt.contains("不要回答“请提供文本”"));
+        }
+    }
+
+    #[tokio::test]
+    async fn speech_polish_blank_text_returns_blank_without_ai_provider() {
+        let mut settings = test_settings();
+        settings.ai.enabled = false;
+        let request = AiTextProcessRequest {
+            action_id: Some("polish".to_string()),
+            text: "   ".to_string(),
+            format: Some("text".to_string()),
+            temporary_prompt: None,
+            speech_polish: true,
+        };
+
+        let result = process_text_with_ai_impl(&Client::new(), &settings, request)
+            .await
+            .expect("blank speech polish should bypass ai");
+
+        assert_eq!(result.output_text, "   ");
+        assert_eq!(result.action_id, "polish");
+        assert_eq!(result.output_mode, "preview_replace");
     }
 
     #[test]

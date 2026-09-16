@@ -161,9 +161,15 @@ const app = createApp({
     },
     enabledAiPromptActions(): any[] {
       return [
+        { id: "general-cleanup", name: "通用整理" },
         { id: "polish", name: "忠实整理" },
         { id: "punctuation", name: "仅加标点" },
         { id: "light-cleanup", name: "轻度清理" },
+        { id: "smooth-speech", name: "流畅口语" },
+        { id: "formal-writing", name: "正式书面" },
+        { id: "key-points", name: "要点整理" },
+        { id: "meeting-notes", name: "会议纪要" },
+        { id: "chat-message", name: "消息发送" },
       ];
     },
     currentSettingsWebdavEndpoints(): any[] {

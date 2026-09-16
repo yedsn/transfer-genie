@@ -110,7 +110,7 @@ export const transferGenieState = reactive<TransferGenieState>({
     speechToTextCueSoundEnabled: true,
     speechToTextCueSoundKind: "system",
     speechToTextPolishEnabled: false,
-    speechToTextPolishActionId: "polish",
+    speechToTextPolishActionId: "general-cleanup",
     speechToTextPolishModel: "",
     speechToTextPolishDeepThinkingEnabled: false,
     speechToTextPolishTemperature: 0.1,

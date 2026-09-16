@@ -15,13 +15,19 @@ const DEFAULT_EDITOR_FORMAT_STORAGE_KEY = 'transfer-genie.default-editor-format'
 const HOME_LAYOUT_STORAGE_KEY = 'transfer-genie.home-layout';
 const DEFAULT_SPEECH_CUE_SOUND_KIND = 'system';
 const DEFAULT_SYSTEM_DICTATION_SHORTCUT = 'alt+d';
-const DEFAULT_SPEECH_POLISH_ACTION_ID = 'polish';
+const DEFAULT_SPEECH_POLISH_ACTION_ID = 'general-cleanup';
 const DEFAULT_SPEECH_POLISH_TEMPERATURE = 0.1;
 const DEFAULT_SPEECH_POLISH_TIMEOUT_SECS = 20;
 const SPEECH_POLISH_ACTIONS = [
+  { id: 'general-cleanup', name: '通用整理' },
   { id: 'polish', name: '忠实整理' },
   { id: 'punctuation', name: '仅加标点' },
   { id: 'light-cleanup', name: '轻度清理' },
+  { id: 'smooth-speech', name: '流畅口语' },
+  { id: 'formal-writing', name: '正式书面' },
+  { id: 'key-points', name: '要点整理' },
+  { id: 'meeting-notes', name: '会议纪要' },
+  { id: 'chat-message', name: '消息发送' },
 ];
 
 function normalizeEditorFormat(format) {
@@ -241,8 +247,8 @@ async function streamSystemDictationPolish(request) {
 }
 
 async function polishSpeechTranscript(text, options = {}) {
-  const value = String(text || '').trim();
-  if (!value) return '';
+  const value = String(text ?? '');
+  if (!value.trim()) return value;
   const { enabled, actionId } = getSpeechPolishSettings();
   if (!enabled) return value;
   const action = resolveSpeechPolishAction(actionId);
@@ -1188,7 +1194,7 @@ let currentSettingsFormState = {
   speechToTextCueSoundEnabled: true,
   speechToTextCueSoundKind: DEFAULT_SPEECH_CUE_SOUND_KIND,
   speechToTextPolishEnabled: false,
-  speechToTextPolishActionId: 'polish',
+  speechToTextPolishActionId: DEFAULT_SPEECH_POLISH_ACTION_ID,
   speechToTextPolishModel: '',
   speechToTextPolishDeepThinkingEnabled: false,
   speechToTextPolishTemperature: DEFAULT_SPEECH_POLISH_TEMPERATURE,
@@ -4111,11 +4117,11 @@ function toggleSystemDictationRecording() {
   ) return;
   if (speechState === 'preparing') {
     systemDictationMode = true;
+    systemDictationStopRequested = true;
     if (performance.now() - systemDictationLastStartAt < SYSTEM_DICTATION_START_TOGGLE_GUARD_MS) {
-      logSystemDictation('toggle ignored during start guard');
+      logSystemDictation('toggle deferred during start guard');
       return;
     }
-    systemDictationStopRequested = true;
     logSystemDictation('toggle deferred until recording starts');
     void playSpeechCueSound('stop');
     return;
@@ -10942,7 +10948,7 @@ function applySettings(settings) {
   if (speechToTextCueSoundKindInput) speechToTextCueSoundKindInput.value = normalizeSpeechCueSoundKind(speechToText.cue_sound_kind || DEFAULT_SPEECH_CUE_SOUND_KIND);
   if (speechToTextPolishEnabledInput) speechToTextPolishEnabledInput.checked = !!speechToText.polish_enabled;
   if (speechToTextPolishActionInput) {
-    speechToTextPolishActionInput.value = normalizeSpeechPolishActionId(speechToText.polish_action_id || 'polish');
+    speechToTextPolishActionInput.value = normalizeSpeechPolishActionId(speechToText.polish_action_id || DEFAULT_SPEECH_POLISH_ACTION_ID);
     syncSpeechPolishActionOptions();
   }
   if (speechToTextPolishModelInput) speechToTextPolishModelInput.value = speechToText.polish_model || '';
@@ -10999,7 +11005,7 @@ function applySettings(settings) {
     speechToTextCueSoundEnabled: speechToText.cue_sound_enabled !== false,
     speechToTextCueSoundKind: normalizeSpeechCueSoundKind(speechToText.cue_sound_kind || DEFAULT_SPEECH_CUE_SOUND_KIND),
     speechToTextPolishEnabled: !!speechToText.polish_enabled,
-    speechToTextPolishActionId: normalizeSpeechPolishActionId(speechToText.polish_action_id || 'polish'),
+    speechToTextPolishActionId: normalizeSpeechPolishActionId(speechToText.polish_action_id || DEFAULT_SPEECH_POLISH_ACTION_ID),
     speechToTextPolishModel: speechToText.polish_model || '',
     speechToTextPolishDeepThinkingEnabled: !!speechToText.polish_deep_thinking_enabled,
     speechToTextPolishTemperature: normalizeSpeechPolishTemperature(speechToText.polish_temperature ?? DEFAULT_SPEECH_POLISH_TEMPERATURE),
