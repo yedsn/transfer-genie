@@ -1888,24 +1888,7 @@ fn write_system_clipboard(text: &str) -> Result<(), String> {
     }
     #[cfg(target_os = "macos")]
     {
-        let mut child = std::process::Command::new("pbcopy")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|err| format!("写入剪贴板失败: {err}"))?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(text.as_bytes())
-                .map_err(|err| format!("写入剪贴板内容失败: {err}"))?;
-        }
-        let output = child
-            .wait_with_output()
-            .map_err(|err| format!("等待剪贴板写入失败: {err}"))?;
-        if !output.status.success() {
-            return Err("写入剪贴板失败".to_string());
-        }
-        Ok(())
+        write_macos_clipboard(text)
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -1932,6 +1915,30 @@ fn write_system_clipboard(text: &str) -> Result<(), String> {
         }
         Ok(())
     }
+}
+
+#[cfg(target_os = "macos")]
+fn write_macos_clipboard(text: &str) -> Result<(), String> {
+    use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+    use objc2_foundation::NSString;
+
+    let pasteboard = NSPasteboard::generalPasteboard();
+    pasteboard.clearContents();
+    let string_type = unsafe { NSPasteboardTypeString };
+
+    let value = NSString::from_str(text);
+    if !pasteboard.setString_forType(&value, string_type) {
+        return Err("写入剪贴板失败: NSPasteboard 拒绝写入文本".to_string());
+    }
+
+    let confirmed = pasteboard
+        .stringForType(string_type)
+        .map(|value| value.to_string())
+        .ok_or_else(|| "写入剪贴板失败: 无法读取已写入的文本".to_string())?;
+    if confirmed != text {
+        return Err("写入剪贴板失败: 剪贴板内容校验不一致".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -2241,17 +2248,6 @@ fn ensure_macos_accessibility_permission(action: &str) -> Result<(), String> {
         Err(format!(
             "{action}需要辅助功能权限。请在系统设置 > 隐私与安全性 > 辅助功能中允许 Transfer Genie，然后重试。"
         ))
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn request_macos_accessibility_permission_prompt() {
-    if check_macos_accessibility_permission(false) {
-        return;
-    }
-    use std::sync::atomic::Ordering;
-    if !MACOS_ACCESSIBILITY_PROMPT_SHOWN.swap(true, Ordering::SeqCst) {
-        let _ = check_macos_accessibility_permission(true);
     }
 }
 
@@ -11156,7 +11152,6 @@ fn start_system_dictation_side_alt_monitor(app: AppHandle) {
         let option_last_down_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let option_down_for_tap = option_down.clone();
         let option_last_down_ms_for_tap = option_last_down_ms.clone();
-        request_macos_accessibility_permission_prompt();
         let tap = match CGEventTap::new(
             CGEventTapLocation::HID,
             CGEventTapPlacement::HeadInsertEventTap,
