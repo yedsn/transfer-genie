@@ -97,6 +97,9 @@ static SYSTEM_DICTATION_OVERLAY_REQUEST_ID: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 #[cfg(target_os = "macos")]
 const MACOS_SIDE_ALT_STALE_DOWN_MS: u64 = 700;
+#[cfg(target_os = "macos")]
+static MACOS_ACCESSIBILITY_PROMPT_SHOWN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 struct AppState {
     settings_path: PathBuf,
@@ -2034,7 +2037,14 @@ fn dispatch_macos_paste_shortcut() -> Result<SystemPasteDispatchOutcome, String>
 
 #[cfg(target_os = "macos")]
 fn ensure_macos_accessibility_permission(action: &str) -> Result<(), String> {
-    if check_macos_accessibility_permission(true) {
+    if check_macos_accessibility_permission(false) {
+        return Ok(());
+    }
+    use std::sync::atomic::Ordering;
+    if !MACOS_ACCESSIBILITY_PROMPT_SHOWN.swap(true, Ordering::SeqCst) {
+        let _ = check_macos_accessibility_permission(true);
+    }
+    if check_macos_accessibility_permission(false) {
         Ok(())
     } else {
         Err(format!(
@@ -2045,7 +2055,13 @@ fn ensure_macos_accessibility_permission(action: &str) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn request_macos_accessibility_permission_prompt() {
-    let _ = check_macos_accessibility_permission(true);
+    if check_macos_accessibility_permission(false) {
+        return;
+    }
+    use std::sync::atomic::Ordering;
+    if !MACOS_ACCESSIBILITY_PROMPT_SHOWN.swap(true, Ordering::SeqCst) {
+        let _ = check_macos_accessibility_permission(true);
+    }
 }
 
 #[cfg(target_os = "macos")]
