@@ -1692,6 +1692,13 @@ fn emit_shortcut_settings_changed(app: &AppHandle, shortcuts_enabled: bool) {
     }
 }
 
+#[cfg(desktop)]
+fn emit_system_dictation_toggle(app: &AppHandle) {
+    if let Err(err) = app.emit("system-dictation-toggle", ()) {
+        eprintln!("[system-dictation] emit toggle failed: {err}");
+    }
+}
+
 #[tauri::command]
 async fn process_text_with_ai(
     state: State<'_, AppState>,
@@ -1980,19 +1987,7 @@ fn dispatch_system_paste_shortcut() -> Result<SystemPasteDispatchOutcome, String
     }
     #[cfg(target_os = "macos")]
     {
-        let output = std::process::Command::new("osascript")
-            .args([
-                "-e",
-                "tell application \"System Events\" to keystroke \"v\" using command down",
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .map_err(|err| format!("触发粘贴失败: {err}"))?;
-        if !output.status.success() {
-            return Err("触发粘贴失败，请检查辅助功能权限".to_string());
-        }
-        Ok(SystemPasteDispatchOutcome::Pasted)
+        dispatch_macos_paste_shortcut()
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -2007,6 +2002,68 @@ fn dispatch_system_paste_shortcut() -> Result<SystemPasteDispatchOutcome, String
         }
         Ok(SystemPasteDispatchOutcome::Pasted)
     }
+}
+
+#[cfg(target_os = "macos")]
+fn dispatch_macos_paste_shortcut() -> Result<SystemPasteDispatchOutcome, String> {
+    use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    const MACOS_V_KEYCODE: u16 = 0x09;
+
+    ensure_macos_accessibility_permission("粘贴听写结果")?;
+
+    let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+        .map_err(|_| "触发粘贴失败：无法创建键盘事件源".to_string())?;
+    let key_down = CGEvent::new_keyboard_event(source.clone(), MACOS_V_KEYCODE, true)
+        .map_err(|_| "触发粘贴失败：无法创建按键事件".to_string())?;
+    let key_up = CGEvent::new_keyboard_event(source, MACOS_V_KEYCODE, false)
+        .map_err(|_| "触发粘贴失败：无法创建按键释放事件".to_string())?;
+    key_down.set_flags(CGEventFlags::CGEventFlagCommand);
+    key_up.set_flags(CGEventFlags::CGEventFlagCommand);
+    eprintln!("[system-dictation] paste shortcut dispatching: command+v");
+    key_down.post(CGEventTapLocation::HID);
+    std::thread::sleep(Duration::from_millis(20));
+    key_up.post(CGEventTapLocation::HID);
+    eprintln!("[system-dictation] paste shortcut dispatched: command+v");
+    Ok(SystemPasteDispatchOutcome::Pasted)
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_macos_accessibility_permission(action: &str) -> Result<(), String> {
+    if check_macos_accessibility_permission(true) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{action}需要辅助功能权限。请在系统设置 > 隐私与安全性 > 辅助功能中允许 Transfer Genie，然后重试。"
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn request_macos_accessibility_permission_prompt() {
+    let _ = check_macos_accessibility_permission(true);
+}
+
+#[cfg(target_os = "macos")]
+fn check_macos_accessibility_permission(prompt: bool) -> bool {
+    use core_foundation::base::{CFTypeRef, TCFType};
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::string::{CFString, CFStringRef};
+    use std::ffi::c_void;
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        static kAXTrustedCheckOptionPrompt: CFStringRef;
+        fn AXIsProcessTrustedWithOptions(options: CFTypeRef) -> u8;
+    }
+
+    let prompt_key = unsafe { CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt) };
+    let prompt_value = CFBoolean::from(prompt);
+    let options =
+        CFDictionary::<CFString, CFBoolean>::from_CFType_pairs(&[(prompt_key, prompt_value)]);
+    unsafe { AXIsProcessTrustedWithOptions(options.as_CFTypeRef() as *const c_void) != 0 }
 }
 
 #[cfg(target_os = "windows")]
@@ -10707,11 +10764,7 @@ fn start_system_dictation_side_alt_monitor(app: AppHandle) {
         std::thread::spawn(move || {
             while rx.recv().is_ok() {
                 eprintln!("[system-dictation] side-alt hook event: emitting toggle");
-                if let Some(window) = app_for_events.get_webview_window("main") {
-                    let _ = window.emit("system-dictation-toggle", ());
-                } else {
-                    eprintln!("[system-dictation] side-alt hook event: main window not found");
-                }
+                emit_system_dictation_toggle(&app_for_events);
             }
         });
     }
@@ -10823,11 +10876,7 @@ fn start_system_dictation_side_alt_monitor(app: AppHandle) {
         std::thread::spawn(move || {
             while rx.recv().is_ok() {
                 eprintln!("[system-dictation] mac side-alt event: emitting toggle");
-                if let Some(window) = app_for_events.get_webview_window("main") {
-                    let _ = window.emit("system-dictation-toggle", ());
-                } else {
-                    eprintln!("[system-dictation] mac side-alt event: main window not found");
-                }
+                emit_system_dictation_toggle(&app_for_events);
             }
         });
     }
@@ -10835,6 +10884,7 @@ fn start_system_dictation_side_alt_monitor(app: AppHandle) {
     std::thread::spawn(move || {
         let option_down = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let option_down_for_tap = option_down.clone();
+        request_macos_accessibility_permission_prompt();
         let tap = match CGEventTap::new(
             CGEventTapLocation::HID,
             CGEventTapPlacement::HeadInsertEventTap,
@@ -11242,9 +11292,7 @@ fn main() {
                                 .as_ref()
                                 .is_some_and(|current| *shortcut == *current)
                             {
-                                if let Some(window) = app.get_webview_window("main") {
-                                    let _ = window.emit("system-dictation-toggle", ());
-                                }
+                                emit_system_dictation_toggle(app);
                             }
                         })
                         .build(),
