@@ -100,6 +100,9 @@ const MACOS_SIDE_ALT_STALE_DOWN_MS: u64 = 700;
 #[cfg(target_os = "macos")]
 static MACOS_ACCESSIBILITY_PROMPT_SHOWN: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+#[cfg(target_os = "macos")]
+static SYSTEM_DICTATION_TARGET_APP_PID: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(0);
 
 struct AppState {
     settings_path: PathBuf,
@@ -1840,7 +1843,7 @@ fn paste_dictation_text(text: String) -> Result<SystemDictationPasteResult, Stri
     );
     let paste_result = write_system_clipboard(&value).and_then(|()| {
         eprintln!("[system-dictation] clipboard write done");
-        dispatch_system_paste_shortcut()
+        dispatch_system_paste()
     });
     paste_result.map(system_dictation_paste_result)
 }
@@ -1985,7 +1988,7 @@ impl Drop for ClipboardCloseGuard {
     }
 }
 
-fn dispatch_system_paste_shortcut() -> Result<SystemPasteDispatchOutcome, String> {
+fn dispatch_system_paste() -> Result<SystemPasteDispatchOutcome, String> {
     std::thread::sleep(Duration::from_millis(90));
     #[cfg(target_os = "windows")]
     {
@@ -1993,7 +1996,12 @@ fn dispatch_system_paste_shortcut() -> Result<SystemPasteDispatchOutcome, String
     }
     #[cfg(target_os = "macos")]
     {
-        dispatch_macos_paste_shortcut()
+        dispatch_macos_paste_command().or_else(|err| {
+            eprintln!(
+                "[system-dictation] mac paste command failed, falling back to shortcut: {err}"
+            );
+            dispatch_macos_paste_shortcut("cmd+v")
+        })
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -2011,28 +2019,211 @@ fn dispatch_system_paste_shortcut() -> Result<SystemPasteDispatchOutcome, String
 }
 
 #[cfg(target_os = "macos")]
-fn dispatch_macos_paste_shortcut() -> Result<SystemPasteDispatchOutcome, String> {
-    use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
+fn dispatch_macos_paste_command() -> Result<SystemPasteDispatchOutcome, String> {
+    ensure_macos_accessibility_permission("粘贴听写结果")?;
+    restore_macos_system_dictation_target_app_before_paste();
+
+    let script = r#"
+tell application "System Events"
+  set frontApp to first application process whose frontmost is true
+  try
+    click menu item "Paste" of menu "Edit" of menu bar 1 of frontApp
+  on error firstError
+    try
+      click menu item "粘贴" of menu "编辑" of menu bar 1 of frontApp
+    on error secondError
+      error (firstError & " / " & secondError)
+    end try
+  end try
+end tell
+"#;
+
+    eprintln!("[system-dictation] paste command dispatching: app menu Paste");
+    let output = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|err| format!("触发系统粘贴命令失败: {err}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "触发系统粘贴命令失败".to_string()
+        } else {
+            format!("触发系统粘贴命令失败: {stderr}")
+        });
+    }
+    eprintln!("[system-dictation] paste command dispatched: app menu Paste");
+    Ok(SystemPasteDispatchOutcome::Pasted)
+}
+
+#[cfg(target_os = "macos")]
+fn dispatch_macos_paste_shortcut(shortcut: &str) -> Result<SystemPasteDispatchOutcome, String> {
+    use core_graphics::event::{CGEvent, CGEventTapLocation};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
-    const MACOS_V_KEYCODE: u16 = 0x09;
-
     ensure_macos_accessibility_permission("粘贴听写结果")?;
+    restore_macos_system_dictation_target_app_before_paste();
+
+    let shortcut = normalize_macos_keyboard_shortcut(shortcut)
+        .ok_or_else(|| "系统听写结果粘贴快捷键格式无效".to_string())?;
 
     let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
         .map_err(|_| "触发粘贴失败：无法创建键盘事件源".to_string())?;
-    let key_down = CGEvent::new_keyboard_event(source.clone(), MACOS_V_KEYCODE, true)
+    let key_down = CGEvent::new_keyboard_event(source.clone(), shortcut.key_code, true)
         .map_err(|_| "触发粘贴失败：无法创建按键事件".to_string())?;
-    let key_up = CGEvent::new_keyboard_event(source, MACOS_V_KEYCODE, false)
+    let key_up = CGEvent::new_keyboard_event(source, shortcut.key_code, false)
         .map_err(|_| "触发粘贴失败：无法创建按键释放事件".to_string())?;
-    key_down.set_flags(CGEventFlags::CGEventFlagCommand);
-    key_up.set_flags(CGEventFlags::CGEventFlagCommand);
-    eprintln!("[system-dictation] paste shortcut dispatching: command+v");
+    key_down.set_flags(shortcut.flags);
+    key_up.set_flags(shortcut.flags);
+    eprintln!(
+        "[system-dictation] paste shortcut dispatching: {}",
+        shortcut.label
+    );
     key_down.post(CGEventTapLocation::HID);
     std::thread::sleep(Duration::from_millis(20));
     key_up.post(CGEventTapLocation::HID);
-    eprintln!("[system-dictation] paste shortcut dispatched: command+v");
+    eprintln!(
+        "[system-dictation] paste shortcut dispatched: {}",
+        shortcut.label
+    );
     Ok(SystemPasteDispatchOutcome::Pasted)
+}
+
+#[cfg(target_os = "macos")]
+struct MacosKeyboardShortcut {
+    flags: core_graphics::event::CGEventFlags,
+    key_code: u16,
+    label: String,
+}
+
+#[cfg(target_os = "macos")]
+fn normalize_macos_keyboard_shortcut(raw: &str) -> Option<MacosKeyboardShortcut> {
+    use core_graphics::event::CGEventFlags;
+
+    let normalized = normalize_global_hotkey(raw).unwrap_or_else(|| "cmd+v".to_string());
+    let mut flags = CGEventFlags::CGEventFlagNull;
+    let mut key_code = None;
+    for part in normalized
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        match part {
+            "ctrl" | "control" => flags |= CGEventFlags::CGEventFlagControl,
+            "alt" | "option" => flags |= CGEventFlags::CGEventFlagAlternate,
+            "shift" => flags |= CGEventFlags::CGEventFlagShift,
+            "cmd" | "command" | "meta" | "super" => flags |= CGEventFlags::CGEventFlagCommand,
+            value => key_code = macos_key_code_for_shortcut_key(value),
+        }
+    }
+    Some(MacosKeyboardShortcut {
+        flags,
+        key_code: key_code?,
+        label: normalized,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_key_code_for_shortcut_key(key: &str) -> Option<u16> {
+    match key {
+        "a" => Some(0x00),
+        "s" => Some(0x01),
+        "d" => Some(0x02),
+        "f" => Some(0x03),
+        "h" => Some(0x04),
+        "g" => Some(0x05),
+        "z" => Some(0x06),
+        "x" => Some(0x07),
+        "c" => Some(0x08),
+        "v" => Some(0x09),
+        "b" => Some(0x0B),
+        "q" => Some(0x0C),
+        "w" => Some(0x0D),
+        "e" => Some(0x0E),
+        "r" => Some(0x0F),
+        "y" => Some(0x10),
+        "t" => Some(0x11),
+        "1" => Some(0x12),
+        "2" => Some(0x13),
+        "3" => Some(0x14),
+        "4" => Some(0x15),
+        "6" => Some(0x16),
+        "5" => Some(0x17),
+        "=" | "equal" => Some(0x18),
+        "9" => Some(0x19),
+        "7" => Some(0x1A),
+        "-" | "minus" => Some(0x1B),
+        "8" => Some(0x1C),
+        "0" => Some(0x1D),
+        "]" | "bracketright" => Some(0x1E),
+        "o" => Some(0x1F),
+        "u" => Some(0x20),
+        "[" | "bracketleft" => Some(0x21),
+        "i" => Some(0x22),
+        "p" => Some(0x23),
+        "l" => Some(0x25),
+        "j" => Some(0x26),
+        "'" | "quote" => Some(0x27),
+        "k" => Some(0x28),
+        ";" | "semicolon" => Some(0x29),
+        "\\" | "backslash" => Some(0x2A),
+        "," | "comma" => Some(0x2B),
+        "/" | "slash" => Some(0x2C),
+        "n" => Some(0x2D),
+        "m" => Some(0x2E),
+        "." | "period" => Some(0x2F),
+        "space" => Some(0x31),
+        "enter" | "return" => Some(0x24),
+        "tab" => Some(0x30),
+        "escape" | "esc" => Some(0x35),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn current_macos_frontmost_app_pid() -> Option<i32> {
+    let workspace = objc2_app_kit::NSWorkspace::sharedWorkspace();
+    workspace
+        .frontmostApplication()
+        .map(|application| application.processIdentifier() as i32)
+        .filter(|pid| *pid > 0)
+}
+
+#[cfg(target_os = "macos")]
+fn record_macos_system_dictation_target_app() {
+    use std::sync::atomic::Ordering;
+
+    let current_pid = std::process::id() as i32;
+    let Some(frontmost_pid) = current_macos_frontmost_app_pid() else {
+        return;
+    };
+    if frontmost_pid != current_pid {
+        SYSTEM_DICTATION_TARGET_APP_PID.store(frontmost_pid, Ordering::SeqCst);
+        eprintln!("[system-dictation] mac target app pid recorded: {frontmost_pid}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn restore_macos_system_dictation_target_app_before_paste() {
+    use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
+    use std::sync::atomic::Ordering;
+
+    let target_pid = SYSTEM_DICTATION_TARGET_APP_PID.swap(0, Ordering::SeqCst);
+    if target_pid <= 0 {
+        return;
+    }
+    if let Some(application) =
+        NSRunningApplication::runningApplicationWithProcessIdentifier(target_pid)
+    {
+        #[allow(deprecated)]
+        let options = NSApplicationActivationOptions::ActivateAllWindows
+            | NSApplicationActivationOptions::ActivateIgnoringOtherApps;
+        let activated = application.activateWithOptions(options);
+        eprintln!("[system-dictation] mac target app restored before paste: pid={target_pid} activated={activated}");
+        std::thread::sleep(Duration::from_millis(220));
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -10538,7 +10729,10 @@ fn restore_system_dictation_hidden_main_window(app: &AppHandle, window: &tauri::
 #[cfg(desktop)]
 fn emit_system_dictation_toggle_from_shortcut(app: &AppHandle) {
     #[cfg(target_os = "macos")]
-    wake_hidden_main_window_for_system_dictation(app);
+    {
+        record_macos_system_dictation_target_app();
+        wake_hidden_main_window_for_system_dictation(app);
+    }
     emit_system_dictation_toggle(app);
 }
 
