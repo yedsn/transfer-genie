@@ -5510,6 +5510,7 @@ dependencies = [
  "futures-util",
  "image 0.24.9",
  "log",
+ "objc2-foundation",
  "pbkdf2",
  "percent-encoding",
  "quick-xml 0.31.0",

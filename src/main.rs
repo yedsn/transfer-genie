@@ -95,6 +95,8 @@ static SYSTEM_DICTATION_OVERLAY_GENERATION: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 static SYSTEM_DICTATION_OVERLAY_REQUEST_ID: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+#[cfg(target_os = "macos")]
+const MACOS_SIDE_ALT_STALE_DOWN_MS: u64 = 700;
 
 struct AppState {
     settings_path: PathBuf,
@@ -114,6 +116,7 @@ struct AppState {
     update_guard: AsyncMutex<()>,
     auto_backup_guard: AsyncMutex<()>,
     pending_webdav_conflict: Mutex<Option<WebDavConflict>>,
+    system_dictation_hidden_main_position: Mutex<Option<PhysicalPosition<i32>>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -5074,6 +5077,10 @@ fn open_data_dir(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn minimize_window(app: AppHandle, window: Window) -> Result<(), String> {
     let _ = window.emit("trigger-hide", ());
+    #[cfg(target_os = "macos")]
+    if let Some(webview_window) = app.get_webview_window("main") {
+        restore_system_dictation_hidden_main_window(&app, &webview_window);
+    }
     window
         .hide()
         .map_err(|err| format!("隐藏窗口失败: {err}"))?;
@@ -10459,8 +10466,11 @@ fn show_main_window(app: &AppHandle) {
 
 fn show_main_window_with_event(app: &AppHandle, event_name: Option<&str>) {
     if let Some(window) = app.get_webview_window("main") {
+        restore_system_dictation_hidden_main_window(app, &window);
         let _ = window.unminimize();
         let _ = window.show();
+        let _ = window.set_focusable(true);
+        let _ = window.set_skip_taskbar(false);
         let _ = window.set_focus();
         let _ = window.emit("trigger-show", ());
         if let Some(event_name) = event_name {
@@ -10480,14 +10490,64 @@ fn toggle_main_window(app: &AppHandle) {
             #[cfg(target_os = "macos")]
             sync_dock_visibility_webview(app, &window);
         } else {
+            restore_system_dictation_hidden_main_window(app, &window);
             let _ = window.unminimize();
             let _ = window.show();
+            let _ = window.set_focusable(true);
+            let _ = window.set_skip_taskbar(false);
             let _ = window.set_focus();
             let _ = window.emit("trigger-show", ());
             #[cfg(target_os = "macos")]
             sync_dock_visibility_webview(app, &window);
         }
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn restore_system_dictation_hidden_main_window(_app: &AppHandle, _window: &tauri::WebviewWindow) {}
+
+#[cfg(target_os = "macos")]
+fn restore_system_dictation_hidden_main_window(app: &AppHandle, window: &tauri::WebviewWindow) {
+    let state = app.state::<AppState>();
+    let original_position = state
+        .system_dictation_hidden_main_position
+        .lock()
+        .ok()
+        .and_then(|mut position| position.take());
+    if let Some(position) = original_position {
+        let _ = window.set_position(position);
+    }
+}
+
+#[cfg(desktop)]
+fn emit_system_dictation_toggle_from_shortcut(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    wake_hidden_main_window_for_system_dictation(app);
+    emit_system_dictation_toggle(app);
+}
+
+#[cfg(target_os = "macos")]
+fn wake_hidden_main_window_for_system_dictation(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    if window.is_visible().unwrap_or(true) {
+        return;
+    }
+
+    let state = app.state::<AppState>();
+    if let Ok(mut stored_position) = state.system_dictation_hidden_main_position.lock() {
+        if stored_position.is_none() {
+            *stored_position = window.outer_position().ok();
+        }
+    }
+
+    let _ = window.set_focusable(false);
+    let _ = window.set_skip_taskbar(true);
+    let _ = window.set_position(PhysicalPosition::new(-32000, -32000));
+    let _ = window.show();
+    let _ = window.emit("trigger-show", ());
+    sync_dock_visibility_webview(app, &window);
 }
 
 #[cfg(desktop)]
@@ -10764,7 +10824,7 @@ fn start_system_dictation_side_alt_monitor(app: AppHandle) {
         std::thread::spawn(move || {
             while rx.recv().is_ok() {
                 eprintln!("[system-dictation] side-alt hook event: emitting toggle");
-                emit_system_dictation_toggle(&app_for_events);
+                emit_system_dictation_toggle_from_shortcut(&app_for_events);
             }
         });
     }
@@ -10876,23 +10936,32 @@ fn start_system_dictation_side_alt_monitor(app: AppHandle) {
         std::thread::spawn(move || {
             while rx.recv().is_ok() {
                 eprintln!("[system-dictation] mac side-alt event: emitting toggle");
-                emit_system_dictation_toggle(&app_for_events);
+                emit_system_dictation_toggle_from_shortcut(&app_for_events);
             }
         });
     }
 
     std::thread::spawn(move || {
         let option_down = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let option_last_down_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let option_down_for_tap = option_down.clone();
+        let option_last_down_ms_for_tap = option_last_down_ms.clone();
         request_macos_accessibility_permission_prompt();
         let tap = match CGEventTap::new(
             CGEventTapLocation::HID,
             CGEventTapPlacement::HeadInsertEventTap,
-            CGEventTapOptions::Default,
+            CGEventTapOptions::ListenOnly,
             vec![CGEventType::FlagsChanged],
             move |_proxy, event_type, event| {
+                if matches!(
+                    event_type,
+                    CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
+                ) {
+                    eprintln!("[system-dictation] mac side-alt hook disabled by system");
+                    return None;
+                }
                 if !matches!(event_type, CGEventType::FlagsChanged) {
-                    return Some(event.clone());
+                    return None;
                 }
                 let flags = event.get_flags();
                 let is_option = flags.contains(CGEventFlags::CGEventFlagAlternate);
@@ -10913,25 +10982,29 @@ fn start_system_dictation_side_alt_monitor(app: AppHandle) {
                     _ => false,
                 };
                 if !should_handle {
-                    return Some(event.clone());
+                    return None;
                 }
 
                 let is_down = is_option;
                 if is_down {
+                    let now = now_ms().max(0) as u64;
                     let was_down = option_down_for_tap.swap(true, Ordering::SeqCst);
-                    if !was_down {
-                        eprintln!("[system-dictation] mac side-alt swallowed option down");
+                    let last_down_ms = option_last_down_ms_for_tap.swap(now, Ordering::SeqCst);
+                    let stale_down =
+                        now.saturating_sub(last_down_ms) >= MACOS_SIDE_ALT_STALE_DOWN_MS;
+                    if !was_down || stale_down {
+                        eprintln!("[system-dictation] mac side-alt option down");
                         if let Some(tx) = SYSTEM_DICTATION_SIDE_ALT_TOGGLE_TX.get() {
                             let _ = tx.send(());
                         }
+                    } else {
+                        eprintln!("[system-dictation] mac side-alt repeated option down ignored");
                     }
                 } else {
                     option_down_for_tap.store(false, Ordering::SeqCst);
-                    eprintln!("[system-dictation] mac side-alt swallowed option up");
+                    eprintln!("[system-dictation] mac side-alt option up");
                 }
-                let null_event = event.clone();
-                null_event.set_type(CGEventType::Null);
-                Some(null_event)
+                None
             },
         ) {
             Ok(tap) => tap,
@@ -10956,6 +11029,21 @@ fn start_system_dictation_side_alt_monitor(app: AppHandle) {
         eprintln!("[system-dictation] mac side-alt hook started");
         CFRunLoop::run_current();
     });
+}
+
+#[cfg(target_os = "macos")]
+fn retain_macos_background_activity() {
+    use objc2_foundation::{ns_string, NSActivityOptions, NSProcessInfo};
+
+    let activity = NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+        NSActivityOptions::UserInitiatedAllowingIdleSystemSleep
+            | NSActivityOptions::LatencyCritical
+            | NSActivityOptions::SuddenTerminationDisabled
+            | NSActivityOptions::AutomaticTerminationDisabled,
+        ns_string!("Keep Transfer Genie shortcuts, dictation, and paste delivery responsive in the background"),
+    );
+    std::mem::forget(activity);
+    eprintln!("[system-dictation] mac background activity retained");
 }
 
 #[cfg(target_os = "windows")]
@@ -11108,6 +11196,7 @@ fn main() {
                 update_guard: AsyncMutex::new(()),
                 auto_backup_guard: AsyncMutex::new(()),
                 pending_webdav_conflict: Mutex::new(None),
+                system_dictation_hidden_main_position: Mutex::new(None),
             });
 
             #[cfg(desktop)]
@@ -11115,6 +11204,9 @@ fn main() {
                 let state = app.state::<AppState>();
                 refresh_autostart_registration(&app.handle(), &state);
             }
+
+            #[cfg(target_os = "macos")]
+            retain_macos_background_activity();
 
             #[cfg(desktop)]
             {
@@ -11292,7 +11384,7 @@ fn main() {
                                 .as_ref()
                                 .is_some_and(|current| *shortcut == *current)
                             {
-                                emit_system_dictation_toggle(app);
+                                emit_system_dictation_toggle_from_shortcut(app);
                             }
                         })
                         .build(),
@@ -11324,6 +11416,11 @@ fn main() {
                     window.on_window_event(move |event| {
                         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                             let _ = event_window.emit("trigger-hide", ());
+                            #[cfg(target_os = "macos")]
+                            restore_system_dictation_hidden_main_window(
+                                &event_window.app_handle(),
+                                &event_window,
+                            );
                             let _ = event_window.hide();
                             api.prevent_close();
                         }
@@ -11593,6 +11690,7 @@ mod tests {
             update_guard: AsyncMutex::new(()),
             auto_backup_guard: AsyncMutex::new(()),
             pending_webdav_conflict: Mutex::new(None),
+            system_dictation_hidden_main_position: Mutex::new(None),
         }
     }
 
