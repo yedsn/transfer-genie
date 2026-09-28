@@ -2094,13 +2094,26 @@ function normalizeSpeechHotkey(value) {
   return normalizeGlobalHotkey(value);
 }
 
+function normalizeSystemDictationShortcut(value) {
+  const normalized = String(value || '').toLowerCase().trim().replace(/\s+/g, '');
+  const parts = normalized.split('+').filter(Boolean);
+  if (parts.length === 2 && parts.includes('shift') && (parts.includes('alt') || parts.includes('option'))) {
+    return 'shift+alt';
+  }
+  return normalizeSpeechHotkey(value);
+}
+
 let capturingSystemDictationShortcut = false;
+let pendingSystemDictationSideAlt = '';
+
+function isSystemDictationShortcutCaptureControl(target) {
+  return target instanceof Element && !!target.closest(
+    '#system-dictation-shortcut, #system-dictation-shortcut-clear, #system-dictation-shortcut-reset',
+  );
+}
 
 function formatSystemShortcutFromKeyboardEvent(event) {
   const code = event.code || '';
-  if (code === 'AltRight' && !event.ctrlKey && !event.shiftKey && !event.metaKey) return 'right-alt';
-  if (code === 'AltLeft' && !event.ctrlKey && !event.shiftKey && !event.metaKey) return 'left-alt';
-
   const key = String(event.key || '').toLowerCase();
   if ((key === 'altgraph' || (key === 'alt' && event.altKey && event.ctrlKey)) && !event.shiftKey && !event.metaKey) {
     return 'right-alt';
@@ -2119,13 +2132,19 @@ function formatSystemShortcutFromKeyboardEvent(event) {
   else if (/^F\d{1,2}$/.test(code)) mainKey = code.toLowerCase();
   else if (key && !['control', 'ctrl', 'alt', 'shift', 'meta', 'os', 'super', 'win', 'command'].includes(key)) mainKey = key;
 
-  if (!mainKey || parts.length === 0) return '';
+  if (!mainKey) {
+    if (parts.length === 2 && parts.includes('shift') && parts.includes('alt')) return 'shift+alt';
+    return '';
+  }
+  if (parts.length === 0) return '';
   parts.push(mainKey);
-  return normalizeSpeechHotkey(parts.join('+')) || '';
+  return normalizeSystemDictationShortcut(parts.join('+')) || '';
 }
 
 function setSystemDictationShortcutCapture(active) {
   capturingSystemDictationShortcut = !!active;
+  pendingSystemDictationSideAlt = '';
+  document.body?.classList.toggle('is-capturing-system-shortcut', capturingSystemDictationShortcut);
   if (!systemDictationShortcutInput) return;
   systemDictationShortcutInput.classList.toggle('is-capturing-shortcut', capturingSystemDictationShortcut);
   if (capturingSystemDictationShortcut) {
@@ -2138,7 +2157,7 @@ function setSystemDictationShortcutCapture(active) {
 function handleSystemDictationShortcutCapture(event) {
   if (!capturingSystemDictationShortcut) return;
   event.preventDefault();
-  event.stopPropagation();
+  event.stopImmediatePropagation();
 
   if (event.key === 'Escape') {
     setSystemDictationShortcutCapture(false);
@@ -2151,13 +2170,48 @@ function handleSystemDictationShortcutCapture(event) {
     return;
   }
 
+  const code = event.code || '';
+  const key = String(event.key || '').toLowerCase();
+  if ((code === 'AltRight' || code === 'AltLeft' || key === 'alt')
+    && !event.ctrlKey && !event.shiftKey && !event.metaKey) {
+    pendingSystemDictationSideAlt = code === 'AltRight' ? 'right-alt' : 'left-alt';
+    systemDictationShortcutInput.value = '松开 Alt 保存，或继续按 Shift';
+    setStatus('松开 Alt 可保存单独的 Alt；继续按 Shift 可设置 Shift+Alt');
+    return;
+  }
+
   const shortcut = formatSystemShortcutFromKeyboardEvent(event);
   if (!shortcut) {
-    setStatus('请按下 right-alt、left-alt 或包含修饰键的组合键');
+    setStatus('请继续按下 Alt、Shift 或其他主键');
     return;
   }
   updateSettingsFormField('systemDictationShortcut', shortcut, { delayMs: 0 });
   setSystemDictationShortcutCapture(false);
+  systemDictationShortcutInput.blur();
+}
+
+function handleSystemDictationShortcutCaptureKeyup(event) {
+  if (!capturingSystemDictationShortcut) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+
+  const code = event.code || '';
+  const releasedPendingAlt = pendingSystemDictationSideAlt === 'right-alt'
+    ? code === 'AltRight'
+    : code === 'AltLeft' || String(event.key || '').toLowerCase() === 'alt';
+  if (!pendingSystemDictationSideAlt || !releasedPendingAlt) return;
+
+  const shortcut = pendingSystemDictationSideAlt;
+  updateSettingsFormField('systemDictationShortcut', shortcut, { delayMs: 0 });
+  setSystemDictationShortcutCapture(false);
+  systemDictationShortcutInput.blur();
+}
+
+function blockUnrelatedSystemDictationShortcutCaptureEvent(event) {
+  if (!capturingSystemDictationShortcut || isSystemDictationShortcutCaptureControl(event.target)) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  systemDictationShortcutInput?.focus({ preventScroll: true });
 }
 
 let speechStream = null;
@@ -11142,7 +11196,7 @@ async function saveSettings(options = {}) {
   const speechToTextSystemAudioDeviceId = (currentSettingsFormState.speechToTextSystemAudioDeviceId || '').trim();
   const systemDictationShortcutRaw = String(currentSettingsFormState.systemDictationShortcut ?? '').trim();
   const normalizedSystemDictationShortcut = systemDictationShortcutRaw
-    ? normalizeSpeechHotkey(systemDictationShortcutRaw)
+    ? normalizeSystemDictationShortcut(systemDictationShortcutRaw)
     : '';
   const speechToTextCueSoundEnabled = !!currentSettingsFormState.speechToTextCueSoundEnabled;
   const speechToTextCueSoundKind = normalizeSpeechCueSoundKind(currentSettingsFormState.speechToTextCueSoundKind || DEFAULT_SPEECH_CUE_SOUND_KIND);
@@ -12675,9 +12729,13 @@ if (systemDictationShortcutInput) {
   systemDictationShortcutInput.addEventListener('focus', () => setSystemDictationShortcutCapture(true));
   systemDictationShortcutInput.addEventListener('click', () => setSystemDictationShortcutCapture(true));
   systemDictationShortcutInput.addEventListener('mousedown', () => setSystemDictationShortcutCapture(true));
-  systemDictationShortcutInput.addEventListener('keydown', handleSystemDictationShortcutCapture);
   systemDictationShortcutInput.addEventListener('blur', () => setSystemDictationShortcutCapture(false));
 }
+document.addEventListener('keydown', handleSystemDictationShortcutCapture, true);
+document.addEventListener('keyup', handleSystemDictationShortcutCaptureKeyup, true);
+document.addEventListener('pointerdown', blockUnrelatedSystemDictationShortcutCaptureEvent, true);
+document.addEventListener('mousedown', blockUnrelatedSystemDictationShortcutCaptureEvent, true);
+document.addEventListener('click', blockUnrelatedSystemDictationShortcutCaptureEvent, true);
 if (systemDictationEnabledInput) {
   systemDictationEnabledInput.addEventListener('change', (event) => {
     currentSettingsFormState = {
@@ -12890,10 +12948,16 @@ if (globalHotkeyResetButton) {
   globalHotkeyResetButton.addEventListener('click', () => updateSettingsFormField('globalHotkey', DEFAULT_GLOBAL_HOTKEY));
 }
 if (systemDictationShortcutClearButton) {
-  systemDictationShortcutClearButton.addEventListener('click', () => updateSettingsFormField('systemDictationShortcut', ''));
+  systemDictationShortcutClearButton.addEventListener('click', () => {
+    setSystemDictationShortcutCapture(false);
+    updateSettingsFormField('systemDictationShortcut', '');
+  });
 }
 if (systemDictationShortcutResetButton) {
-  systemDictationShortcutResetButton.addEventListener('click', () => updateSettingsFormField('systemDictationShortcut', DEFAULT_SYSTEM_DICTATION_SHORTCUT));
+  systemDictationShortcutResetButton.addEventListener('click', () => {
+    setSystemDictationShortcutCapture(false);
+    updateSettingsFormField('systemDictationShortcut', DEFAULT_SYSTEM_DICTATION_SHORTCUT);
+  });
 }
 if (sendHotkeyClearButton) {
   sendHotkeyClearButton.addEventListener('click', async () => {

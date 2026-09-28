@@ -1573,6 +1573,7 @@ async function run() {
       const captureValue = shortcutInput.value;
       const captureClass = shortcutInput.classList.contains('is-capturing-shortcut');
       shortcutInput.dispatchEvent(new KeyboardEvent('keydown', { code: 'AltRight', key: 'Alt', altKey: true, bubbles: true }));
+      shortcutInput.dispatchEvent(new KeyboardEvent('keyup', { code: 'AltRight', key: 'Alt', bubbles: true }));
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
@@ -1600,7 +1601,7 @@ async function run() {
       shortcutInput.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
       shortcutInput.focus();
       shortcutInput.click();
-      shortcutInput.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyD', key: 'd', altKey: true, bubbles: true }));
+      shortcutInput.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyS', key: 's', altKey: true, bubbles: true }));
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
@@ -1614,8 +1615,72 @@ async function run() {
       const saved = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.speech_to_text || {};
       return { inputValue: shortcutInput.value, saved };
     })()`);
-    assert.equal(comboShortcutCaptureResult.inputValue, 'alt+d', 'captured Alt+D is shown in shortcut input');
-    assert.equal(comboShortcutCaptureResult.saved.system_dictation_shortcut, 'alt+d', 'Alt+D is saved as the system dictation shortcut');
+    assert.equal(comboShortcutCaptureResult.inputValue, 'alt+s', 'captured Alt+S is shown in shortcut input');
+    assert.equal(comboShortcutCaptureResult.saved.system_dictation_shortcut, 'alt+s', 'Alt+S is saved as the system dictation shortcut');
+
+    const modifierShortcutCaptureResult = await evaluate(client, `(async () => {
+      const beforeSaves = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').length;
+      const shortcutInput = document.querySelector('#system-dictation-shortcut');
+      shortcutInput.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      shortcutInput.focus();
+      shortcutInput.click();
+      shortcutInput.dispatchEvent(new KeyboardEvent('keydown', { code: 'AltLeft', key: 'Alt', altKey: true, bubbles: true, cancelable: true }));
+      const pendingValue = shortcutInput.value;
+      shortcutInput.dispatchEvent(new KeyboardEvent('keydown', { code: 'ShiftLeft', key: 'Shift', altKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const saveCalls = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings');
+          if (saveCalls.length > beforeSaves) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('Shift+Alt system dictation shortcut was not saved'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const saved = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').at(-1)?.args?.settings?.speech_to_text || {};
+      return { pendingValue, inputValue: shortcutInput.value, saved };
+    })()`);
+    assert.match(modifierShortcutCaptureResult.pendingValue, /继续按 Shift/, 'single Alt remains pending so Shift can complete the modifier shortcut');
+    assert.equal(modifierShortcutCaptureResult.inputValue, 'shift+alt', 'captured Shift+Alt is shown in shortcut input');
+    assert.equal(modifierShortcutCaptureResult.saved.system_dictation_shortcut, 'shift+alt', 'Shift+Alt is saved as the system dictation shortcut');
+
+    const shortcutCaptureIsolationResult = await evaluate(client, `(async () => {
+      const shortcutInput = document.querySelector('#system-dictation-shortcut');
+      const beforeSaves = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').length;
+      const probe = document.createElement('button');
+      probe.type = 'button';
+      probe.textContent = 'probe';
+      let clickCount = 0;
+      let keyCount = 0;
+      probe.addEventListener('click', () => { clickCount += 1; });
+      document.addEventListener('keydown', () => { keyCount += 1; }, { once: true });
+      document.body.appendChild(probe);
+      shortcutInput.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      shortcutInput.focus();
+      shortcutInput.click();
+      probe.click();
+      probe.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyX', key: 'x', bubbles: true, cancelable: true }));
+      const captureAfterBlockedActions = shortcutInput.classList.contains('is-capturing-shortcut');
+      shortcutInput.dispatchEvent(new KeyboardEvent('keydown', { code: 'Escape', key: 'Escape', bubbles: true, cancelable: true }));
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      const afterSaves = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').length;
+      const result = {
+        clickCount,
+        keyCount,
+        captureAfterBlockedActions,
+        captureAfterEscape: shortcutInput.classList.contains('is-capturing-shortcut'),
+        valueAfterEscape: shortcutInput.value,
+        saveDelta: afterSaves - beforeSaves,
+      };
+      probe.remove();
+      return result;
+    })()`);
+    assert.equal(shortcutCaptureIsolationResult.clickCount, 0, 'unrelated clicks are blocked while shortcut capture is active');
+    assert.equal(shortcutCaptureIsolationResult.keyCount, 0, 'unrelated page key handlers do not run while shortcut capture is active');
+    assert.equal(shortcutCaptureIsolationResult.captureAfterBlockedActions, true, 'blocked page actions keep shortcut capture active');
+    assert.equal(shortcutCaptureIsolationResult.captureAfterEscape, false, 'Escape exits shortcut capture');
+    assert.equal(shortcutCaptureIsolationResult.valueAfterEscape, 'shift+alt', 'Escape preserves the previously saved shortcut');
+    assert.equal(shortcutCaptureIsolationResult.saveDelta, 0, 'Escape does not save a new shortcut value');
 
     const systemDictationOnlyResult = await evaluate(client, `(async () => {
       document.querySelector('#speech-to-text-enabled').checked = false;

@@ -6873,8 +6873,17 @@ fn is_side_alt_hotkey(raw: &str) -> bool {
     )
 }
 
+fn is_shift_alt_hotkey(raw: &str) -> bool {
+    matches!(normalize_speech_hotkey(raw).as_deref(), Some("shift+alt"))
+}
+
 fn normalize_system_dictation_hotkey(raw: &str) -> Option<String> {
-    normalize_speech_hotkey(raw)
+    let normalized = normalize_speech_hotkey(raw)?;
+    let parts: HashSet<&str> = normalized.split('+').collect();
+    if parts.len() == 2 && parts.contains("shift") && parts.contains("alt") {
+        return Some("shift+alt".to_string());
+    }
+    Some(normalized)
 }
 
 fn is_valid_endpoint_id(value: &str) -> bool {
@@ -7038,7 +7047,7 @@ fn normalize_settings(
         String::new()
     } else {
         normalized_system_dictation_hotkey.ok_or_else(|| {
-            "系统听写快捷键格式无效，可填写 right-alt、left-alt 或 Alt+D".to_string()
+            "系统听写快捷键格式无效，可填写 right-alt、left-alt、Shift+Alt 或 Alt+S".to_string()
         })?
     };
     if settings.speech_to_text.system_dictation_enabled
@@ -11016,9 +11025,12 @@ fn update_system_dictation_hotkey_registration(
         let hotkey =
             normalize_system_dictation_hotkey(&settings.speech_to_text.system_dictation_shortcut)
                 .ok_or_else(|| {
-                "系统听写快捷键格式无效，可填写 right-alt、left-alt 或 Alt+D".to_string()
+                "系统听写快捷键格式无效，可填写 right-alt、left-alt、Shift+Alt 或 Alt+S".to_string()
             })?;
-        if is_side_alt_hotkey(&hotkey) {
+        if is_side_alt_hotkey(&hotkey) || is_shift_alt_hotkey(&hotkey) {
+            #[cfg(target_os = "macos")]
+            ensure_macos_accessibility_permission("使用系统听写快捷键")?;
+
             #[cfg(any(target_os = "windows", target_os = "macos"))]
             {
                 *current = None;
@@ -11027,7 +11039,7 @@ fn update_system_dictation_hotkey_registration(
 
             #[cfg(not(any(target_os = "windows", target_os = "macos")))]
             {
-                return Err("当前系统不支持单独 left-alt/right-alt 作为系统听写快捷键".to_string());
+                return Err("当前系统不支持纯修饰键作为系统听写快捷键".to_string());
             }
         }
         let shortcut = hotkey
@@ -11090,9 +11102,17 @@ fn start_system_dictation_side_alt_monitor(app: AppHandle) {
             std::sync::atomic::AtomicBool::new(false);
         static LEFT_ALT_DOWN: std::sync::atomic::AtomicBool =
             std::sync::atomic::AtomicBool::new(false);
+        static SHIFT_DOWN: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        static SHIFT_ALT_ACTIVE: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        static SHIFT_ALT_SWALLOWED_KEY: std::sync::atomic::AtomicU8 =
+            std::sync::atomic::AtomicU8::new(0);
 
         unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-            use windows_sys::Win32::UI::Input::KeyboardAndMouse::{VK_LMENU, VK_RMENU};
+            use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+                VK_LMENU, VK_LSHIFT, VK_RMENU, VK_RSHIFT,
+            };
             use windows_sys::Win32::UI::WindowsAndMessaging::{
                 WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
             };
@@ -11107,10 +11127,65 @@ fn start_system_dictation_side_alt_monitor(app: AppHandle) {
                 return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
             }
             let key = unsafe { *(lparam as *const KBDLLHOOKSTRUCT) }.vkCode;
-            let configured_key = current_windows_side_alt_dictation_key();
-            let should_handle = match configured_key {
-                Some("right-alt") => key == VK_RMENU as u32,
-                Some("left-alt") => key == VK_LMENU as u32,
+            let configured = SYSTEM_DICTATION_SIDE_ALT_CONFIG.load(Ordering::SeqCst);
+            if configured == 3 {
+                let is_alt_key = key == VK_LMENU as u32 || key == VK_RMENU as u32;
+                let is_shift_key = key == VK_LSHIFT as u32 || key == VK_RSHIFT as u32;
+                if !is_alt_key && !is_shift_key {
+                    return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
+                }
+
+                if is_down {
+                    if is_alt_key {
+                        LEFT_ALT_DOWN.store(key == VK_LMENU as u32, Ordering::SeqCst);
+                        RIGHT_ALT_DOWN.store(key == VK_RMENU as u32, Ordering::SeqCst);
+                    } else {
+                        SHIFT_DOWN.store(true, Ordering::SeqCst);
+                    }
+                    let alt_down = LEFT_ALT_DOWN.load(Ordering::SeqCst)
+                        || RIGHT_ALT_DOWN.load(Ordering::SeqCst);
+                    if alt_down && SHIFT_DOWN.load(Ordering::SeqCst) {
+                        if !SHIFT_ALT_ACTIVE.swap(true, Ordering::SeqCst) {
+                            SHIFT_ALT_SWALLOWED_KEY
+                                .store(if is_alt_key { 1 } else { 2 }, Ordering::SeqCst);
+                            eprintln!("[system-dictation] shift-alt hook event");
+                            if let Some(tx) = SYSTEM_DICTATION_SIDE_ALT_TOGGLE_TX.get() {
+                                let _ = tx.send(());
+                            }
+                        }
+                        let swallowed_key = SHIFT_ALT_SWALLOWED_KEY.load(Ordering::SeqCst);
+                        if (is_alt_key && swallowed_key == 1)
+                            || (is_shift_key && swallowed_key == 2)
+                        {
+                            return 1;
+                        }
+                    }
+                } else if is_up {
+                    let swallowed_key = SHIFT_ALT_SWALLOWED_KEY.load(Ordering::SeqCst);
+                    if key == VK_LMENU as u32 {
+                        LEFT_ALT_DOWN.store(false, Ordering::SeqCst);
+                    } else if key == VK_RMENU as u32 {
+                        RIGHT_ALT_DOWN.store(false, Ordering::SeqCst);
+                    } else {
+                        SHIFT_DOWN.store(false, Ordering::SeqCst);
+                    }
+                    if !(LEFT_ALT_DOWN.load(Ordering::SeqCst)
+                        || RIGHT_ALT_DOWN.load(Ordering::SeqCst))
+                        || !SHIFT_DOWN.load(Ordering::SeqCst)
+                    {
+                        SHIFT_ALT_ACTIVE.store(false, Ordering::SeqCst);
+                    }
+                    if (is_alt_key && swallowed_key == 1) || (is_shift_key && swallowed_key == 2) {
+                        SHIFT_ALT_SWALLOWED_KEY.store(0, Ordering::SeqCst);
+                        return 1;
+                    }
+                }
+                return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
+            }
+
+            let should_handle = match configured {
+                1 => key == VK_LMENU as u32,
+                2 => key == VK_RMENU as u32,
                 _ => false,
             };
             if !should_handle {
@@ -11194,8 +11269,10 @@ fn start_system_dictation_side_alt_monitor(app: AppHandle) {
     std::thread::spawn(move || {
         let option_down = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let option_last_down_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let shift_alt_active = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let option_down_for_tap = option_down.clone();
         let option_last_down_ms_for_tap = option_last_down_ms.clone();
+        let shift_alt_active_for_tap = shift_alt_active.clone();
         let tap = match CGEventTap::new(
             CGEventTapLocation::HID,
             CGEventTapPlacement::HeadInsertEventTap,
@@ -11214,6 +11291,7 @@ fn start_system_dictation_side_alt_monitor(app: AppHandle) {
                 }
                 let flags = event.get_flags();
                 let is_option = flags.contains(CGEventFlags::CGEventFlagAlternate);
+                let is_shift = flags.contains(CGEventFlags::CGEventFlagShift);
                 let keycode =
                     event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;
                 let configured = SYSTEM_DICTATION_SIDE_ALT_CONFIG.load(Ordering::SeqCst);
@@ -11224,6 +11302,24 @@ fn start_system_dictation_side_alt_monitor(app: AppHandle) {
                 } else {
                     0
                 };
+
+                if configured == 3 {
+                    let is_relevant_key = key_kind != 0
+                        || keycode == KeyCode::SHIFT
+                        || keycode == KeyCode::RIGHT_SHIFT;
+                    if !is_relevant_key {
+                        return None;
+                    }
+                    let is_active = is_option && is_shift;
+                    let was_active = shift_alt_active_for_tap.swap(is_active, Ordering::SeqCst);
+                    if is_active && !was_active {
+                        eprintln!("[system-dictation] mac shift-alt event");
+                        if let Some(tx) = SYSTEM_DICTATION_SIDE_ALT_TOGGLE_TX.get() {
+                            let _ = tx.send(());
+                        }
+                    }
+                    return None;
+                }
 
                 let should_handle = match configured {
                     1 => key_kind == 1,
@@ -11300,10 +11396,12 @@ fn update_windows_side_alt_dictation_config(settings: &Settings) {
     use std::sync::atomic::Ordering;
 
     let value = if settings.shortcuts_enabled && settings.speech_to_text.system_dictation_enabled {
-        match normalize_speech_hotkey(&settings.speech_to_text.system_dictation_shortcut).as_deref()
+        match normalize_system_dictation_hotkey(&settings.speech_to_text.system_dictation_shortcut)
+            .as_deref()
         {
             Some("left-alt") => 1,
             Some("right-alt") => 2,
+            Some("shift+alt") => 3,
             _ => 0,
         }
     } else {
@@ -11318,10 +11416,12 @@ fn update_macos_side_alt_dictation_config(settings: &Settings) {
     use std::sync::atomic::Ordering;
 
     let value = if settings.shortcuts_enabled && settings.speech_to_text.system_dictation_enabled {
-        match normalize_speech_hotkey(&settings.speech_to_text.system_dictation_shortcut).as_deref()
+        match normalize_system_dictation_hotkey(&settings.speech_to_text.system_dictation_shortcut)
+            .as_deref()
         {
             Some("left-alt") => 1,
             Some("right-alt") => 2,
+            Some("shift+alt") => 3,
             _ => 0,
         }
     } else {
@@ -11329,17 +11429,6 @@ fn update_macos_side_alt_dictation_config(settings: &Settings) {
     };
     SYSTEM_DICTATION_SIDE_ALT_CONFIG.store(value, Ordering::SeqCst);
     eprintln!("[system-dictation] mac side-alt config={value}");
-}
-
-#[cfg(target_os = "windows")]
-fn current_windows_side_alt_dictation_key() -> Option<&'static str> {
-    use std::sync::atomic::Ordering;
-
-    match SYSTEM_DICTATION_SIDE_ALT_CONFIG.load(Ordering::SeqCst) {
-        1 => Some("left-alt"),
-        2 => Some("right-alt"),
-        _ => None,
-    }
 }
 
 #[cfg(target_os = "macos")]
@@ -12459,6 +12548,24 @@ mod tests {
         assert!(normalized.speech_to_text.enabled);
         assert!(normalized.speech_to_text.system_dictation_enabled);
         assert_eq!(normalized.speech_to_text.system_dictation_shortcut, "alt+d");
+    }
+
+    #[test]
+    fn normalize_settings_accepts_system_dictation_shortcut_variants() {
+        let download_dir = std::env::temp_dir().join("transfer-genie-settings-test");
+        for (shortcut, expected) in [("Alt+S", "alt+s"), ("Alt+Shift", "shift+alt")] {
+            let mut settings = test_settings();
+            settings.speech_to_text.api_key = "speech-key".to_string();
+            settings.speech_to_text.system_dictation_enabled = true;
+            settings.speech_to_text.system_dictation_shortcut = shortcut.to_string();
+
+            let normalized = normalize_settings(settings, &download_dir).unwrap();
+
+            assert_eq!(
+                normalized.speech_to_text.system_dictation_shortcut,
+                expected
+            );
+        }
     }
 
     #[test]

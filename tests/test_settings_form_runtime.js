@@ -149,6 +149,8 @@ function testShortcutSettingsMarkup() {
   assert.match(shortcuts, /id="system-dictation-shortcut"/);
   assert.match(shortcuts, /id="system-dictation-shortcut-clear"/);
   assert.match(shortcuts, /id="system-dictation-shortcut-reset"/);
+  assert.match(shortcuts, /Shift\+Alt/);
+  assert.match(shortcuts, /Alt\+S/);
   assert.match(shortcuts, /name="send-hotkey" value="enter"/);
   assert.match(shortcuts, /name="send-hotkey" value="ctrl_enter"/);
   assert.match(shortcuts, /id="send-hotkey-clear"/);
