@@ -175,6 +175,13 @@ function preloadScript() {
   return `(() => {
     const eventHandlers = {};
     const settings = ${JSON.stringify(mockSettings())};
+    const bulkResources = Array.from({ length: 75 }, (_, index) => {
+      const number = index + 1;
+      const category = ['image', 'video', 'audio', 'file'][index % 4];
+      const extension = { image: 'png', video: 'mp4', audio: 'wav', file: 'pdf' }[category];
+      return { key: 'endpoint-1::bulk-' + number + '::file', endpointId: 'endpoint-1', filename: 'bulk-' + number, originalName: 'resource-' + String(number).padStart(3, '0') + '.' + extension, category, extension, size: number * 1000, timestampMs: 100000 - number, status: number === 1 ? 'downloaded' : 'notDownloaded', isSpeechAudio: false };
+    });
+    window.__speechSmokeBulkResources = bulkResources;
     window.__speechSmoke = {
       calls: [],
       sentMessages: [],
@@ -198,6 +205,12 @@ function preloadScript() {
       overlayFocusStealCount: 0,
       pasteWithoutFocus: false,
       downloads: [],
+      bulkDownloads: 0,
+      bulkDownloadDelayMs: 0,
+      bulkDownloadFailure: '',
+      thumbnailActive: 0,
+      thumbnailPeak: 0,
+      openDownloadDirCalls: 0,
       aiRequests: [],
       failAiPolish: false,
       aiStreamDelayMs: 0,
@@ -233,6 +246,34 @@ function preloadScript() {
         invoke: async (command, args) => {
           window.__speechSmoke.calls.push({ command, args });
           if (command === 'get_settings') return structuredClone(settings);
+          if (command === 'list_bulk_download_resources' || command === 'resolve_bulk_download_selection') {
+            const input = args?.input || {};
+            const category = input.category || 'all';
+            const extension = input.extension || '';
+            const searchQuery = String(input.searchQuery || '').toLowerCase();
+            const filtered = bulkResources.filter((item) =>
+              (category === 'all' || item.category === category)
+              && (!extension || item.extension === extension)
+              && (!searchQuery || item.originalName.toLowerCase().includes(searchQuery))
+            );
+            if (command === 'resolve_bulk_download_selection') return { resources: filtered, total: filtered.length, totalSize: filtered.reduce((sum, item) => sum + item.size, 0) };
+            const page = Number(input.page || 1);
+            const pageSize = Number(input.pageSize || 60);
+            return { resources: filtered.slice((page - 1) * pageSize, page * pageSize), total: filtered.length, totalSize: filtered.reduce((sum, item) => sum + item.size, 0), page, pageSize, totalPages: Math.max(1, Math.ceil(filtered.length / pageSize)), categoryCounts: ['all', 'file', 'image', 'audio', 'video'].map((name) => ({ category: name, count: name === 'all' ? bulkResources.length : bulkResources.filter((item) => item.category === name).length })), extensions: [...new Set(filtered.map((item) => item.extension))] };
+          }
+          if (command === 'prepare_bulk_download_resources') {
+            const keys = new Set(args?.input?.keys || []);
+            const selected = bulkResources.filter((item) => keys.has(item.key));
+            return { resources: selected, total: selected.length, totalSize: selected.reduce((sum, item) => sum + item.size, 0), statusCounts: { newDownload: selected.filter((item) => item.status === 'notDownloaded').length, resumable: 0, redownload: 0, skipped: selected.filter((item) => item.status === 'downloaded').length } };
+          }
+          if (command === 'open_download_dir') { window.__speechSmoke.openDownloadDirCalls += 1; return null; }
+          if (command === 'get_thumbnail') {
+            window.__speechSmoke.thumbnailActive += 1;
+            window.__speechSmoke.thumbnailPeak = Math.max(window.__speechSmoke.thumbnailPeak, window.__speechSmoke.thumbnailActive);
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            window.__speechSmoke.thumbnailActive -= 1;
+            throw new Error('thumbnail unavailable');
+          }
           if (command === 'save_settings') return args.settings;
           if (command === 'paste_dictation_text') {
             const text = String(args?.text || '');
@@ -370,6 +411,9 @@ function preloadScript() {
           }
           if (command === 'get_message_source_audio_file') return 'data:audio/wav;base64,UklGRg==';
           if (command === 'download_message_file') {
+            window.__speechSmoke.bulkDownloads += String(args?.filename || '').startsWith('bulk-') ? 1 : 0;
+            if (String(args?.filename || '').startsWith('bulk-') && window.__speechSmoke.bulkDownloadDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, window.__speechSmoke.bulkDownloadDelayMs));
+            if (args?.filename === window.__speechSmoke.bulkDownloadFailure) throw new Error('bulk download failed');
             return { status: 'saved', path: 'C:/Downloads/speech-message.wav' };
           }
           if (command === 'list_messages_window') {
@@ -527,12 +571,179 @@ async function run() {
           document.querySelector('#speech-to-text-api-key')?.value === 'saved-for-smoke' &&
           document.querySelector('#speech-to-text-microphone')?.value === 'mic-1' &&
           window.__speechSmoke?.eventHandlers?.['system-dictation-toggle']
+          && window.transferGenieBulkDownloadRuntime
+          && window.transferGenieDownloadBulkResource
+          && window.transferGenieBulkDownloadDialogReady
         ) resolve(true);
         else if (Date.now() - start > 15000) reject(new Error('speech UI did not initialize'));
         else setTimeout(tick, 100);
       };
       tick();
     })`);
+    const bulkDownloadResult = JSON.parse(await evaluate(client, `(async () => JSON.stringify(await (async () => {
+      document.querySelector('#open-bulk-download').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelectorAll('.bulk-download-item').length === 60) resolve();
+          else if (Date.now() - start > 5000) reject(new Error('bulk download modal did not load: ' + JSON.stringify({ count: document.querySelectorAll('.bulk-download-item').length, active: document.querySelector('#bulk-download-modal')?.classList.contains('is-active'), calls: window.__speechSmoke.calls.filter((call) => String(call.command).includes('bulk_download')).slice(-5) })));
+          else setTimeout(tick, 30);
+        };
+        tick();
+      });
+      const initial = {
+        active: document.querySelector('#bulk-download-modal').classList.contains('is-active'),
+        count: document.querySelectorAll('.bulk-download-item').length,
+        page: document.querySelector('#bulk-download-page-label').textContent,
+      };
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      const escapeClosed = !document.querySelector('#bulk-download-modal').classList.contains('is-active');
+      document.querySelector('#open-bulk-download').click();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      document.querySelector('#bulk-download-modal .message-preview-backdrop').click();
+      const backdropClosed = !document.querySelector('#bulk-download-modal').classList.contains('is-active');
+      document.querySelector('#open-bulk-download').click();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const pointer = (target, type, x, y, pointerId = 11) => target.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, button: 0, buttons: type === 'pointerup' ? 0 : 1, clientX: x, clientY: y, pointerId, pointerType: 'mouse' }));
+      document.querySelector('[data-bulk-view="small-icons"]').click();
+      const gestureItems = [...document.querySelectorAll('.bulk-download-item')];
+      const firstRect = gestureItems[0].getBoundingClientRect();
+      const secondRect = gestureItems[1].getBoundingClientRect();
+      pointer(gestureItems[0], 'pointerdown', firstRect.left + 10, firstRect.top + 10);
+      await new Promise((resolve) => setTimeout(resolve, 330));
+      pointer(document.querySelector('#bulk-download-content'), 'pointermove', secondRect.left + 10, secondRect.top + 10);
+      pointer(document.querySelector('#bulk-download-content'), 'pointerup', secondRect.left + 10, secondRect.top + 10);
+      const brushSelected = document.querySelectorAll('.bulk-download-item.is-selected').length;
+      const brushSelectedKeys = [...document.querySelectorAll('.bulk-download-item.is-selected')].map((item) => item.dataset.resourceKey);
+      const cancelFirst = document.querySelector('[data-resource-key="' + brushSelectedKeys[0] + '"]');
+      const cancelSecond = document.querySelector('[data-resource-key="' + brushSelectedKeys[1] + '"]');
+      const cancelFirstRect = cancelFirst.getBoundingClientRect();
+      const cancelSecondRect = cancelSecond.getBoundingClientRect();
+      pointer(cancelFirst, 'pointerdown', cancelFirstRect.left + 10, cancelFirstRect.top + 10, 13);
+      await new Promise((resolve) => setTimeout(resolve, 330));
+      pointer(document.querySelector('#bulk-download-content'), 'pointermove', cancelSecondRect.left + 10, cancelSecondRect.top + 10, 13);
+      pointer(document.querySelector('#bulk-download-content'), 'pointerup', cancelSecondRect.left + 10, cancelSecondRect.top + 10, 13);
+      const brushCancelled = document.querySelectorAll('.bulk-download-item.is-selected').length;
+      pointer(gestureItems[0], 'pointerdown', firstRect.left + 10, firstRect.top + 10, 14);
+      await new Promise((resolve) => setTimeout(resolve, 330));
+      pointer(document.querySelector('#bulk-download-content'), 'pointercancel', firstRect.left + 10, firstRect.top + 10, 14);
+      const brushClassAfterCancel = document.querySelector('#bulk-download-content').classList.contains('is-brush-selecting');
+      document.querySelector('#bulk-download-clear-selection').click();
+      const brushContent = document.querySelector('#bulk-download-content');
+      brushContent.scrollTop = 0;
+      const visibleEdgeItems = [...document.querySelectorAll('.bulk-download-item')].filter((item) => {
+        const rect = item.getBoundingClientRect();
+        const bounds = brushContent.getBoundingClientRect();
+        return rect.bottom > bounds.top && rect.top < bounds.bottom;
+      });
+      const edgeItem = visibleEdgeItems.at(-1) || document.querySelector('.bulk-download-item');
+      const edgeItemRect = edgeItem.getBoundingClientRect();
+      const brushContentRect = brushContent.getBoundingClientRect();
+      const edgeY = brushContentRect.bottom - 30;
+      pointer(edgeItem, 'pointerdown', edgeItemRect.left + 10, edgeItemRect.top + 10, 16);
+      await new Promise((resolve) => setTimeout(resolve, 330));
+      pointer(brushContent, 'pointermove', edgeItemRect.left + 10, edgeY, 16);
+      await new Promise((resolve) => {
+        const startedAt = Date.now();
+        const waitForTraversedItem = () => {
+          if (document.querySelectorAll('.bulk-download-item.is-selected').length >= 2 || Date.now() - startedAt >= 600) resolve();
+          else setTimeout(waitForTraversedItem, 20);
+        };
+        waitForTraversedItem();
+      });
+      const autoScrollTop = brushContent.scrollTop;
+      const autoScrollSelected = document.querySelectorAll('.bulk-download-item.is-selected').length;
+      pointer(brushContent, 'pointerup', edgeItemRect.left + 10, edgeY, 16);
+      const scrollTopAfterRelease = brushContent.scrollTop;
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      const autoScrollStopped = brushContent.scrollTop === scrollTopAfterRelease;
+      document.querySelector('#bulk-download-clear-selection').click();
+      for (const view of ['details', 'list', 'small-icons', 'large-icons', 'tiles']) {
+        document.querySelector('[data-bulk-view="' + view + '"]').click();
+        if (!document.querySelector('#bulk-download-list').classList.contains('view-' + view)) throw new Error('view switch failed: ' + view);
+      }
+      document.querySelector('[data-bulk-category="image"]').click();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      document.querySelector('[data-bulk-view="large-icons"]').click();
+      document.querySelector('[data-bulk-category="video"]').click();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      document.querySelector('[data-bulk-category="image"]').click();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      const restoredImageView = document.querySelector('#bulk-download-list').classList.contains('view-large-icons');
+      const thumbnailFallback = [...document.querySelectorAll('.bulk-download-thumb')].every((item) => !item.querySelector('img'));
+      const thumbnailPeak = window.__speechSmoke.thumbnailPeak;
+      document.querySelector('[data-bulk-category="all"]').click();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      document.querySelector('[data-bulk-view="large-icons"]').click();
+      const content = document.querySelector('#bulk-download-content');
+      const contentRect = content.getBoundingClientRect();
+      pointer(content, 'pointerdown', contentRect.left + 2, contentRect.top + 2, 12);
+      pointer(content, 'pointermove', contentRect.left + 380, contentRect.top + 240, 12);
+      const marqueePreview = document.querySelectorAll('.bulk-download-item.is-preview-selected').length;
+      pointer(content, 'pointerup', contentRect.left + 380, contentRect.top + 240, 12);
+      const marqueeSelected = document.querySelectorAll('.bulk-download-item.is-selected').length;
+      document.querySelector('[data-bulk-view="details"]').click();
+      const detailsContentRect = content.getBoundingClientRect();
+      pointer(content, 'pointerdown', detailsContentRect.right - 4, detailsContentRect.bottom - 4, 15);
+      pointer(content, 'pointermove', detailsContentRect.left + 100, detailsContentRect.top + 100, 15);
+      const detailsMarqueeHidden = document.querySelector('#bulk-download-selection-box').hidden;
+      pointer(content, 'pointerup', detailsContentRect.left + 100, detailsContentRect.top + 100, 15);
+      document.querySelector('#bulk-download-clear-selection').click();
+      document.querySelector('[data-bulk-view="tiles"]').click();
+      document.querySelectorAll('.bulk-download-check')[1].click();
+      document.querySelector('#bulk-download-next').click();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      const crossPage = document.querySelector('#bulk-download-selection-summary').textContent;
+      document.querySelector('[data-bulk-category="image"]').click();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      document.querySelector('#bulk-download-select-all').click();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      const selected = document.querySelector('#bulk-download-selection-summary').textContent;
+      window.__speechSmokeBulkResources.push({ key: 'endpoint-1::bulk-late::file', endpointId: 'endpoint-1', filename: 'bulk-late', originalName: 'resource-late.png', category: 'image', extension: 'png', size: 999, timestampMs: 200000, status: 'notDownloaded', isSpeechAudio: false });
+      const frozenSelection = document.querySelector('#bulk-download-selection-summary').textContent;
+      const submitHint = document.querySelector('#bulk-download-submit-hint').textContent;
+      document.querySelector('#bulk-download-open-dir').click();
+      window.__speechSmoke.bulkDownloadDelayMs = 40;
+      window.__speechSmoke.bulkDownloadFailure = 'bulk-9';
+      document.querySelector('#bulk-download-submit').click();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      document.querySelector('[data-tab-target="downloads"]').click();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const queuedStates = [...document.querySelectorAll('#download-task-panel .download-task-state')].map((item) => item.textContent);
+      const badgeWhileQueued = document.querySelector('#download-task-tab-badge').textContent;
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      const finalStates = [...document.querySelectorAll('#download-task-panel .download-task-state')].map((item) => item.textContent);
+      const bulkErrors = window.__speechSmoke.calls.filter((call) => call.command === 'download_message_file' && call.args?.filename === window.__speechSmoke.bulkDownloadFailure).length;
+      const hasRetry = [...document.querySelectorAll('#download-task-panel .download-task-actions button')].some((button) => button.textContent === '重新下载');
+      return { initial, escapeClosed, backdropClosed, brushSelected, brushCancelled, brushClassAfterCancel, autoScrollTop, autoScrollSelected, autoScrollStopped, restoredImageView, thumbnailFallback, thumbnailPeak, marqueePreview, marqueeSelected, detailsMarqueeHidden, crossPage, selected, frozenSelection, submitHint, queuedStates, badgeWhileQueued, finalStates, bulkErrors, failure: window.__speechSmoke.bulkDownloadFailure, hasRetry, open: document.querySelector('#bulk-download-modal').classList.contains('is-active'), downloads: window.__speechSmoke.bulkDownloads, openDir: window.__speechSmoke.openDownloadDirCalls };
+    })()))()`));
+    assert.deepEqual(bulkDownloadResult.initial, { active: true, count: 60, page: '1 / 2' });
+    assert.equal(bulkDownloadResult.escapeClosed, true, 'Escape closes bulk download modal');
+    assert.equal(bulkDownloadResult.backdropClosed, true, 'backdrop closes bulk download modal');
+    assert.ok(bulkDownloadResult.brushSelected >= 2, 'long press brush selects traversed items');
+    assert.equal(bulkDownloadResult.brushCancelled, 0, 'long press on selected items brushes to cancel');
+    assert.equal(bulkDownloadResult.brushClassAfterCancel, false, 'pointer cancel clears brush interaction state');
+    assert.ok(bulkDownloadResult.autoScrollTop > 0, 'brush near the bottom edge auto-scrolls the resource area');
+    assert.ok(bulkDownloadResult.autoScrollSelected >= 2, `auto-scroll keeps brushing newly traversed resources: ${JSON.stringify(bulkDownloadResult)}`);
+    assert.equal(bulkDownloadResult.autoScrollStopped, true, 'releasing the pointer stops brush auto-scroll');
+    assert.equal(bulkDownloadResult.restoredImageView, true, 'category restores its saved view preference');
+    assert.equal(bulkDownloadResult.thumbnailFallback, true, 'failed image thumbnails retain the type fallback');
+    assert.ok(bulkDownloadResult.thumbnailPeak <= 4, 'thumbnail loading is capped at four concurrent requests');
+    assert.ok(bulkDownloadResult.marqueePreview >= 1, 'grid marquee previews intersecting items');
+    assert.equal(bulkDownloadResult.marqueeSelected, bulkDownloadResult.marqueePreview, 'grid marquee commits previewed items');
+    assert.equal(bulkDownloadResult.detailsMarqueeHidden, true, 'details view does not start marquee selection');
+    assert.match(bulkDownloadResult.crossPage, /已选择 1 项/);
+    assert.match(bulkDownloadResult.selected, /已选择 20 项/);
+    assert.equal(bulkDownloadResult.frozenSelection, bulkDownloadResult.selected, 'select-all freezes the resolved key set when later resources arrive');
+    assert.match(bulkDownloadResult.submitHint, /新下载 19.*跳过 1/);
+    assert.ok(bulkDownloadResult.queuedStates.some((state) => state === '准备中' || state === '下载中'), 'download page shows queued or progress state');
+    assert.ok(Number(bulkDownloadResult.badgeWhileQueued) > 0, 'download tab badge counts pending bulk tasks');
+    assert.ok(bulkDownloadResult.finalStates.includes('已完成'), 'download page shows completed bulk tasks');
+    assert.ok(bulkDownloadResult.finalStates.includes('失败'), `download page keeps failed bulk tasks: ${JSON.stringify(bulkDownloadResult)}`);
+    assert.equal(bulkDownloadResult.hasRetry, true, 'failed bulk task exposes redownload action');
+    assert.equal(bulkDownloadResult.open, false, 'submitting closes bulk download modal');
+    assert.equal(bulkDownloadResult.downloads, 19, 'downloaded resources are skipped while remaining selections are queued');
+    assert.equal(bulkDownloadResult.openDir, 1, 'modal opens download directory');
 
     const dictationPageResult = await (async () => {
       const { targetId } = await chrome.browserClient.send('Target.createTarget', { url: 'about:blank' });

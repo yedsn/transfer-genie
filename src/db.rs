@@ -87,6 +87,19 @@ pub struct DbPartialDownload {
     pub updated_at_ms: i64,
 }
 
+#[derive(Clone, Debug)]
+pub struct DbBulkDownloadResource {
+    pub filename: String,
+    pub timestamp_ms: i64,
+    pub size: i64,
+    pub original_name: String,
+    pub transcript_source: Option<String>,
+    pub source_audio_mime_type: Option<String>,
+    pub download_status: Option<String>,
+    pub saved_path: Option<String>,
+    pub partial_bytes: Option<i64>,
+}
+
 fn parse_tag_ids(raw: String) -> Vec<String> {
     let mut tag_ids = serde_json::from_str::<Vec<String>>(&raw).unwrap_or_default();
     tag_ids.sort();
@@ -724,6 +737,54 @@ pub fn list_messages_paged(
     } else {
         collect_messages(&conn, &sql, &[&endpoint_id])
     }
+}
+
+pub fn list_bulk_download_candidates(
+    path: &Path,
+    endpoint_id: &str,
+    search_query: Option<&str>,
+) -> rusqlite::Result<Vec<DbBulkDownloadResource>> {
+    let conn = Connection::open(path)?;
+    let normalized_search = search_query
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .map(|query| format!("%{}%", query.to_lowercase()));
+    let search_clause = if normalized_search.is_some() {
+        " AND (LOWER(COALESCE(m.original_name, '')) LIKE ?2 OR LOWER(m.filename) LIKE ?2)"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT m.filename, m.timestamp_ms, m.size, m.original_name, \
+                m.transcript_source, m.source_audio_mime_type, d.status, d.saved_path, p.downloaded_bytes \
+         FROM messages m \
+         LEFT JOIN download_history d ON d.endpoint_id = m.endpoint_id AND d.filename = m.filename \
+         LEFT JOIN partial_downloads p ON p.endpoint_id = m.endpoint_id AND p.filename = m.filename \
+         WHERE m.endpoint_id = ?1 \
+           AND (m.kind = 'file' OR m.transcript_source = 'speech-to-text'){} \
+         ORDER BY m.timestamp_ms DESC, m.filename DESC",
+        search_clause
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let map_row = |row: &Row<'_>| {
+        Ok(DbBulkDownloadResource {
+            filename: row.get(0)?,
+            timestamp_ms: row.get(1)?,
+            size: row.get(2)?,
+            original_name: row.get(3)?,
+            transcript_source: row.get(4)?,
+            source_audio_mime_type: row.get(5)?,
+            download_status: row.get(6)?,
+            saved_path: row.get(7)?,
+            partial_bytes: row.get(8)?,
+        })
+    };
+    let rows = if let Some(search) = normalized_search.as_deref() {
+        stmt.query_map(params![endpoint_id, search], map_row)?
+    } else {
+        stmt.query_map(params![endpoint_id], map_row)?
+    };
+    rows.collect()
 }
 
 pub fn list_latest_messages_window(
@@ -1510,6 +1571,48 @@ mod tests {
             source_audio_mime_type: None,
             transcript_raw_text: None,
         }
+    }
+
+    fn sample_file_message(endpoint_id: &str, filename: &str, original_name: &str, timestamp_ms: i64) -> DbMessage {
+        DbMessage {
+            endpoint_id: endpoint_id.to_string(), filename: filename.to_string(), sender: "tester".to_string(), timestamp_ms, size: timestamp_ms,
+            kind: "file".to_string(), original_name: original_name.to_string(), etag: None, mtime: None, content: None, local_path: None,
+            remote_path: Some(format!("files/{filename}")), file_hash: None, marked: false, marked_tag_ids: Vec::new(), marked_pinned: false,
+            marked_due_date: None, format: "text".to_string(), transcript_source: None, source_audio_mime_type: None, transcript_raw_text: None,
+        }
+    }
+
+    #[test]
+    fn list_bulk_download_candidates_filters_endpoint_search_and_sorts_latest_first() {
+        let path = temp_db_path("bulk-download-candidates");
+        init_db(&path, None).expect("initialize database");
+        upsert_message(&path, &sample_file_message("endpoint-1", "old", "old-photo.png", 100)).unwrap();
+        upsert_message(&path, &sample_file_message("endpoint-1", "new", "new-video.mp4", 300)).unwrap();
+        upsert_message(&path, &sample_file_message("endpoint-2", "other", "new-other.mp4", 400)).unwrap();
+        let plain_text = sample_message("plain.txt", 500, &[], false);
+        upsert_message(&path, &plain_text).unwrap();
+
+        let rows = list_bulk_download_candidates(&path, "endpoint-1", None).unwrap();
+        assert_eq!(rows.iter().map(|row| row.filename.as_str()).collect::<Vec<_>>(), vec!["new", "old"]);
+        let searched = list_bulk_download_candidates(&path, "endpoint-1", Some("photo")).unwrap();
+        assert_eq!(searched.len(), 1);
+        assert_eq!(searched[0].original_name, "old-photo.png");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn list_bulk_download_candidates_includes_speech_transcript_audio() {
+        let path = temp_db_path("bulk-download-speech");
+        init_db(&path, None).expect("initialize database");
+        let mut speech = sample_message("speech-message", 200, &[], false);
+        speech.original_name = "speech-message.wav".to_string();
+        speech.transcript_source = Some("speech-to-text".to_string());
+        speech.source_audio_mime_type = Some("audio/wav".to_string());
+        upsert_message(&path, &speech).unwrap();
+        let rows = list_bulk_download_candidates(&path, "endpoint-1", None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source_audio_mime_type.as_deref(), Some("audio/wav"));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

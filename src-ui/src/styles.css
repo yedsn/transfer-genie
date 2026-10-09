@@ -4049,6 +4049,76 @@ body.is-capturing-system-shortcut {
   border-radius: 10px;
 }
 
+.bulk-download-modal { padding: 18px; }
+.bulk-download-dialog {
+  width: min(1180px, 96vw);
+  max-width: none;
+  height: min(820px, 92vh);
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  padding: 0;
+}
+.bulk-download-header, .bulk-download-footer {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 20px;
+}
+.bulk-download-header { border-bottom: 1px solid var(--border); }
+.bulk-download-header h2 { margin: 0; font-size: 22px; }
+.bulk-download-header p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+.bulk-download-header-actions, .bulk-download-footer-actions, .bulk-download-filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.bulk-download-controls { padding: 12px 20px; border-bottom: 1px solid var(--border); display: grid; gap: 10px; }
+.bulk-download-categories { display: flex; gap: 6px; overflow-x: auto; }
+.bulk-download-categories button, .bulk-download-view-menu button, .bulk-download-select-menu button { border: 0; background: transparent; padding: 8px 12px; border-radius: 8px; cursor: pointer; color: var(--ink); }
+.bulk-download-categories button.is-active { background: var(--accent); color: white; }
+.bulk-download-filters input { flex: 1 1 240px; min-width: 180px; }
+.bulk-download-content { position: relative; overflow: auto; padding: 14px 20px; background: var(--panel-soft); user-select: none; }
+.bulk-download-list { min-height: 100%; }
+.bulk-download-list.view-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; align-content: start; }
+.bulk-download-list.view-details { display: flex; flex-direction: column; gap: 3px; }
+.bulk-download-list.view-list { display: grid; grid-auto-flow: column; grid-template-rows: repeat(10, minmax(42px, auto)); grid-auto-columns: minmax(250px, 1fr); gap: 4px 10px; overflow-x: auto; align-content: start; }
+.bulk-download-list.view-small-icons { display: grid; grid-template-columns: repeat(auto-fill, minmax(115px, 1fr)); gap: 10px; align-content: start; }
+.bulk-download-list.view-large-icons { display: grid; grid-template-columns: repeat(auto-fill, minmax(175px, 1fr)); gap: 14px; align-content: start; }
+.bulk-download-item { position: relative; display: grid; grid-template-columns: auto 48px minmax(0, 1fr); gap: 10px; align-items: center; padding: 10px; border: 1px solid var(--border); border-radius: 10px; background: #fff; cursor: default; overflow: hidden; }
+.bulk-download-item:hover { border-color: rgba(255, 122, 47, .55); background: #fffaf6; }
+.bulk-download-item.is-selected, .bulk-download-item.is-preview-selected { border-color: var(--accent); background: rgba(255, 122, 47, .1); box-shadow: inset 0 0 0 1px rgba(255, 122, 47, .16); }
+.bulk-download-check { width: 17px; height: 17px; margin: 0; }
+.bulk-download-thumb { width: 48px; height: 48px; border-radius: 8px; object-fit: cover; background: #f0ece8; display: grid; place-items: center; font-size: 11px; font-weight: 700; color: var(--muted); overflow: hidden; }
+.bulk-download-thumb img { width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
+.bulk-download-name { font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bulk-download-meta { margin-top: 4px; color: var(--muted); font-size: 12px; }
+.bulk-download-detail-field { display: none; }
+.bulk-download-status { margin-left: auto; font-size: 11px; color: var(--muted); }
+.view-details .bulk-download-item { grid-template-columns: auto 34px minmax(220px, 2fr) 80px 90px 150px 90px; border-radius: 6px; padding: 7px 10px; }
+.view-details .bulk-download-thumb { width: 30px; height: 30px; }
+.view-details .bulk-download-info { display: contents; }
+.view-details .bulk-download-meta { display: contents; }
+.view-details .bulk-download-detail-field { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.view-details .bulk-download-detail-field { display: block; }
+.view-list .bulk-download-item { grid-template-columns: auto 30px minmax(0, 1fr); padding: 5px 8px; border-color: transparent; box-shadow: none; }
+.view-list .bulk-download-thumb { width: 28px; height: 28px; border-radius: 5px; }
+.view-list .bulk-download-meta, .view-list .bulk-download-status { display: none; }
+.view-small-icons .bulk-download-item, .view-large-icons .bulk-download-item { display: flex; flex-direction: column; text-align: center; padding: 10px; }
+.view-small-icons .bulk-download-check, .view-large-icons .bulk-download-check { position: absolute; left: 8px; top: 8px; z-index: 2; }
+.view-small-icons .bulk-download-thumb { width: 56px; height: 56px; }
+.view-large-icons .bulk-download-thumb { width: 100%; height: 120px; }
+.view-small-icons .bulk-download-meta, .view-small-icons .bulk-download-status, .view-large-icons .bulk-download-status { display: none; }
+.view-large-icons .bulk-download-meta { display: block; }
+.bulk-download-empty { display: grid; place-items: center; height: 100%; min-height: 240px; color: var(--muted); }
+.bulk-download-selection-box { position: absolute; pointer-events: none; border: 1px solid var(--accent); background: rgba(255, 122, 47, .14); z-index: 5; }
+.bulk-download-footer { border-top: 1px solid var(--border); }
+.bulk-download-footer > div:first-child { display: grid; gap: 3px; font-size: 12px; color: var(--muted); }
+.bulk-download-footer strong { color: var(--ink); font-size: 13px; }
+.bulk-download-content.is-brush-selecting { cursor: crosshair; }
+
+@media (max-width: 760px) {
+  .bulk-download-modal { padding: 6px; }
+  .bulk-download-dialog { width: 100%; height: 96vh; }
+  .bulk-download-header, .bulk-download-footer { align-items: flex-start; flex-direction: column; }
+  .bulk-download-list.view-tiles { grid-template-columns: 1fr; }
+  .view-details .bulk-download-item { grid-template-columns: auto 34px minmax(0, 1fr); }
+  .view-details .bulk-download-detail-field, .view-details .bulk-download-status { display: none; }
+}
+
 .message-preview-actions {
   display: flex;
   gap: 10px;

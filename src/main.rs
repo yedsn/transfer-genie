@@ -11,7 +11,8 @@ mod webdav_sync_runtime;
 mod workspace;
 
 use crate::db::{
-    DbDownloadHistory, DbMessage, DbPartialDownload, DbUploadHistory, PendingMarkedSync,
+    DbBulkDownloadResource, DbDownloadHistory, DbMessage, DbPartialDownload, DbUploadHistory,
+    PendingMarkedSync,
 };
 use crate::filenames::{
     build_message_filename, message_remote_path, parse_message_filename, thumbnail_remote_path,
@@ -760,6 +761,82 @@ struct DownloadResult {
     path: Option<String>,
     suggested_path: Option<String>,
     transfer_mode: Option<String>,
+}
+
+#[derive(Clone, Default, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BulkDownloadQueryInput {
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    extension: Option<String>,
+    #[serde(default)]
+    search_query: Option<String>,
+    #[serde(default)]
+    page: Option<i64>,
+    #[serde(default)]
+    page_size: Option<i64>,
+}
+
+#[derive(Clone, Serialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct BulkDownloadResource {
+    key: String,
+    endpoint_id: String,
+    filename: String,
+    original_name: String,
+    category: String,
+    extension: String,
+    size: i64,
+    timestamp_ms: i64,
+    status: String,
+    is_speech_audio: bool,
+}
+
+#[derive(Clone, Serialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct BulkDownloadCategoryCount {
+    category: String,
+    count: i64,
+}
+
+#[derive(Clone, Serialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct BulkDownloadStatusCounts {
+    new_download: i64,
+    resumable: i64,
+    redownload: i64,
+    skipped: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BulkDownloadResourcesResult {
+    resources: Vec<BulkDownloadResource>,
+    total: i64,
+    total_size: i64,
+    page: i64,
+    page_size: i64,
+    total_pages: i64,
+    category_counts: Vec<BulkDownloadCategoryCount>,
+    extensions: Vec<String>,
+    status_counts: BulkDownloadStatusCounts,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BulkDownloadSelectionResult {
+    resources: Vec<BulkDownloadResource>,
+    total: i64,
+    total_size: i64,
+    status_counts: BulkDownloadStatusCounts,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrepareBulkDownloadInput {
+    #[serde(default)]
+    keys: Vec<String>,
 }
 
 #[derive(Clone, Default, Deserialize, Debug, PartialEq, Eq)]
@@ -3575,6 +3652,246 @@ fn list_messages(
     })
 }
 
+fn bulk_download_extension(name: &str, mime_type: Option<&str>) -> String {
+    let extension = Path::new(name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    if !extension.is_empty() {
+        return extension;
+    }
+    mime_type
+        .and_then(|value| value.split('/').nth(1))
+        .and_then(|value| value.split(';').next())
+        .unwrap_or("")
+        .trim()
+        .to_lowercase()
+}
+
+fn bulk_download_category(extension: &str, mime_type: Option<&str>) -> &'static str {
+    const IMAGE: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif"];
+    const AUDIO: &[&str] = &["mp3", "wav", "m4a", "aac", "flac", "ogg", "opus", "wma"];
+    const VIDEO: &[&str] = &["mp4", "mov", "mkv", "avi", "webm", "m4v", "wmv", "flv"];
+    if IMAGE.contains(&extension) || mime_type.is_some_and(|value| value.starts_with("image/")) {
+        "image"
+    } else if AUDIO.contains(&extension) || mime_type.is_some_and(|value| value.starts_with("audio/")) {
+        "audio"
+    } else if VIDEO.contains(&extension) || mime_type.is_some_and(|value| value.starts_with("video/")) {
+        "video"
+    } else {
+        "file"
+    }
+}
+
+fn bulk_download_status(row: &DbBulkDownloadResource) -> String {
+    if row.partial_bytes.unwrap_or(0) > 0 {
+        return "resumable".to_string();
+    }
+    if row.download_status.as_deref() == Some("complete") {
+        let exists = row
+            .saved_path
+            .as_deref()
+            .filter(|path| !path.trim().is_empty())
+            .map(Path::new)
+            .is_some_and(Path::is_file);
+        return if exists { "downloaded" } else { "missing" }.to_string();
+    }
+    if row.download_status.as_deref() == Some("error") {
+        return "error".to_string();
+    }
+    "notDownloaded".to_string()
+}
+
+fn map_bulk_download_resource(endpoint_id: &str, row: DbBulkDownloadResource) -> BulkDownloadResource {
+    let is_speech_audio = row.transcript_source.as_deref() == Some("speech-to-text");
+    let extension = bulk_download_extension(&row.original_name, row.source_audio_mime_type.as_deref());
+    let category = bulk_download_category(&extension, row.source_audio_mime_type.as_deref());
+    let status = bulk_download_status(&row);
+    BulkDownloadResource {
+        key: format!(
+            "{}::{}::{}",
+            endpoint_id,
+            row.filename,
+            if is_speech_audio { "speech-audio" } else { "file" }
+        ),
+        endpoint_id: endpoint_id.to_string(),
+        filename: row.filename,
+        original_name: row.original_name,
+        category: category.to_string(),
+        extension,
+        size: row.size.max(0),
+        timestamp_ms: row.timestamp_ms,
+        status,
+        is_speech_audio,
+    }
+}
+
+fn bulk_download_status_counts(resources: &[BulkDownloadResource]) -> BulkDownloadStatusCounts {
+    let mut counts = BulkDownloadStatusCounts {
+        new_download: 0,
+        resumable: 0,
+        redownload: 0,
+        skipped: 0,
+    };
+    for resource in resources {
+        match resource.status.as_str() {
+            "downloaded" => counts.skipped += 1,
+            "resumable" => counts.resumable += 1,
+            "missing" | "error" => counts.redownload += 1,
+            _ => counts.new_download += 1,
+        }
+    }
+    counts
+}
+
+fn query_bulk_download_resources(
+    state: &AppState,
+    endpoint_id: &str,
+    input: &BulkDownloadQueryInput,
+) -> Result<(Vec<BulkDownloadResource>, Vec<BulkDownloadCategoryCount>, Vec<String>), String> {
+    let rows = db::list_bulk_download_candidates(
+        &state.db_path,
+        endpoint_id,
+        input.search_query.as_deref(),
+    )
+    .map_err(|err| format!("读取批量下载资料失败: {err}"))?;
+    let resources: Vec<_> = rows
+        .into_iter()
+        .map(|row| map_bulk_download_resource(endpoint_id, row))
+        .collect();
+    let mut counts = HashMap::<String, i64>::new();
+    counts.insert("all".to_string(), resources.len() as i64);
+    for resource in &resources {
+        *counts.entry(resource.category.clone()).or_insert(0) += 1;
+    }
+    let category = input.category.as_deref().unwrap_or("all");
+    let category_resources: Vec<_> = resources
+        .into_iter()
+        .filter(|resource| category == "all" || resource.category == category)
+        .collect();
+    let mut extensions: Vec<_> = category_resources
+        .iter()
+        .map(|resource| resource.extension.clone())
+        .filter(|value| !value.is_empty())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    extensions.sort();
+    let wanted_extension = input
+        .extension
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .to_lowercase();
+    let filtered = category_resources
+        .into_iter()
+        .filter(|resource| wanted_extension.is_empty() || resource.extension == wanted_extension)
+        .collect();
+    let category_counts = ["all", "file", "image", "audio", "video"]
+        .into_iter()
+        .map(|category| BulkDownloadCategoryCount {
+            category: category.to_string(),
+            count: counts.get(category).copied().unwrap_or(0),
+        })
+        .collect();
+    Ok((filtered, category_counts, extensions))
+}
+
+#[tauri::command]
+fn list_bulk_download_resources(
+    state: State<'_, AppState>,
+    input: Option<BulkDownloadQueryInput>,
+) -> Result<BulkDownloadResourcesResult, String> {
+    list_bulk_download_resources_for_state(&state, input.unwrap_or_default())
+}
+
+fn list_bulk_download_resources_for_state(
+    state: &AppState,
+    input: BulkDownloadQueryInput,
+) -> Result<BulkDownloadResourcesResult, String> {
+    let settings = current_settings(state)?;
+    let endpoint = resolve_active_endpoint(&settings)?;
+    let page = input.page.unwrap_or(1).max(1);
+    let page_size = input.page_size.unwrap_or(60).clamp(10, 200);
+    let (resources, category_counts, extensions) =
+        query_bulk_download_resources(&state, &endpoint.id, &input)?;
+    let total = resources.len() as i64;
+    let total_size = resources.iter().map(|resource| resource.size).sum();
+    let status_counts = bulk_download_status_counts(&resources);
+    let total_pages = ((total + page_size - 1) / page_size).max(1);
+    let bounded_page = page.min(total_pages);
+    let offset = ((bounded_page - 1) * page_size) as usize;
+    let page_resources = resources
+        .into_iter()
+        .skip(offset)
+        .take(page_size as usize)
+        .collect();
+    Ok(BulkDownloadResourcesResult {
+        resources: page_resources,
+        total,
+        total_size,
+        page: bounded_page,
+        page_size,
+        total_pages,
+        category_counts,
+        extensions,
+        status_counts,
+    })
+}
+
+fn resolve_bulk_download_selection_for_state(
+    state: &AppState,
+    input: BulkDownloadQueryInput,
+) -> Result<BulkDownloadSelectionResult, String> {
+    let settings = current_settings(state)?;
+    let endpoint = resolve_active_endpoint(&settings)?;
+    let (resources, _, _) = query_bulk_download_resources(state, &endpoint.id, &input)?;
+    let total = resources.len() as i64;
+    let total_size = resources.iter().map(|resource| resource.size).sum();
+    let status_counts = bulk_download_status_counts(&resources);
+    Ok(BulkDownloadSelectionResult { resources, total, total_size, status_counts })
+}
+
+#[tauri::command]
+fn resolve_bulk_download_selection(
+    state: State<'_, AppState>,
+    input: Option<BulkDownloadQueryInput>,
+) -> Result<BulkDownloadSelectionResult, String> {
+    resolve_bulk_download_selection_for_state(&state, input.unwrap_or_default())
+}
+
+fn prepare_bulk_download_resources_for_state(
+    state: &AppState,
+    input: PrepareBulkDownloadInput,
+) -> Result<BulkDownloadSelectionResult, String> {
+    let settings = current_settings(state)?;
+    let endpoint = resolve_active_endpoint(&settings)?;
+    let wanted: HashSet<_> = input.keys.into_iter().collect();
+    let (resources, _, _) = query_bulk_download_resources(
+        state,
+        &endpoint.id,
+        &BulkDownloadQueryInput::default(),
+    )?;
+    let resources: Vec<_> = resources
+        .into_iter()
+        .filter(|resource| wanted.contains(&resource.key))
+        .collect();
+    let total = resources.len() as i64;
+    let total_size = resources.iter().map(|resource| resource.size).sum();
+    let status_counts = bulk_download_status_counts(&resources);
+    Ok(BulkDownloadSelectionResult { resources, total, total_size, status_counts })
+}
+
+#[tauri::command]
+fn prepare_bulk_download_resources(
+    state: State<'_, AppState>,
+    input: PrepareBulkDownloadInput,
+) -> Result<BulkDownloadSelectionResult, String> {
+    prepare_bulk_download_resources_for_state(&state, input)
+}
+
 #[tauri::command]
 fn list_messages_window(
     state: State<'_, AppState>,
@@ -4280,20 +4597,43 @@ async fn download_message_file(
     filename: String,
     original_name: String,
     conflict_action: Option<String>,
+    endpoint_id: Option<String>,
 ) -> Result<DownloadResult, String> {
-    let settings = current_settings(&state)?;
-    let endpoint = resolve_active_endpoint(&settings)?;
+    download_message_file_impl(
+        &window,
+        state.inner(),
+        &filename,
+        &original_name,
+        conflict_action,
+        endpoint_id.as_deref(),
+    )
+    .await
+}
 
-    let base_dir = resolve_download_dir(&state, &settings);
+async fn download_message_file_impl(
+    window: &Window,
+    state: &AppState,
+    filename: &str,
+    original_name: &str,
+    conflict_action: Option<String>,
+    endpoint_id: Option<&str>,
+) -> Result<DownloadResult, String> {
+    let settings = current_settings(state)?;
+    let endpoint = match endpoint_id.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        Some(endpoint_id) => resolve_endpoint_by_id(&settings, endpoint_id)?,
+        None => resolve_active_endpoint(&settings)?,
+    };
+
+    let base_dir = resolve_download_dir(state, &settings);
     fs::create_dir_all(&base_dir)
         .map_err(|err| format!("Failed to create download directory: {err}"))?;
 
-    let message = db::get_message(&state.db_path, &endpoint.id, &filename)
+    let message = db::get_message(&state.db_path, &endpoint.id, filename)
         .map_err(|err| format!("Failed to read message: {err}"))?;
     let target_path = build_download_target_path(
-        &state,
+        state,
         &settings,
-        &original_name,
+        original_name,
         message
             .as_ref()
             .map(|item| item.timestamp_ms)
@@ -4316,17 +4656,17 @@ async fn download_message_file(
         message
             .as_ref()
             .and_then(|item| item.remote_path.as_deref()),
-        &filename,
+        filename,
         message.as_ref().map(|item| item.timestamp_ms),
     );
 
     let download = match execute_streamed_download(
-        &window,
-        &state,
+        window,
+        state,
         &endpoint,
-        &filename,
+        filename,
         &remote_path,
-        &original_name,
+        original_name,
         &final_path,
     )
     .await
@@ -4334,10 +4674,10 @@ async fn download_message_file(
         Ok(result) => result,
         Err(err) => {
             let _ = persist_download_history(
-                &state,
+                state,
                 &endpoint.id,
-                &filename,
-                &original_name,
+                filename,
+                original_name,
                 None,
                 "error",
                 Some(err.clone()),
@@ -4348,10 +4688,10 @@ async fn download_message_file(
     };
 
     persist_download_history(
-        &state,
+        state,
         &endpoint.id,
-        &filename,
-        &original_name,
+        filename,
+        original_name,
         Some(&download.final_path),
         "complete",
         None,
@@ -11890,6 +12230,9 @@ fn main() {
             import_settings,
             list_messages,
             list_messages_window,
+            list_bulk_download_resources,
+            resolve_bulk_download_selection,
+            prepare_bulk_download_resources,
             list_marked_messages,
             list_marked_tags,
             send_text,
@@ -12029,6 +12372,38 @@ mod tests {
             auto_backup_guard: AsyncMutex::new(()),
             pending_webdav_conflict: Mutex::new(None),
             system_dictation_hidden_main_position: Mutex::new(None),
+        }
+    }
+
+    fn test_db_message(
+        endpoint_id: &str,
+        filename: &str,
+        original_name: &str,
+        timestamp_ms: i64,
+        size: i64,
+    ) -> DbMessage {
+        DbMessage {
+            endpoint_id: endpoint_id.to_string(),
+            filename: filename.to_string(),
+            sender: "tester".to_string(),
+            timestamp_ms,
+            size,
+            kind: MessageKind::File.as_str().to_string(),
+            original_name: original_name.to_string(),
+            etag: None,
+            mtime: None,
+            content: None,
+            local_path: None,
+            remote_path: Some(format!("files/{filename}")),
+            file_hash: None,
+            marked: false,
+            marked_tag_ids: Vec::new(),
+            marked_pinned: false,
+            marked_due_date: None,
+            format: "text".to_string(),
+            transcript_source: None,
+            source_audio_mime_type: None,
+            transcript_raw_text: None,
         }
     }
 
@@ -14832,5 +15207,156 @@ mod tests {
         build_telegram_http_client("", Duration::from_secs(5)).expect("direct Telegram client");
         build_telegram_http_client("http://127.0.0.1:7890", Duration::from_secs(5))
             .expect("proxy Telegram client");
+    }
+
+    #[test]
+    fn bulk_download_query_contract_uses_camel_case() {
+        let input: BulkDownloadQueryInput = serde_json::from_value(serde_json::json!({
+            "category": "image", "extension": "png", "searchQuery": "photo", "page": 2, "pageSize": 30
+        })).expect("deserialize bulk query");
+        assert_eq!(input.category.as_deref(), Some("image"));
+        assert_eq!(input.search_query.as_deref(), Some("photo"));
+        assert_eq!(input.page_size, Some(30));
+        let resource = BulkDownloadResource { key: "ep::file::file".into(), endpoint_id: "ep".into(), filename: "file".into(), original_name: "photo.png".into(), category: "image".into(), extension: "png".into(), size: 10, timestamp_ms: 20, status: "notDownloaded".into(), is_speech_audio: false };
+        let value = serde_json::to_value(resource).expect("serialize resource");
+        assert_eq!(value["originalName"], "photo.png");
+        assert_eq!(value["timestampMs"], 20);
+        assert_eq!(value["isSpeechAudio"], false);
+    }
+
+    #[test]
+    fn bulk_download_classifies_common_formats_and_speech_mime() {
+        assert_eq!(bulk_download_category("png", None), "image");
+        assert_eq!(bulk_download_category("mp4", None), "video");
+        assert_eq!(bulk_download_category("wav", Some("audio/wav")), "audio");
+        assert_eq!(bulk_download_category("pdf", None), "file");
+        assert_eq!(bulk_download_extension("speech", Some("audio/ogg;codecs=opus")), "ogg");
+    }
+
+    #[test]
+    fn bulk_download_resource_keys_distinguish_speech_audio() {
+        let row = DbBulkDownloadResource { filename: "message".into(), timestamp_ms: 1, size: 2, original_name: "speech.wav".into(), transcript_source: Some("speech-to-text".into()), source_audio_mime_type: Some("audio/wav".into()), download_status: None, saved_path: None, partial_bytes: None };
+        let resource = map_bulk_download_resource("ep", row);
+        assert_eq!(resource.key, "ep::message::speech-audio");
+        assert_eq!(resource.category, "audio");
+        assert!(resource.is_speech_audio);
+    }
+
+    #[test]
+    fn bulk_download_status_mapping_covers_existing_missing_partial_and_error() {
+        let temp_dir = std::env::temp_dir().join(format!("transfer-genie-bulk-status-{}", now_ms()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let existing = temp_dir.join("existing.bin");
+        fs::write(&existing, b"ok").expect("write existing download");
+        let make_row = |status: Option<&str>, saved_path: Option<&Path>, partial_bytes: Option<i64>| DbBulkDownloadResource {
+            filename: "resource".into(), timestamp_ms: 1, size: 2, original_name: "resource.bin".into(), transcript_source: None,
+            source_audio_mime_type: None, download_status: status.map(str::to_string),
+            saved_path: saved_path.map(|path| path.to_string_lossy().to_string()), partial_bytes,
+        };
+        assert_eq!(bulk_download_status(&make_row(Some("complete"), Some(&existing), None)), "downloaded");
+        assert_eq!(bulk_download_status(&make_row(Some("complete"), Some(&temp_dir.join("missing.bin")), None)), "missing");
+        assert_eq!(bulk_download_status(&make_row(None, None, Some(12))), "resumable");
+        assert_eq!(bulk_download_status(&make_row(Some("error"), None, None)), "error");
+        assert_eq!(bulk_download_status(&make_row(None, None, None)), "notDownloaded");
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn bulk_download_commands_filter_count_and_isolate_active_endpoint() {
+        let temp_dir = std::env::temp_dir().join(format!("transfer-genie-bulk-query-{}", now_ms()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let state = test_app_state(&temp_dir, test_settings());
+        db::init_db(&state.db_path, None).expect("initialize database");
+        for index in 0..12 {
+            let name = if index % 2 == 0 { format!("photo-{index}.png") } else { format!("video-{index}.mp4") };
+            db::upsert_message(&state.db_path, &test_db_message("endpoint-1", &format!("item-{index:02}"), &name, 1_000 - index, 100 + index)).unwrap();
+        }
+        db::upsert_message(&state.db_path, &test_db_message("endpoint-2", "foreign", "foreign.png", 2_000, 999)).unwrap();
+        let result = list_bulk_download_resources_for_state(&state, BulkDownloadQueryInput {
+            category: Some("image".into()), page: Some(2), page_size: Some(10), ..Default::default()
+        }).expect("query bulk resources");
+        assert_eq!(result.total, 6);
+        assert_eq!(result.total_size, 630);
+        assert_eq!(result.page, 1);
+        assert_eq!(result.resources.len(), 6);
+        assert!(result.resources.iter().all(|resource| resource.endpoint_id == "endpoint-1" && resource.category == "image"));
+        assert_eq!(result.extensions, vec!["png"]);
+        assert_eq!(result.category_counts.iter().find(|item| item.category == "video").map(|item| item.count), Some(6));
+        let selection = resolve_bulk_download_selection_for_state(&state, BulkDownloadQueryInput {
+            category: Some("video".into()), ..Default::default()
+        }).expect("resolve filtered selection");
+        assert_eq!(selection.total, 6);
+        assert_eq!(selection.resources.first().map(|resource| resource.filename.as_str()), Some("item-01"));
+        let prepared = prepare_bulk_download_resources_for_state(&state, PrepareBulkDownloadInput {
+            keys: selection.resources.iter().take(2).map(|resource| resource.key.clone()).collect(),
+        }).expect("prepare selection");
+        assert_eq!(prepared.total, 2);
+        assert_eq!(prepared.total_size, 204);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn bulk_download_prepare_reports_all_status_groups() {
+        let temp_dir = std::env::temp_dir().join(format!("transfer-genie-bulk-prepare-{}", now_ms()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let state = test_app_state(&temp_dir, test_settings());
+        db::init_db(&state.db_path, None).expect("initialize database");
+        for (index, filename) in ["new", "partial", "missing", "done"].into_iter().enumerate() {
+            db::upsert_message(&state.db_path, &test_db_message("endpoint-1", filename, &format!("{filename}.bin"), 100 - index as i64, 10)).unwrap();
+        }
+        let downloaded = temp_dir.join("done.bin");
+        fs::write(&downloaded, b"done").expect("write completed file");
+        for (filename, saved_path) in [("missing", temp_dir.join("gone.bin")), ("done", downloaded)] {
+            db::upsert_download_history(&state.db_path, &DbDownloadHistory {
+                id: 0, endpoint_id: "endpoint-1".into(), filename: filename.into(), original_name: format!("{filename}.bin"),
+                saved_path: Some(saved_path.to_string_lossy().to_string()), status: "complete".into(), error: None,
+                file_size: 10, created_at_ms: 1, updated_at_ms: 1,
+            }).unwrap();
+        }
+        db::upsert_partial_download(&state.db_path, &DbPartialDownload {
+            endpoint_id: "endpoint-1".into(), filename: "partial".into(), original_name: "partial.bin".into(),
+            final_path: temp_dir.join("partial.bin").to_string_lossy().to_string(),
+            temp_path: temp_dir.join("partial.bin.part").to_string_lossy().to_string(), downloaded_bytes: 5, total_bytes: 10,
+            etag: None, mtime: None, updated_at_ms: 1,
+        }).unwrap();
+        let all = resolve_bulk_download_selection_for_state(&state, BulkDownloadQueryInput::default()).unwrap();
+        let prepared = prepare_bulk_download_resources_for_state(&state, PrepareBulkDownloadInput {
+            keys: all.resources.iter().map(|resource| resource.key.clone()).collect(),
+        }).unwrap();
+        assert_eq!(prepared.status_counts, BulkDownloadStatusCounts { new_download: 1, resumable: 1, redownload: 1, skipped: 1 });
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn bulk_download_rename_conflict_generates_non_conflicting_target() {
+        let temp_dir = std::env::temp_dir().join(format!("transfer-genie-bulk-conflict-{}", now_ms()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let target = temp_dir.join("photo.png");
+        fs::write(&target, b"one").expect("write original target");
+        fs::write(temp_dir.join("photo (1).png"), b"two").expect("write first renamed target");
+        match resolve_download_target(&target, ConflictAction::Rename).expect("resolve rename") {
+            DownloadDecision::Ready(path) => assert_eq!(path, temp_dir.join("photo (2).png")),
+            DownloadDecision::Conflict { .. } => panic!("rename should not prompt"),
+        }
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn bulk_download_resume_identity_uses_etag_mtime_then_total_size() {
+        use futures_util::stream;
+        let response = |etag: Option<&str>, mtime: Option<&str>, total_size: Option<u64>| webdav::DownloadStreamResponse {
+            stream: Box::pin(stream::empty()), content_length: None, total_size,
+            etag: etag.map(str::to_string), last_modified: mtime.map(str::to_string), status_code: 206,
+        };
+        let partial = |etag: Option<&str>, mtime: Option<&str>, total_bytes: i64| DbPartialDownload {
+            endpoint_id: "endpoint-1".into(), filename: "file".into(), original_name: "file.bin".into(),
+            final_path: "file.bin".into(), temp_path: "file.bin.part".into(), downloaded_bytes: 5, total_bytes,
+            etag: etag.map(str::to_string), mtime: mtime.map(str::to_string), updated_at_ms: 1,
+        };
+        assert!(resume_identity_matches(&partial(Some("etag-1"), None, 10), &response(Some("etag-1"), None, Some(10))));
+        assert!(!resume_identity_matches(&partial(Some("etag-1"), None, 10), &response(Some("etag-2"), None, Some(10))));
+        assert!(resume_identity_matches(&partial(None, Some("mtime-1"), 10), &response(None, Some("mtime-1"), Some(10))));
+        assert!(resume_identity_matches(&partial(None, None, 10), &response(None, None, Some(10))));
+        assert!(!resume_identity_matches(&partial(None, None, 10), &response(None, None, Some(11))));
     }
 }

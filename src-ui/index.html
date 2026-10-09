@@ -94,7 +94,7 @@
                   <img src="icons/mark.svg" alt="" style="width: 14px; height: 14px; margin-right: 4px; vertical-align: middle; margin-top: -2px;" />
                   <span id="marked-filter-label">已标记 (0)</span>
                 </button>
-                <button id="open-download-dir" class="button ghost small" type="button">打开下载目录</button>
+                <button id="open-bulk-download" class="button ghost small" type="button">下载</button>
                <button id="refresh-btn" class="button ghost small refresh-button" type="button">
                  <span class="refresh-label">刷新</span>
                  <span class="refresh-spinner" aria-hidden="true"></span>
@@ -1527,6 +1527,75 @@
             </div>
           </div>
           <div id="message-preview-body" class="message-preview-body"></div>
+        </div>
+      </div>
+
+      <div id="bulk-download-modal" class="message-preview bulk-download-modal" aria-hidden="true">
+        <div class="message-preview-backdrop"></div>
+        <div class="message-preview-dialog bulk-download-dialog" role="dialog" aria-modal="true" aria-labelledby="bulk-download-title">
+          <header class="bulk-download-header">
+            <div>
+              <h2 id="bulk-download-title">批量下载</h2>
+              <p id="bulk-download-summary">正在加载资料...</p>
+            </div>
+            <div class="bulk-download-header-actions">
+              <details id="bulk-download-view-menu" class="action-menu bulk-download-view-menu">
+                <summary class="button ghost small">查看</summary>
+                <div class="action-menu-list">
+                  <button type="button" data-bulk-view="tiles">平铺</button>
+                  <button type="button" data-bulk-view="details">详细信息</button>
+                  <button type="button" data-bulk-view="list">列表</button>
+                  <button type="button" data-bulk-view="small-icons">小图标</button>
+                  <button type="button" data-bulk-view="large-icons">大图标</button>
+                </div>
+              </details>
+              <button id="bulk-download-open-dir" class="button ghost small" type="button">打开下载目录</button>
+              <button id="bulk-download-close" type="button" class="message-preview-close" aria-label="关闭批量下载">×</button>
+            </div>
+          </header>
+          <div class="bulk-download-controls">
+            <div id="bulk-download-categories" class="bulk-download-categories">
+              <button class="is-active" type="button" data-bulk-category="all">全部 <span>0</span></button>
+              <button type="button" data-bulk-category="file">文件 <span>0</span></button>
+              <button type="button" data-bulk-category="image">图片 <span>0</span></button>
+              <button type="button" data-bulk-category="audio">音频 <span>0</span></button>
+              <button type="button" data-bulk-category="video">视频 <span>0</span></button>
+            </div>
+            <div class="bulk-download-filters">
+              <input id="bulk-download-search" type="search" placeholder="搜索文件名" />
+              <select id="bulk-download-format" aria-label="格式筛选"><option value="">全部格式</option></select>
+              <select id="bulk-download-page-size" aria-label="每页数量">
+                <option value="30">每页 30</option><option value="60" selected>每页 60</option><option value="100">每页 100</option>
+              </select>
+              <details id="bulk-download-select-menu" class="action-menu bulk-download-select-menu">
+                <summary class="button ghost small">全选</summary>
+                <div class="action-menu-list">
+                  <button id="bulk-download-select-page" type="button">全选当前页</button>
+                  <button id="bulk-download-select-all" type="button">全选全部筛选结果</button>
+                  <button id="bulk-download-unselect-page" type="button">取消当前页选择</button>
+                </div>
+              </details>
+              <button id="bulk-download-clear-selection" class="button ghost small" type="button">清空选择</button>
+            </div>
+          </div>
+          <div id="bulk-download-content" class="bulk-download-content">
+            <div id="bulk-download-list" class="bulk-download-list view-tiles"></div>
+            <div id="bulk-download-selection-box" class="bulk-download-selection-box" hidden></div>
+            <div id="bulk-download-empty" class="bulk-download-empty" hidden>当前条件下没有可下载资料</div>
+          </div>
+          <footer class="bulk-download-footer">
+            <div>
+              <strong id="bulk-download-selection-summary">已选择 0 项 · 0 B</strong>
+              <span id="bulk-download-submit-hint"></span>
+            </div>
+            <div class="bulk-download-footer-actions">
+              <button id="bulk-download-prev" class="button ghost small" type="button">上一页</button>
+              <span id="bulk-download-page-label">1 / 1</span>
+              <button id="bulk-download-next" class="button ghost small" type="button">下一页</button>
+              <button id="bulk-download-cancel" class="button ghost small" type="button">取消</button>
+              <button id="bulk-download-submit" class="button primary small" type="button" disabled>下载所选</button>
+            </div>
+          </footer>
         </div>
       </div>
 

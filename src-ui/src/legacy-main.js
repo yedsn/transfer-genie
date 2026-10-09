@@ -4864,7 +4864,10 @@ function trimDownloadTasks() {
     ...activeTasks.map((task) => task.key),
     ...persistedKeys,
     ...inactiveTasks
-      .filter((task) => !(task.persisted || task.historyId))
+      .filter((task) => task.status === 'error')
+      .map((task) => task.key),
+    ...inactiveTasks
+      .filter((task) => !(task.persisted || task.historyId) && task.status !== 'error')
       .slice(0, MAX_RECENT_DOWNLOAD_TASKS)
       .map((task) => task.key),
   ]);
@@ -4894,7 +4897,7 @@ function updateDownloadTaskEntry(task) {
 }
 
 function createDownloadTask(message, mode = 'download') {
-  const endpointId = activeEndpointId || '';
+  const endpointId = message?.endpoint_id || message?.endpointId || activeEndpointId || '';
   const endpoint = endpointId
     ? webdavEndpoints.find((item) => item.id === endpointId)
     : null;
@@ -5306,7 +5309,7 @@ function buildTransferTaskViewModel(task, options = {}) {
     selectable: !!options.selectable,
     showProgress: isActive,
     progressPercent,
-    showHistoryActions: isDownload && !!task?.historyId && !isActive,
+    showHistoryActions: isDownload && (!!task?.historyId || isError) && !isActive,
     canOpenFile: task?.localExists !== false,
   };
 }
@@ -5494,48 +5497,53 @@ function renderDownloadTasks() {
       }
       main.appendChild(detail);
 
-      if (task.historyId) {
+      if (task.historyId || task.status === 'error') {
         const actions = document.createElement('div');
         actions.className = 'download-task-actions';
-
-        const saveAsButton = document.createElement('button');
-        saveAsButton.className = 'button ghost small';
-        saveAsButton.type = 'button';
-        saveAsButton.textContent = '另存为';
-        saveAsButton.addEventListener('click', () => saveDownloadHistoryAs(task));
 
         const redownloadButton = document.createElement('button');
         redownloadButton.className = 'button ghost small';
         redownloadButton.type = 'button';
         redownloadButton.textContent = '重新下载';
-        redownloadButton.addEventListener('click', () => redownloadDownloadHistory(task));
+        redownloadButton.addEventListener('click', () => task.historyId ? redownloadDownloadHistory(task) : downloadBulkResource({ filename: task.filename, originalName: task.originalName, size: task.total, endpointId: task.endpointId }));
 
-        const openFileButton = document.createElement('button');
-        openFileButton.className = 'button ghost small';
-        openFileButton.type = 'button';
-        openFileButton.textContent = '打开文件';
-        openFileButton.disabled = task.localExists === false;
-        openFileButton.addEventListener('click', () => openDownloadHistoryFile(task));
+        if (!task.historyId) {
+          actions.appendChild(redownloadButton);
+          main.appendChild(actions);
+        } else {
+          const saveAsButton = document.createElement('button');
+          saveAsButton.className = 'button ghost small';
+          saveAsButton.type = 'button';
+          saveAsButton.textContent = '另存为';
+          saveAsButton.addEventListener('click', () => saveDownloadHistoryAs(task));
 
-        const openDirButton = document.createElement('button');
-        openDirButton.className = 'button ghost small';
-        openDirButton.type = 'button';
-        openDirButton.textContent = '打开目录';
-        openDirButton.disabled = task.localExists === false;
-        openDirButton.addEventListener('click', () => openDownloadHistoryDir(task));
+          const openFileButton = document.createElement('button');
+          openFileButton.className = 'button ghost small';
+          openFileButton.type = 'button';
+          openFileButton.textContent = '打开文件';
+          openFileButton.disabled = task.localExists === false;
+          openFileButton.addEventListener('click', () => openDownloadHistoryFile(task));
 
-        const deleteButton = document.createElement('button');
-        deleteButton.className = 'button ghost small download-task-delete';
-        deleteButton.type = 'button';
-        deleteButton.textContent = '删除';
-        deleteButton.addEventListener('click', () => deleteDownloadHistoryRecord(task));
+          const openDirButton = document.createElement('button');
+          openDirButton.className = 'button ghost small';
+          openDirButton.type = 'button';
+          openDirButton.textContent = '打开目录';
+          openDirButton.disabled = task.localExists === false;
+          openDirButton.addEventListener('click', () => openDownloadHistoryDir(task));
 
-        actions.appendChild(saveAsButton);
-        actions.appendChild(redownloadButton);
-        actions.appendChild(openFileButton);
-        actions.appendChild(openDirButton);
-        actions.appendChild(deleteButton);
-        main.appendChild(actions);
+          const deleteButton = document.createElement('button');
+          deleteButton.className = 'button ghost small download-task-delete';
+          deleteButton.type = 'button';
+          deleteButton.textContent = '删除';
+          deleteButton.addEventListener('click', () => deleteDownloadHistoryRecord(task));
+
+          actions.appendChild(saveAsButton);
+          actions.appendChild(redownloadButton);
+          actions.appendChild(openFileButton);
+          actions.appendChild(openDirButton);
+          actions.appendChild(deleteButton);
+          main.appendChild(actions);
+        }
       }
     }
 
@@ -8365,6 +8373,9 @@ async function saveDownloadHistoryAs(task) {
 }
 
 async function redownloadDownloadHistory(task) {
+  if (!task?.historyId) {
+    return downloadBulkResource({ filename: task?.filename, originalName: task?.originalName, size: task?.total, endpointId: task?.endpointId });
+  }
   try {
     if (!invoke) {
       setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
@@ -12684,6 +12695,51 @@ sendTextButton.addEventListener('click', sendText);
 if (speechToTextButton) {
   // Keep the composer editor focused when dictation is started with the mouse.
   speechToTextButton.addEventListener('mousedown', (event) => event.preventDefault());
+}
+
+async function downloadBulkResource(resource) {
+  const message = {
+    filename: resource?.filename || '',
+    original_name: resource?.originalName || resource?.original_name || resource?.filename || 'download.bin',
+    size: Number(resource?.size) || 0,
+    endpoint_id: resource?.endpointId || '',
+  };
+  const task = getDownloadTask(message.filename, message.endpoint_id) || createDownloadTask(message, 'bulk');
+  try {
+    const result = await invoke('download_message_file', {
+      filename: message.filename,
+      originalName: message.original_name,
+      conflictAction: 'rename',
+      endpointId: resource?.endpointId || null,
+    });
+    if (result?.status !== 'saved') {
+      throw new Error('下载未完成');
+    }
+    updateMessageDownloadStatus(message.filename, task.endpointId);
+    await loadPersistedDownloadHistory({ silent: true });
+    return result;
+  } catch (error) {
+    await loadPersistedDownloadHistory({ silent: true });
+    throw error;
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window.transferGenieDownloadBulkResource = downloadBulkResource;
+  window.transferGenieCreateBulkDownloadTask = (resource) => createDownloadTask({
+    filename: resource?.filename || '',
+    original_name: resource?.originalName || resource?.original_name || resource?.filename || 'download.bin',
+    size: Number(resource?.size) || 0,
+    endpoint_id: resource?.endpointId || '',
+  }, 'bulk');
+  window.transferGenieUpdateBulkDownloadTask = (resource, status, payload) => {
+    const endpointId = resource?.endpointId || resource?.endpoint_id || '';
+    const key = getDownloadTaskKey(resource?.filename || '', endpointId);
+    const patch = { status };
+    if (status === 'complete') patch.path = payload?.path || '';
+    if (status === 'error') patch.error = String(payload || '下载失败');
+    return setDownloadTaskResult(key, patch);
+  };
 }
 document.addEventListener('click', (event) => {
   if (event.target?.closest?.('#speech-to-text-toggle')) {
