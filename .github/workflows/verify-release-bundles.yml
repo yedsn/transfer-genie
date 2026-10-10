@@ -86,9 +86,24 @@ jobs:
       - name: Verify and prepare pinned FFmpeg
         shell: pwsh
         run: |
-          ./scripts/verify_ffmpeg_manifest.ps1 -CheckRemoteMetadata
-          ./scripts/prepare_ffmpeg_sidecar.ps1 -Target ${{ matrix.ffmpeg_target }}
-          ./scripts/verify_ffmpeg_bundle.ps1
+          $reportPath = "target/release-verification/${{ matrix.ffmpeg_target }}.json"
+          New-Item -ItemType Directory -Path (Split-Path -Parent $reportPath) -Force | Out-Null
+          try {
+            ./scripts/verify_ffmpeg_manifest.ps1 -CheckRemoteMetadata
+            ./scripts/prepare_ffmpeg_sidecar.ps1 -Target ${{ matrix.ffmpeg_target }}
+            ./scripts/verify_ffmpeg_bundle.ps1
+          } catch {
+            @{
+              target = "${{ matrix.ffmpeg_target }}"
+              profile = "release"
+              verifiedAtUtc = [DateTime]::UtcNow.ToString("o")
+              stage = "prepare-ffmpeg"
+              error = $_.Exception.Message
+              launchVerified = $false
+            } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $reportPath -Encoding UTF8
+            Write-Error $_.Exception.Message
+            exit 1
+          }
 
       - name: Build native bundles without updater artifacts
         shell: pwsh

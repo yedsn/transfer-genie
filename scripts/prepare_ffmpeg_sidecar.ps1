@@ -35,7 +35,20 @@ $targetPath = Join-Path $targetDirectory $executableName
 $archivePath = Join-Path ([System.IO.Path]::GetTempPath()) ("transfer-genie-ffmpeg-" + [guid]::NewGuid().ToString("N"))
 
 function Get-VerifiedDownload([string]$Url, [string]$ExpectedHash, [string]$Destination) {
-  Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing
+  $attempts = 3
+  for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+    try {
+      Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing -MaximumRetryCount 2 -RetryIntervalSec 3
+      break
+    } catch {
+      if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Force }
+      if ($attempt -eq $attempts) {
+        throw "Download failed after $attempts attempts for $Url`: $($_.Exception.Message)"
+      }
+      Write-Warning "Download attempt $attempt/$attempts failed for $Url`: $($_.Exception.Message)"
+      Start-Sleep -Seconds (3 * $attempt)
+    }
+  }
   $actualHash = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
   if ($actualHash -ne $ExpectedHash.Trim().ToLowerInvariant()) {
     throw "SHA-256 mismatch for $Url. Expected $ExpectedHash, got $actualHash."

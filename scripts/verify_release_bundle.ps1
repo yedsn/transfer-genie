@@ -70,6 +70,7 @@ function Write-VerificationReport {
 
 trap {
   $report.error = $_.Exception.Message
+  Write-Error $report.error -ErrorAction Continue
   Write-VerificationReport
   exit 1
 }
@@ -136,9 +137,22 @@ if ($Target -eq "windows-x64") {
       throw "Packaged FFmpeg did not report version 6.1.1: $ffmpegVersion"
     }
 
-    $applicationExecutable = Get-ChildItem -LiteralPath (Join-Path $appBundle.FullName "Contents/MacOS") -File | Select-Object -First 1
-    if (-not $applicationExecutable) { throw "Application bundle does not contain a native executable." }
-    $applicationArchitecture = Assert-MacArchitecture $applicationExecutable.FullName $expectedArchitecture "application"
+    $infoPlist = Join-Path $appBundle.FullName "Contents/Info.plist"
+    Assert-Path $infoPlist "application Info.plist"
+    $executableName = (& /usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" $infoPlist 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($executableName)) {
+      throw "Unable to resolve CFBundleExecutable from $infoPlist`: $executableName"
+    }
+    $applicationExecutablePath = Join-Path $appBundle.FullName "Contents/MacOS/$executableName"
+    Assert-Path $applicationExecutablePath "application executable"
+    $applicationArchitecture = Assert-MacArchitecture $applicationExecutablePath $expectedArchitecture "application"
+
+    $report.bundle = $dmg.FullName
+    $report.bundleSha256 = Get-Sha256 $dmg.FullName
+    $report.ffmpeg = $ffmpeg
+    $report.ffmpegVersion = $ffmpegVersion
+    $report.applicationExecutable = $applicationExecutablePath
+    $report.applicationArchitecture = $applicationArchitecture
 
     if ($LaunchMacApp) {
       $appData = Join-Path ([System.IO.Path]::GetTempPath()) ("transfer-genie-app-data-" + [guid]::NewGuid().ToString("N"))
@@ -150,7 +164,7 @@ if ($Target -eq "windows-x64") {
       try {
         $env:TRANSFER_GENIE_APP_DATA_DIR = $appData
         $env:TRANSFER_GENIE_FFMPEG = $ffmpeg
-        $appProcess = Start-Process -FilePath $applicationExecutable.FullName -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+        $appProcess = Start-Process -FilePath $applicationExecutablePath -ArgumentList @("--release-smoke-test") -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
         Start-Sleep -Seconds 8
         $appProcess.Refresh()
         if ($appProcess.HasExited) {
@@ -167,12 +181,6 @@ if ($Target -eq "windows-x64") {
       }
     }
 
-    $report.bundle = $dmg.FullName
-    $report.bundleSha256 = Get-Sha256 $dmg.FullName
-    $report.ffmpeg = $ffmpeg
-    $report.ffmpegVersion = $ffmpegVersion
-    $report.applicationExecutable = $applicationExecutable.FullName
-    $report.applicationArchitecture = $applicationArchitecture
     Write-Output "Verified macOS DMG bundle: $($dmg.FullName) ($ffmpegArchitecture)"
   } finally {
     if (Test-Path -LiteralPath $mountPoint) {

@@ -20,10 +20,11 @@ macOS release inputs are pinned and audited for both Apple Silicon and Intel, an
   - macOS Intel: `ebdddc936f61e14049a2d4b549a412b8a40deeff6540e58a9f2a2da9e6b18894`
 - `scripts/verify_ffmpeg_manifest.ps1 -CheckRemoteMetadata -CheckArchives` verified the public release metadata, downloaded archive hashes, license/readme hashes, and executable architecture headers for PE x64, Mach-O arm64, and Mach-O x86_64. The network-only audit was also run through the local proxy after direct GitHub asset download stalled.
 - `scripts/prepare_ffmpeg_sidecar.ps1` now verifies both the pinned archive hash and the decompressed executable hash before accepting a sidecar.
+- FFmpeg artifact downloads retry transient GitHub/CDN failures up to three times, and the verification workflow writes a stage-specific JSON report even when preparation fails before bundle creation.
 - `scripts/verify_release_bundle.ps1` verifies the finished bundle:
   - Windows: latest NSIS installer hash, generated installer resource list, and packaged FFmpeg executable hash/version.
-  - macOS: mounts the latest DMG, verifies required resources and FFmpeg hash, checks FFmpeg and application Mach-O architecture, and optionally launches the packaged application for 8 seconds with isolated app data.
-  - On failure, the script exits non-zero and writes a JSON report containing the error.
+  - macOS: mounts the latest DMG, verifies required resources and FFmpeg hash, resolves the application binary from `CFBundleExecutable`, checks FFmpeg and application Mach-O architecture, and optionally launches the packaged application for 8 seconds with isolated app data and a harmless smoke-test argument.
+  - On failure, the script exits non-zero, prints the concrete error in the Actions log, and writes a JSON report containing the same error plus every bundle field that had already been verified.
 - Local Windows debug bundle verification passed and produced `target/release-verification/windows-x64.json`.
 - `actionlint v1.7.12` validated both `release.yml` and the new `verify-release-bundles.yml`.
 - `release.yml` now runs `verify-release-bundles.yml` as a pre-publish gate, so bundles are verified before the release job publishes assets.
@@ -106,5 +107,7 @@ The repository release matrix now prepares and verifies the pinned sidecar on:
 - `windows-latest` / x64.
 
 Windows was built locally. Native macOS `.app`/`.dmg` production and launch evidence must come from the next release workflow run on those two native runners.
+
+The first native macOS Intel run successfully built and mounted the DMG and verified its packaged resources and FFmpeg executable, then exposed a launch-verifier bug: the verifier selected the first file under `Contents/MacOS`, which could be the auxiliary `telegram_bridge` binary instead of the application entry point. That helper correctly looked for `telegram-bridge.json` and exited. The verifier now reads the exact `CFBundleExecutable` from `Info.plist` and passes a harmless `--release-smoke-test` argument. A follow-up native run is still required before marking the macOS tasks complete.
 
 The new `verify-release-bundles.yml` workflow now builds the same three targets on pull requests, manual dispatch, pushes to `master`, and as a pre-publish gate in `release.yml`, then runs the finished-bundle verifier and uploads the JSON report. It has not yet been executed in GitHub Actions from this working tree, so the native macOS evidence is still pending until those runs complete.
