@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import '../frontend/settings-runtime-status.js';
+import '../src-ui/src/utils/settings-runtime-status.js';
 
 const runtime = globalThis.transferGenieSettingsRuntimeStatus;
 

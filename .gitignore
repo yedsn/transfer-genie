@@ -9,3 +9,9 @@ docs/.vitepress/cache
 docs/.vitepress/dist
 
 /dist
+
+# Optional platform FFmpeg binaries are supplied by release packaging.
+/tools/ffmpeg/ffmpeg
+/tools/ffmpeg/ffmpeg.exe
+/tools/ffmpeg/FFMPEG_LICENSE.txt
+/tools/ffmpeg/FFMPEG_BUILD_README.txt

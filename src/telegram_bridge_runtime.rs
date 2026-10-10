@@ -400,9 +400,13 @@ mod tests {
             ..Default::default()
         };
 
-        std::thread::sleep(std::time::Duration::from_millis(150));
-
-        refresh_telegram_bridge_manager(&mut manager);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while manager.process.is_some() && std::time::Instant::now() < deadline {
+            refresh_telegram_bridge_manager(&mut manager);
+            if manager.process.is_some() {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+        }
 
         assert!(manager.process.is_none());
         assert!(!runtime_config_path.exists());

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import '../frontend/settings-ops-runtime.js';
+import '../src-ui/src/utils/settings-ops-runtime.js';
 
 const runtime = globalThis.transferGenieSettingsOpsRuntime;
 

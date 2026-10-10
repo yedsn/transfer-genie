@@ -109,6 +109,22 @@ pub fn thumbnail_remote_path(filename: &str, timestamp_ms: i64) -> String {
     }
 }
 
+pub const MEDIA_PREVIEW_VERSION: &str = "v1";
+
+pub fn media_preview_remote_path(filename: &str, timestamp_ms: i64) -> String {
+    match timestamp_bucket_path(timestamp_ms) {
+        Some(bucket) => format!("files/.previews/{MEDIA_PREVIEW_VERSION}/{bucket}/{filename}.jpg"),
+        None => format!("files/.previews/{MEDIA_PREVIEW_VERSION}/{filename}.jpg"),
+    }
+}
+
+pub fn media_preview_relative_path(filename: &str, timestamp_ms: i64) -> String {
+    match timestamp_bucket_path(timestamp_ms) {
+        Some(bucket) => format!("{MEDIA_PREVIEW_VERSION}/{bucket}/{filename}.jpg"),
+        None => format!("{MEDIA_PREVIEW_VERSION}/{filename}.jpg"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,5 +180,25 @@ mod tests {
             thumbnail_remote_path("image.jpg", timestamp_ms),
             "files/.thumbs/2024/01/image.jpg"
         );
+        assert_eq!(
+            media_preview_remote_path("image.jpg", timestamp_ms),
+            "files/.previews/v1/2024/01/image.jpg.jpg"
+        );
+        assert_eq!(
+            media_preview_relative_path("image.jpg", timestamp_ms),
+            "v1/2024/01/image.jpg.jpg"
+        );
+    }
+
+    #[test]
+    fn media_preview_paths_keep_encoded_message_names_as_one_component() {
+        let timestamp_ms = 1_704_067_200_000i64;
+        let filename = "1704067200000__PC__00000001__a%2Fb%20c.mp4";
+        let path = media_preview_remote_path(filename, timestamp_ms);
+        assert_eq!(
+            path,
+            "files/.previews/v1/2024/01/1704067200000__PC__00000001__a%2Fb%20c.mp4.jpg"
+        );
+        assert!(!path.contains("a/b"));
     }
 }

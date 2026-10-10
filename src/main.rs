@@ -3,6 +3,8 @@ mod db;
 mod filenames;
 mod history;
 mod integration_runtime;
+mod media_playback;
+mod media_preview;
 mod telegram_bridge;
 mod telegram_bridge_runtime;
 mod types;
@@ -15,8 +17,8 @@ use crate::db::{
     PendingMarkedSync,
 };
 use crate::filenames::{
-    build_message_filename, message_remote_path, parse_message_filename, thumbnail_remote_path,
-    MessageKind,
+    build_message_filename, media_preview_relative_path, media_preview_remote_path,
+    message_remote_path, parse_message_filename, thumbnail_remote_path, MessageKind,
 };
 use crate::history::{HistoryEntry, HistoryLayout};
 use crate::integration_runtime::{
@@ -124,6 +126,7 @@ struct AppState {
     auto_backup_guard: AsyncMutex<()>,
     pending_webdav_conflict: Mutex<Option<WebDavConflict>>,
     system_dictation_hidden_main_position: Mutex<Option<PhysicalPosition<i32>>>,
+    media_playback: media_playback::PlaybackRegistry,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -3676,9 +3679,13 @@ fn bulk_download_category(extension: &str, mime_type: Option<&str>) -> &'static 
     const VIDEO: &[&str] = &["mp4", "mov", "mkv", "avi", "webm", "m4v", "wmv", "flv"];
     if IMAGE.contains(&extension) || mime_type.is_some_and(|value| value.starts_with("image/")) {
         "image"
-    } else if AUDIO.contains(&extension) || mime_type.is_some_and(|value| value.starts_with("audio/")) {
+    } else if AUDIO.contains(&extension)
+        || mime_type.is_some_and(|value| value.starts_with("audio/"))
+    {
         "audio"
-    } else if VIDEO.contains(&extension) || mime_type.is_some_and(|value| value.starts_with("video/")) {
+    } else if VIDEO.contains(&extension)
+        || mime_type.is_some_and(|value| value.starts_with("video/"))
+    {
         "video"
     } else {
         "file"
@@ -3704,9 +3711,13 @@ fn bulk_download_status(row: &DbBulkDownloadResource) -> String {
     "notDownloaded".to_string()
 }
 
-fn map_bulk_download_resource(endpoint_id: &str, row: DbBulkDownloadResource) -> BulkDownloadResource {
+fn map_bulk_download_resource(
+    endpoint_id: &str,
+    row: DbBulkDownloadResource,
+) -> BulkDownloadResource {
     let is_speech_audio = row.transcript_source.as_deref() == Some("speech-to-text");
-    let extension = bulk_download_extension(&row.original_name, row.source_audio_mime_type.as_deref());
+    let extension =
+        bulk_download_extension(&row.original_name, row.source_audio_mime_type.as_deref());
     let category = bulk_download_category(&extension, row.source_audio_mime_type.as_deref());
     let status = bulk_download_status(&row);
     BulkDownloadResource {
@@ -3714,7 +3725,11 @@ fn map_bulk_download_resource(endpoint_id: &str, row: DbBulkDownloadResource) ->
             "{}::{}::{}",
             endpoint_id,
             row.filename,
-            if is_speech_audio { "speech-audio" } else { "file" }
+            if is_speech_audio {
+                "speech-audio"
+            } else {
+                "file"
+            }
         ),
         endpoint_id: endpoint_id.to_string(),
         filename: row.filename,
@@ -3750,7 +3765,14 @@ fn query_bulk_download_resources(
     state: &AppState,
     endpoint_id: &str,
     input: &BulkDownloadQueryInput,
-) -> Result<(Vec<BulkDownloadResource>, Vec<BulkDownloadCategoryCount>, Vec<String>), String> {
+) -> Result<
+    (
+        Vec<BulkDownloadResource>,
+        Vec<BulkDownloadCategoryCount>,
+        Vec<String>,
+    ),
+    String,
+> {
     let rows = db::list_bulk_download_candidates(
         &state.db_path,
         endpoint_id,
@@ -3851,7 +3873,12 @@ fn resolve_bulk_download_selection_for_state(
     let total = resources.len() as i64;
     let total_size = resources.iter().map(|resource| resource.size).sum();
     let status_counts = bulk_download_status_counts(&resources);
-    Ok(BulkDownloadSelectionResult { resources, total, total_size, status_counts })
+    Ok(BulkDownloadSelectionResult {
+        resources,
+        total,
+        total_size,
+        status_counts,
+    })
 }
 
 #[tauri::command]
@@ -3869,11 +3896,8 @@ fn prepare_bulk_download_resources_for_state(
     let settings = current_settings(state)?;
     let endpoint = resolve_active_endpoint(&settings)?;
     let wanted: HashSet<_> = input.keys.into_iter().collect();
-    let (resources, _, _) = query_bulk_download_resources(
-        state,
-        &endpoint.id,
-        &BulkDownloadQueryInput::default(),
-    )?;
+    let (resources, _, _) =
+        query_bulk_download_resources(state, &endpoint.id, &BulkDownloadQueryInput::default())?;
     let resources: Vec<_> = resources
         .into_iter()
         .filter(|resource| wanted.contains(&resource.key))
@@ -3881,7 +3905,12 @@ fn prepare_bulk_download_resources_for_state(
     let total = resources.len() as i64;
     let total_size = resources.iter().map(|resource| resource.size).sum();
     let status_counts = bulk_download_status_counts(&resources);
-    Ok(BulkDownloadSelectionResult { resources, total, total_size, status_counts })
+    Ok(BulkDownloadSelectionResult {
+        resources,
+        total,
+        total_size,
+        status_counts,
+    })
 }
 
 #[tauri::command]
@@ -4132,36 +4161,6 @@ async fn send_text_impl(
     persist_sent_message_with_marked_options(state, &endpoint, &mut message, marked_options).await
 }
 
-fn is_image_file(filename: &str) -> bool {
-    let lower = filename.to_lowercase();
-    lower.ends_with(".png")
-        || lower.ends_with(".jpg")
-        || lower.ends_with(".jpeg")
-        || lower.ends_with(".gif")
-        || lower.ends_with(".webp")
-        || lower.ends_with(".bmp")
-}
-
-fn generate_thumbnail(data: &[u8]) -> Result<Vec<u8>, String> {
-    use image::io::Reader as ImageReader;
-    use std::io::Cursor;
-
-    let img = ImageReader::new(Cursor::new(data))
-        .with_guessed_format()
-        .map_err(|e| format!("无法识别图片格式: {}", e))?
-        .decode()
-        .map_err(|e| format!("图片解码失败: {}", e))?;
-
-    let thumbnail = img.thumbnail(200, 200);
-    let mut buf = Cursor::new(Vec::new());
-    // Always use JPEG for thumbnails for consistency and small size
-    thumbnail
-        .write_to(&mut buf, image::ImageFormat::Jpeg)
-        .map_err(|e| format!("缩略图生成失败: {}", e))?;
-
-    Ok(buf.into_inner())
-}
-
 fn cache_uploaded_bytes(target_path: &Path, data: &[u8]) -> Result<(), String> {
     if let Some(parent) = target_path.parent() {
         fs::create_dir_all(parent).map_err(|err| format!("??????: {err}"))?;
@@ -4195,45 +4194,144 @@ fn cleanup_upload_temp_path(path: &Path) {
     }
 }
 
-fn generate_thumbnail_from_path(path: &Path) -> Result<Vec<u8>, String> {
-    let data = fs::read(path).map_err(|err| format!("????????: {err}"))?;
-    generate_thumbnail(&data)
+fn media_preview_local_path(endpoint_dir: &Path, filename: &str, timestamp_ms: i64) -> PathBuf {
+    endpoint_dir
+        .join(".previews")
+        .join(media_preview_relative_path(filename, timestamp_ms))
 }
 
-fn spawn_thumbnail_upload(
+fn legacy_thumbnail_local_path(endpoint_dir: &Path, filename: &str) -> PathBuf {
+    endpoint_dir.join(".thumbs").join(filename)
+}
+
+fn delete_local_media_cache_for_entry(
+    state: &AppState,
+    endpoint_id: &str,
+    filename: &str,
+    original_name: &str,
+    timestamp_ms: i64,
+) {
+    let endpoint_dir = endpoint_files_dir(state, endpoint_id);
+    let preview_path = media_preview_local_path(&endpoint_dir, filename, timestamp_ms);
+    let legacy_thumbnail_path = legacy_thumbnail_local_path(&endpoint_dir, filename);
+    let playback_path = media_preview::media_playback_cache_path(
+        &endpoint_dir,
+        endpoint_id,
+        filename,
+        original_name,
+        "file",
+    );
+    let speech_playback_path = media_preview::media_playback_cache_path(
+        &endpoint_dir,
+        endpoint_id,
+        filename,
+        original_name,
+        "speech-audio",
+    );
+    for path in [
+        preview_path,
+        legacy_thumbnail_path,
+        playback_path,
+        speech_playback_path,
+    ] {
+        if path.starts_with(&endpoint_dir) {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+async fn delete_remote_media_previews(
+    state: &AppState,
+    endpoint: &WebDavEndpoint,
+    filename: &str,
+    original_name: &str,
+    remote_path: Option<&str>,
+    timestamp_ms: i64,
+) {
+    let preview_remote_path = media_preview_remote_path(filename, timestamp_ms);
+    let legacy_remote_path =
+        resolved_thumbnail_remote_path(remote_path, filename, Some(timestamp_ms));
+    if let Err(err) = webdav::delete_file(&state.http, endpoint, &preview_remote_path, true).await {
+        log::warn!(
+            "delete remote media preview failed for {}: {}",
+            filename,
+            err
+        );
+    }
+    if media_preview::media_preview_kind(original_name)
+        == Some(media_preview::MediaPreviewKind::Image)
+    {
+        if let Err(err) =
+            webdav::delete_file(&state.http, endpoint, &legacy_remote_path, true).await
+        {
+            log::warn!("delete legacy thumbnail failed for {}: {}", filename, err);
+        }
+    }
+}
+
+fn spawn_media_preview_upload(
     http: Client,
     endpoint: WebDavEndpoint,
     endpoint_dir: PathBuf,
-    remote_path: String,
     filename: String,
     timestamp_ms: i64,
     original_name: String,
     source_path: PathBuf,
 ) {
-    if !is_image_file(&original_name) {
+    if media_preview::media_preview_kind(&original_name).is_none() {
         return;
     }
     tokio::spawn(async move {
-        let thumb_data =
-            match tokio::task::spawn_blocking(move || generate_thumbnail_from_path(&source_path))
-                .await
-            {
-                Ok(Ok(bytes)) => bytes,
-                _ => return,
-            };
-        let thumb_remote_path =
-            resolved_thumbnail_remote_path(Some(&remote_path), &filename, Some(timestamp_ms));
-        let _ = webdav::upload_file_ensuring_parent(
+        let permit = match media_preview::preview_generation_semaphore()
+            .acquire_owned()
+            .await
+        {
+            Ok(permit) => permit,
+            Err(_) => return,
+        };
+        let preview_path = media_preview_local_path(&endpoint_dir, &filename, timestamp_ms);
+        let generation_path = preview_path.clone();
+        let generated = tokio::task::spawn_blocking(move || {
+            media_preview::run_preview_generator(|| {
+                media_preview::generate_media_preview(
+                    &source_path,
+                    &original_name,
+                    &generation_path,
+                )
+            })
+        })
+        .await;
+        drop(permit);
+        match generated {
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => return,
+            Ok(Err(err)) => {
+                log::warn!("media preview generation failed for {}: {}", filename, err);
+                return;
+            }
+            Err(err) => {
+                log::warn!("media preview task failed for {}: {}", filename, err);
+                return;
+            }
+        }
+        let preview_data = match fs::read(&preview_path) {
+            Ok(data) => data,
+            Err(err) => {
+                log::warn!("read media preview failed for {}: {}", filename, err);
+                return;
+            }
+        };
+        let preview_remote_path = media_preview_remote_path(&filename, timestamp_ms);
+        if let Err(err) = webdav::upload_file_ensuring_parent(
             &http,
             &endpoint,
-            &thumb_remote_path,
-            thumb_data.clone(),
+            &preview_remote_path,
+            preview_data,
         )
-        .await;
-
-        let thumb_local_dir = endpoint_dir.join(".thumbs");
-        let _ = fs::create_dir_all(&thumb_local_dir);
-        let _ = fs::write(thumb_local_dir.join(&filename), thumb_data);
+        .await
+        {
+            log::warn!("upload media preview failed for {}: {}", filename, err);
+        }
     });
 }
 
@@ -4404,15 +4502,14 @@ async fn send_file_path_impl(
         None,
         total_bytes as i64,
     )?;
-    spawn_thumbnail_upload(
+    spawn_media_preview_upload(
         state.http.clone(),
         endpoint.clone(),
         endpoint_dir,
-        message.remote_path.clone().unwrap_or_default(),
         filename,
         timestamp_ms,
         message.original_name.clone(),
-        source_path,
+        local_path,
     );
     if let Some(window) = window {
         emit_upload_progress(
@@ -4590,6 +4687,429 @@ async fn get_thumbnail(state: State<'_, AppState>, filename: String) -> Result<S
     }
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaPreviewInput {
+    endpoint_id: String,
+    filename: String,
+    #[serde(default)]
+    original_name: String,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaPlaybackInput {
+    endpoint_id: String,
+    filename: String,
+    #[serde(default)]
+    original_name: String,
+    #[serde(default = "default_media_variant")]
+    variant: String,
+}
+
+fn default_media_variant() -> String {
+    "file".to_string()
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaPlaybackProgress {
+    endpoint_id: String,
+    filename: String,
+    resource_key: String,
+    received: u64,
+    total: Option<u64>,
+    status: String,
+    error: Option<String>,
+}
+
+fn validate_media_playback_input(input: &MediaPlaybackInput) -> Result<(&str, &str, &str), String> {
+    let endpoint_id = input.endpoint_id.trim();
+    let filename = input.filename.trim();
+    let variant = input.variant.trim();
+    if endpoint_id.is_empty()
+        || filename.is_empty()
+        || filename.contains('/')
+        || filename.contains('\\')
+        || !matches!(variant, "file" | "speech-audio")
+    {
+        return Err("媒体播放参数无效".to_string());
+    }
+    Ok((endpoint_id, filename, variant))
+}
+
+fn playback_result(
+    path: &Path,
+    source: &str,
+    resource_key: &str,
+) -> media_playback::MediaPlaybackResult {
+    media_playback::MediaPlaybackResult {
+        path: path.to_string_lossy().to_string(),
+        source: source.to_string(),
+        resource_key: resource_key.to_string(),
+    }
+}
+
+fn existing_media_playback_source(
+    state: &AppState,
+    message: &DbMessage,
+    endpoint_dir: &Path,
+    cache_path: &Path,
+    resource_key: &str,
+) -> Result<Option<media_playback::MediaPlaybackResult>, String> {
+    let uploaded_path = endpoint_dir.join(&message.filename);
+    if uploaded_path.is_file() {
+        return Ok(Some(playback_result(
+            &uploaded_path,
+            "uploadLocal",
+            resource_key,
+        )));
+    }
+    if let Some(record) =
+        db::find_download_history_by_key(&state.db_path, &message.endpoint_id, &message.filename)
+            .map_err(|err| format!("读取下载历史失败: {err}"))?
+    {
+        if record.status == "complete" {
+            if let Some(path) = record
+                .saved_path
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .map(PathBuf::from)
+                .filter(|path| path.is_file())
+            {
+                return Ok(Some(playback_result(&path, "formalDownload", resource_key)));
+            }
+        }
+    }
+    if cache_path.is_file() {
+        media_playback::touch_cache_file(cache_path);
+        return Ok(Some(playback_result(
+            cache_path,
+            "previewCache",
+            resource_key,
+        )));
+    }
+    if let Some(path) = message
+        .local_path
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+    {
+        return Ok(Some(playback_result(&path, "uploadLocal", resource_key)));
+    }
+    Ok(None)
+}
+
+type MediaPlaybackProgressSink = Arc<dyn Fn(MediaPlaybackProgress) + Send + Sync>;
+
+fn report_media_playback_progress(
+    progress_sink: &MediaPlaybackProgressSink,
+    endpoint_id: &str,
+    filename: &str,
+    resource_key: &str,
+    received: u64,
+    total: Option<u64>,
+    status: &str,
+    error: Option<String>,
+) {
+    progress_sink(MediaPlaybackProgress {
+        endpoint_id: endpoint_id.to_string(),
+        filename: filename.to_string(),
+        resource_key: resource_key.to_string(),
+        received,
+        total,
+        status: status.to_string(),
+        error,
+    });
+}
+
+async fn cache_remote_media_for_playback(
+    progress_sink: &MediaPlaybackProgressSink,
+    state: &AppState,
+    endpoint: &WebDavEndpoint,
+    message: &DbMessage,
+    cache_path: &Path,
+    resource_key: &str,
+    job: &media_playback::PlaybackJob,
+) -> Result<media_playback::MediaPlaybackResult, String> {
+    use std::fs::OpenOptions;
+
+    ensure_parent_dir(cache_path)?;
+    let temp_path = cache_path.with_file_name(format!(
+        "{}.part",
+        cache_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("media")
+    ));
+    let _ = fs::remove_file(&temp_path);
+    let remote_path = resolved_remote_path(
+        message.remote_path.as_deref(),
+        &message.filename,
+        Some(message.timestamp_ms),
+    );
+    let response = webdav::download_file_stream(&state.http, endpoint, &remote_path).await?;
+    let total = response.total_size.or(response.content_length);
+    let mut stream = response.stream;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&temp_path)
+        .map_err(|err| format!("创建媒体预览缓存失败: {err}"))?;
+    let mut received = 0_u64;
+    report_media_playback_progress(
+        progress_sink,
+        &endpoint.id,
+        &message.filename,
+        resource_key,
+        0,
+        total,
+        "progress",
+        None,
+    );
+    let result = async {
+        loop {
+            let chunk = tokio::select! {
+                _ = job.cancelled() => return Err("媒体缓存已取消".to_string()),
+                chunk = stream.next() => chunk,
+            };
+            let Some(chunk) = chunk else {
+                break;
+            };
+            let chunk = chunk.map_err(|err| format!("读取媒体内容失败: {err}"))?;
+            file.write_all(&chunk)
+                .map_err(|err| format!("写入媒体缓存失败: {err}"))?;
+            received += chunk.len() as u64;
+            report_media_playback_progress(
+                progress_sink,
+                &endpoint.id,
+                &message.filename,
+                resource_key,
+                received,
+                total,
+                "progress",
+                None,
+            );
+        }
+        file.flush()
+            .map_err(|err| format!("完成媒体缓存失败: {err}"))?;
+        if job.is_cancelled() {
+            return Err("媒体缓存已取消".to_string());
+        }
+        if cache_path.exists() {
+            fs::remove_file(cache_path).map_err(|err| format!("替换媒体缓存失败: {err}"))?;
+        }
+        fs::rename(&temp_path, cache_path).map_err(|err| format!("完成媒体缓存失败: {err}"))?;
+        Ok(playback_result(cache_path, "remoteCache", resource_key))
+    }
+    .await;
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
+}
+
+async fn resolve_media_playback_source_impl(
+    state: &AppState,
+    input: MediaPlaybackInput,
+    progress_sink: MediaPlaybackProgressSink,
+) -> Result<media_playback::MediaPlaybackResult, String> {
+    let (endpoint_id, filename, variant) = validate_media_playback_input(&input)?;
+    let settings = current_settings(&state)?;
+    let endpoint = resolve_endpoint_by_id(&settings, endpoint_id)?;
+    let message = db::get_message(&state.db_path, endpoint_id, filename)
+        .map_err(|err| format!("读取媒体消息失败: {err}"))?
+        .ok_or_else(|| "媒体消息不存在".to_string())?;
+    if variant == "speech-audio" && message.transcript_source.as_deref() != Some("speech-to-text") {
+        return Err("消息没有关联的源音频".to_string());
+    }
+    let original_name = if input.original_name.trim().is_empty() {
+        message.original_name.clone()
+    } else {
+        input.original_name.trim().to_string()
+    };
+    let endpoint_dir = endpoint_files_dir(&state, endpoint_id);
+    let cache_path = media_preview::media_playback_cache_path(
+        &endpoint_dir,
+        endpoint_id,
+        filename,
+        &original_name,
+        variant,
+    );
+    let resource_key = media_preview::media_resource_key(endpoint_id, filename, variant);
+    if let Some(result) =
+        existing_media_playback_source(&state, &message, &endpoint_dir, &cache_path, &resource_key)?
+    {
+        return Ok(result);
+    }
+
+    let (job, owner) = state.media_playback.acquire(&resource_key).await;
+    if !owner {
+        return job.wait().await;
+    }
+    let result = cache_remote_media_for_playback(
+        &progress_sink,
+        state,
+        &endpoint,
+        &message,
+        &cache_path,
+        &resource_key,
+        &job,
+    )
+    .await;
+    if let Err(error) = &result {
+        report_media_playback_progress(
+            &progress_sink,
+            endpoint_id,
+            filename,
+            &resource_key,
+            0,
+            None,
+            if job.is_cancelled() {
+                "cancelled"
+            } else {
+                "error"
+            },
+            Some(error.clone()),
+        );
+    } else {
+        report_media_playback_progress(
+            &progress_sink,
+            endpoint_id,
+            filename,
+            &resource_key,
+            message.size.max(0) as u64,
+            Some(message.size.max(0) as u64),
+            "complete",
+            None,
+        );
+    }
+    job.finish(result.clone()).await;
+    state.media_playback.remove(&resource_key, &job).await;
+    let protected = state.media_playback.active_paths();
+    let _ = media_playback::maintain_cache(
+        cache_path.parent().unwrap_or(&endpoint_dir),
+        media_playback::DEFAULT_CACHE_LIMIT_BYTES,
+        media_playback::DEFAULT_CACHE_MAX_AGE,
+        &protected,
+        SystemTime::now(),
+    );
+    result
+}
+
+#[tauri::command]
+async fn resolve_media_playback_source(
+    window: Window,
+    state: State<'_, AppState>,
+    input: MediaPlaybackInput,
+) -> Result<media_playback::MediaPlaybackResult, String> {
+    let progress_window = window.clone();
+    let progress_sink: MediaPlaybackProgressSink = Arc::new(move |progress| {
+        let _ = progress_window.emit("media-playback-progress", progress);
+    });
+    resolve_media_playback_source_impl(state.inner(), input, progress_sink).await
+}
+
+#[tauri::command]
+async fn cancel_media_playback_cache(
+    state: State<'_, AppState>,
+    input: MediaPlaybackInput,
+) -> Result<bool, String> {
+    let (endpoint_id, filename, variant) = validate_media_playback_input(&input)?;
+    let resource_key = media_preview::media_resource_key(endpoint_id, filename, variant);
+    Ok(state.media_playback.cancel(&resource_key).await)
+}
+
+#[tauri::command]
+fn set_active_media_playback_path(
+    state: State<'_, AppState>,
+    path: Option<String>,
+) -> Result<(), String> {
+    let active = path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    state.media_playback.set_active_path(active);
+    Ok(())
+}
+
+async fn get_media_preview_impl(
+    state: &AppState,
+    input: MediaPreviewInput,
+) -> Result<String, String> {
+    let endpoint_id = input.endpoint_id.trim();
+    let filename = input.filename.trim();
+    if endpoint_id.is_empty()
+        || filename.is_empty()
+        || filename.contains('/')
+        || filename.contains('\\')
+    {
+        return Err("媒体预览参数无效".to_string());
+    }
+    let settings = current_settings(&state)?;
+    let endpoint = resolve_endpoint_by_id(&settings, endpoint_id)?;
+    let message = db::get_message(&state.db_path, endpoint_id, filename)
+        .map_err(|err| format!("读取消息失败: {err}"))?
+        .ok_or_else(|| "媒体消息不存在".to_string())?;
+    let original_name = if input.original_name.trim().is_empty() {
+        message.original_name.clone()
+    } else {
+        input.original_name.trim().to_string()
+    };
+    let endpoint_dir = endpoint_files_dir(&state, endpoint_id);
+    let preview_path = media_preview_local_path(&endpoint_dir, filename, message.timestamp_ms);
+    if preview_path.is_file() {
+        return Ok(preview_path.to_string_lossy().to_string());
+    }
+    let preview_remote_path = media_preview_remote_path(filename, message.timestamp_ms);
+    if let Some(data) =
+        webdav::download_optional_file(&state.http, &endpoint, &preview_remote_path).await?
+    {
+        if let Some(parent) = preview_path.parent() {
+            fs::create_dir_all(parent).map_err(|err| format!("创建预览缓存目录失败: {err}"))?;
+        }
+        fs::write(&preview_path, data).map_err(|err| format!("保存预览缓存失败: {err}"))?;
+        return Ok(preview_path.to_string_lossy().to_string());
+    }
+
+    if media_preview::media_preview_kind(&original_name)
+        == Some(media_preview::MediaPreviewKind::Image)
+    {
+        let legacy_local_path = legacy_thumbnail_local_path(&endpoint_dir, filename);
+        if legacy_local_path.is_file() {
+            return Ok(legacy_local_path.to_string_lossy().to_string());
+        }
+        let legacy_remote_path = resolved_thumbnail_remote_path(
+            message.remote_path.as_deref(),
+            filename,
+            Some(message.timestamp_ms),
+        );
+        if let Some(data) =
+            webdav::download_optional_file(&state.http, &endpoint, &legacy_remote_path).await?
+        {
+            if let Some(parent) = legacy_local_path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|err| format!("创建旧缩略图缓存目录失败: {err}"))?;
+            }
+            fs::write(&legacy_local_path, data)
+                .map_err(|err| format!("保存旧缩略图缓存失败: {err}"))?;
+            return Ok(legacy_local_path.to_string_lossy().to_string());
+        }
+    }
+    Err("媒体预览不存在".to_string())
+}
+
+#[tauri::command]
+async fn get_media_preview(
+    state: State<'_, AppState>,
+    input: MediaPreviewInput,
+) -> Result<String, String> {
+    get_media_preview_impl(state.inner(), input).await
+}
+
 #[tauri::command]
 async fn download_message_file(
     window: Window,
@@ -4619,7 +5139,11 @@ async fn download_message_file_impl(
     endpoint_id: Option<&str>,
 ) -> Result<DownloadResult, String> {
     let settings = current_settings(state)?;
-    let endpoint = match endpoint_id.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+    let endpoint = match endpoint_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         Some(endpoint_id) => resolve_endpoint_by_id(&settings, endpoint_id)?,
         None => resolve_active_endpoint(&settings)?,
     };
@@ -5761,6 +6285,15 @@ async fn delete_messages(
                 Ok(_) => {
                     succeeded.push(filename.clone());
                     if let Some(message) = message {
+                        delete_remote_media_previews(
+                            &state,
+                            &endpoint,
+                            &message.filename,
+                            &message.original_name,
+                            message.remote_path.as_deref(),
+                            message.timestamp_ms,
+                        )
+                        .await;
                         succeeded_targets.push((filename.clone(), message.timestamp_ms));
                     }
                 }
@@ -5906,6 +6439,15 @@ async fn cleanup_messages(
                 );
                 match webdav::delete_file(&state.http, &endpoint, &remote_path, true).await {
                     Ok(_) => {
+                        delete_remote_media_previews(
+                            &state,
+                            &endpoint,
+                            &message.filename,
+                            &message.original_name,
+                            message.remote_path.as_deref(),
+                            message.timestamp_ms,
+                        )
+                        .await;
                         succeeded.push(message.filename.clone());
                         succeeded_targets.push((message.filename.clone(), message.timestamp_ms));
                     }
@@ -8922,34 +9464,41 @@ fn resolve_endpoint_by_id(
     Ok(endpoint.clone())
 }
 
-fn settings_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
-    let base = app_handle
+fn app_data_base_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("TRANSFER_GENIE_APP_DATA_DIR") {
+        let path = PathBuf::from(path);
+        if !path.as_os_str().is_empty() {
+            return Ok(path);
+        }
+    }
+    app_handle
         .path()
         .app_data_dir()
-        .map_err(|err| format!("无法定位应用数据目录: {err}"))?;
+        .map_err(|err| format!("无法定位应用数据目录: {err}"))
+}
+
+fn settings_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
+    let base = app_data_base_dir(app_handle)?;
     let layout = WorkspaceLayout::new(base.clone());
     Ok(layout.settings_path(&base))
 }
 
 fn db_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
-    let base = app_handle
-        .path()
-        .app_data_dir()
-        .map_err(|err| format!("无法定位应用数据目录: {err}"))?;
+    let base = app_data_base_dir(app_handle)?;
     let layout = WorkspaceLayout::new(base.clone());
     Ok(layout.db_path(&base))
 }
 
 fn files_base_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
-    let base = app_handle
-        .path()
-        .app_data_dir()
-        .map_err(|err| format!("无法定位应用数据目录: {err}"))?;
+    let base = app_data_base_dir(app_handle)?;
     let layout = WorkspaceLayout::new(base);
     Ok(layout.endpoints_dir())
 }
 
 fn default_download_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
+    if std::env::var_os("TRANSFER_GENIE_APP_DATA_DIR").is_some() {
+        return Ok(app_data_base_dir(app_handle)?.join("downloads"));
+    }
     app_handle
         .path()
         .download_dir()
@@ -9895,6 +10444,14 @@ fn record_local_http_api_start_failure(state: &AppState, err: String) {
 
 async fn local_http_api_send_file(
     AxumState(context): AxumState<LocalHttpApiContext>,
+    multipart: Multipart,
+) -> Result<Json<LocalHttpApiSendResponse>, LocalHttpApiError> {
+    let state = context.app_handle.state::<AppState>();
+    local_http_api_send_file_impl(&state, multipart).await
+}
+
+async fn local_http_api_send_file_impl(
+    state: &AppState,
     mut multipart: Multipart,
 ) -> Result<Json<LocalHttpApiSendResponse>, LocalHttpApiError> {
     use std::io::Write;
@@ -9952,19 +10509,11 @@ async fn local_http_api_send_file(
     let original_name = uploaded_name.ok_or_else(|| LocalHttpApiError::bad_request("????????"))?;
     let temp_path = uploaded_path.ok_or_else(|| LocalHttpApiError::bad_request("????????"))?;
 
-    let state = context.app_handle.state::<AppState>();
-    let marked_options = resolve_local_http_marked_options(&state, marked_options)
+    let marked_options = resolve_local_http_marked_options(state, marked_options)
         .await
         .map_err(LocalHttpApiError::bad_request)?;
-    let result = send_file_path_impl(
-        &state,
-        None,
-        &temp_path,
-        original_name,
-        None,
-        marked_options,
-    )
-    .await;
+    let result =
+        send_file_path_impl(state, None, &temp_path, original_name, None, marked_options).await;
     cleanup_upload_temp_path(&temp_path);
     let result = result.map_err(LocalHttpApiError::internal)?;
 
@@ -10253,6 +10802,7 @@ fn delete_local_files_for_entry(
     timestamp_ms: i64,
     local_path: Option<&str>,
 ) -> Result<(), String> {
+    delete_local_media_cache_for_entry(state, endpoint_id, filename, original_name, timestamp_ms);
     if !filename.trim().is_empty() {
         let endpoint_dir = endpoint_files_dir(state, endpoint_id);
         let source_audio_path = endpoint_dir.join("source-audio").join(filename);
@@ -11875,6 +12425,7 @@ fn main() {
                 auto_backup_guard: AsyncMutex::new(()),
                 pending_webdav_conflict: Mutex::new(None),
                 system_dictation_hidden_main_position: Mutex::new(None),
+                media_playback: media_playback::PlaybackRegistry::default(),
             });
 
             #[cfg(desktop)]
@@ -12239,6 +12790,10 @@ fn main() {
             send_file,
             send_file_data,
             get_thumbnail,
+            get_media_preview,
+            resolve_media_playback_source,
+            cancel_media_playback_cache,
+            set_active_media_playback_path,
             download_message_file,
             save_message_file_as,
             list_upload_history,
@@ -12313,8 +12868,212 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::extract::{Path as AxumPath, State as TestAxumState};
+    use axum::http::StatusCode as HttpStatusCode;
+    use axum::response::Response as AxumResponse;
+    use axum::routing::get;
+    use axum::Router as TestRouter;
+    use std::collections::HashMap as TestHashMap;
     use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use tokio::sync::watch;
+    use tokio::time::Duration as TokioDuration;
+
+    #[derive(Clone, Default)]
+    struct TestDavState {
+        files: Arc<Mutex<TestHashMap<String, Vec<u8>>>>,
+        get_counts: Arc<Mutex<TestHashMap<String, usize>>>,
+        delete_counts: Arc<Mutex<TestHashMap<String, usize>>>,
+        slow_gets: Arc<Mutex<HashSet<String>>>,
+        failed_gets: Arc<Mutex<HashSet<String>>>,
+        active_slow_streams: Arc<AtomicUsize>,
+    }
+
+    impl TestDavState {
+        fn insert(&self, path: impl Into<String>, bytes: impl Into<Vec<u8>>) {
+            let path = path.into();
+            self.files
+                .lock()
+                .unwrap()
+                .insert(decode_test_dav_path(&path), bytes.into());
+        }
+
+        fn get_count(&self, path: &str) -> usize {
+            *self
+                .get_counts
+                .lock()
+                .unwrap()
+                .get(&decode_test_dav_path(path))
+                .unwrap_or(&0)
+        }
+
+        fn delete_count(&self, path: &str) -> usize {
+            *self
+                .delete_counts
+                .lock()
+                .unwrap()
+                .get(&decode_test_dav_path(path))
+                .unwrap_or(&0)
+        }
+    }
+
+    fn decode_test_dav_path(path: &str) -> String {
+        urlencoding::decode(path)
+            .map(|value| value.into_owned())
+            .unwrap_or_else(|_| path.to_string())
+    }
+
+    struct TestDavServer {
+        base_url: String,
+        state: TestDavState,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for TestDavServer {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    async fn test_dav_get(
+        TestAxumState(state): TestAxumState<TestDavState>,
+        AxumPath(path): AxumPath<String>,
+    ) -> AxumResponse {
+        *state
+            .get_counts
+            .lock()
+            .unwrap()
+            .entry(path.clone())
+            .or_default() += 1;
+        if state.failed_gets.lock().unwrap().contains(&path) {
+            return AxumResponse::builder()
+                .status(HttpStatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::empty())
+                .unwrap();
+        }
+        let Some(bytes) = state.files.lock().unwrap().get(&path).cloned() else {
+            return AxumResponse::builder()
+                .status(HttpStatusCode::NOT_FOUND)
+                .body(Body::empty())
+                .unwrap();
+        };
+        if state.slow_gets.lock().unwrap().contains(&path) {
+            state
+                .active_slow_streams
+                .fetch_add(1, AtomicOrdering::SeqCst);
+            let active = Arc::clone(&state.active_slow_streams);
+            let content_length = bytes.len();
+            let stream = futures_util::stream::unfold(
+                (bytes, 0_usize, active),
+                |(bytes, offset, active)| async move {
+                    if offset >= bytes.len() {
+                        active.fetch_sub(1, AtomicOrdering::SeqCst);
+                        return None;
+                    }
+                    tokio::time::sleep(TokioDuration::from_millis(80)).await;
+                    let end = (offset + 4).min(bytes.len());
+                    let chunk = Bytes::copy_from_slice(&bytes[offset..end]);
+                    Some((
+                        Ok::<Bytes, std::convert::Infallible>(chunk),
+                        (bytes, end, active),
+                    ))
+                },
+            );
+            return AxumResponse::builder()
+                .status(HttpStatusCode::OK)
+                .header("content-length", content_length.to_string())
+                .body(Body::from_stream(stream))
+                .unwrap();
+        }
+        AxumResponse::builder()
+            .status(HttpStatusCode::OK)
+            .header("content-length", bytes.len().to_string())
+            .body(Body::from(bytes))
+            .unwrap()
+    }
+
+    async fn test_dav_delete(
+        TestAxumState(state): TestAxumState<TestDavState>,
+        AxumPath(path): AxumPath<String>,
+    ) -> HttpStatusCode {
+        *state
+            .delete_counts
+            .lock()
+            .unwrap()
+            .entry(path.clone())
+            .or_default() += 1;
+        if state.files.lock().unwrap().remove(&path).is_some() {
+            HttpStatusCode::NO_CONTENT
+        } else {
+            HttpStatusCode::NOT_FOUND
+        }
+    }
+
+    async fn test_dav_put(
+        TestAxumState(state): TestAxumState<TestDavState>,
+        AxumPath(path): AxumPath<String>,
+        body: Bytes,
+    ) -> HttpStatusCode {
+        state.files.lock().unwrap().insert(path, body.to_vec());
+        HttpStatusCode::CREATED
+    }
+
+    async fn spawn_test_dav() -> TestDavServer {
+        let state = TestDavState::default();
+        let app = TestRouter::new()
+            .route(
+                "/*path",
+                get(test_dav_get).put(test_dav_put).delete(test_dav_delete),
+            )
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        TestDavServer {
+            base_url: format!("http://{address}/"),
+            state,
+            task,
+        }
+    }
+
+    async fn test_local_http_file_upload(
+        TestAxumState(state): TestAxumState<Arc<AppState>>,
+        multipart: Multipart,
+    ) -> Result<Json<LocalHttpApiSendResponse>, LocalHttpApiError> {
+        local_http_api_send_file_impl(state.as_ref(), multipart).await
+    }
+
+    fn test_settings_with_url(url: String) -> Settings {
+        let mut settings = test_settings();
+        settings.webdav_endpoints[0].url = url;
+        settings.webdav_endpoints[0].username.clear();
+        settings.webdav_endpoints[0].password.clear();
+        settings
+    }
+
+    fn test_media_input(message: &DbMessage, variant: &str) -> MediaPlaybackInput {
+        MediaPlaybackInput {
+            endpoint_id: message.endpoint_id.clone(),
+            filename: message.filename.clone(),
+            original_name: message.original_name.clone(),
+            variant: variant.to_string(),
+        }
+    }
+
+    fn collect_progress() -> (
+        MediaPlaybackProgressSink,
+        Arc<Mutex<Vec<MediaPlaybackProgress>>>,
+    ) {
+        let progress = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&progress);
+        let sink: MediaPlaybackProgressSink = Arc::new(move |event| {
+            captured.lock().unwrap().push(event);
+        });
+        (sink, progress)
+    }
 
     fn test_settings() -> Settings {
         Settings {
@@ -12372,6 +13131,7 @@ mod tests {
             auto_backup_guard: AsyncMutex::new(()),
             pending_webdav_conflict: Mutex::new(None),
             system_dictation_hidden_main_position: Mutex::new(None),
+            media_playback: media_playback::PlaybackRegistry::default(),
         }
     }
 
@@ -12611,6 +13371,758 @@ mod tests {
         .expect("delete local speech cache");
 
         assert!(!cache_path.exists());
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn delete_local_files_for_entry_removes_media_preview_caches_without_touching_downloads() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-delete-preview-{:016x}",
+            rand::thread_rng().gen::<u64>()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(&temp_dir, test_settings());
+        let endpoint_dir = endpoint_files_dir(&state, "endpoint-1");
+        let filename = "1704067200000__PC__00000001__movie.mp4";
+        let original_name = "movie.mp4";
+        let timestamp_ms = 1_704_067_200_000;
+        let preview_path = media_preview_local_path(&endpoint_dir, filename, timestamp_ms);
+        let legacy_path = legacy_thumbnail_local_path(&endpoint_dir, filename);
+        let playback_path = media_preview::media_playback_cache_path(
+            &endpoint_dir,
+            "endpoint-1",
+            filename,
+            original_name,
+            "file",
+        );
+        for path in [&preview_path, &legacy_path, &playback_path] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"cache").unwrap();
+        }
+        let download_path = temp_dir.join("outside-download.mp4");
+        fs::write(&download_path, b"user-file").unwrap();
+
+        delete_local_files_for_entry(
+            &state,
+            &test_settings(),
+            "endpoint-1",
+            filename,
+            MessageKind::File.as_str(),
+            original_name,
+            timestamp_ms,
+            None,
+        )
+        .unwrap();
+
+        assert!(!preview_path.exists());
+        assert!(!legacy_path.exists());
+        assert!(!playback_path.exists());
+        assert!(download_path.exists());
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn playback_cache_hit_does_not_create_download_history_or_change_bulk_status() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-playback-cache-db-{}", now_ms()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(&temp_dir, test_settings());
+        db::init_db(&state.db_path, None).unwrap();
+        let message = test_db_message("endpoint-1", "cached-media", "cached-media.mp4", 1_000, 7);
+        db::upsert_message(&state.db_path, &message).unwrap();
+        let endpoint_dir = endpoint_files_dir(&state, "endpoint-1");
+        let cache_path = media_preview::media_playback_cache_path(
+            &endpoint_dir,
+            "endpoint-1",
+            &message.filename,
+            &message.original_name,
+            "file",
+        );
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(&cache_path, b"preview-only").unwrap();
+        let key = media_preview::media_resource_key("endpoint-1", &message.filename, "file");
+        let source =
+            existing_media_playback_source(&state, &message, &endpoint_dir, &cache_path, &key)
+                .unwrap()
+                .unwrap();
+        assert_eq!(source.source, "previewCache");
+        assert_eq!(db::count_download_history(&state.db_path).unwrap(), 0);
+        let resources =
+            query_bulk_download_resources(&state, "endpoint-1", &BulkDownloadQueryInput::default())
+                .unwrap()
+                .0;
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].status, "notDownloaded");
+        let stored = db::get_message(&state.db_path, "endpoint-1", &message.filename)
+            .unwrap()
+            .unwrap();
+        assert!(stored.local_path.is_none());
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn media_playback_contract_uses_camel_case_fields() {
+        let input: MediaPlaybackInput = serde_json::from_value(serde_json::json!({
+            "endpointId": "endpoint-1",
+            "filename": "clip",
+            "originalName": "clip.mp4",
+            "variant": "file"
+        }))
+        .unwrap();
+        assert_eq!(validate_media_playback_input(&input).unwrap().2, "file");
+        let result = media_playback::MediaPlaybackResult {
+            path: "cache/clip.mp4".into(),
+            source: "previewCache".into(),
+            resource_key: "resource-key".into(),
+        };
+        let value = serde_json::to_value(result).unwrap();
+        assert_eq!(value["resourceKey"], "resource-key");
+        assert_eq!(value["source"], "previewCache");
+        let progress = MediaPlaybackProgress {
+            endpoint_id: "endpoint-1".into(),
+            filename: "clip".into(),
+            resource_key: "resource-key".into(),
+            received: 12,
+            total: Some(24),
+            status: "progress".into(),
+            error: None,
+        };
+        let progress_value = serde_json::to_value(progress).unwrap();
+        assert_eq!(progress_value["endpointId"], "endpoint-1");
+        assert_eq!(progress_value["resourceKey"], "resource-key");
+        assert_eq!(progress_value["received"], 12);
+        assert_eq!(progress_value["total"], 24);
+        assert_eq!(progress_value["status"], "progress");
+    }
+
+    #[test]
+    fn existing_media_playback_source_prefers_uploaded_then_formal_then_preview_cache() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-playback-order-{:016x}",
+            rand::thread_rng().gen::<u64>()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(&temp_dir, test_settings());
+        db::init_db(&state.db_path, None).unwrap();
+        let message = test_db_message(
+            "endpoint-1",
+            "1704067200000__PC__00000001__movie.mp4",
+            "movie.mp4",
+            1_704_067_200_000,
+            12,
+        );
+        db::upsert_message(&state.db_path, &message).unwrap();
+        let endpoint_dir = endpoint_files_dir(&state, "endpoint-1");
+        fs::create_dir_all(&endpoint_dir).unwrap();
+        let uploaded = endpoint_dir.join(&message.filename);
+        let formal = temp_dir.join("formal.mp4");
+        let cache = media_preview::media_playback_cache_path(
+            &endpoint_dir,
+            "endpoint-1",
+            &message.filename,
+            &message.original_name,
+            "file",
+        );
+        fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        fs::write(&uploaded, b"upload").unwrap();
+        fs::write(&formal, b"formal").unwrap();
+        fs::write(&cache, b"preview").unwrap();
+        db::upsert_download_history(
+            &state.db_path,
+            &DbDownloadHistory {
+                id: 0,
+                endpoint_id: message.endpoint_id.clone(),
+                filename: message.filename.clone(),
+                original_name: message.original_name.clone(),
+                saved_path: Some(formal.to_string_lossy().to_string()),
+                status: "complete".into(),
+                error: None,
+                file_size: 6,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+            },
+        )
+        .unwrap();
+        let key = media_preview::media_resource_key("endpoint-1", &message.filename, "file");
+
+        let upload_result =
+            existing_media_playback_source(&state, &message, &endpoint_dir, &cache, &key)
+                .unwrap()
+                .unwrap();
+        assert_eq!(upload_result.source, "uploadLocal");
+
+        fs::remove_file(&uploaded).unwrap();
+        let formal_result =
+            existing_media_playback_source(&state, &message, &endpoint_dir, &cache, &key)
+                .unwrap()
+                .unwrap();
+        assert_eq!(formal_result.source, "formalDownload");
+
+        fs::remove_file(&formal).unwrap();
+        let preview_result =
+            existing_media_playback_source(&state, &message, &endpoint_dir, &cache, &key)
+                .unwrap()
+                .unwrap();
+        assert_eq!(preview_result.source, "previewCache");
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn get_media_preview_uses_local_remote_legacy_and_endpoint_isolation() {
+        let server = spawn_test_dav().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-preview-command-{:016x}",
+            rand::thread_rng().gen::<u64>()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(&temp_dir, test_settings_with_url(server.base_url.clone()));
+        db::init_db(&state.db_path, None).unwrap();
+        let image = test_db_message(
+            "endpoint-1",
+            "1704067200000__PC__00000001__photo.png",
+            "photo.png",
+            1_704_067_200_000,
+            3,
+        );
+        db::upsert_message(&state.db_path, &image).unwrap();
+        let endpoint_dir = endpoint_files_dir(&state, "endpoint-1");
+        let preview_path =
+            media_preview_local_path(&endpoint_dir, &image.filename, image.timestamp_ms);
+        fs::create_dir_all(preview_path.parent().unwrap()).unwrap();
+        fs::write(&preview_path, b"local").unwrap();
+        let input = MediaPreviewInput {
+            endpoint_id: image.endpoint_id.clone(),
+            filename: image.filename.clone(),
+            original_name: image.original_name.clone(),
+        };
+        let local = get_media_preview_impl(&state, MediaPreviewInput { ..input })
+            .await
+            .unwrap();
+        assert_eq!(PathBuf::from(local), preview_path);
+        assert_eq!(
+            server.state.get_count(&media_preview_remote_path(
+                &image.filename,
+                image.timestamp_ms
+            )),
+            0
+        );
+
+        fs::remove_file(&preview_path).unwrap();
+        let preview_remote = media_preview_remote_path(&image.filename, image.timestamp_ms);
+        server
+            .state
+            .insert(preview_remote.clone(), b"remote-preview".to_vec());
+        let remote = get_media_preview_impl(
+            &state,
+            MediaPreviewInput {
+                endpoint_id: image.endpoint_id.clone(),
+                filename: image.filename.clone(),
+                original_name: image.original_name.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs::read(&remote).unwrap(), b"remote-preview");
+        assert_eq!(server.state.get_count(&preview_remote), 1);
+
+        fs::remove_file(&preview_path).unwrap();
+        server.state.files.lock().unwrap().remove(&preview_remote);
+        let legacy_remote = resolved_thumbnail_remote_path(
+            image.remote_path.as_deref(),
+            &image.filename,
+            Some(image.timestamp_ms),
+        );
+        server
+            .state
+            .insert(legacy_remote.clone(), b"legacy-preview".to_vec());
+        let legacy = get_media_preview_impl(
+            &state,
+            MediaPreviewInput {
+                endpoint_id: image.endpoint_id.clone(),
+                filename: image.filename.clone(),
+                original_name: image.original_name.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs::read(&legacy).unwrap(), b"legacy-preview");
+        assert_eq!(server.state.get_count(&legacy_remote), 1);
+
+        let missing = test_db_message(
+            "endpoint-1",
+            "1704067200001__PC__00000002__missing.mp4",
+            "missing.mp4",
+            1_704_067_200_001,
+            1,
+        );
+        db::upsert_message(&state.db_path, &missing).unwrap();
+        let error = get_media_preview_impl(
+            &state,
+            MediaPreviewInput {
+                endpoint_id: missing.endpoint_id.clone(),
+                filename: missing.filename.clone(),
+                original_name: missing.original_name.clone(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "媒体预览不存在");
+
+        let mut second_settings = test_settings_with_url(server.base_url.clone());
+        second_settings.webdav_endpoints.push(WebDavEndpoint {
+            id: "endpoint-2".into(),
+            name: "Second".into(),
+            url: server.base_url.clone(),
+            username: String::new(),
+            password: String::new(),
+            enabled: true,
+        });
+        *state.settings.lock().unwrap() = second_settings;
+        let isolated = get_media_preview_impl(
+            &state,
+            MediaPreviewInput {
+                endpoint_id: "endpoint-2".into(),
+                filename: image.filename.clone(),
+                original_name: image.original_name.clone(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(isolated, "媒体消息不存在");
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn remote_playback_cache_deduplicates_downloads_and_emits_progress() {
+        let server = spawn_test_dav().await;
+        let remote_path = "files/media.mp4";
+        server
+            .state
+            .insert(remote_path, b"0123456789abcdef".to_vec());
+        server
+            .state
+            .slow_gets
+            .lock()
+            .unwrap()
+            .insert(remote_path.into());
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-playback-dedupe-{:016x}",
+            rand::thread_rng().gen::<u64>()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = Arc::new(test_app_state(
+            &temp_dir,
+            test_settings_with_url(server.base_url.clone()),
+        ));
+        db::init_db(&state.db_path, None).unwrap();
+        let mut message = test_db_message("endpoint-1", "media.mp4", "media.mp4", 123, 16);
+        message.remote_path = Some(remote_path.into());
+        db::upsert_message(&state.db_path, &message).unwrap();
+        let (sink, progress) = collect_progress();
+        let first_state = Arc::clone(&state);
+        let first_input = test_media_input(&message, "file");
+        let first_sink = Arc::clone(&sink);
+        let first = tokio::spawn(async move {
+            resolve_media_playback_source_impl(&first_state, first_input, first_sink).await
+        });
+        tokio::time::sleep(TokioDuration::from_millis(30)).await;
+        let second_state = Arc::clone(&state);
+        let second_input = test_media_input(&message, "file");
+        let second_sink = Arc::clone(&sink);
+        let second = tokio::spawn(async move {
+            resolve_media_playback_source_impl(&second_state, second_input, second_sink).await
+        });
+        let first_result = first.await.unwrap().unwrap();
+        let second_result = second.await.unwrap().unwrap();
+        assert_eq!(first_result.path, second_result.path);
+        assert_eq!(first_result.source, "remoteCache");
+        assert_eq!(server.state.get_count(remote_path), 1);
+        assert_eq!(fs::read(&first_result.path).unwrap(), b"0123456789abcdef");
+        let events = progress.lock().unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.status == "progress" && event.received > 0));
+        assert!(events.iter().any(|event| event.status == "complete"));
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn remote_playback_cancel_cleans_partial_and_allows_retry() {
+        let server = spawn_test_dav().await;
+        let remote_path = "files/cancel.mp4";
+        server
+            .state
+            .insert(remote_path, b"abcdefghijklmnopqrstuvwxyz".to_vec());
+        server
+            .state
+            .slow_gets
+            .lock()
+            .unwrap()
+            .insert(remote_path.into());
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-playback-cancel-{:016x}",
+            rand::thread_rng().gen::<u64>()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = Arc::new(test_app_state(
+            &temp_dir,
+            test_settings_with_url(server.base_url.clone()),
+        ));
+        db::init_db(&state.db_path, None).unwrap();
+        let mut message = test_db_message("endpoint-1", "cancel.mp4", "cancel.mp4", 123, 26);
+        message.remote_path = Some(remote_path.into());
+        db::upsert_message(&state.db_path, &message).unwrap();
+        let (sink, progress) = collect_progress();
+        let worker_state = Arc::clone(&state);
+        let worker_input = test_media_input(&message, "file");
+        let worker_sink = Arc::clone(&sink);
+        let worker = tokio::spawn(async move {
+            resolve_media_playback_source_impl(&worker_state, worker_input, worker_sink).await
+        });
+        tokio::time::sleep(TokioDuration::from_millis(110)).await;
+        let key = media_preview::media_resource_key("endpoint-1", &message.filename, "file");
+        assert!(state.media_playback.cancel(&key).await);
+        let error = worker.await.unwrap().unwrap_err();
+        assert!(error.contains("取消"));
+        let endpoint_dir = endpoint_files_dir(&state, "endpoint-1");
+        let cache_path = media_preview::media_playback_cache_path(
+            &endpoint_dir,
+            "endpoint-1",
+            &message.filename,
+            &message.original_name,
+            "file",
+        );
+        assert!(!cache_path.exists());
+        assert!(!cache_path
+            .with_file_name(format!(
+                "{}.part",
+                cache_path.file_name().unwrap().to_string_lossy()
+            ))
+            .exists());
+        assert!(progress
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| event.status == "cancelled"));
+
+        server.state.slow_gets.lock().unwrap().remove(remote_path);
+        let retry =
+            resolve_media_playback_source_impl(&state, test_media_input(&message, "file"), sink)
+                .await
+                .unwrap();
+        assert_eq!(retry.source, "remoteCache");
+        assert_eq!(server.state.get_count(remote_path), 2);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn remote_playback_failure_leaves_no_partial_and_retry_succeeds() {
+        let server = spawn_test_dav().await;
+        let remote_path = "files/retry.mp4";
+        server.state.insert(remote_path, b"retry-data".to_vec());
+        server
+            .state
+            .failed_gets
+            .lock()
+            .unwrap()
+            .insert(remote_path.into());
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-playback-retry-{:016x}",
+            rand::thread_rng().gen::<u64>()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(&temp_dir, test_settings_with_url(server.base_url.clone()));
+        db::init_db(&state.db_path, None).unwrap();
+        let mut message = test_db_message("endpoint-1", "retry.mp4", "retry.mp4", 123, 10);
+        message.remote_path = Some(remote_path.into());
+        db::upsert_message(&state.db_path, &message).unwrap();
+        let (sink, _) = collect_progress();
+        let error = resolve_media_playback_source_impl(
+            &state,
+            test_media_input(&message, "file"),
+            Arc::clone(&sink),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("HTTP 500"));
+        let endpoint_dir = endpoint_files_dir(&state, "endpoint-1");
+        let cache_path = media_preview::media_playback_cache_path(
+            &endpoint_dir,
+            "endpoint-1",
+            &message.filename,
+            &message.original_name,
+            "file",
+        );
+        assert!(!cache_path.exists());
+        assert!(!cache_path
+            .with_file_name(format!(
+                "{}.part",
+                cache_path.file_name().unwrap().to_string_lossy()
+            ))
+            .exists());
+
+        server.state.failed_gets.lock().unwrap().remove(remote_path);
+        let retry =
+            resolve_media_playback_source_impl(&state, test_media_input(&message, "file"), sink)
+                .await
+                .unwrap();
+        assert_eq!(retry.source, "remoteCache");
+        assert_eq!(server.state.get_count(remote_path), 2);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn delete_remote_media_previews_removes_new_and_legacy_and_tolerates_missing() {
+        let server = spawn_test_dav().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-delete-remote-preview-{:016x}",
+            rand::thread_rng().gen::<u64>()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let settings = test_settings_with_url(server.base_url.clone());
+        let endpoint = settings.webdav_endpoints[0].clone();
+        let state = test_app_state(&temp_dir, settings);
+        let filename = "1704067200000__PC__00000001__photo.png";
+        let timestamp_ms = 1_704_067_200_000;
+        let preview_remote = media_preview_remote_path(filename, timestamp_ms);
+        let legacy_remote = resolved_thumbnail_remote_path(
+            Some(&message_remote_path(filename, timestamp_ms)),
+            filename,
+            Some(timestamp_ms),
+        );
+        server.state.insert(preview_remote.clone(), b"new".to_vec());
+        server
+            .state
+            .insert(legacy_remote.clone(), b"legacy".to_vec());
+        delete_remote_media_previews(
+            &state,
+            &endpoint,
+            filename,
+            "photo.png",
+            Some(&message_remote_path(filename, timestamp_ms)),
+            timestamp_ms,
+        )
+        .await;
+        assert_eq!(server.state.delete_count(&preview_remote), 1);
+        assert_eq!(server.state.delete_count(&legacy_remote), 1);
+        delete_remote_media_previews(
+            &state,
+            &endpoint,
+            filename,
+            "photo.png",
+            Some(&message_remote_path(filename, timestamp_ms)),
+            timestamp_ms,
+        )
+        .await;
+        assert_eq!(server.state.delete_count(&preview_remote), 2);
+        assert_eq!(server.state.delete_count(&legacy_remote), 2);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    async fn wait_for_test_dav_file(server: &TestDavServer, path: &str) -> Vec<u8> {
+        let path = decode_test_dav_path(path);
+        let result = tokio::time::timeout(TokioDuration::from_secs(5), async {
+            loop {
+                if let Some(bytes) = server.state.files.lock().unwrap().get(&path).cloned() {
+                    return bytes;
+                }
+                tokio::time::sleep(TokioDuration::from_millis(25)).await;
+            }
+        })
+        .await;
+        result.unwrap_or_else(|_| {
+            let keys = server
+                .state
+                .files
+                .lock()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>();
+            panic!("wait for WebDAV file {path}; existing keys: {keys:?}");
+        })
+    }
+
+    fn png_fixture_bytes() -> Vec<u8> {
+        let image = image::DynamicImage::ImageRgb8(image::ImageBuffer::from_pixel(
+            32,
+            16,
+            image::Rgb([20_u8, 100, 220]),
+        ));
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        image
+            .write_to(&mut cursor, image::ImageFormat::Png)
+            .unwrap();
+        cursor.into_inner()
+    }
+
+    #[tokio::test]
+    async fn path_and_byte_uploads_use_stable_source_and_publish_preview() {
+        for mode in ["path", "bytes"] {
+            let server = spawn_test_dav().await;
+            let temp_dir = std::env::temp_dir().join(format!(
+                "transfer-genie-upload-preview-{mode}-{:016x}",
+                rand::thread_rng().gen::<u64>()
+            ));
+            fs::create_dir_all(&temp_dir).unwrap();
+            let state = test_app_state(&temp_dir, test_settings_with_url(server.base_url.clone()));
+            db::init_db(&state.db_path, None).unwrap();
+            let bytes = png_fixture_bytes();
+            let result = if mode == "path" {
+                let source = temp_dir.join("source image.png");
+                fs::write(&source, &bytes).unwrap();
+                send_file_path_impl(&state, None, &source, "source image.png".into(), None, None)
+                    .await
+                    .unwrap()
+            } else {
+                send_file_data_impl(
+                    &state,
+                    None,
+                    bytes.clone(),
+                    "memory image.png".into(),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+            };
+            let message = db::get_message(&state.db_path, &result.endpoint_id, &result.filename)
+                .unwrap()
+                .unwrap();
+            let local_path = PathBuf::from(message.local_path.clone().unwrap());
+            assert_eq!(fs::read(&local_path).unwrap(), bytes);
+            assert!(server
+                .state
+                .files
+                .lock()
+                .unwrap()
+                .values()
+                .any(|uploaded| uploaded == &bytes));
+            let preview_remote = media_preview_remote_path(&message.filename, message.timestamp_ms);
+            let preview_bytes = wait_for_test_dav_file(&server, &preview_remote).await;
+            assert_eq!(
+                image::guess_format(&preview_bytes).unwrap(),
+                image::ImageFormat::Jpeg
+            );
+            let local_preview = media_preview_local_path(
+                &endpoint_files_dir(&state, &result.endpoint_id),
+                &message.filename,
+                message.timestamp_ms,
+            );
+            assert!(local_preview.is_file());
+            let uploads = db::list_upload_history_paged(&state.db_path, None, None).unwrap();
+            assert_eq!(uploads.len(), 1);
+            assert_eq!(uploads[0].status, "complete");
+            assert_eq!(uploads[0].filename, message.filename);
+            let _ = fs::remove_dir_all(temp_dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn local_http_multipart_upload_publishes_preview_after_request_temp_cleanup() {
+        let server = spawn_test_dav().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-local-http-preview-{:016x}",
+            rand::thread_rng().gen::<u64>()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = Arc::new(test_app_state(
+            &temp_dir,
+            test_settings_with_url(server.base_url.clone()),
+        ));
+        db::init_db(&state.db_path, None).unwrap();
+
+        let router = TestRouter::new()
+            .route(
+                LOCAL_HTTP_API_ROUTE,
+                axum::routing::post(test_local_http_file_upload),
+            )
+            .layer(DefaultBodyLimit::disable())
+            .with_state(Arc::clone(&state));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let api_task = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let bytes = png_fixture_bytes();
+        let response = Client::new()
+            .post(format!("http://{address}{LOCAL_HTTP_API_ROUTE}"))
+            .multipart(
+                reqwest::multipart::Form::new().part(
+                    "file",
+                    reqwest::multipart::Part::bytes(bytes.clone())
+                        .file_name("HTTP pasted image.png")
+                        .mime_str("image/png")
+                        .unwrap(),
+                ),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let payload: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(payload["status"], "ok");
+        let filename = payload["result"]["filename"].as_str().unwrap();
+        let endpoint_id = payload["result"]["endpointId"].as_str().unwrap();
+        let message = db::get_message(&state.db_path, endpoint_id, filename)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            fs::read(message.local_path.as_ref().unwrap()).unwrap(),
+            bytes
+        );
+
+        let preview_remote = media_preview_remote_path(&message.filename, message.timestamp_ms);
+        let preview_bytes = wait_for_test_dav_file(&server, &preview_remote).await;
+        assert_eq!(
+            image::guess_format(&preview_bytes).unwrap(),
+            image::ImageFormat::Jpeg
+        );
+        let uploads = db::list_upload_history_paged(&state.db_path, None, None).unwrap();
+        assert_eq!(uploads.len(), 1);
+        assert_eq!(uploads[0].status, "complete");
+        assert_eq!(uploads[0].filename, message.filename);
+
+        api_task.abort();
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn preview_generation_failure_does_not_change_upload_success_or_history() {
+        let server = spawn_test_dav().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-upload-preview-failure-{:016x}",
+            rand::thread_rng().gen::<u64>()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(&temp_dir, test_settings_with_url(server.base_url.clone()));
+        db::init_db(&state.db_path, None).unwrap();
+        let result = send_file_data_impl(
+            &state,
+            None,
+            b"not-a-video".to_vec(),
+            "broken-video.mp4".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let message = db::get_message(&state.db_path, &result.endpoint_id, &result.filename)
+            .unwrap()
+            .unwrap();
+        assert!(PathBuf::from(message.local_path.unwrap()).is_file());
+        let uploads = db::list_upload_history_paged(&state.db_path, None, None).unwrap();
+        assert_eq!(uploads.len(), 1);
+        assert_eq!(uploads[0].status, "complete");
+        tokio::time::sleep(TokioDuration::from_millis(250)).await;
+        let preview_remote = media_preview_remote_path(&message.filename, message.timestamp_ms);
+        assert!(!server
+            .state
+            .files
+            .lock()
+            .unwrap()
+            .contains_key(&preview_remote));
         let _ = fs::remove_dir_all(temp_dir);
     }
 
@@ -15217,7 +16729,18 @@ mod tests {
         assert_eq!(input.category.as_deref(), Some("image"));
         assert_eq!(input.search_query.as_deref(), Some("photo"));
         assert_eq!(input.page_size, Some(30));
-        let resource = BulkDownloadResource { key: "ep::file::file".into(), endpoint_id: "ep".into(), filename: "file".into(), original_name: "photo.png".into(), category: "image".into(), extension: "png".into(), size: 10, timestamp_ms: 20, status: "notDownloaded".into(), is_speech_audio: false };
+        let resource = BulkDownloadResource {
+            key: "ep::file::file".into(),
+            endpoint_id: "ep".into(),
+            filename: "file".into(),
+            original_name: "photo.png".into(),
+            category: "image".into(),
+            extension: "png".into(),
+            size: 10,
+            timestamp_ms: 20,
+            status: "notDownloaded".into(),
+            is_speech_audio: false,
+        };
         let value = serde_json::to_value(resource).expect("serialize resource");
         assert_eq!(value["originalName"], "photo.png");
         assert_eq!(value["timestampMs"], 20);
@@ -15230,12 +16753,25 @@ mod tests {
         assert_eq!(bulk_download_category("mp4", None), "video");
         assert_eq!(bulk_download_category("wav", Some("audio/wav")), "audio");
         assert_eq!(bulk_download_category("pdf", None), "file");
-        assert_eq!(bulk_download_extension("speech", Some("audio/ogg;codecs=opus")), "ogg");
+        assert_eq!(
+            bulk_download_extension("speech", Some("audio/ogg;codecs=opus")),
+            "ogg"
+        );
     }
 
     #[test]
     fn bulk_download_resource_keys_distinguish_speech_audio() {
-        let row = DbBulkDownloadResource { filename: "message".into(), timestamp_ms: 1, size: 2, original_name: "speech.wav".into(), transcript_source: Some("speech-to-text".into()), source_audio_mime_type: Some("audio/wav".into()), download_status: None, saved_path: None, partial_bytes: None };
+        let row = DbBulkDownloadResource {
+            filename: "message".into(),
+            timestamp_ms: 1,
+            size: 2,
+            original_name: "speech.wav".into(),
+            transcript_source: Some("speech-to-text".into()),
+            source_audio_mime_type: Some("audio/wav".into()),
+            download_status: None,
+            saved_path: None,
+            partial_bytes: None,
+        };
         let resource = map_bulk_download_resource("ep", row);
         assert_eq!(resource.key, "ep::message::speech-audio");
         assert_eq!(resource.category, "audio");
@@ -15244,20 +16780,48 @@ mod tests {
 
     #[test]
     fn bulk_download_status_mapping_covers_existing_missing_partial_and_error() {
-        let temp_dir = std::env::temp_dir().join(format!("transfer-genie-bulk-status-{}", now_ms()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-bulk-status-{}", now_ms()));
         fs::create_dir_all(&temp_dir).expect("create temp dir");
         let existing = temp_dir.join("existing.bin");
         fs::write(&existing, b"ok").expect("write existing download");
-        let make_row = |status: Option<&str>, saved_path: Option<&Path>, partial_bytes: Option<i64>| DbBulkDownloadResource {
-            filename: "resource".into(), timestamp_ms: 1, size: 2, original_name: "resource.bin".into(), transcript_source: None,
-            source_audio_mime_type: None, download_status: status.map(str::to_string),
-            saved_path: saved_path.map(|path| path.to_string_lossy().to_string()), partial_bytes,
+        let make_row = |status: Option<&str>,
+                        saved_path: Option<&Path>,
+                        partial_bytes: Option<i64>| DbBulkDownloadResource {
+            filename: "resource".into(),
+            timestamp_ms: 1,
+            size: 2,
+            original_name: "resource.bin".into(),
+            transcript_source: None,
+            source_audio_mime_type: None,
+            download_status: status.map(str::to_string),
+            saved_path: saved_path.map(|path| path.to_string_lossy().to_string()),
+            partial_bytes,
         };
-        assert_eq!(bulk_download_status(&make_row(Some("complete"), Some(&existing), None)), "downloaded");
-        assert_eq!(bulk_download_status(&make_row(Some("complete"), Some(&temp_dir.join("missing.bin")), None)), "missing");
-        assert_eq!(bulk_download_status(&make_row(None, None, Some(12))), "resumable");
-        assert_eq!(bulk_download_status(&make_row(Some("error"), None, None)), "error");
-        assert_eq!(bulk_download_status(&make_row(None, None, None)), "notDownloaded");
+        assert_eq!(
+            bulk_download_status(&make_row(Some("complete"), Some(&existing), None)),
+            "downloaded"
+        );
+        assert_eq!(
+            bulk_download_status(&make_row(
+                Some("complete"),
+                Some(&temp_dir.join("missing.bin")),
+                None
+            )),
+            "missing"
+        );
+        assert_eq!(
+            bulk_download_status(&make_row(None, None, Some(12))),
+            "resumable"
+        );
+        assert_eq!(
+            bulk_download_status(&make_row(Some("error"), None, None)),
+            "error"
+        );
+        assert_eq!(
+            bulk_download_status(&make_row(None, None, None)),
+            "notDownloaded"
+        );
         let _ = fs::remove_dir_all(temp_dir);
     }
 
@@ -15268,28 +16832,83 @@ mod tests {
         let state = test_app_state(&temp_dir, test_settings());
         db::init_db(&state.db_path, None).expect("initialize database");
         for index in 0..12 {
-            let name = if index % 2 == 0 { format!("photo-{index}.png") } else { format!("video-{index}.mp4") };
-            db::upsert_message(&state.db_path, &test_db_message("endpoint-1", &format!("item-{index:02}"), &name, 1_000 - index, 100 + index)).unwrap();
+            let name = if index % 2 == 0 {
+                format!("photo-{index}.png")
+            } else {
+                format!("video-{index}.mp4")
+            };
+            db::upsert_message(
+                &state.db_path,
+                &test_db_message(
+                    "endpoint-1",
+                    &format!("item-{index:02}"),
+                    &name,
+                    1_000 - index,
+                    100 + index,
+                ),
+            )
+            .unwrap();
         }
-        db::upsert_message(&state.db_path, &test_db_message("endpoint-2", "foreign", "foreign.png", 2_000, 999)).unwrap();
-        let result = list_bulk_download_resources_for_state(&state, BulkDownloadQueryInput {
-            category: Some("image".into()), page: Some(2), page_size: Some(10), ..Default::default()
-        }).expect("query bulk resources");
+        db::upsert_message(
+            &state.db_path,
+            &test_db_message("endpoint-2", "foreign", "foreign.png", 2_000, 999),
+        )
+        .unwrap();
+        let result = list_bulk_download_resources_for_state(
+            &state,
+            BulkDownloadQueryInput {
+                category: Some("image".into()),
+                page: Some(2),
+                page_size: Some(10),
+                ..Default::default()
+            },
+        )
+        .expect("query bulk resources");
         assert_eq!(result.total, 6);
         assert_eq!(result.total_size, 630);
         assert_eq!(result.page, 1);
         assert_eq!(result.resources.len(), 6);
-        assert!(result.resources.iter().all(|resource| resource.endpoint_id == "endpoint-1" && resource.category == "image"));
+        assert!(result
+            .resources
+            .iter()
+            .all(|resource| resource.endpoint_id == "endpoint-1" && resource.category == "image"));
         assert_eq!(result.extensions, vec!["png"]);
-        assert_eq!(result.category_counts.iter().find(|item| item.category == "video").map(|item| item.count), Some(6));
-        let selection = resolve_bulk_download_selection_for_state(&state, BulkDownloadQueryInput {
-            category: Some("video".into()), ..Default::default()
-        }).expect("resolve filtered selection");
+        assert_eq!(
+            result
+                .category_counts
+                .iter()
+                .find(|item| item.category == "video")
+                .map(|item| item.count),
+            Some(6)
+        );
+        let selection = resolve_bulk_download_selection_for_state(
+            &state,
+            BulkDownloadQueryInput {
+                category: Some("video".into()),
+                ..Default::default()
+            },
+        )
+        .expect("resolve filtered selection");
         assert_eq!(selection.total, 6);
-        assert_eq!(selection.resources.first().map(|resource| resource.filename.as_str()), Some("item-01"));
-        let prepared = prepare_bulk_download_resources_for_state(&state, PrepareBulkDownloadInput {
-            keys: selection.resources.iter().take(2).map(|resource| resource.key.clone()).collect(),
-        }).expect("prepare selection");
+        assert_eq!(
+            selection
+                .resources
+                .first()
+                .map(|resource| resource.filename.as_str()),
+            Some("item-01")
+        );
+        let prepared = prepare_bulk_download_resources_for_state(
+            &state,
+            PrepareBulkDownloadInput {
+                keys: selection
+                    .resources
+                    .iter()
+                    .take(2)
+                    .map(|resource| resource.key.clone())
+                    .collect(),
+            },
+        )
+        .expect("prepare selection");
         assert_eq!(prepared.total, 2);
         assert_eq!(prepared.total_size, 204);
         let _ = fs::remove_dir_all(temp_dir);
@@ -15297,39 +16916,97 @@ mod tests {
 
     #[test]
     fn bulk_download_prepare_reports_all_status_groups() {
-        let temp_dir = std::env::temp_dir().join(format!("transfer-genie-bulk-prepare-{}", now_ms()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-bulk-prepare-{}", now_ms()));
         fs::create_dir_all(&temp_dir).expect("create temp dir");
         let state = test_app_state(&temp_dir, test_settings());
         db::init_db(&state.db_path, None).expect("initialize database");
-        for (index, filename) in ["new", "partial", "missing", "done"].into_iter().enumerate() {
-            db::upsert_message(&state.db_path, &test_db_message("endpoint-1", filename, &format!("{filename}.bin"), 100 - index as i64, 10)).unwrap();
+        for (index, filename) in ["new", "partial", "missing", "done"]
+            .into_iter()
+            .enumerate()
+        {
+            db::upsert_message(
+                &state.db_path,
+                &test_db_message(
+                    "endpoint-1",
+                    filename,
+                    &format!("{filename}.bin"),
+                    100 - index as i64,
+                    10,
+                ),
+            )
+            .unwrap();
         }
         let downloaded = temp_dir.join("done.bin");
         fs::write(&downloaded, b"done").expect("write completed file");
-        for (filename, saved_path) in [("missing", temp_dir.join("gone.bin")), ("done", downloaded)] {
-            db::upsert_download_history(&state.db_path, &DbDownloadHistory {
-                id: 0, endpoint_id: "endpoint-1".into(), filename: filename.into(), original_name: format!("{filename}.bin"),
-                saved_path: Some(saved_path.to_string_lossy().to_string()), status: "complete".into(), error: None,
-                file_size: 10, created_at_ms: 1, updated_at_ms: 1,
-            }).unwrap();
+        for (filename, saved_path) in [("missing", temp_dir.join("gone.bin")), ("done", downloaded)]
+        {
+            db::upsert_download_history(
+                &state.db_path,
+                &DbDownloadHistory {
+                    id: 0,
+                    endpoint_id: "endpoint-1".into(),
+                    filename: filename.into(),
+                    original_name: format!("{filename}.bin"),
+                    saved_path: Some(saved_path.to_string_lossy().to_string()),
+                    status: "complete".into(),
+                    error: None,
+                    file_size: 10,
+                    created_at_ms: 1,
+                    updated_at_ms: 1,
+                },
+            )
+            .unwrap();
         }
-        db::upsert_partial_download(&state.db_path, &DbPartialDownload {
-            endpoint_id: "endpoint-1".into(), filename: "partial".into(), original_name: "partial.bin".into(),
-            final_path: temp_dir.join("partial.bin").to_string_lossy().to_string(),
-            temp_path: temp_dir.join("partial.bin.part").to_string_lossy().to_string(), downloaded_bytes: 5, total_bytes: 10,
-            etag: None, mtime: None, updated_at_ms: 1,
-        }).unwrap();
-        let all = resolve_bulk_download_selection_for_state(&state, BulkDownloadQueryInput::default()).unwrap();
-        let prepared = prepare_bulk_download_resources_for_state(&state, PrepareBulkDownloadInput {
-            keys: all.resources.iter().map(|resource| resource.key.clone()).collect(),
-        }).unwrap();
-        assert_eq!(prepared.status_counts, BulkDownloadStatusCounts { new_download: 1, resumable: 1, redownload: 1, skipped: 1 });
+        db::upsert_partial_download(
+            &state.db_path,
+            &DbPartialDownload {
+                endpoint_id: "endpoint-1".into(),
+                filename: "partial".into(),
+                original_name: "partial.bin".into(),
+                final_path: temp_dir.join("partial.bin").to_string_lossy().to_string(),
+                temp_path: temp_dir
+                    .join("partial.bin.part")
+                    .to_string_lossy()
+                    .to_string(),
+                downloaded_bytes: 5,
+                total_bytes: 10,
+                etag: None,
+                mtime: None,
+                updated_at_ms: 1,
+            },
+        )
+        .unwrap();
+        let all =
+            resolve_bulk_download_selection_for_state(&state, BulkDownloadQueryInput::default())
+                .unwrap();
+        let prepared = prepare_bulk_download_resources_for_state(
+            &state,
+            PrepareBulkDownloadInput {
+                keys: all
+                    .resources
+                    .iter()
+                    .map(|resource| resource.key.clone())
+                    .collect(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.status_counts,
+            BulkDownloadStatusCounts {
+                new_download: 1,
+                resumable: 1,
+                redownload: 1,
+                skipped: 1
+            }
+        );
         let _ = fs::remove_dir_all(temp_dir);
     }
 
     #[test]
     fn bulk_download_rename_conflict_generates_non_conflicting_target() {
-        let temp_dir = std::env::temp_dir().join(format!("transfer-genie-bulk-conflict-{}", now_ms()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-bulk-conflict-{}", now_ms()));
         fs::create_dir_all(&temp_dir).expect("create temp dir");
         let target = temp_dir.join("photo.png");
         fs::write(&target, b"one").expect("write original target");
@@ -15344,19 +17021,48 @@ mod tests {
     #[test]
     fn bulk_download_resume_identity_uses_etag_mtime_then_total_size() {
         use futures_util::stream;
-        let response = |etag: Option<&str>, mtime: Option<&str>, total_size: Option<u64>| webdav::DownloadStreamResponse {
-            stream: Box::pin(stream::empty()), content_length: None, total_size,
-            etag: etag.map(str::to_string), last_modified: mtime.map(str::to_string), status_code: 206,
+        let response = |etag: Option<&str>, mtime: Option<&str>, total_size: Option<u64>| {
+            webdav::DownloadStreamResponse {
+                stream: Box::pin(stream::empty()),
+                content_length: None,
+                total_size,
+                etag: etag.map(str::to_string),
+                last_modified: mtime.map(str::to_string),
+                status_code: 206,
+            }
         };
-        let partial = |etag: Option<&str>, mtime: Option<&str>, total_bytes: i64| DbPartialDownload {
-            endpoint_id: "endpoint-1".into(), filename: "file".into(), original_name: "file.bin".into(),
-            final_path: "file.bin".into(), temp_path: "file.bin.part".into(), downloaded_bytes: 5, total_bytes,
-            etag: etag.map(str::to_string), mtime: mtime.map(str::to_string), updated_at_ms: 1,
-        };
-        assert!(resume_identity_matches(&partial(Some("etag-1"), None, 10), &response(Some("etag-1"), None, Some(10))));
-        assert!(!resume_identity_matches(&partial(Some("etag-1"), None, 10), &response(Some("etag-2"), None, Some(10))));
-        assert!(resume_identity_matches(&partial(None, Some("mtime-1"), 10), &response(None, Some("mtime-1"), Some(10))));
-        assert!(resume_identity_matches(&partial(None, None, 10), &response(None, None, Some(10))));
-        assert!(!resume_identity_matches(&partial(None, None, 10), &response(None, None, Some(11))));
+        let partial =
+            |etag: Option<&str>, mtime: Option<&str>, total_bytes: i64| DbPartialDownload {
+                endpoint_id: "endpoint-1".into(),
+                filename: "file".into(),
+                original_name: "file.bin".into(),
+                final_path: "file.bin".into(),
+                temp_path: "file.bin.part".into(),
+                downloaded_bytes: 5,
+                total_bytes,
+                etag: etag.map(str::to_string),
+                mtime: mtime.map(str::to_string),
+                updated_at_ms: 1,
+            };
+        assert!(resume_identity_matches(
+            &partial(Some("etag-1"), None, 10),
+            &response(Some("etag-1"), None, Some(10))
+        ));
+        assert!(!resume_identity_matches(
+            &partial(Some("etag-1"), None, 10),
+            &response(Some("etag-2"), None, Some(10))
+        ));
+        assert!(resume_identity_matches(
+            &partial(None, Some("mtime-1"), 10),
+            &response(None, Some("mtime-1"), Some(10))
+        ));
+        assert!(resume_identity_matches(
+            &partial(None, None, 10),
+            &response(None, None, Some(10))
+        ));
+        assert!(!resume_identity_matches(
+            &partial(None, None, 10),
+            &response(None, None, Some(11))
+        ));
     }
 }

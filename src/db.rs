@@ -1237,6 +1237,15 @@ fn get_download_history_by_key(
     .optional()
 }
 
+pub fn find_download_history_by_key(
+    path: &Path,
+    endpoint_id: &str,
+    filename: &str,
+) -> rusqlite::Result<Option<DbDownloadHistory>> {
+    let conn = Connection::open(path)?;
+    get_download_history_by_key(&conn, endpoint_id, filename)
+}
+
 pub fn upsert_download_history(
     path: &Path,
     entry: &DbDownloadHistory,
@@ -1573,12 +1582,34 @@ mod tests {
         }
     }
 
-    fn sample_file_message(endpoint_id: &str, filename: &str, original_name: &str, timestamp_ms: i64) -> DbMessage {
+    fn sample_file_message(
+        endpoint_id: &str,
+        filename: &str,
+        original_name: &str,
+        timestamp_ms: i64,
+    ) -> DbMessage {
         DbMessage {
-            endpoint_id: endpoint_id.to_string(), filename: filename.to_string(), sender: "tester".to_string(), timestamp_ms, size: timestamp_ms,
-            kind: "file".to_string(), original_name: original_name.to_string(), etag: None, mtime: None, content: None, local_path: None,
-            remote_path: Some(format!("files/{filename}")), file_hash: None, marked: false, marked_tag_ids: Vec::new(), marked_pinned: false,
-            marked_due_date: None, format: "text".to_string(), transcript_source: None, source_audio_mime_type: None, transcript_raw_text: None,
+            endpoint_id: endpoint_id.to_string(),
+            filename: filename.to_string(),
+            sender: "tester".to_string(),
+            timestamp_ms,
+            size: timestamp_ms,
+            kind: "file".to_string(),
+            original_name: original_name.to_string(),
+            etag: None,
+            mtime: None,
+            content: None,
+            local_path: None,
+            remote_path: Some(format!("files/{filename}")),
+            file_hash: None,
+            marked: false,
+            marked_tag_ids: Vec::new(),
+            marked_pinned: false,
+            marked_due_date: None,
+            format: "text".to_string(),
+            transcript_source: None,
+            source_audio_mime_type: None,
+            transcript_raw_text: None,
         }
     }
 
@@ -1586,14 +1617,31 @@ mod tests {
     fn list_bulk_download_candidates_filters_endpoint_search_and_sorts_latest_first() {
         let path = temp_db_path("bulk-download-candidates");
         init_db(&path, None).expect("initialize database");
-        upsert_message(&path, &sample_file_message("endpoint-1", "old", "old-photo.png", 100)).unwrap();
-        upsert_message(&path, &sample_file_message("endpoint-1", "new", "new-video.mp4", 300)).unwrap();
-        upsert_message(&path, &sample_file_message("endpoint-2", "other", "new-other.mp4", 400)).unwrap();
+        upsert_message(
+            &path,
+            &sample_file_message("endpoint-1", "old", "old-photo.png", 100),
+        )
+        .unwrap();
+        upsert_message(
+            &path,
+            &sample_file_message("endpoint-1", "new", "new-video.mp4", 300),
+        )
+        .unwrap();
+        upsert_message(
+            &path,
+            &sample_file_message("endpoint-2", "other", "new-other.mp4", 400),
+        )
+        .unwrap();
         let plain_text = sample_message("plain.txt", 500, &[], false);
         upsert_message(&path, &plain_text).unwrap();
 
         let rows = list_bulk_download_candidates(&path, "endpoint-1", None).unwrap();
-        assert_eq!(rows.iter().map(|row| row.filename.as_str()).collect::<Vec<_>>(), vec!["new", "old"]);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.filename.as_str())
+                .collect::<Vec<_>>(),
+            vec!["new", "old"]
+        );
         let searched = list_bulk_download_candidates(&path, "endpoint-1", Some("photo")).unwrap();
         assert_eq!(searched.len(), 1);
         assert_eq!(searched[0].original_name, "old-photo.png");

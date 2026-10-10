@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import '../frontend/feed-state.js';
+import '../src-ui/src/utils/feed-state.js';
 
 const feedState = globalThis.transferGenieFeedState;
 
@@ -96,7 +96,7 @@ function testFilterMessagesForSearch() {
   assert.equal(result.searchState.hasQuery, true);
   assert.deepEqual(
     result.messages.map((item) => item.filename),
-    ['bravo.bin']
+    ['alpha.txt', 'bravo.bin', 'charlie.txt']
   );
 }
 

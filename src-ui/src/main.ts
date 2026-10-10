@@ -436,6 +436,7 @@ async function loadLegacyRuntime() {
   await import("./utils/settings-runtime-status.js");
   await import("./utils/feed-state.js");
   await import("./utils/feed-view-model.js");
+  await import("./utils/media-runtime.js");
   await import("./utils/bulk-download-runtime.js");
   await import("./utils/settings-form-runtime.js");
   await import("./legacy-main.js");

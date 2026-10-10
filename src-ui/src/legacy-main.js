@@ -11,6 +11,10 @@ const feedViewModel = window.transferGenieFeedViewModel || null;
 const settingsFormRuntime = window.transferGenieSettingsFormRuntime || null;
 const settingsOpsRuntime = window.transferGenieSettingsOpsRuntime || null;
 const settingsRuntimeStatus = window.transferGenieSettingsRuntimeStatus || null;
+const mediaRuntime = window.transferGenieMediaRuntime || null;
+const mediaSession = mediaRuntime?.createMediaSession({
+  onActivePath: (path) => invoke?.('set_active_media_playback_path', { path }).catch(() => {}),
+});
 const DEFAULT_EDITOR_FORMAT_STORAGE_KEY = 'transfer-genie.default-editor-format';
 const HOME_LAYOUT_STORAGE_KEY = 'transfer-genie.home-layout';
 const DEFAULT_SPEECH_CUE_SOUND_KIND = 'system';
@@ -3299,13 +3303,8 @@ async function sendSpeechTranscriptMessage(audio, transcript, rawTranscript) {
 
 async function getMessageSourceAudioSrc(message) {
   if (!message?.filename) return;
-  if (!invoke) {
-    setErrorStatus('未检测到 Tauri API，请检查 app.withGlobalTauri 设置');
-    return;
-  }
-  const path = await invoke('get_message_source_audio_file', { filename: message.filename });
-  const tauriConvert = window.__TAURI__?.tauri?.convertFileSrc || window.__TAURI__?.path?.convertFileSrc || window.__TAURI__?.core?.convertFileSrc;
-  return tauriConvert ? tauriConvert(path) : path;
+  const result = await resolveMessageMediaSource(message, 'speech-audio');
+  return tauriAssetUrl(result.path);
 }
 
 async function playMessageSourceAudio(message) {
@@ -3321,7 +3320,7 @@ async function playMessageSourceAudio(message) {
   }
 }
 
-function createSpeechSourceAudioControls(message) {
+function createSpeechSourceAudioControls(message, owner = `speech-${message.filename}`) {
   const wrap = document.createElement('div');
   wrap.className = 'speech-source-audio-player';
 
@@ -3330,6 +3329,21 @@ function createSpeechSourceAudioControls(message) {
   audio.controls = true;
   audio.preload = 'metadata';
   audio.setAttribute('aria-label', '源音频');
+  audio.hidden = true;
+  const status = document.createElement('span');
+  status.className = 'speech-source-audio-status';
+  status.dataset.mediaEndpointId = message.endpoint_id || activeEndpointId || '';
+  status.dataset.mediaFilename = message.filename || '';
+  const playButton = document.createElement('button');
+  playButton.type = 'button';
+  playButton.className = 'button ghost small';
+  playButton.textContent = '播放源音频';
+  playButton.dataset.mediaControl = 'true';
+  const cancelButton = document.createElement('button');
+  cancelButton.type = 'button';
+  cancelButton.className = 'button ghost small';
+  cancelButton.textContent = '取消加载';
+  cancelButton.dataset.mediaControl = 'true';
 
   let loadPromise = null;
   const loadAudioSource = async () => {
@@ -3343,10 +3357,23 @@ function createSpeechSourceAudioControls(message) {
     return loadPromise;
   };
 
-  loadAudioSource().catch((error) => {
-    console.warn('Load speech source audio failed', error);
+  playButton.addEventListener('click', async () => {
+    playButton.disabled = true;
+    status.textContent = '正在准备源音频…';
+    try {
+      await loadAudioSource();
+      audio.hidden = false;
+      mediaSession?.activate({ owner, element: audio });
+      await audio.play();
+      playButton.hidden = true;
+      status.textContent = '';
+    } catch (error) {
+      playButton.disabled = false;
+      status.textContent = String(error?.message || error);
+    }
   });
-  wrap.appendChild(audio);
+  cancelButton.addEventListener('click', () => invoke('cancel_media_playback_cache', { input: { endpointId: message.endpoint_id || activeEndpointId || '', filename: message.filename, originalName: message.original_name || '', variant: 'speech-audio' } }).catch(() => {}));
+  wrap.append(audio, playButton, cancelButton, status);
   return wrap;
 }
 
@@ -4201,9 +4228,55 @@ function toggleSystemDictationRecording() {
 }
 
 function isImagePath(path) {
-    if (!path) return false;
-    const lower = path.toLowerCase();
-    return lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.gif') || lower.endsWith('.webp') || lower.endsWith('.bmp');
+    return mediaRuntime ? mediaRuntime.mediaKind(path) === 'image' : false;
+}
+
+function mediaKindForPath(path, mimeType) {
+  return mediaRuntime?.mediaKind(path, mimeType) || (isImagePath(path) ? 'image' : 'file');
+}
+
+function tauriAssetUrl(path) {
+  const convert = window.__TAURI__?.tauri?.convertFileSrc || window.__TAURI__?.path?.convertFileSrc || window.__TAURI__?.core?.convertFileSrc;
+  return convert ? convert(path) : path;
+}
+
+async function resolveMessageMediaSource(message, variant = 'file') {
+  if (!invoke) throw new Error('媒体播放服务不可用');
+  return invoke('resolve_media_playback_source', {
+    input: {
+      endpointId: message?.endpoint_id || message?.endpointId || activeEndpointId || '',
+      filename: message?.filename || '',
+      originalName: message?.original_name || message?.originalName || '',
+      variant,
+    },
+  });
+}
+
+function createMediaElement(kind, options = {}) {
+  const element = document.createElement(kind);
+  element.controls = true;
+  element.preload = 'metadata';
+  element.className = options.className || `message-${kind}-player`;
+  element.dataset.mediaControl = 'true';
+  element.addEventListener('pointerdown', (event) => event.stopPropagation());
+  element.addEventListener('click', (event) => event.stopPropagation());
+  return element;
+}
+
+async function loadAndPlayMediaElement(element, message, owner, variant = 'file') {
+  const name = message?.original_name || message?.originalName || message?.filename || '';
+  const support = mediaRuntime?.canPlay(name, message?.source_audio_mime_type);
+  if (support === false) throw new Error('当前格式不支持应用内播放，请下载后使用系统程序打开');
+  const result = await resolveMessageMediaSource(message, variant);
+  element.src = tauriAssetUrl(result.path);
+  mediaSession?.activate({ owner, element, path: result.path });
+  try {
+    await element.play();
+  } catch (error) {
+    mediaSession?.stopOwner(owner);
+    throw new Error('当前格式不支持应用内播放，请下载后使用系统程序打开');
+  }
+  return result;
 }
 
 function isValidGlobalHotkey(value) {
@@ -8922,6 +8995,7 @@ function legacyResetMarkedFilter(options = {}) {
 
 function closeMessagePreview() {
   if (!messagePreview) return;
+  mediaSession?.stopOwner('message-preview');
   currentPreviewMessage = null;
   if (messagePreviewBody) {
     messagePreviewBody.innerHTML = '';
@@ -9077,11 +9151,15 @@ function renderPreviewContent(message) {
       if (transcriptToggle) {
         messagePreviewBody.appendChild(transcriptToggle);
       }
+      if (isSpeechTranscriptMessage(message)) {
+        messagePreviewBody.appendChild(createSpeechSourceAudioControls(message, 'message-preview'));
+      }
     }
   } else {
     messagePreviewBody.classList.remove('is-markdown');
     
-    const isImage = isImagePath(message.original_name || message.filename);
+    const mediaKind = mediaKindForPath(message.original_name || message.filename);
+    const isImage = mediaKind === 'image';
     const tauriConvert = window.__TAURI__?.tauri?.convertFileSrc || window.__TAURI__?.path?.convertFileSrc || window.__TAURI__?.core?.convertFileSrc;
 
     if (isImage && tauriConvert) {
@@ -9095,9 +9173,9 @@ function renderPreviewContent(message) {
         img.src = tauriConvert(message.local_path);
       } else {
         // Try thumbnail first
-        invoke('get_thumbnail', { filename: message.filename })
+        invoke('get_media_preview', { input: { endpointId: message.endpoint_id || activeEndpointId || '', filename: message.filename, originalName: message.original_name || '' } })
           .then(path => {
-            if (!img.getAttribute('src')) {
+            if (path && !img.getAttribute('src')) {
               img.src = tauriConvert(path);
             }
           })
@@ -9106,6 +9184,51 @@ function renderPreviewContent(message) {
       
       imgContainer.appendChild(img);
       messagePreviewBody.appendChild(imgContainer);
+    }
+
+    if (mediaKind === 'audio' || mediaKind === 'video') {
+      const mediaWrap = document.createElement('div');
+      mediaWrap.className = `message-preview-media-wrap is-${mediaKind}`;
+      const media = createMediaElement(mediaKind, { className: `message-preview-${mediaKind}` });
+      media.hidden = true;
+      if (mediaKind === 'video') media.playsInline = true;
+      const status = document.createElement('div');
+      status.className = 'message-preview-media-status';
+      status.dataset.mediaEndpointId = message.endpoint_id || activeEndpointId || '';
+      status.dataset.mediaFilename = message.filename || '';
+      status.textContent = '媒体仅在需要时加载，不会计入正式下载';
+      const loadButton = document.createElement('button');
+      loadButton.type = 'button';
+      loadButton.className = 'button primary small message-preview-media-load';
+      loadButton.textContent = mediaKind === 'video' ? '播放视频' : '播放音频';
+      loadButton.dataset.mediaControl = 'true';
+      loadButton.addEventListener('click', async () => {
+        loadButton.disabled = true;
+        status.textContent = '正在准备媒体…';
+        try {
+          media.hidden = false;
+          await loadAndPlayMediaElement(media, message, 'message-preview');
+          status.textContent = '';
+          loadButton.hidden = true;
+        } catch (error) {
+          media.hidden = true;
+          loadButton.disabled = false;
+          status.textContent = String(error?.message || error);
+        }
+      });
+      const cancelButton = document.createElement('button');
+      cancelButton.type = 'button';
+      cancelButton.className = 'button ghost small message-preview-media-cancel';
+      cancelButton.textContent = '取消加载';
+      cancelButton.dataset.mediaControl = 'true';
+      cancelButton.addEventListener('click', () => invoke('cancel_media_playback_cache', { input: { endpointId: message.endpoint_id || activeEndpointId || '', filename: message.filename, originalName: message.original_name || '', variant: 'file' } }).catch(() => {}));
+      if (mediaKind === 'video') {
+        invoke('get_media_preview', { input: { endpointId: message.endpoint_id || activeEndpointId || '', filename: message.filename, originalName: message.original_name || '' } })
+          .then((path) => { media.poster = tauriAssetUrl(path); })
+          .catch(() => {});
+      }
+      mediaWrap.append(media, loadButton, cancelButton, status);
+      messagePreviewBody.appendChild(mediaWrap);
     }
 
     const title = document.createElement('div');
@@ -9135,6 +9258,9 @@ function renderPreviewContent(message) {
 
 function openMessagePreview(message) {
   if (!messagePreview || !message) return;
+  if (currentPreviewMessage?.filename && currentPreviewMessage.filename !== message.filename) {
+    mediaSession?.stopOwner('message-preview');
+  }
   currentPreviewMessage = message;
   messagePreview.classList.add('is-active');
   messagePreview.setAttribute('aria-hidden', 'false');
@@ -9349,7 +9475,8 @@ function renderMessages(messages, options = {}) {
         collapseQueue.push({ item, body, message });
       }
     } else {
-      if (viewModel.isImage) {
+      const mediaKind = mediaKindForPath(message.original_name || message.filename);
+      if (viewModel.isImage || mediaKind === 'video') {
         body.classList.add('is-image-message');
         body.innerHTML = ''; // Clear existing content
 
@@ -9365,9 +9492,9 @@ function renderMessages(messages, options = {}) {
         
         const tauriConvert = window.__TAURI__?.tauri?.convertFileSrc || window.__TAURI__?.path?.convertFileSrc || window.__TAURI__?.core?.convertFileSrc;
         
-        invoke('get_thumbnail', { filename: message.filename })
+        invoke('get_media_preview', { input: { endpointId: message.endpoint_id || activeEndpointId || '', filename: message.filename, originalName: message.original_name || '' } })
           .then(path => {
-            if (tauriConvert) {
+            if (path && tauriConvert) {
               thumbImg.src = tauriConvert(path);
             }
           })
@@ -9379,6 +9506,27 @@ function renderMessages(messages, options = {}) {
         body.addEventListener('dblclick', () => {
           openMessagePreview(message);
         });
+        if (mediaKind === 'video') {
+          const playButton = document.createElement('button');
+          playButton.type = 'button';
+          playButton.className = 'message-media-play-button';
+          playButton.textContent = '▶';
+          playButton.title = '播放视频';
+          playButton.dataset.mediaControl = 'true';
+          playButton.addEventListener('click', (event) => { event.stopPropagation(); openMessagePreview(message); });
+          body.appendChild(playButton);
+        }
+      } else if (mediaKind === 'audio') {
+        body.classList.add('is-audio-message');
+        const label = document.createElement('span');
+        label.textContent = viewModel.originalName;
+        const playButton = document.createElement('button');
+        playButton.type = 'button';
+        playButton.className = 'message-media-play-button';
+        playButton.textContent = '▶ 播放';
+        playButton.dataset.mediaControl = 'true';
+        playButton.addEventListener('click', (event) => { event.stopPropagation(); openMessagePreview(message); });
+        body.replaceChildren(label, playButton);
       } else {
         body.textContent = viewModel.bodyText;
       }
@@ -9971,6 +10119,9 @@ function hasActiveContentTransfer() {
 }
 
 async function loadMessages(options = {}) {
+  if (options.loadMore || (!options.checkNew && !options.preserveMedia)) {
+    mediaSession?.stop('message-page-change');
+  }
   if (isLoadMessagesRunning && options.checkNew) {
     return;
   }
@@ -11076,6 +11227,9 @@ function applySettings(settings) {
     speechToTextPolishTemperature: normalizeSpeechPolishTemperature(speechToText.polish_temperature ?? DEFAULT_SPEECH_POLISH_TEMPERATURE),
     speechToTextPolishTimeoutSecs: normalizeSpeechPolishTimeoutSecs(speechToText.polish_timeout_secs ?? DEFAULT_SPEECH_POLISH_TIMEOUT_SECS),
   };
+  audio.addEventListener('play', () => {
+    mediaSession?.activate({ owner, element: audio });
+  });
   syncVueSettingsForm(currentSettingsFormState);
   syncShortcutsEnabledState();
   syncSpeechCueSoundControls();
@@ -11138,6 +11292,8 @@ function applySettings(settings) {
   queueSettingsSectionUpdate();
   startRefreshTimer(settings.refresh_interval_secs || 5);
   if (previousActiveEndpointId !== activeEndpointId) {
+    mediaSession?.stop('endpoint-change');
+    closeMessagePreview();
     resetComposerMarkDraft();
   } else {
     renderComposerMarkTagList();
@@ -12064,6 +12220,8 @@ function renderSelectedFiles() {
   selectedFiles.forEach((path, index) => {
     const fileItem = document.createElement('div');
     fileItem.className = 'selected-file-item';
+    fileItem.dataset.pendingMediaOwner = path;
+    const mediaKind = mediaKindForPath(path);
 
     if (isImagePath(path)) {
         const tauriConvert = window.__TAURI__?.tauri?.convertFileSrc || window.__TAURI__?.path?.convertFileSrc || window.__TAURI__?.core?.convertFileSrc;
@@ -12089,6 +12247,18 @@ function renderSelectedFiles() {
         } else {
             fileItem.style.backgroundColor = 'red'; // Visual debug hint
         }
+    } else if (mediaKind === 'audio' || mediaKind === 'video') {
+        const media = createMediaElement(mediaKind, { className: `selected-file-${mediaKind}` });
+        media.src = tauriAssetUrl(path);
+        if (mediaKind === 'video') {
+          media.muted = true;
+          media.playsInline = true;
+        }
+        media.addEventListener('play', () => {
+          media.muted = false;
+          mediaSession?.activate({ owner: `pending-${path}`, element: media, path });
+        });
+        fileItem.appendChild(media);
     } else {
         const fileIcon = document.createElement('div');
         fileIcon.className = 'selected-file-icon';
@@ -12122,6 +12292,7 @@ function renderSelectedFiles() {
 
 function removeSelectedFile(index) {
   if (index >= 0 && index < selectedFiles.length) {
+    mediaSession?.stopOwner(`pending-${selectedFiles[index]}`);
     selectedFiles.splice(index, 1);
     renderSelectedFiles();
   }
@@ -12491,6 +12662,22 @@ async function refreshMessages(options = {}) {
 }
 
 if (listen) {
+  listen('media-playback-progress', (event) => {
+    const payload = event.payload || {};
+    const endpointId = String(payload.endpointId || payload.endpoint_id || '');
+    const filename = String(payload.filename || '');
+    if (!endpointId || !filename) return;
+    document.querySelectorAll('[data-media-filename]').forEach((status) => {
+      if (status.dataset.mediaEndpointId !== endpointId || status.dataset.mediaFilename !== filename) return;
+      if (payload.status === 'progress') {
+        const total = Number(payload.total || 0);
+        const received = Number(payload.received || 0);
+        status.textContent = total > 0 ? `正在缓存 ${Math.min(100, Math.round(received / total * 100))}%` : '正在缓存媒体…';
+      } else if (payload.status === 'error') status.textContent = payload.error || '媒体缓存失败';
+      else if (payload.status === 'cancelled') status.textContent = '已取消媒体缓存';
+      else if (payload.status === 'complete') status.textContent = '';
+    });
+  });
   listen('download-progress', (event) => {
     const payload = event.payload || {};
     const filename = payload.filename;

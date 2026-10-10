@@ -211,6 +211,13 @@ function preloadScript() {
       thumbnailActive: 0,
       thumbnailPeak: 0,
       openDownloadDirCalls: 0,
+      selectedDialogPaths: null,
+      previewPaths: {},
+      mediaPlayCount: 0,
+      mediaPauseCount: 0,
+      failMediaPlayPattern: '',
+      failMediaResolvePattern: '',
+      mediaResolveDelayMs: 0,
       aiRequests: [],
       failAiPolish: false,
       aiStreamDelayMs: 0,
@@ -230,6 +237,17 @@ function preloadScript() {
       fullscreenWasExitedBeforeLoadMessagesAfterSpeechSend: null,
     };
     window.__speechSmoke.longText = '语音识别文本'.repeat(20);
+    HTMLMediaElement.prototype.play = async function () {
+      window.__speechSmoke.mediaPlayCount += 1;
+      if (window.__speechSmoke.failMediaPlayPattern && String(this.src || '').includes(window.__speechSmoke.failMediaPlayPattern)) {
+        throw new Error('unsupported media fixture');
+      }
+      this.dispatchEvent(new Event('play'));
+    };
+    HTMLMediaElement.prototype.pause = function () {
+      window.__speechSmoke.mediaPauseCount += 1;
+      this.dispatchEvent(new Event('pause'));
+    };
     const originalFetch = window.fetch?.bind(window);
     window.fetch = async (input, init) => {
       const url = typeof input === 'string' ? input : String(input?.url || '');
@@ -267,11 +285,24 @@ function preloadScript() {
             return { resources: selected, total: selected.length, totalSize: selected.reduce((sum, item) => sum + item.size, 0), statusCounts: { newDownload: selected.filter((item) => item.status === 'notDownloaded').length, resumable: 0, redownload: 0, skipped: selected.filter((item) => item.status === 'downloaded').length } };
           }
           if (command === 'open_download_dir') { window.__speechSmoke.openDownloadDirCalls += 1; return null; }
-          if (command === 'get_thumbnail') {
+          if (command === 'resolve_media_playback_source') {
+            if (window.__speechSmoke.mediaResolveDelayMs > 0) {
+              await new Promise((resolve) => setTimeout(resolve, window.__speechSmoke.mediaResolveDelayMs));
+            }
+            if (window.__speechSmoke.failMediaResolvePattern && String(args?.input?.filename || '').includes(window.__speechSmoke.failMediaResolvePattern)) {
+              throw new Error('controlled media cache failure');
+            }
+            return { path: 'C:/media/' + (args?.input?.originalName || args?.input?.filename || 'media.bin'), source: 'previewCache', resourceKey: 'media-key' };
+          }
+          if (command === 'set_active_media_playback_path' || command === 'cancel_media_playback_cache') return true;
+          if (command === 'delete_messages') return { deleted: (args?.filenames || []).length, failed: [] };
+          if (command === 'get_thumbnail' || command === 'get_media_preview') {
             window.__speechSmoke.thumbnailActive += 1;
             window.__speechSmoke.thumbnailPeak = Math.max(window.__speechSmoke.thumbnailPeak, window.__speechSmoke.thumbnailActive);
             await new Promise((resolve) => setTimeout(resolve, 10));
             window.__speechSmoke.thumbnailActive -= 1;
+            const previewName = String(args?.input?.filename || args?.filename || '');
+            if (window.__speechSmoke.previewPaths[previewName]) return window.__speechSmoke.previewPaths[previewName];
             throw new Error('thumbnail unavailable');
           }
           if (command === 'save_settings') return args.settings;
@@ -409,6 +440,9 @@ function preloadScript() {
           if (command === 'send_file') {
             return { filename: 'file-message.bin', markedTagIds: [] };
           }
+          if (command === 'send_file_data') {
+            return { filename: 'pasted-file.bin', originalName: args?.originalName, markedTagIds: [] };
+          }
           if (command === 'get_message_source_audio_file') return 'data:audio/wav;base64,UklGRg==';
           if (command === 'download_message_file') {
             window.__speechSmoke.bulkDownloads += String(args?.filename || '').startsWith('bulk-') ? 1 : 0;
@@ -424,6 +458,7 @@ function preloadScript() {
             }
             return { messages: window.__speechSmoke.sentMessages, has_more_before: false, has_more_after: false };
           }
+          if (command === 'refresh') return { state: 'idle', syncing: false, pending: false };
           if (command === 'get_sync_status') return { state: 'idle', syncing: false, pending: false };
           if (command === 'get_local_http_api_status') return { state: 'disabled', running: false };
           if (command === 'get_telegram_bridge_status') return { running: false };
@@ -446,7 +481,7 @@ function preloadScript() {
         },
       },
       path: { convertFileSrc: (value) => value },
-      dialog: { open: async () => null, save: async () => null }
+      dialog: { open: async () => window.__speechSmoke.selectedDialogPaths, save: async () => null }
     };
     Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: {
       enumerateDevices: async () => ([
@@ -568,8 +603,6 @@ async function run() {
         if (
           document.querySelector('#speech-to-text-toggle') &&
           document.querySelector('#speech-to-text-enabled')?.checked &&
-          document.querySelector('#speech-to-text-api-key')?.value === 'saved-for-smoke' &&
-          document.querySelector('#speech-to-text-microphone')?.value === 'mic-1' &&
           window.__speechSmoke?.eventHandlers?.['system-dictation-toggle']
           && window.transferGenieBulkDownloadRuntime
           && window.transferGenieDownloadBulkResource
@@ -673,9 +706,102 @@ async function run() {
       document.querySelector('[data-bulk-view="large-icons"]').click();
       document.querySelector('[data-bulk-category="video"]').click();
       await new Promise((resolve) => setTimeout(resolve, 80));
+      const selectedBeforeVideoPreview = document.querySelectorAll('.bulk-download-item.is-selected').length;
+      const videoThumbPlay = document.querySelector('.bulk-download-thumb-play');
+      videoThumbPlay?.click();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const videoOverlayOpen = !!document.querySelector('.bulk-media-overlay .bulk-media-video');
+      const selectedAfterVideoPreview = document.querySelectorAll('.bulk-download-item.is-selected').length;
+      const videoControl = document.querySelector('.bulk-media-video');
+      const videoRect = videoControl?.getBoundingClientRect();
+      if (videoControl && videoRect) {
+        pointer(videoControl, 'pointerdown', videoRect.left + 5, videoRect.top + 5, 18);
+        pointer(videoControl, 'pointermove', videoRect.left + 25, videoRect.top + 5, 18);
+        pointer(videoControl, 'pointerup', videoRect.left + 25, videoRect.top + 5, 18);
+      }
+      const videoProgressDragIsolated = document.querySelectorAll('.bulk-download-item.is-selected').length === selectedAfterVideoPreview
+        && document.querySelector('#bulk-download-selection-box').hidden;
+      document.querySelector('.bulk-media-close')?.click();
+      const videoOverlayClosed = !document.querySelector('.bulk-media-overlay');
+      document.querySelector('[data-bulk-category="audio"]').click();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      const audioItem = document.querySelector('.bulk-download-item');
+      const audioHeightBefore = audioItem?.getBoundingClientRect().height || 0;
+      const audioSelectedBefore = document.querySelectorAll('.bulk-download-item.is-selected').length;
+      const audioThumbPlay = audioItem?.querySelector('.bulk-download-thumb-play');
+      audioThumbPlay?.click();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const audioPlayer = document.querySelector('.bulk-audio-player');
+      const audioElement = audioPlayer?.querySelector('.bulk-media-audio');
+      const audioProgress = audioPlayer?.querySelector('.bulk-audio-progress');
+      const audioToggle = audioPlayer?.querySelector('.bulk-audio-toggle');
+      const audioTime = audioPlayer?.querySelector('.bulk-audio-time');
+      const audioInlineOpen = !!audioPlayer && !!audioProgress && !!audioToggle && !!audioTime;
+      const audioHeightAfterOpen = audioItem?.getBoundingClientRect().height || 0;
+      const audioCardHeightStable = Math.abs(audioHeightAfterOpen - audioHeightBefore) < 1;
+      if (audioElement) {
+        Object.defineProperty(audioElement, 'duration', { configurable: true, value: 125 });
+        audioElement.currentTime = 30;
+        audioElement.dispatchEvent(new Event('loadedmetadata'));
+        audioElement.dispatchEvent(new Event('timeupdate'));
+      }
+      const audioTimeAfterProgress = audioTime?.textContent || '';
+      const audioProgressReady = audioProgress?.max === '125' && Math.round(Number(audioProgress?.value)) === 30 && !audioProgress?.disabled;
+      if (audioProgress) {
+        audioProgress.value = '75';
+        audioProgress.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      const audioSeekApplied = Math.round(Number(audioElement?.currentTime)) === 75
+        && (audioTime?.textContent || '') === '1:15 / 2:05';
+      const pauseBeforeAudioToggle = window.__speechSmoke.mediaPauseCount;
+      audioToggle?.click();
+      const audioPausedFromCustomControl = window.__speechSmoke.mediaPauseCount > pauseBeforeAudioToggle
+        && audioToggle?.getAttribute('aria-label') === '播放';
+      const playBeforeAudioToggle = window.__speechSmoke.mediaPlayCount;
+      audioToggle?.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const audioResumedFromCustomControl = window.__speechSmoke.mediaPlayCount > playBeforeAudioToggle
+        && audioToggle?.getAttribute('aria-label') === '暂停';
+      const audioSelectedAfter = document.querySelectorAll('.bulk-download-item.is-selected').length;
+      const audioControl = audioProgress;
+      const audioRect = audioControl?.getBoundingClientRect();
+      if (audioControl && audioRect) {
+        pointer(audioControl, 'pointerdown', audioRect.left + 5, audioRect.top + 5, 19);
+        await new Promise((resolve) => setTimeout(resolve, 330));
+        pointer(audioControl, 'pointermove', audioRect.left + 25, audioRect.top + 5, 19);
+        pointer(audioControl, 'pointerup', audioRect.left + 25, audioRect.top + 5, 19);
+      }
+      const audioLongPressIsolated = document.querySelectorAll('.bulk-download-item.is-selected').length === audioSelectedAfter
+        && document.querySelector('#bulk-download-selection-box').hidden;
+      const pauseBeforeAudioClose = window.__speechSmoke.mediaPauseCount;
+      audioPlayer?.querySelector('.bulk-audio-close')?.click();
+      const audioCloseStopped = window.__speechSmoke.mediaPauseCount > pauseBeforeAudioClose
+        && !document.querySelector('.bulk-audio-player');
+      const audioHeightAfterClose = audioItem?.getBoundingClientRect().height || 0;
+      const audioCloseHeightStable = Math.abs(audioHeightAfterClose - audioHeightBefore) < 1;
+      const audioStableViews = {};
+      for (const view of ['tiles', 'details', 'list', 'small-icons', 'large-icons']) {
+        document.querySelector('[data-bulk-view="' + view + '"]')?.click();
+        const viewItem = document.querySelector('.bulk-download-item');
+        const beforeHeight = viewItem?.getBoundingClientRect().height || 0;
+        const playButton = viewItem?.querySelector('.bulk-download-thumb-play');
+        playButton?.click();
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        const afterHeight = viewItem?.getBoundingClientRect().height || 0;
+        viewItem?.querySelector('.bulk-audio-close')?.click();
+        const closedHeight = viewItem?.getBoundingClientRect().height || 0;
+        audioStableViews[view] = !!playButton
+          && Math.abs(afterHeight - beforeHeight) < 1
+          && Math.abs(closedHeight - beforeHeight) < 1;
+      }
+      document.querySelector('.bulk-download-item .bulk-download-thumb-play')?.click();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const pauseBeforeCategorySwitch = window.__speechSmoke.mediaPauseCount;
       document.querySelector('[data-bulk-category="image"]').click();
       await new Promise((resolve) => setTimeout(resolve, 80));
       const restoredImageView = document.querySelector('#bulk-download-list').classList.contains('view-large-icons');
+      const categorySwitchStoppedMedia = window.__speechSmoke.mediaPauseCount > pauseBeforeCategorySwitch
+        && !document.querySelector('.bulk-media-audio');
       const thumbnailFallback = [...document.querySelectorAll('.bulk-download-thumb')].every((item) => !item.querySelector('img'));
       const thumbnailPeak = window.__speechSmoke.thumbnailPeak;
       document.querySelector('[data-bulk-category="all"]').click();
@@ -721,7 +847,7 @@ async function run() {
       const finalStates = [...document.querySelectorAll('#download-task-panel .download-task-state')].map((item) => item.textContent);
       const bulkErrors = window.__speechSmoke.calls.filter((call) => call.command === 'download_message_file' && call.args?.filename === window.__speechSmoke.bulkDownloadFailure).length;
       const hasRetry = [...document.querySelectorAll('#download-task-panel .download-task-actions button')].some((button) => button.textContent === '重新下载');
-      return { initial, escapeClosed, backdropClosed, brushSelected, brushCancelled, brushClassAfterCancel, autoScrollTop, autoScrollPreview, autoScrollSelected, autoScrollStopped, restoredImageView, thumbnailFallback, thumbnailPeak, marqueePreview, marqueeSelected, detailsMarqueeHidden, crossPage, selected, frozenSelection, submitHint, queuedStates, badgeWhileQueued, finalStates, bulkErrors, failure: window.__speechSmoke.bulkDownloadFailure, hasRetry, open: document.querySelector('#bulk-download-modal').classList.contains('is-active'), downloads: window.__speechSmoke.bulkDownloads, openDir: window.__speechSmoke.openDownloadDirCalls };
+      return { initial, escapeClosed, backdropClosed, brushSelected, brushCancelled, brushClassAfterCancel, autoScrollTop, autoScrollPreview, autoScrollSelected, autoScrollStopped, videoThumbPlay: !!videoThumbPlay, videoOverlayOpen, videoOverlayClosed, selectedBeforeVideoPreview, selectedAfterVideoPreview, videoProgressDragIsolated, audioThumbPlay: !!audioThumbPlay, audioInlineOpen, audioCardHeightStable, audioCloseStopped, audioCloseHeightStable, audioStableViews, audioTimeAfterProgress, audioProgressReady, audioSeekApplied, audioPausedFromCustomControl, audioResumedFromCustomControl, audioSelectedBefore, audioSelectedAfter, audioLongPressIsolated, categorySwitchStoppedMedia, restoredImageView, thumbnailFallback, thumbnailPeak, marqueePreview, marqueeSelected, detailsMarqueeHidden, crossPage, selected, frozenSelection, submitHint, queuedStates, badgeWhileQueued, finalStates, bulkErrors, failure: window.__speechSmoke.bulkDownloadFailure, hasRetry, open: document.querySelector('#bulk-download-modal').classList.contains('is-active'), downloads: window.__speechSmoke.bulkDownloads, openDir: window.__speechSmoke.openDownloadDirCalls };
     })()))()`));
     assert.deepEqual(bulkDownloadResult.initial, { active: true, count: 60, page: '1 / 2', emptyHidden: true, pageSizeInFooter: true });
     assert.equal(bulkDownloadResult.escapeClosed, true, 'Escape closes bulk download modal');
@@ -732,6 +858,25 @@ async function run() {
     assert.ok(bulkDownloadResult.autoScrollTop > 0, 'marquee near the bottom edge auto-scrolls the resource area');
     assert.ok(bulkDownloadResult.autoScrollPreview >= 2, `auto-scroll keeps previewing newly intersected resources: ${JSON.stringify(bulkDownloadResult)}`);
     assert.equal(bulkDownloadResult.autoScrollStopped, true, 'releasing the pointer stops marquee auto-scroll');
+    assert.equal(bulkDownloadResult.videoThumbPlay, true, 'video card exposes its play action over the thumbnail');
+    assert.equal(bulkDownloadResult.videoOverlayOpen, true, 'video card opens an independent video preview layer');
+    assert.equal(bulkDownloadResult.videoOverlayClosed, true, 'video preview layer closes cleanly');
+    assert.equal(bulkDownloadResult.selectedAfterVideoPreview, bulkDownloadResult.selectedBeforeVideoPreview, 'video controls do not change selection');
+    assert.equal(bulkDownloadResult.videoProgressDragIsolated, true, 'dragging video controls does not start marquee selection');
+    assert.equal(bulkDownloadResult.audioThumbPlay, true, 'audio card exposes its play action over the thumbnail');
+    assert.equal(bulkDownloadResult.audioInlineOpen, true, 'audio card replaces its content with the custom progress player');
+    assert.equal(bulkDownloadResult.audioCardHeightStable, true, 'opening the audio player keeps the card height stable');
+    assert.equal(bulkDownloadResult.audioCloseStopped, true, 'the audio player close action stops playback and restores the card');
+    assert.equal(bulkDownloadResult.audioCloseHeightStable, true, 'closing the audio player keeps the card height stable');
+    assert.deepEqual(bulkDownloadResult.audioStableViews, { tiles: true, details: true, list: true, 'small-icons': true, 'large-icons': true }, 'all five views keep audio card dimensions stable while opening and closing the player');
+    assert.equal(bulkDownloadResult.audioTimeAfterProgress, '0:30 / 2:05', 'audio player shows current and total time');
+    assert.equal(bulkDownloadResult.audioProgressReady, true, 'audio progress becomes seekable after metadata loads');
+    assert.equal(bulkDownloadResult.audioSeekApplied, true, 'dragging audio progress seeks and updates the time label');
+    assert.equal(bulkDownloadResult.audioPausedFromCustomControl, true, 'custom audio control pauses playback');
+    assert.equal(bulkDownloadResult.audioResumedFromCustomControl, true, 'custom audio control resumes playback');
+    assert.equal(bulkDownloadResult.audioSelectedAfter, bulkDownloadResult.audioSelectedBefore, 'audio controls do not change selection');
+    assert.equal(bulkDownloadResult.audioLongPressIsolated, true, 'long-pressing and dragging audio controls does not start marquee selection');
+    assert.equal(bulkDownloadResult.categorySwitchStoppedMedia, true, 'switching bulk categories stops and removes active media');
     assert.equal(bulkDownloadResult.restoredImageView, true, 'category restores its saved view preference');
     assert.equal(bulkDownloadResult.thumbnailFallback, true, 'failed image thumbnails retain the type fallback');
     assert.ok(bulkDownloadResult.thumbnailPeak <= 4, 'thumbnail loading is capped at four concurrent requests');
@@ -750,6 +895,220 @@ async function run() {
     assert.equal(bulkDownloadResult.open, false, 'submitting closes bulk download modal');
     assert.equal(bulkDownloadResult.downloads, 19, 'downloaded resources are skipped while remaining selections are queued');
     assert.equal(bulkDownloadResult.openDir, 1, 'modal opens download directory');
+
+    const pendingMediaResult = await evaluate(client, `(async () => {
+      document.querySelector('[data-tab-target="home"]')?.click();
+      window.__speechSmoke.calls = [];
+      window.__speechSmoke.selectedDialogPaths = [
+        'C:/Smoke/photo-preview.png',
+        'C:/Smoke/voice-preview.mp3',
+        'C:/Smoke/movie-preview.mp4',
+      ];
+      const sentBefore = window.__speechSmoke.calls.filter((call) => call.command === 'send_file').length;
+      document.querySelector('#send-file').click();
+      await new Promise((resolve, reject) => {
+        const startedAt = Date.now();
+        const tick = () => {
+          if (document.querySelectorAll('#selected-files-container .selected-file-item').length === 3) resolve();
+          else if (Date.now() - startedAt > 2000) reject(new Error('pending media attachments did not render'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const image = document.querySelector('#selected-files-container .selected-file-preview');
+      const audio = document.querySelector('#selected-files-container audio');
+      const video = document.querySelector('#selected-files-container video');
+      await audio.play();
+      const pauseBeforeVideo = window.__speechSmoke.mediaPauseCount;
+      await video.play();
+      const oldPlayerPaused = window.__speechSmoke.mediaPauseCount > pauseBeforeVideo;
+      const pauseBeforeRemove = window.__speechSmoke.mediaPauseCount;
+      video.closest('.selected-file-item').querySelector('.remove-file-btn').click();
+      const removeStoppedPlayback = window.__speechSmoke.mediaPauseCount > pauseBeforeRemove;
+      image.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+      const localImagePreviewOpened = document.querySelector('#message-preview')?.classList.contains('is-active')
+        && !!document.querySelector('#message-preview .message-preview-image');
+      document.querySelector('#message-preview .message-preview-close')?.click();
+      const sentAfter = window.__speechSmoke.calls.filter((call) => call.command === 'send_file').length;
+      return {
+        countAfterRemove: document.querySelectorAll('#selected-files-container .selected-file-item').length,
+        hasImage: !!image,
+        hasAudio: !!audio,
+        hasVideo: !!video,
+        oldPlayerPaused,
+        removeStoppedPlayback,
+        localImagePreviewOpened,
+        sentDelta: sentAfter - sentBefore,
+      };
+    })()`);
+    assert.equal(pendingMediaResult.hasImage, true, 'pending image attachment renders a local preview');
+    assert.equal(pendingMediaResult.hasAudio, true, 'pending audio attachment renders playback controls');
+    assert.equal(pendingMediaResult.hasVideo, true, 'pending video attachment renders playback controls');
+    assert.equal(pendingMediaResult.oldPlayerPaused, true, 'starting pending video stops the previous audio session');
+    assert.equal(pendingMediaResult.removeStoppedPlayback, true, 'removing a pending media attachment stops its player');
+    assert.equal(pendingMediaResult.localImagePreviewOpened, true, 'pending image opens the full preview without sending');
+    assert.equal(pendingMediaResult.countAfterRemove, 2, 'removing one pending attachment preserves the others');
+    assert.equal(pendingMediaResult.sentDelta, 0, 'previewing pending attachments does not send files');
+
+    const pastedMediaResult = await evaluate(client, `(async () => {
+      window.__speechSmoke.calls = [];
+      const file = new File([new Uint8Array([137, 80, 78, 71])], 'clipboard-image.png', { type: 'image/png' });
+      const clipboardData = { files: [file], items: [{ kind: 'file', getAsFile: () => file }] };
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', { value: clipboardData });
+      document.dispatchEvent(event);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const call = window.__speechSmoke.calls.find((entry) => entry.command === 'send_file_data');
+      return { prevented: event.defaultPrevented, originalName: call?.args?.originalName, byteCount: call?.args?.data?.length || 0 };
+    })()`);
+    assert.equal(pastedMediaResult.prevented, true, 'pasting a media file is handled by the attachment upload path');
+    assert.equal(pastedMediaResult.originalName, 'clipboard-image.png', 'pasted media preserves its meaningful filename');
+    assert.equal(pastedMediaResult.byteCount, 4, 'pasted media sends the clipboard bytes through send_file_data');
+
+    const messageMediaResult = await evaluate(client, `(async () => {
+      const now = Date.now();
+      window.__speechSmoke.calls = [];
+      window.__speechSmoke.previewPaths = {
+        'image-message.png': 'C:/media/image-preview.jpg',
+        'video-message.mp4': 'C:/media/video-preview.jpg',
+      };
+      window.__speechSmoke.sentMessages = [
+        { filename: 'image-message.png', original_name: 'image-message.png', endpoint_id: 'endpoint-1', sender: 'Smoke', timestamp_ms: now, size: 10, kind: 'file', local_path: null, marked: false, marked_tag_ids: [], marked_pinned: false, format: 'text' },
+        { filename: 'audio-message.mp3', original_name: 'audio-message.mp3', endpoint_id: 'endpoint-1', sender: 'Smoke', timestamp_ms: now - 1, size: 20, kind: 'file', local_path: null, marked: false, marked_tag_ids: [], marked_pinned: false, format: 'text' },
+        { filename: 'video-message.mp4', original_name: 'video-message.mp4', endpoint_id: 'endpoint-1', sender: 'Smoke', timestamp_ms: now - 2, size: 30, kind: 'file', local_path: null, marked: false, marked_tag_ids: [], marked_pinned: false, format: 'text' },
+        { filename: 'unsupported-message.mkv', original_name: 'unsupported-message.mkv', endpoint_id: 'endpoint-1', sender: 'Smoke', timestamp_ms: now - 3, size: 40, kind: 'file', local_path: null, marked: false, marked_tag_ids: [], marked_pinned: false, format: 'text' },
+      ];
+      document.querySelector('#refresh-btn').click();
+      await new Promise((resolve, reject) => {
+        const startedAt = Date.now();
+        const tick = () => {
+          if (document.querySelectorAll('#message-list .message-card').length >= 4) resolve();
+          else if (Date.now() - startedAt > 2500) reject(new Error('media messages did not render'));
+          else setTimeout(tick, 25);
+        };
+        tick();
+      });
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      const cards = [...document.querySelectorAll('#message-list .message-card')];
+      const byName = (name) => cards.find((card) => card.dataset.filename === name);
+      const imageCard = byName('image-message.png');
+      const audioCard = byName('audio-message.mp3');
+      const videoCard = byName('video-message.mp4');
+      const unsupportedCard = byName('unsupported-message.mkv');
+      const feedImageLoaded = String(imageCard?.querySelector('.message-thumbnail')?.src || '').includes('image-preview.jpg');
+      const videoHasMarker = !!videoCard?.querySelector('.message-media-play-button');
+      const audioHasMarker = !!audioCard?.querySelector('.message-media-play-button');
+      const openCallsBefore = window.__speechSmoke.calls.filter((call) => call.command === 'open_message_file').length;
+      const messageList = document.querySelector('#message-list');
+      const previousListHeight = messageList.style.height;
+      messageList.style.height = '80px';
+      messageList.scrollTop = 20;
+      const scrollBeforePreview = messageList.scrollTop;
+      audioCard.querySelector('.message-media-play-button').click();
+      const audioPreviewOpened = document.querySelector('#message-preview')?.classList.contains('is-active')
+        && !!document.querySelector('#message-preview audio');
+      window.__speechSmoke.mediaResolveDelayMs = 80;
+      const audioResolveBefore = window.__speechSmoke.calls.filter((call) => call.command === 'resolve_media_playback_source' && call.args?.input?.filename === 'audio-message.mp3').length;
+      const audioLoadButton = document.querySelector('#message-preview .message-preview-media-load');
+      audioLoadButton?.click();
+      audioLoadButton?.click();
+      document.querySelector('#message-preview .message-preview-media-cancel')?.click();
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      window.__speechSmoke.mediaResolveDelayMs = 0;
+      const audioResolveAfter = window.__speechSmoke.calls.filter((call) => call.command === 'resolve_media_playback_source' && call.args?.input?.filename === 'audio-message.mp3').length;
+      const audioSourceRequested = window.__speechSmoke.calls.some((call) => call.command === 'resolve_media_playback_source' && call.args?.input?.filename === 'audio-message.mp3');
+      const audioDuplicateSuppressed = audioResolveAfter - audioResolveBefore === 1;
+      const audioCancelRequested = window.__speechSmoke.calls.some((call) => call.command === 'cancel_media_playback_cache' && call.args?.input?.filename === 'audio-message.mp3');
+      window.__speechSmoke.mediaResolveDelayMs = 0;
+      audioLoadButton?.click();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const pauseBeforeMessageSwitch = window.__speechSmoke.mediaPauseCount;
+      videoCard.querySelector('.message-media-play-button').click();
+      const messageSwitchStopped = window.__speechSmoke.mediaPauseCount > pauseBeforeMessageSwitch
+        && !!document.querySelector('#message-preview video');
+      audioCard.querySelector('.message-media-play-button').click();
+      document.querySelector('#message-preview .message-preview-media-load')?.click();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const pauseBeforeEscape = window.__speechSmoke.mediaPauseCount;
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      const escapeClosedAndStopped = !document.querySelector('#message-preview')?.classList.contains('is-active')
+        && window.__speechSmoke.mediaPauseCount > pauseBeforeEscape;
+      const scrollAfterEscape = messageList.scrollTop;
+      const escapePreservedScroll = scrollAfterEscape === scrollBeforePreview;
+      videoCard.querySelector('.message-media-play-button').click();
+      const videoPreviewOpened = document.querySelector('#message-preview')?.classList.contains('is-active')
+        && !!document.querySelector('#message-preview video');
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const videoPosterLoaded = String(document.querySelector('#message-preview video')?.poster || '').includes('video-preview.jpg');
+      window.__speechSmoke.failMediaResolvePattern = 'video-message.mp4';
+      document.querySelector('#message-preview .message-preview-media-load')?.click();
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      const failedVideoLoadButton = document.querySelector('#message-preview .message-preview-media-load');
+      const videoRetryEnabled = !failedVideoLoadButton?.disabled
+        && /controlled media cache failure/.test(document.querySelector('#message-preview .message-preview-media-status')?.textContent || '');
+      const videoFallbackActionAvailable = [...document.querySelectorAll('#message-preview-actions button')]
+        .some((button) => /下载|打开|另存为/.test(button.textContent || ''));
+      window.__speechSmoke.failMediaResolvePattern = '';
+      failedVideoLoadButton?.click();
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      const videoRetrySucceeded = window.__speechSmoke.calls.filter((call) => call.command === 'resolve_media_playback_source' && call.args?.input?.filename === 'video-message.mp4').length === 2;
+      const pauseBeforeBackdrop = window.__speechSmoke.mediaPauseCount;
+      document.querySelector('#message-preview .message-preview-backdrop')?.click();
+      const backdropClosedAndStopped = !document.querySelector('#message-preview')?.classList.contains('is-active')
+        && window.__speechSmoke.mediaPauseCount > pauseBeforeBackdrop;
+      window.__speechSmoke.failMediaPlayPattern = 'unsupported-message.mkv';
+      unsupportedCard.querySelector('.message-media-play-button').click();
+      document.querySelector('#message-preview .message-preview-media-load')?.click();
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      const unsupportedHint = document.querySelector('#message-preview .message-preview-media-status')?.textContent || '';
+      const unsupportedResolvedOnce = window.__speechSmoke.calls.some((call) => call.command === 'resolve_media_playback_source' && call.args?.input?.filename === 'unsupported-message.mkv');
+      window.__speechSmoke.failMediaPlayPattern = '';
+      document.querySelector('#message-preview .message-preview-close')?.click();
+      audioCard.querySelector('.message-media-play-button').click();
+      document.querySelector('#message-preview .message-preview-media-load')?.click();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const pauseBeforeCloseButton = window.__speechSmoke.mediaPauseCount;
+      document.querySelector('#message-preview .message-preview-close')?.click();
+      const closeButtonStopped = !document.querySelector('#message-preview')?.classList.contains('is-active')
+        && window.__speechSmoke.mediaPauseCount > pauseBeforeCloseButton;
+      audioCard.querySelector('.message-media-play-button').click();
+      document.querySelector('#message-preview .message-preview-media-load')?.click();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const pauseBeforeDelete = window.__speechSmoke.mediaPauseCount;
+      document.querySelector('#message-preview-actions .delete-action')?.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      [...document.querySelectorAll('.dialog-overlay .dialog-actions button')].find((button) => button.textContent.includes('仅本地'))?.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      document.querySelector('.dialog-overlay .dialog-actions .primary')?.click();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const deleteClosedAndStopped = !document.querySelector('#message-preview')?.classList.contains('is-active')
+        && window.__speechSmoke.mediaPauseCount > pauseBeforeDelete
+        && window.__speechSmoke.calls.some((call) => call.command === 'delete_messages' && call.args?.filenames?.includes('audio-message.mp3'));
+      messageList.style.height = previousListHeight;
+      const openCallsAfter = window.__speechSmoke.calls.filter((call) => call.command === 'open_message_file').length;
+      return { feedImageLoaded, videoHasMarker, audioHasMarker, audioPreviewOpened, audioSourceRequested, audioDuplicateSuppressed, audioCancelRequested, messageSwitchStopped, escapeClosedAndStopped, escapePreservedScroll, scrollBeforePreview, scrollAfterEscape, closeButtonStopped, deleteClosedAndStopped, videoPreviewOpened, videoPosterLoaded, videoRetryEnabled, videoRetrySucceeded, videoFallbackActionAvailable, backdropClosedAndStopped, unsupportedHint, unsupportedResolvedOnce, openCallDelta: openCallsAfter - openCallsBefore };
+    })()`);
+    assert.equal(messageMediaResult.feedImageLoaded, true, 'image messages use the common media preview resolver');
+    assert.equal(messageMediaResult.videoHasMarker, true, 'video messages expose a play marker');
+    assert.equal(messageMediaResult.audioHasMarker, true, 'audio messages expose a play marker');
+    assert.equal(messageMediaResult.audioPreviewOpened, true, 'audio opens the fullscreen media preview');
+    assert.equal(messageMediaResult.audioSourceRequested, true, 'audio preview resolves the unified playback source');
+    assert.equal(messageMediaResult.audioDuplicateSuppressed, true, 'repeated media load clicks start only one cache request');
+    assert.equal(messageMediaResult.audioCancelRequested, true, 'media load can request backend cache cancellation');
+    assert.equal(messageMediaResult.messageSwitchStopped, true, 'switching preview messages stops the previous media session');
+    assert.equal(messageMediaResult.escapeClosedAndStopped, true, 'Escape closes media preview and stops playback');
+    assert.equal(messageMediaResult.escapePreservedScroll, true, `closing media preview preserves the message list scroll position: ${JSON.stringify({ before: messageMediaResult.scrollBeforePreview, after: messageMediaResult.scrollAfterEscape })}`);
+    assert.equal(messageMediaResult.closeButtonStopped, true, 'the preview close button stops active playback');
+    assert.equal(messageMediaResult.deleteClosedAndStopped, true, 'deleting the previewed message closes the preview and stops playback');
+    assert.equal(messageMediaResult.videoPreviewOpened, true, 'video opens the fullscreen video player');
+    assert.equal(messageMediaResult.videoPosterLoaded, true, 'video fullscreen preview uses its generated cover');
+    assert.equal(messageMediaResult.videoRetryEnabled, true, 'failed media cache load re-enables retry');
+    assert.equal(messageMediaResult.videoRetrySucceeded, true, 'failed media cache load succeeds on retry');
+    assert.equal(messageMediaResult.videoFallbackActionAvailable, true, 'media failure keeps the download or system-open action available');
+    assert.equal(messageMediaResult.backdropClosedAndStopped, true, 'backdrop closes video preview and stops playback');
+    assert.match(messageMediaResult.unsupportedHint, /不支持应用内播放/);
+    assert.equal(messageMediaResult.unsupportedResolvedOnce, true, 'unknown formats report the real player failure after resolving one source');
+    assert.equal(messageMediaResult.openCallDelta, 0, 'media play controls do not trigger file-open actions');
 
     const dictationPageResult = await (async () => {
       const { targetId } = await chrome.browserClient.send('Target.createTarget', { url: 'about:blank' });
@@ -1965,12 +2324,13 @@ async function run() {
         };
         tick();
       });
+      document.querySelector('.message-card .speech-source-audio-player .button')?.click();
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
           const audio = document.querySelector('.message-card .speech-source-audio-controls');
-          const sourceRequested = window.__speechSmoke.calls.some((call) => call.command === 'get_message_source_audio_file');
-          if (audio && sourceRequested) resolve();
+          const sourceRequested = window.__speechSmoke.calls.some((call) => call.command === 'resolve_media_playback_source' && call.args?.input?.variant === 'speech-audio');
+          if (audio?.src && sourceRequested) resolve();
           else if (Date.now() - start > 2000) reject(new Error('source audio controls did not load'));
           else setTimeout(tick, 20);
         };
@@ -1995,7 +2355,7 @@ async function run() {
         hasAudioControls: !!document.querySelector('.message-card .speech-source-audio-controls[controls]'),
         messagePreviewLength: document.querySelector('.message-card .message-body')?.textContent.length || 0,
         hasFullTextAction: !!document.querySelector('.message-card .message-view-full-text'),
-        sourceAudioRequested: window.__speechSmoke.calls.some((call) => call.command === 'get_message_source_audio_file'),
+        sourceAudioRequested: window.__speechSmoke.calls.some((call) => call.command === 'resolve_media_playback_source' && call.args?.input?.variant === 'speech-audio'),
         sourceAudioDownloadRequested: window.__speechSmoke.calls.some(
           (call) => call.command === 'download_message_file' && call.args?.filename === 'speech-message.wav',
         ),
