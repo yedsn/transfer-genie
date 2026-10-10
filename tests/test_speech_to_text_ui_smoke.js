@@ -595,6 +595,8 @@ async function run() {
         active: document.querySelector('#bulk-download-modal').classList.contains('is-active'),
         count: document.querySelectorAll('.bulk-download-item').length,
         page: document.querySelector('#bulk-download-page-label').textContent,
+        emptyHidden: document.querySelector('#bulk-download-empty').hidden && getComputedStyle(document.querySelector('#bulk-download-empty')).display === 'none',
+        pageSizeInFooter: document.querySelector('.bulk-download-footer-actions > #bulk-download-page-size') !== null,
       };
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
       const escapeClosed = !document.querySelector('#bulk-download-modal').classList.contains('is-active');
@@ -654,6 +656,7 @@ async function run() {
         waitForTraversedItem();
       });
       const autoScrollTop = brushContent.scrollTop;
+      const autoScrollPreview = document.querySelectorAll('.bulk-download-item.is-preview-selected').length;
       const autoScrollSelected = document.querySelectorAll('.bulk-download-item.is-selected').length;
       pointer(brushContent, 'pointerup', edgeItemRect.left + 10, edgeY, 16);
       const scrollTopAfterRelease = brushContent.scrollTop;
@@ -718,17 +721,17 @@ async function run() {
       const finalStates = [...document.querySelectorAll('#download-task-panel .download-task-state')].map((item) => item.textContent);
       const bulkErrors = window.__speechSmoke.calls.filter((call) => call.command === 'download_message_file' && call.args?.filename === window.__speechSmoke.bulkDownloadFailure).length;
       const hasRetry = [...document.querySelectorAll('#download-task-panel .download-task-actions button')].some((button) => button.textContent === '重新下载');
-      return { initial, escapeClosed, backdropClosed, brushSelected, brushCancelled, brushClassAfterCancel, autoScrollTop, autoScrollSelected, autoScrollStopped, restoredImageView, thumbnailFallback, thumbnailPeak, marqueePreview, marqueeSelected, detailsMarqueeHidden, crossPage, selected, frozenSelection, submitHint, queuedStates, badgeWhileQueued, finalStates, bulkErrors, failure: window.__speechSmoke.bulkDownloadFailure, hasRetry, open: document.querySelector('#bulk-download-modal').classList.contains('is-active'), downloads: window.__speechSmoke.bulkDownloads, openDir: window.__speechSmoke.openDownloadDirCalls };
+      return { initial, escapeClosed, backdropClosed, brushSelected, brushCancelled, brushClassAfterCancel, autoScrollTop, autoScrollPreview, autoScrollSelected, autoScrollStopped, restoredImageView, thumbnailFallback, thumbnailPeak, marqueePreview, marqueeSelected, detailsMarqueeHidden, crossPage, selected, frozenSelection, submitHint, queuedStates, badgeWhileQueued, finalStates, bulkErrors, failure: window.__speechSmoke.bulkDownloadFailure, hasRetry, open: document.querySelector('#bulk-download-modal').classList.contains('is-active'), downloads: window.__speechSmoke.bulkDownloads, openDir: window.__speechSmoke.openDownloadDirCalls };
     })()))()`));
-    assert.deepEqual(bulkDownloadResult.initial, { active: true, count: 60, page: '1 / 2' });
+    assert.deepEqual(bulkDownloadResult.initial, { active: true, count: 60, page: '1 / 2', emptyHidden: true, pageSizeInFooter: true });
     assert.equal(bulkDownloadResult.escapeClosed, true, 'Escape closes bulk download modal');
     assert.equal(bulkDownloadResult.backdropClosed, true, 'backdrop closes bulk download modal');
-    assert.ok(bulkDownloadResult.brushSelected >= 2, 'long press brush selects traversed items');
-    assert.equal(bulkDownloadResult.brushCancelled, 0, 'long press on selected items brushes to cancel');
-    assert.equal(bulkDownloadResult.brushClassAfterCancel, false, 'pointer cancel clears brush interaction state');
-    assert.ok(bulkDownloadResult.autoScrollTop > 0, 'brush near the bottom edge auto-scrolls the resource area');
-    assert.ok(bulkDownloadResult.autoScrollSelected >= 2, `auto-scroll keeps brushing newly traversed resources: ${JSON.stringify(bulkDownloadResult)}`);
-    assert.equal(bulkDownloadResult.autoScrollStopped, true, 'releasing the pointer stops brush auto-scroll');
+    assert.ok(bulkDownloadResult.brushSelected >= 2, 'long press marquee selects every intersecting item');
+    assert.equal(bulkDownloadResult.brushCancelled, 0, 'long press on selected items marquee-unselects every intersecting item');
+    assert.equal(bulkDownloadResult.brushClassAfterCancel, false, 'pointer cancel clears marquee interaction state');
+    assert.ok(bulkDownloadResult.autoScrollTop > 0, 'marquee near the bottom edge auto-scrolls the resource area');
+    assert.ok(bulkDownloadResult.autoScrollPreview >= 2, `auto-scroll keeps previewing newly intersected resources: ${JSON.stringify(bulkDownloadResult)}`);
+    assert.equal(bulkDownloadResult.autoScrollStopped, true, 'releasing the pointer stops marquee auto-scroll');
     assert.equal(bulkDownloadResult.restoredImageView, true, 'category restores its saved view preference');
     assert.equal(bulkDownloadResult.thumbnailFallback, true, 'failed image thumbnails retain the type fallback');
     assert.ok(bulkDownloadResult.thumbnailPeak <= 4, 'thumbnail loading is capped at four concurrent requests');

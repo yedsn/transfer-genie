@@ -94,7 +94,7 @@
                   <img src="icons/mark.svg" alt="" style="width: 14px; height: 14px; margin-right: 4px; vertical-align: middle; margin-top: -2px;" />
                   <span id="marked-filter-label">已标记 (0)</span>
                 </button>
-                <button id="open-bulk-download" class="button ghost small" type="button">下载</button>
+                <button id="open-bulk-download" class="button ghost small" type="button">批量下载</button>
                <button id="refresh-btn" class="button ghost small refresh-button" type="button">
                  <span class="refresh-label">刷新</span>
                  <span class="refresh-spinner" aria-hidden="true"></span>
@@ -1574,9 +1574,6 @@
                 <input id="bulk-download-search" type="search" placeholder="搜索名称" />
               </label>
               <select id="bulk-download-format" class="bulk-download-select" aria-label="格式筛选"><option value="">全部格式</option></select>
-              <select id="bulk-download-page-size" class="bulk-download-select" aria-label="每页数量">
-                <option value="30">每页 30</option><option value="60" selected>每页 60</option><option value="100">每页 100</option>
-              </select>
               <details id="bulk-download-select-menu" class="action-menu bulk-download-select-menu">
                 <summary class="bulk-download-tool-button"><span>选择</span><svg class="bulk-download-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"></path></svg></summary>
                 <div class="action-menu-list">
@@ -1599,6 +1596,9 @@
               <span id="bulk-download-submit-hint"></span>
             </div>
             <div class="bulk-download-footer-actions">
+              <select id="bulk-download-page-size" class="bulk-download-select bulk-download-page-size" aria-label="每页数量">
+                <option value="30">每页 30</option><option value="60" selected>每页 60</option><option value="100">每页 100</option>
+              </select>
               <div class="bulk-download-pagination">
                 <button id="bulk-download-prev" class="bulk-download-page-button" type="button" aria-label="上一页"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m10 3-5 5 5 5"></path></svg></button>
                 <span id="bulk-download-page-label">1 / 1</span>

@@ -4292,11 +4292,13 @@ button.bulk-download-tool-button {
 .view-small-icons .bulk-download-meta, .view-small-icons .bulk-download-status, .view-large-icons .bulk-download-status { display: none; }
 .view-large-icons .bulk-download-meta { display: block; }
 .bulk-download-empty { display: grid; place-items: center; height: 100%; min-height: 240px; color: var(--muted); }
+.bulk-download-empty[hidden] { display: none; }
 .bulk-download-selection-box { position: absolute; pointer-events: none; border: 1px solid rgba(255, 122, 47, .8); border-radius: 4px; background: rgba(255, 122, 47, .12); box-shadow: 0 0 0 1px rgba(255, 255, 255, .65) inset; z-index: 5; }
 .bulk-download-footer { border-top: 1px solid var(--bulk-border); background: rgba(255, 255, 255, .97); box-shadow: 0 -6px 22px rgba(38, 28, 21, .035); }
 .bulk-download-footer > div:first-child { display: grid; gap: 3px; min-width: 230px; font-size: 11px; color: #8b8580; }
 .bulk-download-footer strong { color: #35312e; font-size: 13px; font-variant-numeric: tabular-nums; }
 .bulk-download-footer-actions { flex-wrap: nowrap; }
+.bulk-download-page-size { min-width: 92px; height: 34px; min-height: 34px; }
 .bulk-download-pagination { display: inline-flex; align-items: center; gap: 3px; padding: 3px; border: 1px solid var(--bulk-border); border-radius: 10px; background: #f7f5f3; }
 .bulk-download-pagination > span { min-width: 48px; padding: 0 5px; color: #69635f; font-size: 11px; font-weight: 650; text-align: center; font-variant-numeric: tabular-nums; }
 .bulk-download-page-button { width: 29px; height: 28px; display: grid; place-items: center; border: 0; border-radius: 7px; background: transparent; color: #635d59; }
@@ -4311,7 +4313,14 @@ button.bulk-download-tool-button {
 .bulk-download-primary-button:hover:not(:disabled) { background: linear-gradient(180deg, #ff914d, #ec651b); box-shadow: 0 6px 14px rgba(223, 97, 28, .25), inset 0 1px rgba(255, 255, 255, .25); }
 .bulk-download-primary-button:disabled { border-color: #ded8d3; background: #ebe7e3; color: #aaa39d; box-shadow: none; cursor: not-allowed; }
 .bulk-download-primary-button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; }
-.bulk-download-content.is-brush-selecting { cursor: crosshair; }
+.bulk-download-content.is-marquee-selecting { cursor: crosshair; }
+.bulk-download-item.is-preview-unselected {
+  border-color: #e5dfda;
+  background: rgba(255, 255, 255, .68);
+  box-shadow: none;
+  opacity: .62;
+  transform: none;
+}
 
 @media (max-width: 760px) {
   .bulk-download-modal { padding: 6px; }

@@ -29,7 +29,6 @@ if (api && runtime && modal && openButton) {
   let thumbnailObserver = null;
   const thumbnailQueue = [];
   let thumbnailActive = 0;
-  let brush = null;
   let marquee = null;
   let autoScrollFrame = 0;
   let suppressClickUntil = 0;
@@ -151,9 +150,8 @@ if (api && runtime && modal && openButton) {
     info.append(name, meta, typeField.cloneNode(true), sizeField, timeField, status);
     item.append(checkbox, thumb, info);
     item.classList.toggle('is-selected', selection.has(resource.key));
-    item.addEventListener('click', (event) => { if (Date.now() >= suppressClickUntil && !brush && !marquee && !event.target.closest('input,button,a')) setResourceSelected(resource, !selection.has(resource.key)); });
+    item.addEventListener('click', (event) => { if (Date.now() >= suppressClickUntil && !marquee && !event.target.closest('input,button,a')) setResourceSelected(resource, !selection.has(resource.key)); });
     item.addEventListener('dragstart', (event) => event.preventDefault());
-    item.addEventListener('pointerdown', (event) => startBrushCandidate(event, resource, item));
     return item;
   }
 
@@ -190,73 +188,74 @@ if (api && runtime && modal && openButton) {
   function openModal() { selection.clear(); state.page = 1; state.category = 'all'; state.extension = ''; state.searchQuery = ''; search.value = ''; restoreView(); modal.classList.add('is-active'); modal.setAttribute('aria-hidden', 'false'); loadResources(); }
   function closeModal() { stopPointerInteractions(); selection.clear(); modal.classList.remove('is-active'); modal.setAttribute('aria-hidden', 'true'); updateSelectionSummary(); }
 
-  function finishBrush() { if (!brush) return; if (brush.active) suppressClickUntil = Date.now() + 350; clearTimeout(brush.timer); brush = null; content.classList.remove('is-brush-selecting'); cancelAnimationFrame(autoScrollFrame); autoScrollFrame = 0; }
-  function stopPointerInteractions() { finishBrush(); finishMarquee(false); }
-
-  function startBrushCandidate(event, resource, item) {
-    if (event.button !== 0 || event.target.closest('input,button,a')) return;
-    const startX = event.clientX; const startY = event.clientY;
-    brush = { pointerId: event.pointerId, startX, startY, active: false, mode: !selection.has(resource.key), visited: new Set(), lastX: startX, lastY: startY, timer: 0 };
-    brush.timer = window.setTimeout(() => {
-      if (!brush) return; brush.active = true;
-      try { item.setPointerCapture?.(event.pointerId); } catch (_) { /* synthetic pointer events used by smoke tests have no native capture */ }
-      content.classList.add('is-brush-selecting'); applyBrushResource(resource);
-    }, 300);
-  }
-
-  function applyBrushResource(resource) { if (!brush?.active || brush.visited.has(resource.key)) return; brush.visited.add(resource.key); selection.set(resource, brush.mode); updateSelectedClasses(); }
-
-  function applyBrushAtPoint(clientX, clientY, includeNearby = false) {
-    let item = document.elementFromPoint(clientX, clientY)?.closest?.('[data-resource-key]');
-    if (!item && includeNearby) {
-      let nearestDistance = 24;
-      list.querySelectorAll('[data-resource-key]').forEach((candidate) => {
-        const rect = candidate.getBoundingClientRect();
-        const deltaX = clientX < rect.left ? rect.left - clientX : clientX > rect.right ? clientX - rect.right : 0;
-        const deltaY = clientY < rect.top ? rect.top - clientY : clientY > rect.bottom ? clientY - rect.bottom : 0;
-        const distance = Math.hypot(deltaX, deltaY);
-        if (distance < nearestDistance) { nearestDistance = distance; item = candidate; }
-      });
-    }
-    const resource = state.resources.find((entry) => entry.key === item?.dataset.resourceKey);
-    if (resource) applyBrushResource(resource);
-  }
-
-  function brushMove(event) {
-    if (!brush || event.pointerId !== brush.pointerId) return; brush.lastX = event.clientX; brush.lastY = event.clientY;
-    if (!brush.active && Math.hypot(event.clientX - brush.startX, event.clientY - brush.startY) > 8) { finishBrush(); return; }
-    if (!brush?.active) return; event.preventDefault();
-    applyBrushAtPoint(event.clientX, event.clientY);
-    if (!autoScrollFrame) autoScrollFrame = requestAnimationFrame(autoScrollBrush);
-  }
-
-  function autoScrollBrush() {
-    autoScrollFrame = 0; if (!brush?.active) return; const rect = content.getBoundingClientRect(); let delta = 0;
-    if (brush.lastY < rect.top + 48) delta = -12; else if (brush.lastY > rect.bottom - 48) delta = 12;
-    if (delta) { content.scrollTop += delta; applyBrushAtPoint(brush.lastX, brush.lastY, true); autoScrollFrame = requestAnimationFrame(autoScrollBrush); }
-  }
-
   function startMarquee(event) {
-    if (event.button !== 0 || !runtime.isBulkGridView(state.view) || event.target.closest('[data-resource-key],button,input,select,summary')) return;
-    const rect = content.getBoundingClientRect(); marquee = { pointerId: event.pointerId, startX: event.clientX - rect.left + content.scrollLeft, startY: event.clientY - rect.top + content.scrollTop, currentX: 0, currentY: 0, preview: new Set() };
-    content.setPointerCapture?.(event.pointerId); selectionBox.hidden = false; updateMarquee(event);
+    if (event.button !== 0 || !runtime.isBulkGridView(state.view) || event.target.closest('button,input,select,summary')) return;
+    const rect = content.getBoundingClientRect();
+    const item = event.target.closest('[data-resource-key]');
+    const startX = event.clientX - rect.left + content.scrollLeft;
+    const startY = event.clientY - rect.top + content.scrollTop;
+    marquee = {
+      pointerId: event.pointerId, startX, startY, currentX: startX, currentY: startY,
+      clientStartX: event.clientX, clientStartY: event.clientY, lastClientX: event.clientX, lastClientY: event.clientY,
+      active: false, mode: item ? !selection.has(item.dataset.resourceKey) : true, preview: new Set(), timer: 0,
+    };
+    if (!item) activateMarquee(event);
+    else marquee.timer = window.setTimeout(() => { if (marquee?.pointerId === event.pointerId) activateMarquee(event); }, 300);
+  }
+
+  function activateMarquee(event) {
+    if (!marquee || marquee.active) return;
+    marquee.active = true;
+    try { content.setPointerCapture?.(marquee.pointerId); } catch (_) { /* synthetic pointer events used by smoke tests have no native capture */ }
+    content.classList.add('is-marquee-selecting'); selectionBox.hidden = false; updateMarquee(event);
   }
 
   function updateMarquee(event) {
-    if (!marquee || event.pointerId !== marquee.pointerId) return; event.preventDefault(); const rect = content.getBoundingClientRect();
+    if (!marquee || event.pointerId !== marquee.pointerId) return;
+    marquee.lastClientX = event.clientX; marquee.lastClientY = event.clientY;
+    if (!marquee.active) {
+      if (Math.hypot(event.clientX - marquee.clientStartX, event.clientY - marquee.clientStartY) > 8) finishMarquee(false);
+      return;
+    }
+    event.preventDefault(); const rect = content.getBoundingClientRect();
     marquee.currentX = event.clientX - rect.left + content.scrollLeft; marquee.currentY = event.clientY - rect.top + content.scrollTop;
     const left = Math.min(marquee.startX, marquee.currentX); const top = Math.min(marquee.startY, marquee.currentY); const right = Math.max(marquee.startX, marquee.currentX); const bottom = Math.max(marquee.startY, marquee.currentY);
     Object.assign(selectionBox.style, { left: `${left}px`, top: `${top}px`, width: `${right - left}px`, height: `${bottom - top}px` }); marquee.preview.clear();
     list.querySelectorAll('[data-resource-key]').forEach((item) => {
       const itemRect = item.getBoundingClientRect(); const local = { left: itemRect.left - rect.left + content.scrollLeft, right: itemRect.right - rect.left + content.scrollLeft, top: itemRect.top - rect.top + content.scrollTop, bottom: itemRect.bottom - rect.top + content.scrollTop };
-      const hit = runtime.rectanglesIntersect({ left, right, top, bottom }, local); item.classList.toggle('is-preview-selected', hit); if (hit) marquee.preview.add(item.dataset.resourceKey);
+      const hit = runtime.rectanglesIntersect({ left, right, top, bottom }, local);
+      item.classList.toggle('is-preview-selected', hit && marquee.mode);
+      item.classList.toggle('is-preview-unselected', hit && !marquee.mode);
+      if (hit) marquee.preview.add(item.dataset.resourceKey);
     });
+    if (!autoScrollFrame) autoScrollFrame = requestAnimationFrame(autoScrollMarquee);
+  }
+
+  function autoScrollMarquee() {
+    autoScrollFrame = 0; if (!marquee?.active) return; const rect = content.getBoundingClientRect(); let delta = 0;
+    if (marquee.lastClientY < rect.top + 48) delta = -12; else if (marquee.lastClientY > rect.bottom - 48) delta = 12;
+    if (delta) {
+      const previousTop = content.scrollTop; content.scrollTop += delta;
+      if (content.scrollTop !== previousTop) {
+        updateMarquee({ pointerId: marquee.pointerId, clientX: marquee.lastClientX, clientY: marquee.lastClientY, preventDefault() {} });
+        return;
+      }
+      autoScrollFrame = requestAnimationFrame(autoScrollMarquee);
+    }
   }
 
   function finishMarquee(commit = true) {
-    if (!marquee) return; if (commit) marquee.preview.forEach((key) => { const resource = state.resources.find((entry) => entry.key === key); if (resource) selection.set(resource, true); });
-    marquee = null; selectionBox.hidden = true; list.querySelectorAll('.is-preview-selected').forEach((item) => item.classList.remove('is-preview-selected')); updateSelectedClasses();
+    if (!marquee) return;
+    clearTimeout(marquee.timer);
+    if (marquee.active) {
+      if (commit) marquee.preview.forEach((key) => { const resource = state.resources.find((entry) => entry.key === key); if (resource) selection.set(resource, marquee.mode); });
+      suppressClickUntil = Date.now() + 350;
+    }
+    marquee = null; selectionBox.hidden = true; content.classList.remove('is-marquee-selecting'); cancelAnimationFrame(autoScrollFrame); autoScrollFrame = 0;
+    list.querySelectorAll('.is-preview-selected, .is-preview-unselected').forEach((item) => item.classList.remove('is-preview-selected', 'is-preview-unselected')); updateSelectedClasses();
   }
+
+  function stopPointerInteractions() { finishMarquee(false); }
 
   const queue = runtime.createBulkDownloadQueue((resource) => window.transferGenieDownloadBulkResource(resource), {
     concurrency: 3,
@@ -298,9 +297,9 @@ if (api && runtime && modal && openButton) {
   document.getElementById('bulk-download-select-all').addEventListener('click', async () => { const result = await api.invoke('resolve_bulk_download_selection', { input: queryInput(false) }); selection.setMany(result.resources || [], true); updateSelectedClasses(); window.showToast?.(`已选择全部 ${result.total || 0} 项`, 'success'); });
   submit.addEventListener('click', submitSelection);
   content.addEventListener('pointerdown', startMarquee);
-  content.addEventListener('pointermove', (event) => { brushMove(event); updateMarquee(event); });
-  content.addEventListener('pointerup', () => { finishBrush(); finishMarquee(true); });
-  content.addEventListener('pointercancel', () => { finishBrush(); finishMarquee(false); });
+  content.addEventListener('pointermove', updateMarquee);
+  content.addEventListener('pointerup', () => finishMarquee(true));
+  content.addEventListener('pointercancel', () => finishMarquee(false));
   window.addEventListener('blur', stopPointerInteractions);
   document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && modal.classList.contains('is-active')) { event.preventDefault(); closeModal(); } }, true);
   updateSelectionSummary();
