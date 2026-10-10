@@ -71,6 +71,14 @@ if (api && runtime && modal && openButton) {
     render();
   }
 
+  function updateViewMenuState() {
+    document.querySelectorAll('[data-bulk-view]').forEach((button) => {
+      const active = button.dataset.bulkView === state.view;
+      button.classList.toggle('is-active', active);
+      button.setAttribute('aria-checked', String(active));
+    });
+  }
+
   function updateSelectionSummary() {
     const selected = selection.summary();
     selectionSummary.textContent = `已选择 ${selected.count} 项 · ${formatBytes(selected.size)}`;
@@ -156,6 +164,7 @@ if (api && runtime && modal && openButton) {
     summary.textContent = state.loading ? '正在加载资料...' : `共 ${state.total} 项 · 最新内容优先`;
     pageLabel.textContent = `${state.page} / ${state.totalPages}`; previous.disabled = state.page <= 1 || state.loading; next.disabled = state.page >= state.totalPages || state.loading;
     document.querySelectorAll('[data-bulk-category]').forEach((button) => button.classList.toggle('is-active', button.dataset.bulkCategory === state.category));
+    updateViewMenuState();
     updateSelectedClasses(); observeThumbnails();
   }
 
@@ -197,8 +206,18 @@ if (api && runtime && modal && openButton) {
 
   function applyBrushResource(resource) { if (!brush?.active || brush.visited.has(resource.key)) return; brush.visited.add(resource.key); selection.set(resource, brush.mode); updateSelectedClasses(); }
 
-  function applyBrushAtPoint(clientX, clientY) {
-    const item = document.elementFromPoint(clientX, clientY)?.closest?.('[data-resource-key]');
+  function applyBrushAtPoint(clientX, clientY, includeNearby = false) {
+    let item = document.elementFromPoint(clientX, clientY)?.closest?.('[data-resource-key]');
+    if (!item && includeNearby) {
+      let nearestDistance = 24;
+      list.querySelectorAll('[data-resource-key]').forEach((candidate) => {
+        const rect = candidate.getBoundingClientRect();
+        const deltaX = clientX < rect.left ? rect.left - clientX : clientX > rect.right ? clientX - rect.right : 0;
+        const deltaY = clientY < rect.top ? rect.top - clientY : clientY > rect.bottom ? clientY - rect.bottom : 0;
+        const distance = Math.hypot(deltaX, deltaY);
+        if (distance < nearestDistance) { nearestDistance = distance; item = candidate; }
+      });
+    }
     const resource = state.resources.find((entry) => entry.key === item?.dataset.resourceKey);
     if (resource) applyBrushResource(resource);
   }
@@ -214,7 +233,7 @@ if (api && runtime && modal && openButton) {
   function autoScrollBrush() {
     autoScrollFrame = 0; if (!brush?.active) return; const rect = content.getBoundingClientRect(); let delta = 0;
     if (brush.lastY < rect.top + 48) delta = -12; else if (brush.lastY > rect.bottom - 48) delta = 12;
-    if (delta) { content.scrollTop += delta; applyBrushAtPoint(brush.lastX, brush.lastY); autoScrollFrame = requestAnimationFrame(autoScrollBrush); }
+    if (delta) { content.scrollTop += delta; applyBrushAtPoint(brush.lastX, brush.lastY, true); autoScrollFrame = requestAnimationFrame(autoScrollBrush); }
   }
 
   function startMarquee(event) {

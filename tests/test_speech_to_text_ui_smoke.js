@@ -630,6 +630,8 @@ async function run() {
       const brushClassAfterCancel = document.querySelector('#bulk-download-content').classList.contains('is-brush-selecting');
       document.querySelector('#bulk-download-clear-selection').click();
       const brushContent = document.querySelector('#bulk-download-content');
+      const previousBrushContentHeight = brushContent.style.height;
+      brushContent.style.height = '320px';
       brushContent.scrollTop = 0;
       const visibleEdgeItems = [...document.querySelectorAll('.bulk-download-item')].filter((item) => {
         const rect = item.getBoundingClientRect();
@@ -657,6 +659,7 @@ async function run() {
       const scrollTopAfterRelease = brushContent.scrollTop;
       await new Promise((resolve) => setTimeout(resolve, 80));
       const autoScrollStopped = brushContent.scrollTop === scrollTopAfterRelease;
+      brushContent.style.height = previousBrushContentHeight;
       document.querySelector('#bulk-download-clear-selection').click();
       for (const view of ['details', 'list', 'small-icons', 'large-icons', 'tiles']) {
         document.querySelector('[data-bulk-view="' + view + '"]').click();
