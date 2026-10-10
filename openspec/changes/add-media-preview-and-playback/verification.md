@@ -19,6 +19,7 @@ macOS release inputs are pinned and audited for both Apple Silicon and Intel, an
   - macOS Apple Silicon: `a90e3db6a3fd35f6074b013f948b1aa45b31c6375489d39e572bea3f18336584`
   - macOS Intel: `ebdddc936f61e14049a2d4b549a412b8a40deeff6540e58a9f2a2da9e6b18894`
 - `scripts/verify_ffmpeg_manifest.ps1 -CheckRemoteMetadata -CheckArchives` verified the public release metadata, downloaded archive hashes, license/readme hashes, and executable architecture headers for PE x64, Mach-O arm64, and Mach-O x86_64. The network-only audit was also run through the local proxy after direct GitHub asset download stalled.
+- GitHub release metadata is fetched once per CI job with the Actions-provided `GITHUB_TOKEN` (or `GH_TOKEN`), preventing shared-runner unauthenticated API rate-limit failures while retaining remote asset size and digest verification.
 - `scripts/prepare_ffmpeg_sidecar.ps1` now verifies both the pinned archive hash and the decompressed executable hash before accepting a sidecar.
 - FFmpeg artifact downloads retry transient GitHub/CDN failures up to three times, and the verification workflow writes a stage-specific JSON report even when preparation fails before bundle creation.
 - `scripts/verify_release_bundle.ps1` verifies the finished bundle:

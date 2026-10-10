@@ -9,6 +9,26 @@ $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $manifestPath = Join-Path $repoRoot "tools\ffmpeg\sidecars.json"
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
 $expectedTargets = @("windows-x64", "macos-arm64", "macos-x64")
+$release = $null
+
+if ($CheckRemoteMetadata) {
+  $githubToken = [string]$env:GH_TOKEN
+  if ([string]::IsNullOrWhiteSpace($githubToken)) { $githubToken = [string]$env:GITHUB_TOKEN }
+  $githubHeaders = @{
+    Accept = "application/vnd.github+json"
+    "User-Agent" = "transfer-genie-ffmpeg-verifier"
+    "X-GitHub-Api-Version" = "2022-11-28"
+  }
+  if (-not [string]::IsNullOrWhiteSpace($githubToken)) {
+    $githubHeaders.Authorization = "Bearer $($githubToken.Trim())"
+  }
+  $releaseUrl = "https://api.github.com/repos/eugeneware/ffmpeg-static/releases/tags/$($manifest.releaseTag)"
+  try {
+    $release = Invoke-RestMethod -Uri $releaseUrl -Headers $githubHeaders
+  } catch {
+    throw "Unable to verify FFmpeg release metadata from GitHub. Ensure GITHUB_TOKEN or GH_TOKEN is available in CI: $($_.Exception.Message)"
+  }
+}
 
 function Get-VerifiedDownload([string]$Url, [string]$ExpectedHash, [string]$Destination) {
   $arguments = @("--fail", "--location", "--silent", "--show-error", "--connect-timeout", "20", "--max-time", "180", "--output", $Destination)
@@ -68,7 +88,6 @@ foreach ($targetName in $expectedTargets) {
   }
   if ([int64]$target.archiveBytes -le 0) { throw "Invalid archive size for $targetName" }
   if ($CheckRemoteMetadata) {
-    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/eugeneware/ffmpeg-static/releases/tags/$($manifest.releaseTag)"
     $assetName = Split-Path ([uri]$target.archiveUrl).AbsolutePath -Leaf
     $asset = $release.assets | Where-Object { $_.name -eq $assetName } | Select-Object -First 1
     if (-not $asset) { throw "Release asset not found for ${targetName}: $assetName" }

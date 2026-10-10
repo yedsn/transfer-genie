@@ -124,6 +124,8 @@ jobs:
 
       - name: Verify pinned FFmpeg manifest
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: ./scripts/verify_ffmpeg_manifest.ps1 -CheckRemoteMetadata
 
       - name: Prepare pinned FFmpeg sidecar

@@ -85,6 +85,8 @@ jobs:
 
       - name: Verify and prepare pinned FFmpeg
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           $reportPath = "target/release-verification/${{ matrix.ffmpeg_target }}.json"
           New-Item -ItemType Directory -Path (Split-Path -Parent $reportPath) -Force | Out-Null
