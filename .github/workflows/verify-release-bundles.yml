@@ -13,6 +13,7 @@ on:
       - 'package-lock.json'
       - 'package.json'
       - 'scripts/prepare_ffmpeg_sidecar.ps1'
+      - 'scripts/install_frontend_dependencies.ps1'
       - 'scripts/verify_ffmpeg_bundle.ps1'
       - 'scripts/verify_ffmpeg_manifest.ps1'
       - 'scripts/verify_release_bundle.ps1'
@@ -28,6 +29,7 @@ on:
       - 'package-lock.json'
       - 'package.json'
       - 'scripts/prepare_ffmpeg_sidecar.ps1'
+      - 'scripts/install_frontend_dependencies.ps1'
       - 'scripts/verify_ffmpeg_bundle.ps1'
       - 'scripts/verify_ffmpeg_manifest.ps1'
       - 'scripts/verify_release_bundle.ps1'
@@ -67,6 +69,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
+      - name: Initialize verification report
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          $reportPath = "target/release-verification/${{ matrix.ffmpeg_target }}.json"
+          New-Item -ItemType Directory -Path (Split-Path -Parent $reportPath) -Force | Out-Null
+          @{
+            target = "${{ matrix.ffmpeg_target }}"
+            profile = "release"
+            verifiedAtUtc = [DateTime]::UtcNow.ToString("o")
+            stage = "initialized"
+            error = $null
+            launchVerified = $false
+          } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $reportPath -Encoding UTF8
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
@@ -81,7 +98,23 @@ jobs:
           cache: npm
 
       - name: Install frontend dependencies
-        run: npm ci
+        shell: pwsh
+        run: |
+          $reportPath = "target/release-verification/${{ matrix.ffmpeg_target }}.json"
+          try {
+            ./scripts/install_frontend_dependencies.ps1
+          } catch {
+            @{
+              target = "${{ matrix.ffmpeg_target }}"
+              profile = "release"
+              verifiedAtUtc = [DateTime]::UtcNow.ToString("o")
+              stage = "install-frontend-dependencies"
+              error = $_.Exception.Message
+              launchVerified = $false
+            } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $reportPath -Encoding UTF8
+            Write-Error $_.Exception.Message
+            exit 1
+          }
 
       - name: Verify and prepare pinned FFmpeg
         shell: pwsh
@@ -94,6 +127,14 @@ jobs:
             ./scripts/verify_ffmpeg_manifest.ps1 -CheckRemoteMetadata
             ./scripts/prepare_ffmpeg_sidecar.ps1 -Target ${{ matrix.ffmpeg_target }}
             ./scripts/verify_ffmpeg_bundle.ps1
+            @{
+              target = "${{ matrix.ffmpeg_target }}"
+              profile = "release"
+              verifiedAtUtc = [DateTime]::UtcNow.ToString("o")
+              stage = "ffmpeg-prepared"
+              error = $null
+              launchVerified = $false
+            } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $reportPath -Encoding UTF8
           } catch {
             @{
               target = "${{ matrix.ffmpeg_target }}"
@@ -109,7 +150,26 @@ jobs:
 
       - name: Build native bundles without updater artifacts
         shell: pwsh
-        run: npx tauri build ${{ matrix.args }} --config '{"bundle":{"createUpdaterArtifacts":false}}'
+        run: |
+          $reportPath = "target/release-verification/${{ matrix.ffmpeg_target }}.json"
+          try {
+            npx tauri build ${{ matrix.args }} --config '{"bundle":{"createUpdaterArtifacts":false}}'
+            if ($LASTEXITCODE -ne 0) {
+              throw "Tauri bundle build failed (exit code $LASTEXITCODE)."
+            }
+          } catch {
+            New-Item -ItemType Directory -Path (Split-Path -Parent $reportPath) -Force | Out-Null
+            @{
+              target = "${{ matrix.ffmpeg_target }}"
+              profile = "release"
+              verifiedAtUtc = [DateTime]::UtcNow.ToString("o")
+              stage = "build-bundle"
+              error = $_.Exception.Message
+              launchVerified = $false
+            } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $reportPath -Encoding UTF8
+            Write-Error $_.Exception.Message
+            exit 1
+          }
 
       - name: Verify Windows release bundle contents
         if: ${{ !startsWith(matrix.os, 'macos') }}
@@ -127,4 +187,4 @@ jobs:
         with:
           name: release-verification-${{ matrix.ffmpeg_target }}
           path: target/release-verification/${{ matrix.ffmpeg_target }}.json
-          if-no-files-found: error
+          if-no-files-found: warn

@@ -120,7 +120,8 @@ jobs:
           cache: npm
 
       - name: Install frontend dependencies
-        run: npm ci
+        shell: pwsh
+        run: ./scripts/install_frontend_dependencies.ps1
 
       - name: Verify pinned FFmpeg manifest
         shell: pwsh

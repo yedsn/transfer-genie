@@ -13,6 +13,35 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$report = [ordered]@{
+  target = $Target
+  profile = $Profile
+  verifiedAtUtc = [DateTime]::UtcNow.ToString("o")
+  error = $null
+  bundle = $null
+  bundleSha256 = $null
+  ffmpeg = $null
+  ffmpegVersion = $null
+  applicationExecutable = $null
+  applicationArchitecture = $null
+  launchVerified = $false
+}
+
+function Write-VerificationReport {
+  $path = if ($ReportPath) { $ReportPath } else { Join-Path $repoRoot "target/release-verification/$Target.json" }
+  $directory = Split-Path -Parent $path
+  if ($directory) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
+  $report | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $path -Encoding UTF8
+  Write-Output "Wrote release verification report: $path"
+}
+
+trap {
+  $report.error = $_.Exception.Message
+  Write-Error $report.error -ErrorAction Continue
+  Write-VerificationReport
+  exit 1
+}
+
 $manifest = Get-Content -LiteralPath (Join-Path $repoRoot "tools/ffmpeg/sidecars.json") -Raw -Encoding UTF8 | ConvertFrom-Json
 $manifestTarget = $manifest.targets.$Target
 if (-not $manifestTarget) { throw "FFmpeg manifest is missing target $Target." }
@@ -47,35 +76,6 @@ function Assert-MacArchitecture {
     throw "Unexpected $Label architecture. Expected $ExpectedArchitecture, got: $description"
   }
   return $description
-}
-
-$report = [ordered]@{
-  target = $Target
-  profile = $Profile
-  verifiedAtUtc = [DateTime]::UtcNow.ToString("o")
-  error = $null
-  bundle = $null
-  bundleSha256 = $null
-  ffmpeg = $null
-  ffmpegVersion = $null
-  applicationExecutable = $null
-  applicationArchitecture = $null
-  launchVerified = $false
-}
-
-function Write-VerificationReport {
-  $path = if ($ReportPath) { $ReportPath } else { Join-Path $repoRoot "target/release-verification/$Target.json" }
-  $directory = Split-Path -Parent $path
-  if ($directory) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
-  $report | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $path -Encoding UTF8
-  Write-Output "Wrote release verification report: $path"
-}
-
-trap {
-  $report.error = $_.Exception.Message
-  Write-Error $report.error -ErrorAction Continue
-  Write-VerificationReport
-  exit 1
 }
 
 if ($Target -eq "windows-x64") {

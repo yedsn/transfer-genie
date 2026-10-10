@@ -22,6 +22,8 @@ macOS release inputs are pinned and audited for both Apple Silicon and Intel, an
 - GitHub release metadata is fetched once per CI job with the Actions-provided `GITHUB_TOKEN` (or `GH_TOKEN`), preventing shared-runner unauthenticated API rate-limit failures while retaining remote asset size and digest verification.
 - `scripts/prepare_ffmpeg_sidecar.ps1` now verifies both the pinned archive hash and the decompressed executable hash before accepting a sidecar.
 - FFmpeg artifact downloads retry transient GitHub/CDN failures up to three times, and the verification workflow writes a stage-specific JSON report even when preparation fails before bundle creation.
+- The verification workflow initializes its JSON report immediately after checkout, records separate `prepare-ffmpeg` and `build-bundle` failures, and treats a missing final artifact as an upload warning so the original failing step remains visible.
+- Frontend dependency installation retries one transient `npm ci` failure with a fresh temporary npm cache, and persistent failures are recorded as `install-frontend-dependencies` rather than being obscured by the final artifact-upload step.
 - `scripts/verify_release_bundle.ps1` verifies the finished bundle:
   - Windows: latest NSIS installer hash, generated installer resource list, and packaged FFmpeg executable hash/version.
   - macOS: mounts the latest DMG, verifies required resources and FFmpeg hash, resolves the application binary from `CFBundleExecutable`, checks FFmpeg and application Mach-O architecture, and optionally launches the packaged application for 8 seconds with isolated app data and a harmless smoke-test argument.
