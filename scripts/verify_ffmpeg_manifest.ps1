@@ -60,7 +60,7 @@ if ($manifest.license -ne "GPL-3.0-or-later") { throw "Unexpected FFmpeg bundle 
 foreach ($targetName in $expectedTargets) {
   $target = $manifest.targets.$targetName
   if (-not $target) { throw "Missing FFmpeg manifest target: $targetName" }
-  foreach ($field in @("archiveUrl", "archiveSha256", "executableName", "executableSha256", "licenseUrl", "licenseSha256", "readmeUrl", "readmeSha256")) {
+  foreach ($field in @("reportedVersion", "archiveUrl", "archiveSha256", "executableName", "executableSha256", "licenseUrl", "licenseSha256", "readmeUrl", "readmeSha256")) {
     if ([string]::IsNullOrWhiteSpace([string]$target.$field)) { throw "Missing $targetName.$field" }
   }
   foreach ($hashField in @("archiveSha256", "executableSha256", "licenseSha256", "readmeSha256")) {

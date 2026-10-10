@@ -2,7 +2,7 @@
 
 ## FFmpeg
 
-Transfer Genie bundles an FFmpeg 6.1.1 sidecar for extracting a still preview image from uploaded videos. The binaries are distributed by the `eugeneware/ffmpeg-static` project under GPL-3.0-or-later and are invoked as a separate program. Transfer Genie itself is also distributed under AGPL-3.0-or-later.
+Transfer Genie bundles pinned FFmpeg sidecars from the `eugeneware/ffmpeg-static` `b6.1.1` release matrix for extracting a still preview image from uploaded videos. The Windows x64 and macOS Intel executables report FFmpeg 6.1.1; the published macOS Apple Silicon executable reports FFmpeg 6.0. Every target is pinned by archive and executable SHA-256. The binaries are distributed under GPL-3.0-or-later and are invoked as a separate program. Transfer Genie itself is also distributed under AGPL-3.0-or-later.
 
 FFmpeg project: https://ffmpeg.org/
 FFmpeg 6.1.1 source: https://github.com/FFmpeg/FFmpeg/tree/n6.1.1

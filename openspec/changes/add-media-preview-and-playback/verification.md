@@ -8,7 +8,7 @@ macOS release inputs are pinned and audited for both Apple Silicon and Intel, an
 
 ## FFmpeg sidecar and packaging
 
-- Version: FFmpeg `6.1.1`, release tag `b6.1.1` from `eugeneware/ffmpeg-static`.
+- Release matrix: `eugeneware/ffmpeg-static` tag `b6.1.1`; Windows x64 and macOS Intel report FFmpeg `6.1.1`, while the published macOS Apple Silicon executable reports FFmpeg `6.0`.
 - License: GPL-3.0-or-later; `THIRD_PARTY_NOTICES.md`, the matching upstream license, build README, and `tools/ffmpeg/sidecars.json` are included as bundle resources.
 - Pinned archive SHA-256 values:
   - Windows x64: `8883a3dffbd0a16cf4ef95206ea05283f78908dbfb118f73c83f4951dcc06d77`
@@ -28,7 +28,7 @@ macOS release inputs are pinned and audited for both Apple Silicon and Intel, an
 - Local Windows debug bundle verification passed and produced `target/release-verification/windows-x64.json`.
 - `actionlint v1.7.12` validated both `release.yml` and the new `verify-release-bundles.yml`.
 - `release.yml` now runs `verify-release-bundles.yml` as a pre-publish gate, so bundles are verified before the release job publishes assets.
-- `scripts/verify_ffmpeg_bundle.ps1` verified the local Windows executable reports FFmpeg 6.1.1 and all metadata files are present.
+- `scripts/verify_ffmpeg_bundle.ps1` verified the local Windows executable reports its target-pinned FFmpeg 6.1.1 version and all metadata files are present; macOS release checks use each target's independently pinned reported version.
 - Rust path tests cover the Windows installed resource path and macOS `.app/Contents/Resources/tools/ffmpeg/ffmpeg` candidate.
 - Native Windows package command:
   - `npx tauri build --debug --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'`
@@ -109,5 +109,7 @@ The repository release matrix now prepares and verifies the pinned sidecar on:
 Windows was built locally. Native macOS `.app`/`.dmg` production and launch evidence must come from the next release workflow run on those two native runners.
 
 The first native macOS Intel run successfully built and mounted the DMG and verified its packaged resources and FFmpeg executable, then exposed a launch-verifier bug: the verifier selected the first file under `Contents/MacOS`, which could be the auxiliary `telegram_bridge` binary instead of the application entry point. That helper correctly looked for `telegram-bridge.json` and exited. The verifier now reads the exact `CFBundleExecutable` from `Info.plist` and passes a harmless `--release-smoke-test` argument. A follow-up native run is still required before marking the macOS tasks complete.
+
+The next native macOS Apple Silicon run confirmed that the SHA-pinned executable published in the upstream `b6.1.1` matrix reports `ffmpeg version 6.0`, even though the matrix tag and the Windows/macOS Intel executables are 6.1.1. The manifest now records `reportedVersion` per target, and preparation plus finished-bundle verification enforce the matching target-specific version prefix in addition to the existing archive hash, executable hash, and architecture checks. This fixes the false ARM64 failure without weakening integrity validation.
 
 The new `verify-release-bundles.yml` workflow now builds the same three targets on pull requests, manual dispatch, pushes to `master`, and as a pre-publish gate in `release.yml`, then runs the finished-bundle verifier and uploads the JSON report. It has not yet been executed in GitHub Actions from this working tree, so the native macOS evidence is still pending until those runs complete.

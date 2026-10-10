@@ -28,7 +28,9 @@ $targetConfig = $manifest.targets.$Target
 if (-not $targetConfig) { throw "FFmpeg target is missing from manifest: $Target" }
 $SourceUrl = [string]$targetConfig.archiveUrl
 $Sha256 = [string]$targetConfig.archiveSha256
-$Version = [string]$manifest.version
+$ExpectedVersion = [string]$targetConfig.reportedVersion
+if ([string]::IsNullOrWhiteSpace($ExpectedVersion)) { throw "FFmpeg reported version is missing from manifest: $Target" }
+$expectedVersionPattern = '^ffmpeg version ' + [regex]::Escape($ExpectedVersion) + '([-+ ]|$)'
 $targetDirectory = Join-Path $PSScriptRoot "..\tools\ffmpeg"
 $executableName = [string]$targetConfig.executableName
 $targetPath = Join-Path $targetDirectory $executableName
@@ -98,8 +100,8 @@ try {
   $versionLines = @(& $targetPath -version 2>&1)
   $versionExitCode = $LASTEXITCODE
   $versionOutput = $versionLines | Select-Object -First 1
-  if ($versionExitCode -ne 0 -or $versionOutput -notmatch ([regex]::Escape($Version))) {
-    throw "Expected FFmpeg $Version, got: $versionOutput (exit code $versionExitCode)"
+  if ($versionExitCode -ne 0 -or $versionOutput -notmatch $expectedVersionPattern) {
+    throw "Expected FFmpeg $ExpectedVersion for $Target, got: $versionOutput (exit code $versionExitCode)"
   }
   Write-Host "Prepared $targetPath for $Target ($versionOutput, archive sha256=$actualHash, executable sha256=$executableHash)"
 } finally {

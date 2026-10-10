@@ -16,6 +16,9 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $manifest = Get-Content -LiteralPath (Join-Path $repoRoot "tools/ffmpeg/sidecars.json") -Raw -Encoding UTF8 | ConvertFrom-Json
 $manifestTarget = $manifest.targets.$Target
 if (-not $manifestTarget) { throw "FFmpeg manifest is missing target $Target." }
+$expectedFfmpegVersion = [string]$manifestTarget.reportedVersion
+if ([string]::IsNullOrWhiteSpace($expectedFfmpegVersion)) { throw "FFmpeg reported version is missing from manifest: $Target" }
+$expectedFfmpegVersionPattern = '^ffmpeg version ' + [regex]::Escape($expectedFfmpegVersion) + '([-+ ]|$)'
 $requiredMetadata = @(
   "tools/ffmpeg/FFMPEG_BUILD_README.txt",
   "tools/ffmpeg/FFMPEG_LICENSE.txt",
@@ -100,7 +103,12 @@ if ($Target -eq "windows-x64") {
   if ((Get-Sha256 $sourceFfmpeg) -ne $manifestTarget.executableSha256.ToLowerInvariant()) {
     throw "Windows FFmpeg executable does not match the pinned manifest."
   }
-  $report.ffmpegVersion = (& $sourceFfmpeg -version 2>&1 | Select-Object -First 1 | Out-String).Trim()
+  $ffmpegVersionLines = @(& $sourceFfmpeg -version 2>&1)
+  $ffmpegVersionExitCode = $LASTEXITCODE
+  $report.ffmpegVersion = ($ffmpegVersionLines | Select-Object -First 1 | Out-String).Trim()
+  if ($ffmpegVersionExitCode -ne 0 -or $report.ffmpegVersion -notmatch $expectedFfmpegVersionPattern) {
+    throw "Packaged FFmpeg did not report version $expectedFfmpegVersion for ${Target}: $($report.ffmpegVersion) (exit code $ffmpegVersionExitCode)"
+  }
   Write-Output "Verified Windows NSIS bundle: $($installer.FullName)"
 } else {
   if (-not $IsMacOS) { throw "$Target bundle verification must run on macOS." }
@@ -132,9 +140,11 @@ if ($Target -eq "windows-x64") {
       throw "Packaged FFmpeg executable does not match the pinned manifest for $Target."
     }
     $ffmpegArchitecture = Assert-MacArchitecture $ffmpeg $expectedArchitecture "FFmpeg"
-    $ffmpegVersion = (& $ffmpeg -version 2>&1 | Select-Object -First 1 | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $ffmpegVersion -notmatch "6\.1\.1") {
-      throw "Packaged FFmpeg did not report version 6.1.1: $ffmpegVersion"
+    $ffmpegVersionLines = @(& $ffmpeg -version 2>&1)
+    $ffmpegVersionExitCode = $LASTEXITCODE
+    $ffmpegVersion = ($ffmpegVersionLines | Select-Object -First 1 | Out-String).Trim()
+    if ($ffmpegVersionExitCode -ne 0 -or $ffmpegVersion -notmatch $expectedFfmpegVersionPattern) {
+      throw "Packaged FFmpeg did not report version $expectedFfmpegVersion for ${Target}: $ffmpegVersion (exit code $ffmpegVersionExitCode)"
     }
 
     $infoPlist = Join-Path $appBundle.FullName "Contents/Info.plist"
