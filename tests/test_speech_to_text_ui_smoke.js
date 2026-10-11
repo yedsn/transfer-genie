@@ -603,6 +603,9 @@ async function run() {
         if (
           document.querySelector('#speech-to-text-toggle') &&
           document.querySelector('#speech-to-text-enabled')?.checked &&
+          document.querySelector('#active-endpoint')?.value === 'endpoint-1' &&
+          document.querySelector('#active-endpoint')?.selectedOptions?.[0]?.textContent?.includes('Smoke Endpoint') &&
+          !document.querySelector('#sync-status')?.textContent?.includes('读取设置失败') &&
           window.__speechSmoke?.eventHandlers?.['system-dictation-toggle']
           && window.transferGenieBulkDownloadRuntime
           && window.transferGenieDownloadBulkResource

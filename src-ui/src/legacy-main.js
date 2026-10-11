@@ -11227,9 +11227,6 @@ function applySettings(settings) {
     speechToTextPolishTemperature: normalizeSpeechPolishTemperature(speechToText.polish_temperature ?? DEFAULT_SPEECH_POLISH_TEMPERATURE),
     speechToTextPolishTimeoutSecs: normalizeSpeechPolishTimeoutSecs(speechToText.polish_timeout_secs ?? DEFAULT_SPEECH_POLISH_TIMEOUT_SECS),
   };
-  audio.addEventListener('play', () => {
-    mediaSession?.activate({ owner, element: audio });
-  });
   syncVueSettingsForm(currentSettingsFormState);
   syncShortcutsEnabledState();
   syncSpeechCueSoundControls();
