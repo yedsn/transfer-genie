@@ -318,6 +318,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--proxy",
+        default=os.environ.get("GITEE_SYNC_PROXY", "").strip() or None,
         help="Proxy server for downloading from GitHub (e.g., localhost:7890).",
     )
     return parser

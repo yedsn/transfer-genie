@@ -197,8 +197,9 @@ jobs:
       PYTHONUNBUFFERED: "1"
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
-      https_proxy: http://192.168.3.36:7890
-      http_proxy: http://192.168.3.36:7890
+      GITEE_SYNC_PROXY: ${{ vars.GITEE_SYNC_PROXY }}
+      https_proxy: ${{ vars.GITEE_SYNC_PROXY }}
+      http_proxy: ${{ vars.GITEE_SYNC_PROXY }}
       no_proxy: gitee.com,localhost,127.0.0.1
 
     steps:
@@ -211,4 +212,4 @@ jobs:
 
       - name: Sync GitHub release assets to Gitee
         if: ${{ env.GITEE_ACCESS_TOKEN != '' }}
-        run: python3 scripts/release/release_sync_gitee.py --proxy 192.168.3.36:7890
+        run: python3 scripts/release/release_sync_gitee.py
