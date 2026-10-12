@@ -100,6 +100,97 @@ pub struct DbBulkDownloadResource {
     pub partial_bytes: Option<i64>,
 }
 
+#[derive(Clone, Debug)]
+pub struct NewOutboxOperation {
+    pub operation_id: String,
+    pub endpoint_id: String,
+    pub owner_scope: String,
+    pub entity_type: String,
+    pub entity_id: String,
+    pub action: String,
+    pub base_revision: i64,
+    pub payload_json: String,
+    pub payload_hash: String,
+    pub created_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutboxOperation {
+    pub operation_id: String,
+    pub endpoint_id: String,
+    pub owner_scope: String,
+    pub entity_type: String,
+    pub entity_id: String,
+    pub action: String,
+    pub base_revision: i64,
+    pub payload_json: String,
+    pub payload_hash: String,
+    pub depends_on_operation_id: Option<String>,
+    pub state: String,
+    pub attempt_count: i64,
+    pub next_attempt_at_ms: i64,
+    pub lease_owner: Option<String>,
+    pub lease_expires_at_ms: Option<i64>,
+    pub last_error: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct PulledChange {
+    pub change_seq: i64,
+    pub entity_type: String,
+    pub entity_id: String,
+    pub change_type: String,
+    pub revision: i64,
+    pub snapshot: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StorageImportItem {
+    pub item_type: String,
+    pub source_key: String,
+    pub entity_id: String,
+    pub attachment_id: Option<String>,
+    pub message_operation_id: String,
+    pub attachment_operation_id: Option<String>,
+    pub state: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StorageImportProgress {
+    pub batch_id: String,
+    pub source_profile_id: String,
+    pub target_profile_id: String,
+    pub target_owner_scope: String,
+    pub status: String,
+    pub total_items: i64,
+    pub applied_items: i64,
+    pub failed_items: i64,
+    pub last_error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SyncConflictRecord {
+    pub id: i64,
+    pub entity_type: String,
+    pub entity_id: String,
+    pub local_payload_json: String,
+    pub remote_payload_json: Option<String>,
+    pub local_revision: i64,
+    pub remote_revision: Option<i64>,
+    pub created_at_ms: i64,
+}
+
+pub struct NewStorageImportBatch<'a> {
+    pub batch_id: &'a str,
+    pub source_profile_id: &'a str,
+    pub target_profile_id: &'a str,
+    pub target_owner_scope: &'a str,
+    pub items: &'a [StorageImportItem],
+    pub now_ms: i64,
+}
+
 fn parse_tag_ids(raw: String) -> Vec<String> {
     let mut tag_ids = serde_json::from_str::<Vec<String>>(&raw).unwrap_or_default();
     tag_ids.sort();
@@ -110,6 +201,244 @@ fn parse_tag_ids(raw: String) -> Vec<String> {
 fn serialize_tag_ids(tag_ids: &[String]) -> rusqlite::Result<String> {
     serde_json::to_string(tag_ids)
         .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))
+}
+
+fn table_columns(conn: &Connection, table: &str) -> rusqlite::Result<Vec<String>> {
+    let sql = format!("PRAGMA table_info({table})");
+    conn.prepare(&sql)?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect()
+}
+
+fn table_primary_key_columns(conn: &Connection, table: &str) -> rusqlite::Result<Vec<String>> {
+    let sql = format!("PRAGMA table_info({table})");
+    let mut columns = conn
+        .prepare(&sql)?
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(5)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    columns.retain(|(position, _)| *position > 0);
+    columns.sort_by_key(|(position, _)| *position);
+    Ok(columns.into_iter().map(|(_, name)| name).collect())
+}
+
+fn ensure_account_scoped_business_keys(conn: &mut Connection) -> rusqlite::Result<()> {
+    if table_primary_key_columns(conn, "messages")? != ["endpoint_id", "owner_scope", "filename"] {
+        let tx = conn.transaction()?;
+        tx.execute_batch(
+            "CREATE TABLE messages_account_scoped (
+               endpoint_id TEXT NOT NULL,filename TEXT NOT NULL,sender TEXT NOT NULL,
+               timestamp_ms INTEGER NOT NULL,size INTEGER NOT NULL,kind TEXT NOT NULL,
+               original_name TEXT NOT NULL,etag TEXT,mtime TEXT,content TEXT,local_path TEXT,
+               remote_path TEXT,file_hash TEXT,marked BOOLEAN NOT NULL DEFAULT 0,
+               marked_tag_ids TEXT NOT NULL DEFAULT '[]',marked_pinned BOOLEAN NOT NULL DEFAULT 0,
+               marked_due_date TEXT,format TEXT NOT NULL DEFAULT 'text',transcript_source TEXT,
+               source_audio_mime_type TEXT,transcript_raw_text TEXT,message_id TEXT,
+               remote_revision INTEGER NOT NULL DEFAULT 0,deleted_at_ms INTEGER,
+               sync_state TEXT NOT NULL DEFAULT 'synced',owner_scope TEXT NOT NULL DEFAULT '',
+               PRIMARY KEY(endpoint_id,owner_scope,filename)
+             );
+             INSERT INTO messages_account_scoped SELECT endpoint_id,filename,sender,timestamp_ms,size,
+               kind,original_name,etag,mtime,content,local_path,remote_path,file_hash,marked,
+               marked_tag_ids,marked_pinned,marked_due_date,format,transcript_source,
+               source_audio_mime_type,transcript_raw_text,message_id,remote_revision,deleted_at_ms,
+               sync_state,owner_scope FROM messages;
+             DROP TABLE messages;
+             ALTER TABLE messages_account_scoped RENAME TO messages;",
+        )?;
+        tx.commit()?;
+    }
+    if table_primary_key_columns(conn, "marked_tags")? != ["endpoint_id", "owner_scope", "id"] {
+        let tx = conn.transaction()?;
+        tx.execute_batch(
+            "CREATE TABLE marked_tags_account_scoped (
+               endpoint_id TEXT NOT NULL,id TEXT NOT NULL,name TEXT NOT NULL,
+               owner_scope TEXT NOT NULL DEFAULT '',remote_revision INTEGER NOT NULL DEFAULT 0,
+               deleted_at_ms INTEGER,sync_state TEXT NOT NULL DEFAULT 'synced',
+               PRIMARY KEY(endpoint_id,owner_scope,id)
+             );
+             INSERT INTO marked_tags_account_scoped SELECT endpoint_id,id,name,owner_scope,
+               remote_revision,deleted_at_ms,sync_state FROM marked_tags;
+             DROP TABLE marked_tags;
+             ALTER TABLE marked_tags_account_scoped RENAME TO marked_tags;",
+        )?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
+fn ensure_local_first_sync_schema(conn: &Connection) -> rusqlite::Result<()> {
+    let columns = table_columns(conn, "messages")?;
+    let additions = [
+        ("message_id", "TEXT"),
+        ("remote_revision", "INTEGER NOT NULL DEFAULT 0"),
+        ("deleted_at_ms", "INTEGER"),
+        ("sync_state", "TEXT NOT NULL DEFAULT 'synced'"),
+        ("owner_scope", "TEXT NOT NULL DEFAULT ''"),
+    ];
+    for (name, definition) in additions {
+        if !columns.iter().any(|column| column == name) {
+            conn.execute(
+                &format!("ALTER TABLE messages ADD COLUMN {name} {definition}"),
+                [],
+            )?;
+        }
+    }
+    let tag_columns = table_columns(conn, "marked_tags")?;
+    for (name, definition) in [
+        ("owner_scope", "TEXT NOT NULL DEFAULT ''"),
+        ("remote_revision", "INTEGER NOT NULL DEFAULT 0"),
+        ("deleted_at_ms", "INTEGER"),
+        ("sync_state", "TEXT NOT NULL DEFAULT 'synced'"),
+    ] {
+        if !tag_columns.iter().any(|column| column == name) {
+            conn.execute(
+                &format!("ALTER TABLE marked_tags ADD COLUMN {name} {definition}"),
+                [],
+            )?;
+        }
+    }
+    conn.execute_batch(
+        "UPDATE messages
+         SET message_id = lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) ||
+             '-4' || substr(lower(hex(randomblob(2))), 2) || '-' ||
+             substr('89ab', abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))), 2) || '-' ||
+             lower(hex(randomblob(6)))
+         WHERE message_id IS NULL OR trim(message_id) = '';
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_profile_message_id
+           ON messages(endpoint_id, owner_scope, message_id);
+         CREATE INDEX IF NOT EXISTS idx_messages_profile_revision
+           ON messages(endpoint_id, owner_scope, remote_revision);
+         CREATE INDEX IF NOT EXISTS idx_messages_profile_deleted
+           ON messages(endpoint_id, owner_scope, deleted_at_ms);
+         CREATE INDEX IF NOT EXISTS idx_marked_tags_profile_owner
+           ON marked_tags(endpoint_id, owner_scope, deleted_at_ms);
+
+         CREATE TABLE IF NOT EXISTS sync_outbox (
+           operation_id TEXT PRIMARY KEY,
+           endpoint_id TEXT NOT NULL,
+           owner_scope TEXT NOT NULL DEFAULT '',
+           entity_type TEXT NOT NULL,
+           entity_id TEXT NOT NULL,
+           action TEXT NOT NULL,
+           base_revision INTEGER NOT NULL DEFAULT 0,
+           payload_json TEXT NOT NULL,
+           payload_hash TEXT NOT NULL,
+           depends_on_operation_id TEXT,
+           state TEXT NOT NULL DEFAULT 'pending',
+           attempt_count INTEGER NOT NULL DEFAULT 0,
+           next_attempt_at_ms INTEGER NOT NULL DEFAULT 0,
+           lease_started_at_ms INTEGER,
+           last_error TEXT,
+           created_at_ms INTEGER NOT NULL,
+           updated_at_ms INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_sync_outbox_claim
+           ON sync_outbox(endpoint_id, owner_scope, state, next_attempt_at_ms, created_at_ms);
+         CREATE INDEX IF NOT EXISTS idx_sync_outbox_entity
+           ON sync_outbox(endpoint_id, owner_scope, entity_type, entity_id, created_at_ms);
+
+         CREATE TABLE IF NOT EXISTS sync_checkpoints (
+           endpoint_id TEXT NOT NULL,
+           owner_scope TEXT NOT NULL DEFAULT '',
+           change_seq INTEGER NOT NULL DEFAULT 0,
+           updated_at_ms INTEGER NOT NULL,
+           PRIMARY KEY(endpoint_id, owner_scope)
+         );
+
+         CREATE TABLE IF NOT EXISTS sync_conflicts (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           endpoint_id TEXT NOT NULL,
+           owner_scope TEXT NOT NULL DEFAULT '',
+           entity_type TEXT NOT NULL,
+           entity_id TEXT NOT NULL,
+           local_payload_json TEXT NOT NULL,
+           remote_payload_json TEXT,
+           local_revision INTEGER NOT NULL DEFAULT 0,
+           remote_revision INTEGER,
+           status TEXT NOT NULL DEFAULT 'unresolved',
+           created_at_ms INTEGER NOT NULL,
+           resolved_at_ms INTEGER
+         );
+         CREATE INDEX IF NOT EXISTS idx_sync_conflicts_open
+           ON sync_conflicts(endpoint_id, owner_scope, status, created_at_ms);
+
+         CREATE TABLE IF NOT EXISTS attachment_sync (
+           endpoint_id TEXT NOT NULL,
+           owner_scope TEXT NOT NULL DEFAULT '',
+           attachment_id TEXT NOT NULL,
+           message_id TEXT NOT NULL,
+           original_name TEXT NOT NULL,
+           local_path TEXT,
+           object_path TEXT,
+           preview_object_path TEXT,
+           mime_type TEXT,
+           size INTEGER NOT NULL DEFAULT 0,
+           sha256 TEXT,
+           upload_state TEXT NOT NULL DEFAULT 'local',
+           remote_revision INTEGER NOT NULL DEFAULT 0,
+           deleted_at_ms INTEGER,
+           last_error TEXT,
+           updated_at_ms INTEGER NOT NULL,
+           PRIMARY KEY(endpoint_id, owner_scope, attachment_id)
+         );
+          CREATE INDEX IF NOT EXISTS idx_attachment_sync_message
+            ON attachment_sync(endpoint_id, owner_scope, message_id);
+
+         CREATE TABLE IF NOT EXISTS storage_import_batches (
+           batch_id TEXT PRIMARY KEY,
+           source_profile_id TEXT NOT NULL,
+           target_profile_id TEXT NOT NULL,
+           target_owner_scope TEXT NOT NULL,
+           status TEXT NOT NULL DEFAULT 'pending',
+           total_items INTEGER NOT NULL DEFAULT 0,
+           applied_items INTEGER NOT NULL DEFAULT 0,
+           failed_items INTEGER NOT NULL DEFAULT 0,
+           last_error TEXT,
+           created_at_ms INTEGER NOT NULL,
+           updated_at_ms INTEGER NOT NULL
+         );
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_storage_import_batch_scope
+           ON storage_import_batches(source_profile_id,target_profile_id,target_owner_scope);
+
+         CREATE TABLE IF NOT EXISTS storage_import_items (
+           batch_id TEXT NOT NULL,
+           item_type TEXT NOT NULL,
+           source_key TEXT NOT NULL,
+           entity_id TEXT NOT NULL,
+           attachment_id TEXT,
+           message_operation_id TEXT NOT NULL,
+           attachment_operation_id TEXT,
+           state TEXT NOT NULL DEFAULT 'pending',
+           last_error TEXT,
+           updated_at_ms INTEGER NOT NULL,
+           PRIMARY KEY(batch_id,item_type,source_key),
+           FOREIGN KEY(batch_id) REFERENCES storage_import_batches(batch_id) ON DELETE CASCADE
+         );
+         CREATE INDEX IF NOT EXISTS idx_storage_import_items_pending
+           ON storage_import_items(batch_id,state,item_type,source_key);
+
+         UPDATE storage_import_batches
+         SET last_error=NULL
+         WHERE status='completed'
+           AND failed_items=0
+           AND applied_items=total_items;"
+    )?;
+    let outbox_columns = table_columns(conn, "sync_outbox")?;
+    for (name, definition) in [
+        ("lease_owner", "TEXT"),
+        ("lease_expires_at_ms", "INTEGER"),
+        ("depends_on_operation_id", "TEXT"),
+    ] {
+        if !outbox_columns.iter().any(|column| column == name) {
+            conn.execute(
+                &format!("ALTER TABLE sync_outbox ADD COLUMN {name} {definition}"),
+                [],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), String> {
@@ -134,6 +463,12 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
         .map_err(|err| format!("初始化数据库表失败: {err}"))?;
         ensure_pending_marked_sync_schema(&conn)
             .map_err(|err| format!("初始化待同步标记表失败: {err}"))?;
+        ensure_local_first_sync_schema(&conn)
+            .map_err(|err| format!("初始化本地优先同步表失败: {err}"))?;
+        ensure_account_scoped_business_keys(&mut conn)
+            .map_err(|err| format!("初始化账号隔离主键失败: {err}"))?;
+        ensure_local_first_sync_schema(&conn)
+            .map_err(|err| format!("重建账号隔离索引失败: {err}"))?;
         ensure_indexes(&conn).map_err(|err| format!("初始化数据库索引失败: {err}"))?;
         return Ok(());
     }
@@ -423,6 +758,11 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
 
     ensure_pending_marked_sync_schema(&conn)
         .map_err(|err| format!("初始化待同步标记表失败: {err}"))?;
+    ensure_local_first_sync_schema(&conn)
+        .map_err(|err| format!("初始化本地优先同步表失败: {err}"))?;
+    ensure_account_scoped_business_keys(&mut conn)
+        .map_err(|err| format!("初始化账号隔离主键失败: {err}"))?;
+    ensure_local_first_sync_schema(&conn).map_err(|err| format!("重建账号隔离索引失败: {err}"))?;
     ensure_indexes(&conn).map_err(|err| format!("初始化数据库索引失败: {err}"))?;
 
     Ok(())
@@ -515,7 +855,7 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
     "INSERT INTO messages\
       (endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, marked_due_date, format, transcript_source, source_audio_mime_type, transcript_raw_text)\
       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)\
-      ON CONFLICT(endpoint_id, filename) DO UPDATE SET \
+      ON CONFLICT(endpoint_id, owner_scope, filename) DO UPDATE SET \
         sender=excluded.sender,\
         timestamp_ms=excluded.timestamp_ms,\
         size=excluded.size,\
@@ -560,6 +900,1778 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
     ],
   )?;
     Ok(())
+}
+
+fn enqueue_outbox(conn: &Connection, operation: &NewOutboxOperation) -> rusqlite::Result<()> {
+    enqueue_outbox_with_dependency(conn, operation, None)
+}
+
+fn enqueue_outbox_with_dependency(
+    conn: &Connection,
+    operation: &NewOutboxOperation,
+    depends_on_operation_id: Option<&str>,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO sync_outbox (
+           operation_id, endpoint_id, owner_scope, entity_type, entity_id, action,
+           base_revision, payload_json, payload_hash, depends_on_operation_id, state,
+           attempt_count, next_attempt_at_ms, created_at_ms, updated_at_ms
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'pending',0,0,?11,?11)",
+        params![
+            operation.operation_id,
+            operation.endpoint_id,
+            operation.owner_scope,
+            operation.entity_type,
+            operation.entity_id,
+            operation.action,
+            operation.base_revision,
+            operation.payload_json,
+            operation.payload_hash,
+            depends_on_operation_id,
+            operation.created_at_ms,
+        ],
+    )?;
+    Ok(())
+}
+
+fn map_outbox_operation(row: &Row<'_>) -> rusqlite::Result<OutboxOperation> {
+    Ok(OutboxOperation {
+        operation_id: row.get(0)?,
+        endpoint_id: row.get(1)?,
+        owner_scope: row.get(2)?,
+        entity_type: row.get(3)?,
+        entity_id: row.get(4)?,
+        action: row.get(5)?,
+        base_revision: row.get(6)?,
+        payload_json: row.get(7)?,
+        payload_hash: row.get(8)?,
+        depends_on_operation_id: row.get(9)?,
+        state: row.get(10)?,
+        attempt_count: row.get(11)?,
+        next_attempt_at_ms: row.get(12)?,
+        lease_owner: row.get(13)?,
+        lease_expires_at_ms: row.get(14)?,
+        last_error: row.get(15)?,
+        created_at_ms: row.get(16)?,
+        updated_at_ms: row.get(17)?,
+    })
+}
+
+const OUTBOX_SELECT: &str = "operation_id,endpoint_id,owner_scope,entity_type,entity_id,action,
+  base_revision,payload_json,payload_hash,depends_on_operation_id,state,attempt_count,next_attempt_at_ms,lease_owner,
+  lease_expires_at_ms,last_error,created_at_ms,updated_at_ms";
+
+pub fn recover_outbox_leases(path: &Path, now_ms: i64) -> rusqlite::Result<usize> {
+    Connection::open(path)?.execute(
+        "UPDATE sync_outbox
+         SET state='pending',lease_owner=NULL,lease_started_at_ms=NULL,lease_expires_at_ms=NULL,
+             updated_at_ms=?1,last_error=coalesce(last_error,'interrupted before acknowledgement')
+         WHERE state='sending' AND (lease_expires_at_ms IS NULL OR lease_expires_at_ms<=?1)",
+        params![now_ms],
+    )
+}
+
+pub fn recover_all_outbox_claims(path: &Path, now_ms: i64) -> rusqlite::Result<usize> {
+    Connection::open(path)?.execute(
+        "UPDATE sync_outbox
+         SET state='pending',lease_owner=NULL,lease_started_at_ms=NULL,lease_expires_at_ms=NULL,
+             updated_at_ms=?1,last_error=coalesce(last_error,'interrupted before acknowledgement')
+         WHERE state='sending'",
+        params![now_ms],
+    )
+}
+
+pub fn outbox_retry_delay_ms(attempt_count: i64) -> i64 {
+    let exponent = attempt_count.saturating_sub(1).clamp(0, 8) as u32;
+    1_000_i64.saturating_mul(1_i64 << exponent).min(300_000)
+}
+
+pub fn claim_outbox_operations(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    lease_owner: &str,
+    now_ms: i64,
+    lease_duration_ms: i64,
+    limit: usize,
+    ignore_backoff: bool,
+) -> rusqlite::Result<Vec<OutboxOperation>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    tx.execute(
+        "UPDATE sync_outbox
+         SET state='pending',lease_owner=NULL,lease_started_at_ms=NULL,lease_expires_at_ms=NULL,
+             updated_at_ms=?1,last_error=coalesce(last_error,'interrupted before acknowledgement')
+         WHERE endpoint_id=?2 AND owner_scope=?3 AND state='sending'
+           AND (lease_expires_at_ms IS NULL OR lease_expires_at_ms<=?1)",
+        params![now_ms, endpoint_id, owner_scope],
+    )?;
+    let retry_filter = if ignore_backoff {
+        ""
+    } else {
+        "AND o.next_attempt_at_ms<=?4"
+    };
+    let sql = format!(
+        "SELECT o.operation_id FROM sync_outbox o
+         WHERE o.endpoint_id=?1 AND o.owner_scope=?2 AND o.state='pending' {retry_filter}
+           AND (o.depends_on_operation_id IS NULL OR EXISTS (
+             SELECT 1 FROM sync_outbox dependency
+             WHERE dependency.operation_id=o.depends_on_operation_id
+               AND dependency.state IN ('acknowledged','superseded')
+           ))
+           AND NOT EXISTS (
+             SELECT 1 FROM sync_outbox previous
+             WHERE previous.endpoint_id=o.endpoint_id AND previous.owner_scope=o.owner_scope
+               AND previous.entity_type=o.entity_type AND previous.entity_id=o.entity_id
+               AND previous.rowid<o.rowid
+               AND previous.state NOT IN ('acknowledged','superseded')
+           )
+         ORDER BY CASE o.entity_type
+           WHEN 'tag' THEN 0
+           WHEN 'message' THEN 1
+           WHEN 'attachment' THEN 2
+           ELSE 3 END,
+           o.created_at_ms,o.operation_id LIMIT ?3"
+    );
+    let ids: Vec<String> = {
+        let mut statement = tx.prepare(&sql)?;
+        let mut rows = if ignore_backoff {
+            statement.query(params![endpoint_id, owner_scope, limit as i64])?
+        } else {
+            statement.query(params![endpoint_id, owner_scope, limit as i64, now_ms])?
+        };
+        let mut ids = Vec::new();
+        while let Some(row) = rows.next()? {
+            ids.push(row.get(0)?);
+        }
+        ids
+    };
+    let lease_expires_at_ms = now_ms.saturating_add(lease_duration_ms.max(1));
+    for id in &ids {
+        tx.execute(
+            "UPDATE sync_outbox SET state='sending',attempt_count=attempt_count+1,
+               lease_owner=?2,lease_started_at_ms=?3,lease_expires_at_ms=?4,updated_at_ms=?3
+             WHERE operation_id=?1 AND state='pending'",
+            params![id, lease_owner, now_ms, lease_expires_at_ms],
+        )?;
+    }
+    let mut claimed = Vec::with_capacity(ids.len());
+    for id in &ids {
+        claimed.push(tx.query_row(
+            &format!("SELECT {OUTBOX_SELECT} FROM sync_outbox WHERE operation_id=?1"),
+            params![id],
+            map_outbox_operation,
+        )?);
+    }
+    tx.commit()?;
+    Ok(claimed)
+}
+
+pub fn claim_storage_import_outbox_operations(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    batch_id: &str,
+    lease_owner: &str,
+    now_ms: i64,
+    lease_duration_ms: i64,
+    limit: usize,
+) -> rusqlite::Result<Vec<OutboxOperation>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    tx.execute(
+        "UPDATE sync_outbox
+         SET state='pending',lease_owner=NULL,lease_started_at_ms=NULL,lease_expires_at_ms=NULL,
+             updated_at_ms=?1,last_error=coalesce(last_error,'interrupted before acknowledgement')
+         WHERE endpoint_id=?2 AND owner_scope=?3 AND state='sending'
+           AND (lease_expires_at_ms IS NULL OR lease_expires_at_ms<=?1)",
+        params![now_ms, endpoint_id, owner_scope],
+    )?;
+    let ids = {
+        let mut statement = tx.prepare(
+            "SELECT outbox.operation_id FROM sync_outbox outbox
+             WHERE outbox.endpoint_id=?1 AND outbox.owner_scope=?2 AND outbox.state='pending'
+               AND (outbox.depends_on_operation_id IS NULL OR EXISTS (
+                 SELECT 1 FROM sync_outbox dependency
+                 WHERE dependency.operation_id=outbox.depends_on_operation_id
+                   AND dependency.state IN ('acknowledged','superseded')
+               ))
+               AND outbox.operation_id IN (
+                 SELECT message_operation_id FROM storage_import_items WHERE batch_id=?3
+                 UNION
+                 SELECT attachment_operation_id FROM storage_import_items
+                   WHERE batch_id=?3 AND attachment_operation_id IS NOT NULL
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM sync_outbox previous
+                 WHERE previous.endpoint_id=outbox.endpoint_id
+                   AND previous.owner_scope=outbox.owner_scope
+                   AND previous.entity_type=outbox.entity_type
+                   AND previous.entity_id=outbox.entity_id
+                   AND previous.rowid<outbox.rowid
+                   AND previous.state NOT IN ('acknowledged','superseded')
+               )
+             ORDER BY CASE outbox.entity_type
+               WHEN 'tag' THEN 0 WHEN 'message' THEN 1 WHEN 'attachment' THEN 2 ELSE 3 END,
+               outbox.created_at_ms,outbox.operation_id LIMIT ?4",
+        )?;
+        let values = statement
+            .query_map(
+                params![endpoint_id, owner_scope, batch_id, limit as i64],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        values
+    };
+    let lease_expires_at_ms = now_ms.saturating_add(lease_duration_ms.max(1));
+    for id in &ids {
+        tx.execute(
+            "UPDATE sync_outbox SET state='sending',attempt_count=attempt_count+1,
+               lease_owner=?2,lease_started_at_ms=?3,lease_expires_at_ms=?4,updated_at_ms=?3
+             WHERE operation_id=?1 AND state='pending'",
+            params![id, lease_owner, now_ms, lease_expires_at_ms],
+        )?;
+    }
+    let mut claimed = Vec::with_capacity(ids.len());
+    for id in &ids {
+        claimed.push(tx.query_row(
+            &format!("SELECT {OUTBOX_SELECT} FROM sync_outbox WHERE operation_id=?1"),
+            params![id],
+            map_outbox_operation,
+        )?);
+    }
+    tx.commit()?;
+    Ok(claimed)
+}
+
+pub fn release_outbox_operation(
+    path: &Path,
+    operation_id: &str,
+    lease_owner: &str,
+    next_attempt_at_ms: i64,
+    error: &str,
+    now_ms: i64,
+) -> rusqlite::Result<bool> {
+    Ok(Connection::open(path)?.execute(
+        "UPDATE sync_outbox SET state='pending',next_attempt_at_ms=?3,last_error=?4,
+           lease_owner=NULL,lease_started_at_ms=NULL,lease_expires_at_ms=NULL,updated_at_ms=?5
+         WHERE operation_id=?1 AND state='sending' AND lease_owner=?2",
+        params![operation_id, lease_owner, next_attempt_at_ms, error, now_ms],
+    )? > 0)
+}
+
+pub fn mark_storage_import_operation_error(
+    path: &Path,
+    operation_id: &str,
+    error: &str,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    let affected_batches = {
+        let mut statement = tx.prepare(
+            "SELECT DISTINCT batch_id FROM storage_import_items
+             WHERE message_operation_id=?1 OR attachment_operation_id=?1",
+        )?;
+        let values = statement
+            .query_map(params![operation_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        values
+    };
+    tx.execute(
+        "UPDATE storage_import_items SET state='error',last_error=?2,updated_at_ms=?3
+         WHERE message_operation_id=?1 OR attachment_operation_id=?1",
+        params![operation_id, error, now_ms],
+    )?;
+    for batch_id in affected_batches {
+        tx.execute(
+            "UPDATE storage_import_batches SET last_error=?2,updated_at_ms=?3 WHERE batch_id=?1",
+            params![batch_id, error, now_ms],
+        )?;
+        refresh_import_progress(&tx, &batch_id, now_ms)?;
+    }
+    tx.commit()
+}
+
+pub fn acknowledge_outbox_operation(
+    path: &Path,
+    operation_id: &str,
+    lease_owner: &str,
+    now_ms: i64,
+) -> rusqlite::Result<bool> {
+    Ok(Connection::open(path)?.execute(
+        "UPDATE sync_outbox SET state='acknowledged',last_error=NULL,
+           lease_owner=NULL,lease_started_at_ms=NULL,lease_expires_at_ms=NULL,updated_at_ms=?3
+         WHERE operation_id=?1 AND state='sending' AND lease_owner=?2",
+        params![operation_id, lease_owner, now_ms],
+    )? > 0)
+}
+
+pub fn apply_outbox_success(
+    path: &Path,
+    operation: &OutboxOperation,
+    lease_owner: &str,
+    remote_revision: i64,
+    now_ms: i64,
+) -> rusqlite::Result<bool> {
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    let changed = tx.execute(
+        "UPDATE sync_outbox SET state='acknowledged',last_error=NULL,
+           lease_owner=NULL,lease_started_at_ms=NULL,lease_expires_at_ms=NULL,updated_at_ms=?3
+         WHERE operation_id=?1 AND state='sending' AND lease_owner=?2",
+        params![operation.operation_id, lease_owner, now_ms],
+    )?;
+    if changed == 0 {
+        return Ok(false);
+    }
+    tx.execute(
+        "UPDATE sync_outbox SET base_revision=?5,updated_at_ms=?6
+         WHERE endpoint_id=?1 AND owner_scope=?2 AND entity_type=?3 AND entity_id=?4
+           AND state='pending' AND rowid>(SELECT rowid FROM sync_outbox WHERE operation_id=?7)",
+        params![
+            operation.endpoint_id,
+            operation.owner_scope,
+            operation.entity_type,
+            operation.entity_id,
+            remote_revision,
+            now_ms,
+            operation.operation_id,
+        ],
+    )?;
+    match operation.entity_type.as_str() {
+        "message" => {
+            tx.execute(
+                "UPDATE messages SET remote_revision=?4,
+                   sync_state=CASE WHEN EXISTS (
+                     SELECT 1 FROM sync_outbox pending
+                     WHERE pending.endpoint_id=?1 AND pending.owner_scope=?2
+                       AND pending.entity_type='message' AND pending.entity_id=?3
+                       AND pending.operation_id<>?5 AND pending.state NOT IN ('acknowledged','superseded')
+                   ) THEN 'pending' ELSE 'synced' END
+                 WHERE endpoint_id=?1 AND owner_scope=?2 AND message_id=?3",
+                params![
+                    operation.endpoint_id,
+                    operation.owner_scope,
+                    operation.entity_id,
+                    remote_revision,
+                    operation.operation_id,
+                ],
+            )?;
+        }
+        "tag" => {
+            tx.execute(
+                "UPDATE marked_tags SET remote_revision=?4,
+                   sync_state=CASE WHEN EXISTS (
+                     SELECT 1 FROM sync_outbox pending
+                     WHERE pending.endpoint_id=?1 AND pending.owner_scope=?2
+                       AND pending.entity_type='tag' AND pending.entity_id=?3
+                       AND pending.operation_id<>?5 AND pending.state NOT IN ('acknowledged','superseded')
+                   ) THEN 'pending' ELSE 'synced' END
+                 WHERE endpoint_id=?1 AND owner_scope=?2 AND id=?3",
+                params![
+                    operation.endpoint_id,
+                    operation.owner_scope,
+                    operation.entity_id,
+                    remote_revision,
+                    operation.operation_id,
+                ],
+            )?;
+        }
+        "attachment" => {
+            tx.execute(
+                "UPDATE attachment_sync SET remote_revision=?4,upload_state='uploaded',
+                   last_error=NULL,updated_at_ms=?5
+                 WHERE endpoint_id=?1 AND owner_scope=?2 AND attachment_id=?3",
+                params![
+                    operation.endpoint_id,
+                    operation.owner_scope,
+                    operation.entity_id,
+                    remote_revision,
+                    now_ms
+                ],
+            )?;
+        }
+        _ => {}
+    }
+    let affected_batches = {
+        let mut statement = tx.prepare(
+            "SELECT DISTINCT batch_id FROM storage_import_items
+             WHERE message_operation_id=?1 OR attachment_operation_id=?1",
+        )?;
+        let values = statement
+            .query_map(params![operation.operation_id], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        values
+    };
+    tx.execute(
+        "UPDATE storage_import_items SET
+           state=CASE WHEN
+             EXISTS (SELECT 1 FROM sync_outbox message_op
+               WHERE message_op.operation_id=storage_import_items.message_operation_id
+                 AND message_op.state IN ('acknowledged','superseded'))
+             AND (storage_import_items.attachment_operation_id IS NULL OR EXISTS (
+               SELECT 1 FROM sync_outbox attachment_op
+               WHERE attachment_op.operation_id=storage_import_items.attachment_operation_id
+                 AND attachment_op.state IN ('acknowledged','superseded')
+             )) THEN 'applied' ELSE 'staged' END,
+           last_error=NULL,updated_at_ms=?2
+         WHERE message_operation_id=?1 OR attachment_operation_id=?1",
+        params![operation.operation_id, now_ms],
+    )?;
+    for batch_id in affected_batches {
+        refresh_import_progress(&tx, &batch_id, now_ms)?;
+    }
+    tx.commit()?;
+    Ok(true)
+}
+
+pub fn record_outbox_conflict(
+    path: &Path,
+    operation: &OutboxOperation,
+    lease_owner: &str,
+    remote_revision: Option<i64>,
+    remote_payload_json: Option<&str>,
+    now_ms: i64,
+) -> rusqlite::Result<bool> {
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    let changed = tx.execute(
+        "UPDATE sync_outbox SET state='conflict',last_error='revision conflict',
+           lease_owner=NULL,lease_started_at_ms=NULL,lease_expires_at_ms=NULL,updated_at_ms=?3
+         WHERE operation_id=?1 AND state='sending' AND lease_owner=?2",
+        params![operation.operation_id, lease_owner, now_ms],
+    )?;
+    if changed == 0 {
+        return Ok(false);
+    }
+    let affected_batches = {
+        let mut statement = tx.prepare(
+            "SELECT DISTINCT batch_id FROM storage_import_items
+             WHERE message_operation_id=?1 OR attachment_operation_id=?1",
+        )?;
+        let values = statement
+            .query_map(params![operation.operation_id], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        values
+    };
+    tx.execute(
+        "UPDATE storage_import_items SET state='error',last_error='Supabase 数据冲突',updated_at_ms=?2
+         WHERE message_operation_id=?1 OR attachment_operation_id=?1",
+        params![operation.operation_id, now_ms],
+    )?;
+    for batch_id in affected_batches {
+        tx.execute(
+            "UPDATE storage_import_batches SET last_error='Supabase 数据冲突',updated_at_ms=?2
+             WHERE batch_id=?1",
+            params![batch_id, now_ms],
+        )?;
+        refresh_import_progress(&tx, &batch_id, now_ms)?;
+    }
+    tx.execute(
+        "INSERT INTO sync_conflicts (
+           endpoint_id,owner_scope,entity_type,entity_id,local_payload_json,
+           remote_payload_json,local_revision,remote_revision,status,created_at_ms
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'unresolved',?9)",
+        params![
+            operation.endpoint_id,
+            operation.owner_scope,
+            operation.entity_type,
+            operation.entity_id,
+            operation.payload_json,
+            remote_payload_json,
+            operation.base_revision,
+            remote_revision,
+            now_ms,
+        ],
+    )?;
+    let table = match operation.entity_type.as_str() {
+        "message" => Some(("messages", "message_id")),
+        "tag" => Some(("marked_tags", "id")),
+        _ => None,
+    };
+    if let Some((table, id_column)) = table {
+        tx.execute(
+            &format!(
+                "UPDATE {table} SET sync_state='conflict'
+                 WHERE endpoint_id=?1 AND owner_scope=?2 AND {id_column}=?3"
+            ),
+            params![
+                operation.endpoint_id,
+                operation.owner_scope,
+                operation.entity_id
+            ],
+        )?;
+    }
+    tx.commit()?;
+    Ok(true)
+}
+
+pub fn get_outbox_operation(
+    path: &Path,
+    operation_id: &str,
+) -> rusqlite::Result<Option<OutboxOperation>> {
+    Connection::open(path)?
+        .query_row(
+            &format!("SELECT {OUTBOX_SELECT} FROM sync_outbox WHERE operation_id=?1"),
+            params![operation_id],
+            map_outbox_operation,
+        )
+        .optional()
+}
+
+pub fn get_sync_checkpoint(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+) -> rusqlite::Result<i64> {
+    Ok(Connection::open(path)?
+        .query_row(
+            "SELECT change_seq FROM sync_checkpoints WHERE endpoint_id=?1 AND owner_scope=?2",
+            params![endpoint_id, owner_scope],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0))
+}
+
+pub fn count_pending_outbox(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+) -> rusqlite::Result<i64> {
+    Connection::open(path)?.query_row(
+        "SELECT count(*) FROM sync_outbox WHERE endpoint_id=?1 AND owner_scope=?2
+         AND state NOT IN ('acknowledged','superseded','conflict')",
+        params![endpoint_id, owner_scope],
+        |row| row.get(0),
+    )
+}
+
+pub fn count_open_conflicts(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+) -> rusqlite::Result<i64> {
+    Connection::open(path)?.query_row(
+        "SELECT count(*) FROM sync_conflicts WHERE endpoint_id=?1 AND owner_scope=?2 AND status='unresolved'",
+        params![endpoint_id,owner_scope], |row| row.get(0))
+}
+
+pub fn list_pending_operations(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+) -> rusqlite::Result<Vec<OutboxOperation>> {
+    let conn = Connection::open(path)?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {OUTBOX_SELECT} FROM sync_outbox WHERE endpoint_id=?1 AND owner_scope=?2
+         AND state NOT IN ('acknowledged','superseded','conflict') ORDER BY created_at_ms ASC"
+    ))?;
+    let rows = stmt.query_map(params![endpoint_id, owner_scope], map_outbox_operation)?;
+    rows.collect()
+}
+
+pub fn retry_pending_operation(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    operation_id: &str,
+    now_ms: i64,
+) -> rusqlite::Result<bool> {
+    Ok(Connection::open(path)?.execute(
+        "UPDATE sync_outbox SET state='pending',next_attempt_at_ms=0,last_error=NULL,
+         lease_owner=NULL,lease_started_at_ms=NULL,lease_expires_at_ms=NULL,updated_at_ms=?4
+         WHERE endpoint_id=?1 AND owner_scope=?2 AND operation_id=?3
+           AND state NOT IN ('acknowledged','superseded','conflict')",
+        params![endpoint_id, owner_scope, operation_id, now_ms],
+    )? > 0)
+}
+
+pub fn list_sync_conflicts(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+) -> rusqlite::Result<Vec<SyncConflictRecord>> {
+    let conn = Connection::open(path)?;
+    let mut stmt = conn.prepare(
+        "SELECT id,entity_type,entity_id,local_payload_json,remote_payload_json,
+      local_revision,remote_revision,created_at_ms FROM sync_conflicts
+      WHERE endpoint_id=?1 AND owner_scope=?2 AND status='unresolved' ORDER BY created_at_ms ASC",
+    )?;
+    let rows = stmt.query_map(params![endpoint_id, owner_scope], |row| {
+        Ok(SyncConflictRecord {
+            id: row.get(0)?,
+            entity_type: row.get(1)?,
+            entity_id: row.get(2)?,
+            local_payload_json: row.get(3)?,
+            remote_payload_json: row.get(4)?,
+            local_revision: row.get(5)?,
+            remote_revision: row.get(6)?,
+            created_at_ms: row.get(7)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn get_sync_conflict(
+    path: &Path,
+    id: i64,
+    endpoint_id: &str,
+    owner_scope: &str,
+) -> rusqlite::Result<Option<SyncConflictRecord>> {
+    Connection::open(path)?.query_row("SELECT id,entity_type,entity_id,local_payload_json,remote_payload_json,
+      local_revision,remote_revision,created_at_ms FROM sync_conflicts WHERE id=?1 AND endpoint_id=?2
+      AND owner_scope=?3 AND status='unresolved'",params![id,endpoint_id,owner_scope],|row|Ok(SyncConflictRecord{
+      id:row.get(0)?,entity_type:row.get(1)?,entity_id:row.get(2)?,local_payload_json:row.get(3)?,
+      remote_payload_json:row.get(4)?,local_revision:row.get(5)?,remote_revision:row.get(6)?,created_at_ms:row.get(7)?
+    })).optional()
+}
+
+pub fn resolve_sync_conflict_keep_local(
+    path: &Path,
+    conflict_id: i64,
+    endpoint_id: &str,
+    owner_scope: &str,
+    operation: &NewOutboxOperation,
+    now_ms: i64,
+) -> rusqlite::Result<bool> {
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    let changed = tx.execute(
+        "UPDATE sync_conflicts SET status='resolved_local',resolved_at_ms=?4
+      WHERE id=?1 AND endpoint_id=?2 AND owner_scope=?3 AND status='unresolved'",
+        params![conflict_id, endpoint_id, owner_scope, now_ms],
+    )?;
+    if changed == 0 {
+        return Ok(false);
+    }
+    tx.execute(
+        "UPDATE sync_outbox SET state='superseded',updated_at_ms=?4 WHERE endpoint_id=?1
+      AND owner_scope=?2 AND entity_type=?3 AND entity_id=?5 AND state='conflict'",
+        params![
+            endpoint_id,
+            owner_scope,
+            operation.entity_type,
+            now_ms,
+            operation.entity_id
+        ],
+    )?;
+    enqueue_outbox(&tx, operation)?;
+    match operation.entity_type.as_str() {
+        "message" => {
+            tx.execute("UPDATE messages SET sync_state='pending' WHERE endpoint_id=?1 AND owner_scope=?2 AND message_id=?3",params![endpoint_id,owner_scope,operation.entity_id])?;
+        }
+        "tag" => {
+            tx.execute("UPDATE marked_tags SET sync_state='pending' WHERE endpoint_id=?1 AND owner_scope=?2 AND id=?3",params![endpoint_id,owner_scope,operation.entity_id])?;
+        }
+        _ => {}
+    }
+    tx.commit()?;
+    Ok(true)
+}
+
+pub fn resolve_sync_conflict_use_remote(
+    path: &Path,
+    conflict_id: i64,
+    endpoint_id: &str,
+    owner_scope: &str,
+    now_ms: i64,
+) -> rusqlite::Result<bool> {
+    let Some(conflict) = get_sync_conflict(path, conflict_id, endpoint_id, owner_scope)? else {
+        return Ok(false);
+    };
+    let snapshot: Option<serde_json::Value> = conflict
+        .remote_payload_json
+        .as_deref()
+        .and_then(|value| serde_json::from_str(value).ok());
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    tx.execute(
+        "UPDATE sync_outbox SET state='superseded',updated_at_ms=?5 WHERE endpoint_id=?1
+      AND owner_scope=?2 AND entity_type=?3 AND entity_id=?4 AND state='conflict'",
+        params![
+            endpoint_id,
+            owner_scope,
+            conflict.entity_type,
+            conflict.entity_id,
+            now_ms
+        ],
+    )?;
+    let change = PulledChange {
+        change_seq: 0,
+        entity_type: conflict.entity_type.clone(),
+        entity_id: conflict.entity_id.clone(),
+        change_type: if snapshot
+            .as_ref()
+            .is_none_or(|value| !value["deleted_at"].is_null())
+        {
+            "delete".into()
+        } else {
+            "upsert".into()
+        },
+        revision: conflict.remote_revision.unwrap_or(0),
+        snapshot,
+    };
+    match change.entity_type.as_str() {
+        "message" => apply_pulled_message(&tx, endpoint_id, owner_scope, &change, now_ms)?,
+        "tag" => apply_pulled_tag(&tx, endpoint_id, owner_scope, &change, now_ms)?,
+        "attachment" => apply_pulled_attachment(&tx, endpoint_id, owner_scope, &change, now_ms)?,
+        _ => {}
+    }
+    tx.execute(
+        "UPDATE sync_conflicts SET status='resolved_remote',resolved_at_ms=?4
+      WHERE id=?1 AND endpoint_id=?2 AND owner_scope=?3",
+        params![conflict_id, endpoint_id, owner_scope, now_ms],
+    )?;
+    tx.commit()?;
+    Ok(true)
+}
+
+pub fn apply_pulled_changes(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    changes: &[PulledChange],
+    checkpoint: i64,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    for change in changes {
+        match change.entity_type.as_str() {
+            "message" => apply_pulled_message(&tx, endpoint_id, owner_scope, change, now_ms)?,
+            "tag" => apply_pulled_tag(&tx, endpoint_id, owner_scope, change, now_ms)?,
+            "attachment" => apply_pulled_attachment(&tx, endpoint_id, owner_scope, change, now_ms)?,
+            _ => {}
+        }
+    }
+    tx.execute(
+        "INSERT INTO sync_checkpoints (endpoint_id,owner_scope,change_seq,updated_at_ms)
+         VALUES (?1,?2,?3,?4)
+         ON CONFLICT(endpoint_id,owner_scope) DO UPDATE SET
+           change_seq=max(sync_checkpoints.change_seq,excluded.change_seq),updated_at_ms=excluded.updated_at_ms",
+        params![endpoint_id, owner_scope, checkpoint, now_ms],
+    )?;
+    tx.commit()
+}
+
+fn apply_pulled_message(
+    tx: &Connection,
+    endpoint_id: &str,
+    owner_scope: &str,
+    change: &PulledChange,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    if local_entity_has_work(tx, endpoint_id, owner_scope, "message", &change.entity_id)? {
+        return insert_pull_conflict(tx, endpoint_id, owner_scope, change, now_ms);
+    }
+    let Some(snapshot) = change.snapshot.as_ref() else {
+        return Ok(());
+    };
+    let deleted = change.change_type == "delete" || !snapshot["deleted_at"].is_null();
+    tx.execute(
+        "INSERT INTO messages (
+           endpoint_id,filename,sender,timestamp_ms,size,kind,original_name,content,format,file_hash,
+           marked,marked_tag_ids,marked_pinned,marked_due_date,transcript_source,source_audio_mime_type,
+           transcript_raw_text,message_id,remote_revision,deleted_at_ms,sync_state,owner_scope
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,'synced',?21)
+         ON CONFLICT(endpoint_id,owner_scope,filename) DO UPDATE SET
+           sender=excluded.sender,timestamp_ms=excluded.timestamp_ms,size=excluded.size,
+           kind=excluded.kind,original_name=excluded.original_name,content=excluded.content,
+           format=excluded.format,file_hash=excluded.file_hash,marked=excluded.marked,
+           marked_tag_ids=excluded.marked_tag_ids,marked_pinned=excluded.marked_pinned,
+           marked_due_date=excluded.marked_due_date,transcript_source=excluded.transcript_source,
+           source_audio_mime_type=excluded.source_audio_mime_type,
+           transcript_raw_text=excluded.transcript_raw_text,message_id=excluded.message_id,
+           remote_revision=excluded.remote_revision,deleted_at_ms=excluded.deleted_at_ms,
+           sync_state='synced',owner_scope=excluded.owner_scope",
+        params![
+            endpoint_id,
+            snapshot["legacy_filename"].as_str().unwrap_or(&change.entity_id),
+            snapshot["sender"].as_str().unwrap_or_default(),
+            snapshot["timestamp_ms"].as_i64().unwrap_or(0),
+            snapshot["size"].as_i64().unwrap_or(0),
+            snapshot["kind"].as_str().unwrap_or("text"),
+            snapshot["original_name"].as_str().unwrap_or_default(),
+            snapshot["content"].as_str(),
+            snapshot["format"].as_str().unwrap_or("text"),
+            snapshot["file_hash"].as_str(),
+            snapshot["marked"].as_bool().unwrap_or(false),
+            serde_json::to_string(&snapshot["marked_tag_ids"])
+                .unwrap_or_else(|_| "[]".into()),
+            snapshot["marked_pinned"].as_bool().unwrap_or(false),
+            snapshot["marked_due_date"].as_str(),
+            snapshot["transcript_source"].as_str(),
+            snapshot["source_audio_mime_type"].as_str(),
+            snapshot["transcript_raw_text"].as_str(),
+            change.entity_id,
+            change.revision,
+            deleted.then_some(now_ms),
+            owner_scope,
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_pulled_tag(
+    tx: &Connection,
+    endpoint_id: &str,
+    owner_scope: &str,
+    change: &PulledChange,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    if local_entity_has_work(tx, endpoint_id, owner_scope, "tag", &change.entity_id)? {
+        return insert_pull_conflict(tx, endpoint_id, owner_scope, change, now_ms);
+    }
+    let Some(snapshot) = change.snapshot.as_ref() else {
+        return Ok(());
+    };
+    let deleted = change.change_type == "delete" || !snapshot["deleted_at"].is_null();
+    tx.execute(
+        "INSERT INTO marked_tags (endpoint_id,id,name,owner_scope,remote_revision,deleted_at_ms,sync_state)
+         VALUES (?1,?2,?3,?4,?5,?6,'synced') ON CONFLICT(endpoint_id,owner_scope,id) DO UPDATE SET
+         name=excluded.name,owner_scope=excluded.owner_scope,remote_revision=excluded.remote_revision,
+         deleted_at_ms=excluded.deleted_at_ms,sync_state='synced'",
+        params![endpoint_id, change.entity_id, snapshot["name"].as_str().unwrap_or_default(),
+            owner_scope, change.revision, deleted.then_some(now_ms)],
+    )?;
+    Ok(())
+}
+
+fn apply_pulled_attachment(
+    tx: &Connection,
+    endpoint_id: &str,
+    owner_scope: &str,
+    change: &PulledChange,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    let Some(snapshot) = change.snapshot.as_ref() else {
+        return Ok(());
+    };
+    let deleted = change.change_type == "delete" || !snapshot["deleted_at"].is_null();
+    tx.execute(
+        "INSERT INTO attachment_sync (endpoint_id,owner_scope,attachment_id,message_id,original_name,
+         object_path,preview_object_path,mime_type,size,sha256,upload_state,remote_revision,deleted_at_ms,updated_at_ms)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'uploaded',?11,?12,?13)
+         ON CONFLICT(endpoint_id,owner_scope,attachment_id) DO UPDATE SET
+         message_id=excluded.message_id,original_name=excluded.original_name,object_path=excluded.object_path,
+         preview_object_path=excluded.preview_object_path,mime_type=excluded.mime_type,size=excluded.size,
+         sha256=excluded.sha256,upload_state='uploaded',remote_revision=excluded.remote_revision,
+         deleted_at_ms=excluded.deleted_at_ms,updated_at_ms=excluded.updated_at_ms",
+        params![endpoint_id,owner_scope,change.entity_id,snapshot["message_id"].as_str().unwrap_or_default(),
+            snapshot["original_name"].as_str().unwrap_or_default(),snapshot["object_path"].as_str(),
+            snapshot["preview_object_path"].as_str(),snapshot["mime_type"].as_str(),
+            snapshot["size"].as_i64().unwrap_or(0),snapshot["sha256"].as_str(),
+            change.revision,deleted.then_some(now_ms),now_ms],
+    )?;
+    Ok(())
+}
+
+fn local_entity_has_work(
+    tx: &Connection,
+    endpoint_id: &str,
+    owner_scope: &str,
+    entity_type: &str,
+    entity_id: &str,
+) -> rusqlite::Result<bool> {
+    Ok(tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE endpoint_id=?1 AND owner_scope=?2
+          AND entity_type=?3 AND entity_id=?4 AND state NOT IN ('acknowledged','superseded'))",
+        params![endpoint_id, owner_scope, entity_type, entity_id],
+        |row| row.get(0),
+    )?)
+}
+
+fn insert_pull_conflict(
+    tx: &Connection,
+    endpoint_id: &str,
+    owner_scope: &str,
+    change: &PulledChange,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO sync_conflicts (endpoint_id,owner_scope,entity_type,entity_id,local_payload_json,
+         remote_payload_json,local_revision,remote_revision,status,created_at_ms)
+         SELECT ?1,?2,?3,?4,coalesce((SELECT payload_json FROM sync_outbox WHERE endpoint_id=?1
+           AND owner_scope=?2 AND entity_type=?3 AND entity_id=?4
+           AND state NOT IN ('acknowledged','superseded') ORDER BY rowid DESC LIMIT 1),'{}'),
+           ?5,0,?6,'unresolved',?7
+         WHERE NOT EXISTS (SELECT 1 FROM sync_conflicts WHERE endpoint_id=?1 AND owner_scope=?2
+           AND entity_type=?3 AND entity_id=?4 AND status='unresolved' AND remote_revision=?6)",
+        params![endpoint_id,owner_scope,change.entity_type,change.entity_id,
+            change.snapshot.as_ref().map(|value| value.to_string()),change.revision,now_ms],
+    )?;
+    Ok(())
+}
+
+pub fn save_message_and_enqueue(
+    path: &Path,
+    message: &DbMessage,
+    operation: &NewOutboxOperation,
+) -> rusqlite::Result<()> {
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    tx.execute(
+        "UPDATE messages SET
+           sender=?3,timestamp_ms=?4,size=?5,kind=?6,original_name=?7,content=?8,
+           marked=?9,marked_tag_ids=?10,marked_pinned=?11,marked_due_date=?12,
+           format=?13,transcript_source=?14,source_audio_mime_type=?15,
+           transcript_raw_text=?16,sync_state='pending',deleted_at_ms=NULL
+         WHERE endpoint_id=?1 AND filename=?2 AND owner_scope=?17",
+        params![
+            message.endpoint_id,
+            message.filename,
+            message.sender,
+            message.timestamp_ms,
+            message.size,
+            message.kind,
+            message.original_name,
+            message.content,
+            message.marked,
+            serialize_tag_ids(&message.marked_tag_ids)?,
+            message.marked_pinned,
+            message.marked_due_date,
+            message.format,
+            message.transcript_source,
+            message.source_audio_mime_type,
+            message.transcript_raw_text,
+            operation.owner_scope,
+        ],
+    )?;
+    if tx.changes() == 0 {
+        tx.execute(
+            "INSERT INTO messages (
+              endpoint_id,filename,sender,timestamp_ms,size,kind,original_name,etag,mtime,
+              content,local_path,remote_path,file_hash,marked,marked_tag_ids,marked_pinned,
+              marked_due_date,format,transcript_source,source_audio_mime_type,
+              transcript_raw_text,message_id,remote_revision,deleted_at_ms,sync_state,owner_scope
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,
+              ?17,?18,?19,?20,?21,?22,?23,NULL,'pending',?24)",
+            params![
+                message.endpoint_id,
+                message.filename,
+                message.sender,
+                message.timestamp_ms,
+                message.size,
+                message.kind,
+                message.original_name,
+                message.etag,
+                message.mtime,
+                message.content,
+                message.local_path,
+                message.remote_path,
+                message.file_hash,
+                message.marked,
+                serialize_tag_ids(&message.marked_tag_ids)?,
+                message.marked_pinned,
+                message.marked_due_date,
+                message.format,
+                message.transcript_source,
+                message.source_audio_mime_type,
+                message.transcript_raw_text,
+                operation.entity_id,
+                operation.base_revision,
+                operation.owner_scope,
+            ],
+        )?;
+    }
+    enqueue_outbox(&tx, operation)?;
+    tx.commit()
+}
+
+pub fn save_file_message_and_enqueue(
+    path: &Path,
+    message: &DbMessage,
+    message_operation: &NewOutboxOperation,
+    attachment_id: &str,
+    object_path: &str,
+    mime_type: Option<&str>,
+    attachment_operation: &NewOutboxOperation,
+) -> rusqlite::Result<()> {
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT INTO messages (endpoint_id,filename,sender,timestamp_ms,size,kind,original_name,content,
+         local_path,remote_path,file_hash,marked,marked_tag_ids,marked_pinned,marked_due_date,format,
+         message_id,remote_revision,deleted_at_ms,sync_state,owner_scope)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,0,NULL,'pending',?18)",
+        params![message.endpoint_id,message.filename,message.sender,message.timestamp_ms,message.size,
+            message.kind,message.original_name,message.content,message.local_path,message.remote_path,
+            message.file_hash,message.marked,serialize_tag_ids(&message.marked_tag_ids)?,
+            message.marked_pinned,message.marked_due_date,message.format,message_operation.entity_id,
+            message_operation.owner_scope],
+    )?;
+    tx.execute(
+        "INSERT INTO attachment_sync (endpoint_id,owner_scope,attachment_id,message_id,original_name,
+         local_path,object_path,mime_type,size,sha256,upload_state,updated_at_ms)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'local',?11)",
+        params![message.endpoint_id,message_operation.owner_scope,attachment_id,message_operation.entity_id,
+            message.original_name,message.local_path,object_path,mime_type,message.size,message.file_hash,
+            message_operation.created_at_ms],
+    )?;
+    enqueue_outbox(&tx, message_operation)?;
+    enqueue_outbox(&tx, attachment_operation)?;
+    tx.commit()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn save_message_with_marked_changes_and_enqueue(
+    path: &Path,
+    message: &DbMessage,
+    created_tags: &[(MarkedTag, NewOutboxOperation)],
+    cleaned_messages: &[(String, Vec<String>, NewOutboxOperation)],
+    message_operation: &NewOutboxOperation,
+    deleted_tags: &[(MarkedTag, i64, i64, NewOutboxOperation)],
+    attachment: Option<(&str, &str, Option<&str>, &NewOutboxOperation)>,
+) -> rusqlite::Result<()> {
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    let mut dependency: Option<String> = None;
+    for (tag, operation) in created_tags {
+        tx.execute(
+            "INSERT INTO marked_tags
+               (endpoint_id,id,name,owner_scope,remote_revision,deleted_at_ms,sync_state)
+             VALUES (?1,?2,?3,?4,0,NULL,'pending')
+             ON CONFLICT(endpoint_id,owner_scope,id) DO UPDATE SET
+               name=excluded.name,deleted_at_ms=NULL,sync_state='pending'",
+            params![
+                operation.endpoint_id,
+                tag.id,
+                tag.name,
+                operation.owner_scope
+            ],
+        )?;
+        enqueue_outbox_with_dependency(&tx, operation, dependency.as_deref())?;
+        dependency = Some(operation.operation_id.clone());
+    }
+    for (filename, tag_ids, operation) in cleaned_messages {
+        if tx.execute(
+            "UPDATE messages SET marked_tag_ids=?4,sync_state='pending'
+             WHERE endpoint_id=?1 AND owner_scope=?2 AND filename=?3
+               AND deleted_at_ms IS NULL AND marked=1",
+            params![
+                operation.endpoint_id,
+                operation.owner_scope,
+                filename,
+                serialize_tag_ids(tag_ids)?,
+            ],
+        )? == 0
+        {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        enqueue_outbox_with_dependency(&tx, operation, dependency.as_deref())?;
+        dependency = Some(operation.operation_id.clone());
+    }
+    tx.execute(
+        "INSERT INTO messages (
+          endpoint_id,filename,sender,timestamp_ms,size,kind,original_name,etag,mtime,
+          content,local_path,remote_path,file_hash,marked,marked_tag_ids,marked_pinned,
+          marked_due_date,format,transcript_source,source_audio_mime_type,
+          transcript_raw_text,message_id,remote_revision,deleted_at_ms,sync_state,owner_scope
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,
+          ?17,?18,?19,?20,?21,?22,0,NULL,'pending',?23)",
+        params![
+            message.endpoint_id,
+            message.filename,
+            message.sender,
+            message.timestamp_ms,
+            message.size,
+            message.kind,
+            message.original_name,
+            message.etag,
+            message.mtime,
+            message.content,
+            message.local_path,
+            message.remote_path,
+            message.file_hash,
+            message.marked,
+            serialize_tag_ids(&message.marked_tag_ids)?,
+            message.marked_pinned,
+            message.marked_due_date,
+            message.format,
+            message.transcript_source,
+            message.source_audio_mime_type,
+            message.transcript_raw_text,
+            message_operation.entity_id,
+            message_operation.owner_scope,
+        ],
+    )?;
+    enqueue_outbox_with_dependency(&tx, message_operation, dependency.as_deref())?;
+    dependency = Some(message_operation.operation_id.clone());
+    for (tag, revision, deleted_at_ms, operation) in deleted_tags {
+        if tx.execute(
+            "UPDATE marked_tags SET deleted_at_ms=?5,sync_state='pending'
+             WHERE endpoint_id=?1 AND owner_scope=?2 AND id=?3 AND remote_revision=?4",
+            params![
+                operation.endpoint_id,
+                operation.owner_scope,
+                tag.id,
+                revision,
+                deleted_at_ms,
+            ],
+        )? == 0
+        {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        enqueue_outbox_with_dependency(&tx, operation, dependency.as_deref())?;
+        dependency = Some(operation.operation_id.clone());
+    }
+    if let Some((attachment_id, object_path, mime_type, operation)) = attachment {
+        tx.execute(
+            "INSERT INTO attachment_sync (endpoint_id,owner_scope,attachment_id,message_id,original_name,
+             local_path,object_path,mime_type,size,sha256,upload_state,updated_at_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'local',?11)",
+            params![
+                message.endpoint_id,operation.owner_scope,attachment_id,message_operation.entity_id,
+                message.original_name,message.local_path,object_path,mime_type,message.size,
+                message.file_hash,message_operation.created_at_ms,
+            ],
+        )?;
+        enqueue_outbox_with_dependency(&tx, operation, dependency.as_deref())?;
+    }
+    tx.commit()
+}
+
+pub fn get_attachment_local_path(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    attachment_id: &str,
+) -> rusqlite::Result<Option<(String, String, String, i64, Option<String>)>> {
+    Connection::open(path)?
+        .query_row(
+            "SELECT local_path,object_path,original_name,size,sha256 FROM attachment_sync
+         WHERE endpoint_id=?1 AND owner_scope=?2 AND attachment_id=?3 AND deleted_at_ms IS NULL",
+            params![endpoint_id, owner_scope, attachment_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn repair_claimed_attachment_object_path(
+    path: &Path,
+    operation_id: &str,
+    lease_owner: &str,
+    endpoint_id: &str,
+    owner_scope: &str,
+    attachment_id: &str,
+    object_path: &str,
+    payload_json: &str,
+    payload_hash: &str,
+    now_ms: i64,
+) -> rusqlite::Result<bool> {
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    let changed = tx.execute(
+        "UPDATE sync_outbox SET payload_json=?3,payload_hash=?4,last_error=NULL,updated_at_ms=?5
+         WHERE operation_id=?1 AND state='sending' AND lease_owner=?2",
+        params![
+            operation_id,
+            lease_owner,
+            payload_json,
+            payload_hash,
+            now_ms
+        ],
+    )?;
+    if changed == 0 {
+        return Ok(false);
+    }
+    tx.execute(
+        "UPDATE attachment_sync SET object_path=?4,last_error=NULL,updated_at_ms=?5
+         WHERE endpoint_id=?1 AND owner_scope=?2 AND attachment_id=?3",
+        params![endpoint_id, owner_scope, attachment_id, object_path, now_ms],
+    )?;
+    tx.execute(
+        "UPDATE messages SET remote_path=?4
+         WHERE endpoint_id=?1 AND owner_scope=?2 AND message_id=(
+           SELECT message_id FROM attachment_sync
+           WHERE endpoint_id=?1 AND owner_scope=?2 AND attachment_id=?3
+         )",
+        params![endpoint_id, owner_scope, attachment_id, object_path],
+    )?;
+    tx.commit()?;
+    Ok(true)
+}
+
+pub fn set_message_local_path_for_scope(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    filename: &str,
+    local_path: &str,
+) -> rusqlite::Result<bool> {
+    Ok(Connection::open(path)?.execute(
+        "UPDATE messages SET local_path=?4 WHERE endpoint_id=?1 AND owner_scope=?2 AND filename=?3",
+        params![endpoint_id, owner_scope, filename, local_path],
+    )? > 0)
+}
+
+pub fn list_orphan_attachment_candidates(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    cutoff_ms: i64,
+    limit: usize,
+) -> rusqlite::Result<Vec<(String, String)>> {
+    let conn = Connection::open(path)?;
+    let mut stmt = conn.prepare(
+        "SELECT a.attachment_id,a.object_path FROM attachment_sync a
+         WHERE a.endpoint_id=?1 AND a.owner_scope=?2 AND a.deleted_at_ms IS NOT NULL
+           AND a.deleted_at_ms<=?3 AND a.object_path IS NOT NULL AND a.object_path<>''
+           AND a.upload_state NOT IN ('local','uploading','pending_metadata')
+           AND NOT EXISTS (SELECT 1 FROM sync_outbox o WHERE o.endpoint_id=a.endpoint_id
+             AND o.owner_scope=a.owner_scope AND o.entity_type='attachment'
+             AND o.entity_id=a.attachment_id AND o.state NOT IN ('acknowledged','superseded'))
+         ORDER BY a.deleted_at_ms ASC LIMIT ?4",
+    )?;
+    let rows = stmt.query_map(
+        params![endpoint_id, owner_scope, cutoff_ms, limit as i64],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let result = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(result)
+}
+
+pub fn mark_attachment_object_cleaned(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    attachment_id: &str,
+    now_ms: i64,
+) -> rusqlite::Result<bool> {
+    Ok(Connection::open(path)?.execute(
+        "UPDATE attachment_sync SET object_path=NULL,preview_object_path=NULL,upload_state='deleted',
+         last_error=NULL,updated_at_ms=?4 WHERE endpoint_id=?1 AND owner_scope=?2 AND attachment_id=?3",
+        params![endpoint_id,owner_scope,attachment_id,now_ms])? > 0)
+}
+
+pub fn create_or_resume_storage_import(
+    path: &Path,
+    batch: &NewStorageImportBatch<'_>,
+) -> rusqlite::Result<StorageImportProgress> {
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT INTO storage_import_batches(batch_id,source_profile_id,target_profile_id,
+         target_owner_scope,status,total_items,created_at_ms,updated_at_ms)
+         VALUES(?1,?2,?3,?4,'pending',?5,?6,?6)
+         ON CONFLICT(batch_id) DO UPDATE SET total_items=excluded.total_items,updated_at_ms=excluded.updated_at_ms",
+        params![batch.batch_id,batch.source_profile_id,batch.target_profile_id,
+            batch.target_owner_scope,batch.items.len() as i64,batch.now_ms],
+    )?;
+    for item in batch.items {
+        tx.execute(
+            "INSERT OR IGNORE INTO storage_import_items(batch_id,item_type,source_key,entity_id,
+             attachment_id,message_operation_id,attachment_operation_id,state,updated_at_ms)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,'pending',?8)",
+            params![
+                batch.batch_id,
+                item.item_type,
+                item.source_key,
+                item.entity_id,
+                item.attachment_id,
+                item.message_operation_id,
+                item.attachment_operation_id,
+                batch.now_ms
+            ],
+        )?;
+    }
+    tx.execute(
+        "UPDATE storage_import_items SET state=CASE WHEN
+           EXISTS (SELECT 1 FROM sync_outbox message_op
+             WHERE message_op.operation_id=storage_import_items.message_operation_id
+               AND message_op.state IN ('acknowledged','superseded'))
+           AND (storage_import_items.attachment_operation_id IS NULL OR EXISTS (
+             SELECT 1 FROM sync_outbox attachment_op
+             WHERE attachment_op.operation_id=storage_import_items.attachment_operation_id
+               AND attachment_op.state IN ('acknowledged','superseded')
+           )) THEN 'applied' ELSE 'staged' END,
+           last_error=NULL,updated_at_ms=?2
+         WHERE batch_id=?1 AND EXISTS (
+           SELECT 1 FROM sync_outbox existing
+           WHERE existing.operation_id=storage_import_items.message_operation_id
+         )",
+        params![batch.batch_id, batch.now_ms],
+    )?;
+    refresh_import_progress(&tx, batch.batch_id, batch.now_ms)?;
+    tx.commit()?;
+    get_storage_import_progress(path, batch.batch_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
+}
+
+fn map_storage_import_progress(row: &Row<'_>) -> rusqlite::Result<StorageImportProgress> {
+    Ok(StorageImportProgress {
+        batch_id: row.get(0)?,
+        source_profile_id: row.get(1)?,
+        target_profile_id: row.get(2)?,
+        target_owner_scope: row.get(3)?,
+        status: row.get(4)?,
+        total_items: row.get(5)?,
+        applied_items: row.get(6)?,
+        failed_items: row.get(7)?,
+        last_error: row.get(8)?,
+    })
+}
+
+pub fn get_storage_import_progress(
+    path: &Path,
+    batch_id: &str,
+) -> rusqlite::Result<Option<StorageImportProgress>> {
+    Connection::open(path)?.query_row(
+        "SELECT batch_id,source_profile_id,target_profile_id,target_owner_scope,status,
+         total_items,applied_items,failed_items,last_error FROM storage_import_batches WHERE batch_id=?1",
+        params![batch_id],
+        map_storage_import_progress,
+    ).optional()
+}
+
+pub fn count_pending_import_outbox(path: &Path, batch_id: &str) -> rusqlite::Result<i64> {
+    Connection::open(path)?.query_row(
+        "SELECT count(*) FROM sync_outbox outbox
+         WHERE outbox.operation_id IN (
+           SELECT message_operation_id FROM storage_import_items WHERE batch_id=?1
+           UNION
+           SELECT attachment_operation_id FROM storage_import_items
+             WHERE batch_id=?1 AND attachment_operation_id IS NOT NULL
+         ) AND outbox.state NOT IN ('acknowledged','superseded','conflict')",
+        params![batch_id],
+        |row| row.get(0),
+    )
+}
+
+pub fn count_import_conflicts(path: &Path, batch_id: &str) -> rusqlite::Result<i64> {
+    Connection::open(path)?.query_row(
+        "SELECT count(*) FROM sync_outbox outbox
+         WHERE outbox.operation_id IN (
+           SELECT message_operation_id FROM storage_import_items WHERE batch_id=?1
+           UNION
+           SELECT attachment_operation_id FROM storage_import_items
+             WHERE batch_id=?1 AND attachment_operation_id IS NOT NULL
+         ) AND outbox.state='conflict'",
+        params![batch_id],
+        |row| row.get(0),
+    )
+}
+
+pub fn list_storage_import_items(
+    path: &Path,
+    batch_id: &str,
+    states: &[&str],
+) -> rusqlite::Result<Vec<StorageImportItem>> {
+    let conn = Connection::open(path)?;
+    let placeholders = (1..=states.len())
+        .map(|index| format!("?{}", index + 1))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!("SELECT item_type,source_key,entity_id,attachment_id,message_operation_id,
+      attachment_operation_id,state FROM storage_import_items WHERE batch_id=?1 AND state IN ({placeholders})
+      ORDER BY CASE item_type WHEN 'tag' THEN 0 ELSE 1 END,source_key");
+    let mut parameters: Vec<&dyn ToSql> = vec![&batch_id];
+    parameters.extend(states.iter().map(|state| state as &dyn ToSql));
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(parameters), |row| {
+        Ok(StorageImportItem {
+            item_type: row.get(0)?,
+            source_key: row.get(1)?,
+            entity_id: row.get(2)?,
+            attachment_id: row.get(3)?,
+            message_operation_id: row.get(4)?,
+            attachment_operation_id: row.get(5)?,
+            state: row.get(6)?,
+        })
+    })?;
+    rows.collect()
+}
+
+fn refresh_import_progress(conn: &Connection, batch_id: &str, now_ms: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE storage_import_batches SET
+         applied_items=(SELECT count(*) FROM storage_import_items WHERE batch_id=?1 AND state='applied'),
+         failed_items=(SELECT count(*) FROM storage_import_items WHERE batch_id=?1 AND state='error'),
+         last_error=CASE
+           WHEN (SELECT count(*) FROM storage_import_items WHERE batch_id=?1 AND state='error')=0
+             THEN NULL
+           ELSE last_error END,
+         status=CASE
+           WHEN (SELECT count(*) FROM storage_import_items WHERE batch_id=?1 AND state<>'applied')=0 THEN 'completed'
+           WHEN (SELECT count(*) FROM storage_import_items WHERE batch_id=?1 AND state='error')>0 THEN 'error'
+           ELSE 'running' END,updated_at_ms=?2 WHERE batch_id=?1",
+        params![batch_id, now_ms],
+    )?;
+    Ok(())
+}
+
+pub fn mark_storage_import_item_error(
+    path: &Path,
+    batch_id: &str,
+    item_type: &str,
+    source_key: &str,
+    error: &str,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    tx.execute(
+        "UPDATE storage_import_items SET state='error',last_error=?4,updated_at_ms=?5
+      WHERE batch_id=?1 AND item_type=?2 AND source_key=?3",
+        params![batch_id, item_type, source_key, error, now_ms],
+    )?;
+    tx.execute(
+        "UPDATE storage_import_batches SET last_error=?2 WHERE batch_id=?1",
+        params![batch_id, error],
+    )?;
+    refresh_import_progress(&tx, batch_id, now_ms)?;
+    tx.commit()
+}
+
+pub fn apply_imported_tag(
+    path: &Path,
+    batch_id: &str,
+    source_key: &str,
+    target_profile_id: &str,
+    owner_scope: &str,
+    tag: &MarkedTag,
+    operation: &NewOutboxOperation,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    tx.execute("INSERT INTO marked_tags(endpoint_id,id,name,owner_scope,remote_revision,deleted_at_ms,sync_state)
+      VALUES(?1,?2,?3,?4,0,NULL,'pending') ON CONFLICT(endpoint_id,owner_scope,id) DO UPDATE SET
+      name=excluded.name,deleted_at_ms=NULL,sync_state='pending'",params![target_profile_id,tag.id,tag.name,owner_scope])?;
+    enqueue_outbox(&tx, operation)?;
+    tx.execute(
+        "UPDATE storage_import_items SET state='staged',last_error=NULL,updated_at_ms=?4
+      WHERE batch_id=?1 AND item_type='tag' AND source_key=?2 AND entity_id=?3",
+        params![batch_id, source_key, tag.id, now_ms],
+    )?;
+    refresh_import_progress(&tx, batch_id, now_ms)?;
+    tx.commit()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn apply_imported_message(
+    path: &Path,
+    batch_id: &str,
+    source_key: &str,
+    message: &DbMessage,
+    message_operation: &NewOutboxOperation,
+    attachment: Option<(&str, &str, Option<&str>, &NewOutboxOperation)>,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    tx.execute("INSERT INTO messages(endpoint_id,filename,sender,timestamp_ms,size,kind,original_name,etag,mtime,
+      content,local_path,remote_path,file_hash,marked,marked_tag_ids,marked_pinned,marked_due_date,format,
+      transcript_source,source_audio_mime_type,transcript_raw_text,message_id,remote_revision,deleted_at_ms,sync_state,owner_scope)
+      VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,0,NULL,'pending',?23)
+      ON CONFLICT(endpoint_id,owner_scope,filename) DO UPDATE SET sender=excluded.sender,timestamp_ms=excluded.timestamp_ms,
+      size=excluded.size,kind=excluded.kind,original_name=excluded.original_name,content=excluded.content,
+      local_path=excluded.local_path,remote_path=excluded.remote_path,file_hash=excluded.file_hash,marked=excluded.marked,
+      marked_tag_ids=excluded.marked_tag_ids,marked_pinned=excluded.marked_pinned,marked_due_date=excluded.marked_due_date,
+      format=excluded.format,transcript_source=excluded.transcript_source,source_audio_mime_type=excluded.source_audio_mime_type,
+      transcript_raw_text=excluded.transcript_raw_text,message_id=excluded.message_id,deleted_at_ms=NULL,sync_state='pending'",
+      params![message.endpoint_id,message.filename,message.sender,message.timestamp_ms,message.size,message.kind,message.original_name,
+      message.etag,message.mtime,message.content,message.local_path,message.remote_path,message.file_hash,message.marked,
+      serialize_tag_ids(&message.marked_tag_ids)?,message.marked_pinned,message.marked_due_date,message.format,
+      message.transcript_source,message.source_audio_mime_type,message.transcript_raw_text,message_operation.entity_id,
+      message_operation.owner_scope])?;
+    enqueue_outbox(&tx, message_operation)?;
+    if let Some((attachment_id, object_path, mime_type, attachment_operation)) = attachment {
+        tx.execute("INSERT INTO attachment_sync(endpoint_id,owner_scope,attachment_id,message_id,original_name,local_path,
+        object_path,mime_type,size,sha256,upload_state,updated_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'local',?11)",
+        params![message.endpoint_id,message_operation.owner_scope,attachment_id,message_operation.entity_id,message.original_name,
+        message.local_path,object_path,mime_type,message.size,message.file_hash,now_ms])?;
+        enqueue_outbox(&tx, attachment_operation)?;
+    }
+    tx.execute(
+        "UPDATE storage_import_items SET state='staged',last_error=NULL,updated_at_ms=?4
+      WHERE batch_id=?1 AND item_type='message' AND source_key=?2 AND entity_id=?3",
+        params![batch_id, source_key, message_operation.entity_id, now_ms],
+    )?;
+    refresh_import_progress(&tx, batch_id, now_ms)?;
+    tx.commit()
+}
+
+pub fn tombstone_messages_and_enqueue(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    filenames: &[String],
+    operations: &[NewOutboxOperation],
+    deleted_at_ms: i64,
+) -> rusqlite::Result<usize> {
+    if filenames.len() != operations.len() {
+        return Err(rusqlite::Error::InvalidParameterCount(
+            filenames.len(),
+            operations.len(),
+        ));
+    }
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    let mut changed = 0;
+    for (filename, operation) in filenames.iter().zip(operations) {
+        changed += tx.execute(
+            "UPDATE messages SET deleted_at_ms=?4,sync_state='pending'
+             WHERE endpoint_id=?1 AND owner_scope=?2 AND filename=?3",
+            params![endpoint_id, owner_scope, filename, deleted_at_ms],
+        )?;
+        enqueue_outbox(&tx, operation)?;
+    }
+    tx.commit()?;
+    Ok(changed)
+}
+
+pub fn get_message_sync_identity(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    filename: &str,
+) -> rusqlite::Result<Option<(String, i64)>> {
+    Connection::open(path)?
+        .query_row(
+            "SELECT message_id, remote_revision FROM messages
+             WHERE endpoint_id=?1 AND owner_scope=?2 AND filename=?3 AND deleted_at_ms IS NULL",
+            params![endpoint_id, owner_scope, filename],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+}
+
+pub fn get_message_for_scope(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    filename: &str,
+) -> rusqlite::Result<Option<DbMessage>> {
+    let conn = Connection::open(path)?;
+    conn.query_row(
+        "SELECT endpoint_id, filename, sender, timestamp_ms, size, kind, original_name,
+          etag, mtime, content, local_path, remote_path, file_hash, marked, marked_tag_ids,
+          marked_pinned, marked_due_date, format, transcript_source, source_audio_mime_type,
+          transcript_raw_text FROM messages
+         WHERE endpoint_id=?1 AND owner_scope=?2 AND filename=?3 AND deleted_at_ms IS NULL",
+        params![endpoint_id, owner_scope, filename],
+        |row| {
+            let marked_tag_ids: String = row.get(14)?;
+            Ok(DbMessage {
+                endpoint_id: row.get(0)?,
+                filename: row.get(1)?,
+                sender: row.get(2)?,
+                timestamp_ms: row.get(3)?,
+                size: row.get(4)?,
+                kind: row.get(5)?,
+                original_name: row.get(6)?,
+                etag: row.get(7)?,
+                mtime: row.get(8)?,
+                content: row.get(9)?,
+                local_path: row.get(10)?,
+                remote_path: row.get(11)?,
+                file_hash: row.get(12)?,
+                marked: row.get(13)?,
+                marked_tag_ids: parse_tag_ids(marked_tag_ids),
+                marked_pinned: row.get(15)?,
+                marked_due_date: row.get(16)?,
+                format: row.get(17)?,
+                transcript_source: row.get(18)?,
+                source_audio_mime_type: row.get(19)?,
+                transcript_raw_text: row.get(20)?,
+            })
+        },
+    )
+    .optional()
+}
+
+pub fn set_message_marked_and_enqueue(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    filename: &str,
+    marked: bool,
+    tag_ids: &[String],
+    pinned: bool,
+    due_date: Option<&str>,
+    operation: &NewOutboxOperation,
+) -> rusqlite::Result<bool> {
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    let changed = tx.execute(
+        "UPDATE messages SET marked=?4,marked_tag_ids=?5,marked_pinned=?6,
+           marked_due_date=?7,sync_state='pending'
+         WHERE endpoint_id=?1 AND owner_scope=?2 AND filename=?3 AND deleted_at_ms IS NULL",
+        params![
+            endpoint_id,
+            owner_scope,
+            filename,
+            marked,
+            serialize_tag_ids(tag_ids)?,
+            pinned,
+            due_date,
+        ],
+    )?;
+    if changed == 0 {
+        return Ok(false);
+    }
+    enqueue_outbox(&tx, operation)?;
+    tx.commit()?;
+    Ok(true)
+}
+
+pub fn set_messages_marked_tags_and_enqueue(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    updates: &[(String, Vec<String>, NewOutboxOperation)],
+) -> rusqlite::Result<usize> {
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    let mut changed = 0;
+    for (filename, tag_ids, operation) in updates {
+        let updated = tx.execute(
+            "UPDATE messages SET marked_tag_ids=?4,sync_state='pending'
+             WHERE endpoint_id=?1 AND owner_scope=?2 AND filename=?3
+               AND deleted_at_ms IS NULL AND marked=1",
+            params![
+                endpoint_id,
+                owner_scope,
+                filename,
+                serialize_tag_ids(tag_ids)?,
+            ],
+        )?;
+        if updated == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        enqueue_outbox(&tx, operation)?;
+        changed += updated;
+    }
+    tx.commit()?;
+    Ok(changed)
+}
+
+pub fn save_tag_and_enqueue(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    tag: &MarkedTag,
+    remote_revision: i64,
+    deleted_at_ms: Option<i64>,
+    operation: &NewOutboxOperation,
+) -> rusqlite::Result<()> {
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT INTO marked_tags
+           (endpoint_id,id,name,owner_scope,remote_revision,deleted_at_ms,sync_state)
+         VALUES (?1,?2,?3,?4,?5,?6,'pending')
+         ON CONFLICT(endpoint_id,owner_scope,id) DO UPDATE SET
+           name=excluded.name,owner_scope=excluded.owner_scope,
+           remote_revision=excluded.remote_revision,deleted_at_ms=excluded.deleted_at_ms,
+           sync_state='pending'",
+        params![
+            endpoint_id,
+            tag.id,
+            tag.name,
+            owner_scope,
+            remote_revision,
+            deleted_at_ms,
+        ],
+    )?;
+    enqueue_outbox(&tx, operation)?;
+    tx.commit()
+}
+
+pub fn delete_tag_cleanup_messages_and_enqueue(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    tag: &MarkedTag,
+    tag_revision: i64,
+    deleted_at_ms: i64,
+    message_updates: &[(String, Vec<String>, NewOutboxOperation)],
+    tag_operation: &NewOutboxOperation,
+) -> rusqlite::Result<usize> {
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    let mut previous_operation_id: Option<String> = None;
+    let mut changed = 0;
+    for (filename, tag_ids, operation) in message_updates {
+        let updated = tx.execute(
+            "UPDATE messages SET marked_tag_ids=?4,sync_state='pending'
+             WHERE endpoint_id=?1 AND owner_scope=?2 AND filename=?3
+               AND deleted_at_ms IS NULL AND marked=1",
+            params![
+                endpoint_id,
+                owner_scope,
+                filename,
+                serialize_tag_ids(tag_ids)?
+            ],
+        )?;
+        if updated == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        enqueue_outbox_with_dependency(&tx, operation, previous_operation_id.as_deref())?;
+        previous_operation_id = Some(operation.operation_id.clone());
+        changed += updated;
+    }
+    tx.execute(
+        "UPDATE marked_tags SET deleted_at_ms=?5,sync_state='pending'
+         WHERE endpoint_id=?1 AND owner_scope=?2 AND id=?3 AND remote_revision=?4",
+        params![
+            endpoint_id,
+            owner_scope,
+            tag.id,
+            tag_revision,
+            deleted_at_ms
+        ],
+    )?;
+    if tx.changes() == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
+    enqueue_outbox_with_dependency(&tx, tag_operation, previous_operation_id.as_deref())?;
+    tx.commit()?;
+    Ok(changed)
+}
+
+pub fn list_tags_for_scope(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+) -> rusqlite::Result<Vec<(MarkedTag, i64)>> {
+    let conn = Connection::open(path)?;
+    let mut stmt = conn.prepare(
+        "SELECT id,name,remote_revision FROM marked_tags
+         WHERE endpoint_id=?1 AND owner_scope=?2 AND deleted_at_ms IS NULL
+         ORDER BY name COLLATE NOCASE ASC",
+    )?;
+    let rows = stmt.query_map(params![endpoint_id, owner_scope], |row| {
+        Ok((
+            MarkedTag {
+                id: row.get(0)?,
+                name: row.get(1)?,
+            },
+            row.get(2)?,
+        ))
+    })?;
+    rows.collect()
 }
 
 pub fn upsert_pending_marked_sync(
@@ -865,6 +2977,121 @@ pub fn list_messages_after(
     )
 }
 
+pub fn list_latest_messages_window_for_scope(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    limit: i64,
+    only_marked: bool,
+) -> rusqlite::Result<Vec<Message>> {
+    let conn = Connection::open(path)?;
+    let marked_clause = if only_marked { " AND marked=1" } else { "" };
+    let sql = format!(
+        "SELECT * FROM (
+           SELECT {} FROM messages
+           WHERE endpoint_id=?1 AND owner_scope=?2 AND deleted_at_ms IS NULL{}
+           ORDER BY timestamp_ms DESC,filename DESC LIMIT ?3
+         ) ORDER BY timestamp_ms ASC,filename ASC",
+        message_row_select_sql(),
+        marked_clause
+    );
+    collect_messages(&conn, &sql, &[&endpoint_id, &owner_scope, &limit])
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn list_messages_before_for_scope(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    before_timestamp_ms: i64,
+    before_filename: &str,
+    limit: i64,
+    only_marked: bool,
+) -> rusqlite::Result<Vec<Message>> {
+    let conn = Connection::open(path)?;
+    let marked_clause = if only_marked { " AND marked=1" } else { "" };
+    let sql = format!(
+        "SELECT * FROM (
+           SELECT {} FROM messages
+           WHERE endpoint_id=?1 AND owner_scope=?2 AND deleted_at_ms IS NULL{}
+             AND (timestamp_ms<?3 OR (timestamp_ms=?3 AND filename<?4))
+           ORDER BY timestamp_ms DESC,filename DESC LIMIT ?5
+         ) ORDER BY timestamp_ms ASC,filename ASC",
+        message_row_select_sql(),
+        marked_clause
+    );
+    collect_messages(
+        &conn,
+        &sql,
+        &[
+            &endpoint_id,
+            &owner_scope,
+            &before_timestamp_ms,
+            &before_filename,
+            &limit,
+        ],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn list_messages_after_for_scope(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    after_timestamp_ms: i64,
+    after_filename: &str,
+    limit: i64,
+    only_marked: bool,
+) -> rusqlite::Result<Vec<Message>> {
+    let conn = Connection::open(path)?;
+    let marked_clause = if only_marked { " AND marked=1" } else { "" };
+    let sql = format!(
+        "SELECT {} FROM messages
+         WHERE endpoint_id=?1 AND owner_scope=?2 AND deleted_at_ms IS NULL{}
+           AND (timestamp_ms>?3 OR (timestamp_ms=?3 AND filename>?4))
+         ORDER BY timestamp_ms ASC,filename ASC LIMIT ?5",
+        message_row_select_sql(),
+        marked_clause
+    );
+    collect_messages(
+        &conn,
+        &sql,
+        &[
+            &endpoint_id,
+            &owner_scope,
+            &after_timestamp_ms,
+            &after_filename,
+            &limit,
+        ],
+    )
+}
+
+pub fn count_messages_before_for_scope(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    before_timestamp_ms: i64,
+    before_filename: &str,
+    only_marked: bool,
+) -> rusqlite::Result<i64> {
+    let marked_clause = if only_marked { " AND marked=1" } else { "" };
+    Connection::open(path)?.query_row(
+        &format!(
+            "SELECT count(*) FROM messages
+             WHERE endpoint_id=?1 AND owner_scope=?2 AND deleted_at_ms IS NULL{}
+               AND (timestamp_ms<?3 OR (timestamp_ms=?3 AND filename<?4))",
+            marked_clause
+        ),
+        params![
+            endpoint_id,
+            owner_scope,
+            before_timestamp_ms,
+            before_filename
+        ],
+        |row| row.get(0),
+    )
+}
+
 pub fn count_messages(path: &Path, endpoint_id: &str, only_marked: bool) -> rusqlite::Result<i64> {
     let conn = Connection::open(path)?;
     let sql = if only_marked {
@@ -873,6 +3100,60 @@ pub fn count_messages(path: &Path, endpoint_id: &str, only_marked: bool) -> rusq
         "SELECT COUNT(*) FROM messages WHERE endpoint_id = ?1"
     };
     conn.query_row(&sql, params![endpoint_id], |row| row.get(0))
+}
+
+pub fn list_messages_for_scope(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    only_marked: bool,
+    search_query: Option<&str>,
+) -> rusqlite::Result<Vec<Message>> {
+    let conn = Connection::open(path)?;
+    let mut sql = format!(
+        "SELECT {} FROM messages WHERE endpoint_id=?1 AND owner_scope=?2
+      AND deleted_at_ms IS NULL",
+        message_row_select_sql()
+    );
+    if only_marked {
+        sql.push_str(" AND marked=1");
+    }
+    let search = search_query
+        .map(|value| format!("%{}%", value.trim()))
+        .filter(|value| value != "%%");
+    if search.is_some() {
+        sql.push_str(" AND (filename LIKE ?3 OR original_name LIKE ?3 OR content LIKE ?3)");
+        sql.push_str(" ORDER BY timestamp_ms DESC,filename DESC LIMIT ?4 OFFSET ?5");
+    } else {
+        sql.push_str(" ORDER BY timestamp_ms DESC,filename DESC LIMIT ?3 OFFSET ?4");
+    }
+    let limit = limit.unwrap_or(50).clamp(1, 500);
+    let offset = offset.unwrap_or(0).max(0);
+    if let Some(search) = search.as_deref() {
+        collect_messages(
+            &conn,
+            &sql,
+            &[&endpoint_id, &owner_scope, &search, &limit, &offset],
+        )
+    } else {
+        collect_messages(&conn, &sql, &[&endpoint_id, &owner_scope, &limit, &offset])
+    }
+}
+
+pub fn count_messages_for_scope(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    only_marked: bool,
+) -> rusqlite::Result<i64> {
+    let sql = if only_marked {
+        "SELECT count(*) FROM messages WHERE endpoint_id=?1 AND owner_scope=?2 AND deleted_at_ms IS NULL AND marked=1"
+    } else {
+        "SELECT count(*) FROM messages WHERE endpoint_id=?1 AND owner_scope=?2 AND deleted_at_ms IS NULL"
+    };
+    Connection::open(path)?.query_row(sql, params![endpoint_id, owner_scope], |row| row.get(0))
 }
 
 pub fn count_messages_before(
@@ -989,6 +3270,78 @@ pub fn list_marked_messages_paged(
     Ok(messages)
 }
 
+pub fn list_marked_messages_for_scope(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    tag_id: Option<&str>,
+    search_query: Option<&str>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    pending_due_date: Option<&str>,
+) -> rusqlite::Result<Vec<Message>> {
+    let conn = Connection::open(path)?;
+    let normalized_search = search_query
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .map(|query| format!("%{}%", query.to_lowercase()));
+    let untagged_filter = tag_id == Some(UNTAGGED_MARKED_TAG_FILTER_ID);
+    let tag_pattern = tag_id
+        .filter(|tag_id| *tag_id != UNTAGGED_MARKED_TAG_FILTER_ID)
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?
+        .map(|tag_id| format!("%{tag_id}%"));
+    let mut sql = format!(
+        "SELECT {} FROM messages WHERE endpoint_id=?1 AND owner_scope=?2
+         AND deleted_at_ms IS NULL AND marked=1",
+        message_row_select_sql()
+    );
+    if normalized_search.is_some() {
+        sql.push_str(
+            " AND (LOWER(COALESCE(content,'')) LIKE ?3 OR LOWER(COALESCE(original_name,'')) LIKE ?3 OR LOWER(filename) LIKE ?3)",
+        );
+    }
+    if tag_pattern.is_some() {
+        sql.push_str(if normalized_search.is_some() {
+            " AND marked_tag_ids LIKE ?4"
+        } else {
+            " AND marked_tag_ids LIKE ?3"
+        });
+    } else if untagged_filter {
+        sql.push_str(" AND marked_tag_ids='[]'");
+    }
+    if pending_due_date.is_some() {
+        let placeholder =
+            3 + usize::from(normalized_search.is_some()) + usize::from(tag_pattern.is_some());
+        sql.push_str(&format!(
+            " AND (marked_due_date IS NULL OR marked_due_date='' OR marked_due_date<=?{placeholder})"
+        ));
+    }
+    sql.push_str(" ORDER BY marked_pinned DESC,timestamp_ms DESC");
+    if let Some(limit) = limit {
+        sql.push_str(&format!(" LIMIT {}", limit.max(0)));
+        if let Some(offset) = offset {
+            sql.push_str(&format!(" OFFSET {}", offset.max(0)));
+        }
+    }
+    let mut params: Vec<&dyn ToSql> = vec![&endpoint_id, &owner_scope];
+    if let Some(ref value) = normalized_search {
+        params.push(value);
+    }
+    if let Some(ref value) = tag_pattern {
+        params.push(value);
+    }
+    if let Some(ref value) = pending_due_date {
+        params.push(value);
+    }
+    let mut statement = conn.prepare(&sql)?;
+    let result = statement
+        .query_map(params_from_iter(params), map_message_row)?
+        .collect();
+    result
+}
+
 fn params_count(has_search: bool, has_tag: bool) -> usize {
     1 + usize::from(has_search) + usize::from(has_tag)
 }
@@ -1051,6 +3404,63 @@ pub fn count_marked_messages(
     conn.query_row(&sql, params_from_iter(params), |row| row.get(0))
 }
 
+pub fn count_marked_messages_for_scope(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    tag_id: Option<&str>,
+    search_query: Option<&str>,
+    pending_due_date: Option<&str>,
+) -> rusqlite::Result<i64> {
+    let conn = Connection::open(path)?;
+    let normalized_search = search_query
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .map(|query| format!("%{}%", query.to_lowercase()));
+    let untagged_filter = tag_id == Some(UNTAGGED_MARKED_TAG_FILTER_ID);
+    let tag_pattern = tag_id
+        .filter(|tag_id| *tag_id != UNTAGGED_MARKED_TAG_FILTER_ID)
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?
+        .map(|tag_id| format!("%{tag_id}%"));
+    let mut sql = "SELECT count(*) FROM messages WHERE endpoint_id=?1 AND owner_scope=?2
+        AND deleted_at_ms IS NULL AND marked=1"
+        .to_string();
+    if normalized_search.is_some() {
+        sql.push_str(
+            " AND (LOWER(COALESCE(content,'')) LIKE ?3 OR LOWER(COALESCE(original_name,'')) LIKE ?3 OR LOWER(filename) LIKE ?3)",
+        );
+    }
+    if tag_pattern.is_some() {
+        sql.push_str(if normalized_search.is_some() {
+            " AND marked_tag_ids LIKE ?4"
+        } else {
+            " AND marked_tag_ids LIKE ?3"
+        });
+    } else if untagged_filter {
+        sql.push_str(" AND marked_tag_ids='[]'");
+    }
+    if pending_due_date.is_some() {
+        let placeholder =
+            3 + usize::from(normalized_search.is_some()) + usize::from(tag_pattern.is_some());
+        sql.push_str(&format!(
+            " AND (marked_due_date IS NULL OR marked_due_date='' OR marked_due_date<=?{placeholder})"
+        ));
+    }
+    let mut params: Vec<&dyn ToSql> = vec![&endpoint_id, &owner_scope];
+    if let Some(ref value) = normalized_search {
+        params.push(value);
+    }
+    if let Some(ref value) = tag_pattern {
+        params.push(value);
+    }
+    if let Some(ref value) = pending_due_date {
+        params.push(value);
+    }
+    conn.query_row(&sql, params_from_iter(params), |row| row.get(0))
+}
+
 pub fn count_unfinished_marked_messages(
     path: &Path,
     endpoint_id: &str,
@@ -1063,6 +3473,21 @@ pub fn count_unfinished_marked_messages(
            AND marked = 1
            AND (marked_due_date IS NULL OR marked_due_date = '' OR marked_due_date <= ?2)",
         params![endpoint_id, today],
+        |row| row.get(0),
+    )
+}
+
+pub fn count_unfinished_marked_messages_for_scope(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    today: &str,
+) -> rusqlite::Result<i64> {
+    Connection::open(path)?.query_row(
+        "SELECT count(*) FROM messages
+         WHERE endpoint_id=?1 AND owner_scope=?2 AND deleted_at_ms IS NULL AND marked=1
+           AND (marked_due_date IS NULL OR marked_due_date='' OR marked_due_date<=?3)",
+        params![endpoint_id, owner_scope, today],
         |row| row.get(0),
     )
 }
@@ -1724,6 +4149,1256 @@ mod tests {
             .is_empty());
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn init_db_adds_local_first_schema_without_losing_existing_messages() {
+        let path = temp_db_path("local-first-migration");
+        let conn = Connection::open(&path).expect("create legacy db");
+        conn.execute_batch(
+            "CREATE TABLE messages (
+                endpoint_id TEXT NOT NULL, filename TEXT NOT NULL, sender TEXT NOT NULL,
+                timestamp_ms INTEGER NOT NULL, size INTEGER NOT NULL, kind TEXT NOT NULL,
+                original_name TEXT NOT NULL, etag TEXT, mtime TEXT, content TEXT, local_path TEXT,
+                remote_path TEXT, file_hash TEXT, marked BOOLEAN NOT NULL DEFAULT 0,
+                marked_tag_ids TEXT NOT NULL DEFAULT '[]', marked_pinned BOOLEAN NOT NULL DEFAULT 0,
+                marked_due_date TEXT, format TEXT NOT NULL DEFAULT 'text', transcript_source TEXT,
+                source_audio_mime_type TEXT, transcript_raw_text TEXT,
+                PRIMARY KEY(endpoint_id, filename)
+            );",
+        )
+        .expect("create legacy messages table");
+        conn.execute(
+            "INSERT INTO messages
+             (endpoint_id,filename,sender,timestamp_ms,size,kind,original_name,content)
+             VALUES ('endpoint-1','one.txt','one',1,1,'text','one.txt','first'),
+                    ('endpoint-1','two.txt','two',2,2,'text','two.txt','second')",
+            [],
+        )
+        .expect("seed legacy rows");
+        drop(conn);
+
+        init_db(&path, None).expect("migrate database");
+        let conn = Connection::open(&path).expect("open migrated db");
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM messages", [], |row| row.get(0))
+            .expect("count messages");
+        let stable_ids: i64 = conn
+            .query_row(
+                "SELECT count(DISTINCT message_id) FROM messages
+                 WHERE message_id IS NOT NULL AND message_id <> ''",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count stable ids");
+        assert_eq!(count, 2);
+        assert_eq!(stable_ids, 2);
+        for table in [
+            "sync_outbox",
+            "sync_checkpoints",
+            "sync_conflicts",
+            "attachment_sync",
+        ] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .expect("check sync table");
+            assert_eq!(exists, 1, "missing table {table}");
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn message_and_outbox_commit_or_rollback_together() {
+        let path = temp_db_path("message-outbox-transaction");
+        init_db(&path, None).expect("initialize database");
+        let mut message = sample_message("atomic.txt", 100, &[], false);
+        message.marked = false;
+        let operation = NewOutboxOperation {
+            operation_id: "operation-1".into(),
+            endpoint_id: message.endpoint_id.clone(),
+            owner_scope: "user-a".into(),
+            entity_type: "message".into(),
+            entity_id: "message-a".into(),
+            action: "upsert".into(),
+            base_revision: 0,
+            payload_json: "{}".into(),
+            payload_hash: "hash-a".into(),
+            created_at_ms: 100,
+        };
+        save_message_and_enqueue(&path, &message, &operation).expect("save atomically");
+        let conn = Connection::open(&path).expect("open database");
+        let message_count: i64 = conn
+            .query_row("SELECT count(*) FROM messages", [], |row| row.get(0))
+            .expect("count messages");
+        let outbox_count: i64 = conn
+            .query_row("SELECT count(*) FROM sync_outbox", [], |row| row.get(0))
+            .expect("count outbox");
+        assert_eq!((message_count, outbox_count), (1, 1));
+        drop(conn);
+
+        let mut changed = message.clone();
+        changed.content = Some("must roll back".into());
+        let duplicate = NewOutboxOperation {
+            payload_hash: "different".into(),
+            ..operation
+        };
+        assert!(save_message_and_enqueue(&path, &changed, &duplicate).is_err());
+        let conn = Connection::open(&path).expect("reopen database");
+        let stored: String = conn
+            .query_row(
+                "SELECT content FROM messages WHERE filename='atomic.txt'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read message content");
+        let outbox_count: i64 = conn
+            .query_row("SELECT count(*) FROM sync_outbox", [], |row| row.get(0))
+            .expect("count outbox after rollback");
+        assert_eq!(stored, "atomic.txt");
+        assert_eq!(outbox_count, 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn mark_tag_and_delete_rollback_when_outbox_insert_fails() {
+        let path = temp_db_path("mutation-outbox-rollback");
+        init_db(&path, None).expect("initialize database");
+        let mut message = sample_message("atomic.txt", 100, &[], false);
+        message.marked = false;
+        let original = NewOutboxOperation {
+            operation_id: "operation-shared".into(),
+            endpoint_id: message.endpoint_id.clone(),
+            owner_scope: "user-a".into(),
+            entity_type: "message".into(),
+            entity_id: "message-a".into(),
+            action: "upsert".into(),
+            base_revision: 0,
+            payload_json: "{}".into(),
+            payload_hash: "hash-a".into(),
+            created_at_ms: 100,
+        };
+        save_message_and_enqueue(&path, &message, &original).expect("seed message and outbox");
+
+        let conflicting = NewOutboxOperation {
+            payload_hash: "hash-conflict".into(),
+            ..original.clone()
+        };
+        assert!(set_message_marked_and_enqueue(
+            &path,
+            "endpoint-1",
+            "user-a",
+            "atomic.txt",
+            true,
+            &[],
+            false,
+            None,
+            &conflicting,
+        )
+        .is_err());
+        let stored = get_message_for_scope(&path, "endpoint-1", "user-a", "atomic.txt")
+            .expect("read message")
+            .expect("message exists");
+        assert!(!stored.marked);
+
+        let tag = MarkedTag {
+            id: "tag-a".into(),
+            name: "Tag A".into(),
+        };
+        assert!(
+            save_tag_and_enqueue(&path, "endpoint-1", "user-a", &tag, 0, None, &conflicting,)
+                .is_err()
+        );
+        assert!(list_tags_for_scope(&path, "endpoint-1", "user-a")
+            .expect("list tags")
+            .is_empty());
+
+        assert!(tombstone_messages_and_enqueue(
+            &path,
+            "endpoint-1",
+            "user-a",
+            &["atomic.txt".into()],
+            &[conflicting],
+            200,
+        )
+        .is_err());
+        assert!(
+            get_message_for_scope(&path, "endpoint-1", "user-a", "atomic.txt")
+                .expect("read after failed tombstone")
+                .is_some()
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn outbox_claim_recovery_preserves_operation_identity_and_payload() {
+        let path = temp_db_path("outbox-claim-recovery");
+        init_db(&path, None).expect("initialize database");
+        let message = sample_message("outbox.txt", 100, &[], false);
+        let first = NewOutboxOperation {
+            operation_id: "operation-first".into(),
+            endpoint_id: message.endpoint_id.clone(),
+            owner_scope: "user-a".into(),
+            entity_type: "message".into(),
+            entity_id: "message-a".into(),
+            action: "upsert".into(),
+            base_revision: 0,
+            payload_json: "{\"content\":\"immutable\"}".into(),
+            payload_hash: "hash-immutable".into(),
+            created_at_ms: 100,
+        };
+        save_message_and_enqueue(&path, &message, &first).expect("seed first operation");
+        let mut changed = message.clone();
+        changed.content = Some("second".into());
+        let second = NewOutboxOperation {
+            operation_id: "operation-second".into(),
+            payload_json: "{\"content\":\"second\"}".into(),
+            payload_hash: "hash-second".into(),
+            created_at_ms: 101,
+            ..first.clone()
+        };
+        save_message_and_enqueue(&path, &changed, &second).expect("seed second operation");
+
+        let claimed = claim_outbox_operations(
+            &path,
+            "endpoint-1",
+            "user-a",
+            "worker-a",
+            1_000,
+            30_000,
+            10,
+            false,
+        )
+        .expect("claim first operation");
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].operation_id, first.operation_id);
+        assert_eq!(claimed[0].payload_json, first.payload_json);
+        assert_eq!(claimed[0].payload_hash, first.payload_hash);
+        assert_eq!(claimed[0].attempt_count, 1);
+        assert!(claim_outbox_operations(
+            &path,
+            "endpoint-1",
+            "user-a",
+            "worker-b",
+            1_001,
+            30_000,
+            10,
+            false,
+        )
+        .expect("respect active lease")
+        .is_empty());
+
+        assert_eq!(recover_all_outbox_claims(&path, 1_002).unwrap(), 1);
+        let replay = claim_outbox_operations(
+            &path,
+            "endpoint-1",
+            "user-a",
+            "worker-restart",
+            1_003,
+            30_000,
+            10,
+            false,
+        )
+        .expect("reclaim after process interruption");
+        assert_eq!(replay.len(), 1);
+        assert_eq!(replay[0].operation_id, first.operation_id);
+        assert_eq!(replay[0].payload_json, first.payload_json);
+        assert_eq!(replay[0].attempt_count, 2);
+        assert!(
+            acknowledge_outbox_operation(&path, &first.operation_id, "worker-restart", 1_004)
+                .unwrap()
+        );
+        let next = claim_outbox_operations(
+            &path,
+            "endpoint-1",
+            "user-a",
+            "worker-restart",
+            1_005,
+            30_000,
+            10,
+            false,
+        )
+        .expect("claim later operation after acknowledgement");
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].operation_id, second.operation_id);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn outbox_success_rebases_later_pending_change_for_same_message() {
+        let path = temp_db_path("outbox-rebase");
+        init_db(&path, None).unwrap();
+        let message = sample_message("rebase.txt", 100, &[], false);
+        let first = NewOutboxOperation {
+            operation_id: "rebase-first".into(),
+            endpoint_id: "endpoint-1".into(),
+            owner_scope: "user-a".into(),
+            entity_type: "message".into(),
+            entity_id: "message-rebase".into(),
+            action: "upsert".into(),
+            base_revision: 0,
+            payload_json: r#"{"marked":true}"#.into(),
+            payload_hash: "rebase-first-hash".into(),
+            created_at_ms: 100,
+        };
+        save_message_and_enqueue(&path, &message, &first).unwrap();
+        let second = NewOutboxOperation {
+            operation_id: "rebase-second".into(),
+            payload_json: r#"{"marked":true,"markedPinned":true}"#.into(),
+            payload_hash: "rebase-second-hash".into(),
+            created_at_ms: 101,
+            ..first.clone()
+        };
+        save_message_and_enqueue(&path, &message, &second).unwrap();
+        let first_claim = claim_outbox_operations(
+            &path,
+            "endpoint-1",
+            "user-a",
+            "worker",
+            200,
+            30_000,
+            1,
+            true,
+        )
+        .unwrap();
+        apply_outbox_success(&path, &first_claim[0], "worker", 1, 201).unwrap();
+        let second_claim = claim_outbox_operations(
+            &path,
+            "endpoint-1",
+            "user-a",
+            "worker",
+            202,
+            30_000,
+            1,
+            true,
+        )
+        .unwrap();
+        assert_eq!(second_claim[0].operation_id, "rebase-second");
+        assert_eq!(second_claim[0].base_revision, 1);
+        assert_eq!(second_claim[0].payload_hash, "rebase-second-hash");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn outbox_retry_backoff_is_recoverable_and_manual_claim_can_bypass_it() {
+        let path = temp_db_path("outbox-retry-backoff");
+        init_db(&path, None).expect("initialize database");
+        let message = sample_message("retry.txt", 100, &[], false);
+        let operation = NewOutboxOperation {
+            operation_id: "operation-retry".into(),
+            endpoint_id: message.endpoint_id.clone(),
+            owner_scope: "user-a".into(),
+            entity_type: "message".into(),
+            entity_id: "message-a".into(),
+            action: "upsert".into(),
+            base_revision: 0,
+            payload_json: "{}".into(),
+            payload_hash: "hash-retry".into(),
+            created_at_ms: 100,
+        };
+        save_message_and_enqueue(&path, &message, &operation).expect("seed operation");
+        let claimed = claim_outbox_operations(
+            &path,
+            "endpoint-1",
+            "user-a",
+            "worker-a",
+            1_000,
+            30_000,
+            1,
+            false,
+        )
+        .unwrap();
+        let retry_at = 1_000 + outbox_retry_delay_ms(claimed[0].attempt_count);
+        assert!(release_outbox_operation(
+            &path,
+            &operation.operation_id,
+            "worker-a",
+            retry_at,
+            "response lost",
+            1_001
+        )
+        .unwrap());
+        assert!(claim_outbox_operations(
+            &path,
+            "endpoint-1",
+            "user-a",
+            "worker-b",
+            1_002,
+            30_000,
+            1,
+            false,
+        )
+        .unwrap()
+        .is_empty());
+        let manual = claim_outbox_operations(
+            &path,
+            "endpoint-1",
+            "user-a",
+            "worker-b",
+            1_002,
+            30_000,
+            1,
+            true,
+        )
+        .unwrap();
+        assert_eq!(manual[0].operation_id, operation.operation_id);
+        assert_eq!(manual[0].payload_hash, operation.payload_hash);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn outbox_success_and_conflict_update_business_state_atomically() {
+        let path = temp_db_path("outbox-result-atomic");
+        init_db(&path, None).expect("initialize database");
+        let message = sample_message("result.txt", 100, &[], false);
+        let operation = NewOutboxOperation {
+            operation_id: "operation-result".into(),
+            endpoint_id: message.endpoint_id.clone(),
+            owner_scope: "user-a".into(),
+            entity_type: "message".into(),
+            entity_id: "message-result".into(),
+            action: "upsert".into(),
+            base_revision: 0,
+            payload_json: "{\"content\":\"local\"}".into(),
+            payload_hash: "hash-result".into(),
+            created_at_ms: 100,
+        };
+        save_message_and_enqueue(&path, &message, &operation).expect("seed operation");
+        let claimed = claim_outbox_operations(
+            &path,
+            "endpoint-1",
+            "user-a",
+            "worker",
+            1_000,
+            30_000,
+            1,
+            false,
+        )
+        .unwrap();
+        assert!(apply_outbox_success(&path, &claimed[0], "worker", 7, 1_001).unwrap());
+        let conn = Connection::open(&path).unwrap();
+        let state: (i64, String) = conn
+            .query_row(
+                "SELECT remote_revision,sync_state FROM messages WHERE message_id='message-result'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, (7, "synced".into()));
+        drop(conn);
+
+        let conflict_operation = NewOutboxOperation {
+            operation_id: "operation-conflict".into(),
+            base_revision: 7,
+            payload_json: "{\"content\":\"local-new\"}".into(),
+            payload_hash: "hash-conflict".into(),
+            created_at_ms: 101,
+            ..operation
+        };
+        let mut changed = message.clone();
+        changed.content = Some("local-new".into());
+        save_message_and_enqueue(&path, &changed, &conflict_operation).unwrap();
+        let claimed = claim_outbox_operations(
+            &path,
+            "endpoint-1",
+            "user-a",
+            "worker",
+            2_000,
+            30_000,
+            1,
+            false,
+        )
+        .unwrap();
+        assert!(record_outbox_conflict(
+            &path,
+            &claimed[0],
+            "worker",
+            Some(8),
+            Some("{\"deleted_at\":\"2026-01-01T00:00:00Z\"}"),
+            2_001
+        )
+        .unwrap());
+        let conn = Connection::open(&path).unwrap();
+        let conflict: (String, String, i64) = conn
+            .query_row(
+                "SELECT local_payload_json,remote_payload_json,remote_revision
+                 FROM sync_conflicts WHERE entity_id='message-result'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(conflict.0, conflict_operation.payload_json);
+        assert!(conflict.1.contains("deleted_at"));
+        assert_eq!(conflict.2, 8);
+        let sync_state: String = conn
+            .query_row(
+                "SELECT sync_state FROM messages WHERE message_id='message-result'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sync_state, "conflict");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pending_and_conflict_entry_points_keep_blocked_work_distinct() {
+        let path = temp_db_path("sync-issue-entry-points");
+        init_db(&path, None).unwrap();
+        let message = sample_message("issues.txt", 100, &[], false);
+        let operation = NewOutboxOperation {
+            operation_id: "issue-operation".into(),
+            endpoint_id: "endpoint-1".into(),
+            owner_scope: "user-a".into(),
+            entity_type: "message".into(),
+            entity_id: "message-issue".into(),
+            action: "upsert".into(),
+            base_revision: 0,
+            payload_json: "{\"content\":\"local\"}".into(),
+            payload_hash: "issue-hash".into(),
+            created_at_ms: 100,
+        };
+        save_message_and_enqueue(&path, &message, &operation).unwrap();
+        assert_eq!(
+            list_pending_operations(&path, "endpoint-1", "user-a")
+                .unwrap()
+                .len(),
+            1
+        );
+        let claimed = claim_outbox_operations(
+            &path,
+            "endpoint-1",
+            "user-a",
+            "worker",
+            200,
+            30_000,
+            1,
+            false,
+        )
+        .unwrap();
+        record_outbox_conflict(
+            &path,
+            &claimed[0],
+            "worker",
+            Some(2),
+            Some("{\"deleted_at\":null,\"content\":\"remote\"}"),
+            201,
+        )
+        .unwrap();
+        assert!(list_pending_operations(&path, "endpoint-1", "user-a")
+            .unwrap()
+            .is_empty());
+        let conflicts = list_sync_conflicts(&path, "endpoint-1", "user-a").unwrap();
+        assert_eq!(conflicts.len(), 1);
+        let retry = NewOutboxOperation {
+            operation_id: "issue-retry".into(),
+            base_revision: 2,
+            payload_hash: "retry-hash".into(),
+            created_at_ms: 202,
+            ..operation
+        };
+        assert!(resolve_sync_conflict_keep_local(
+            &path,
+            conflicts[0].id,
+            "endpoint-1",
+            "user-a",
+            &retry,
+            202
+        )
+        .unwrap());
+        assert!(list_sync_conflicts(&path, "endpoint-1", "user-a")
+            .unwrap()
+            .is_empty());
+        let pending = list_pending_operations(&path, "endpoint-1", "user-a").unwrap();
+        assert_eq!(
+            (pending.len(), pending[0].operation_id.as_str()),
+            (1, "issue-retry")
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn resolving_conflict_with_remote_applies_snapshot_and_supersedes_local_operation() {
+        let path = temp_db_path("sync-conflict-use-remote");
+        init_db(&path, None).unwrap();
+        let message = sample_message("remote-wins.txt", 100, &[], false);
+        let operation = NewOutboxOperation {
+            operation_id: "remote-wins-operation".into(),
+            endpoint_id: "endpoint-1".into(),
+            owner_scope: "user-a".into(),
+            entity_type: "message".into(),
+            entity_id: "message-remote-wins".into(),
+            action: "upsert".into(),
+            base_revision: 1,
+            payload_json: "{\"content\":\"local\"}".into(),
+            payload_hash: "remote-wins-hash".into(),
+            created_at_ms: 100,
+        };
+        save_message_and_enqueue(&path, &message, &operation).unwrap();
+        let claimed = claim_outbox_operations(
+            &path,
+            "endpoint-1",
+            "user-a",
+            "worker",
+            200,
+            30_000,
+            1,
+            false,
+        )
+        .unwrap();
+        let remote = serde_json::json!({
+            "id": "message-remote-wins",
+            "sender": "device-b",
+            "timestamp_ms": 200,
+            "size": 6,
+            "kind": "text",
+            "original_name": "remote-wins.txt",
+            "legacy_filename": "remote-wins.txt",
+            "content": "remote",
+            "format": "text",
+            "marked": false,
+            "marked_tag_ids": [],
+            "marked_pinned": false,
+            "deleted_at": null
+        });
+        record_outbox_conflict(
+            &path,
+            &claimed[0],
+            "worker",
+            Some(2),
+            Some(&remote.to_string()),
+            201,
+        )
+        .unwrap();
+        let conflict = list_sync_conflicts(&path, "endpoint-1", "user-a")
+            .unwrap()
+            .remove(0);
+
+        assert!(
+            resolve_sync_conflict_use_remote(&path, conflict.id, "endpoint-1", "user-a", 202)
+                .unwrap()
+        );
+
+        let conn = Connection::open(&path).unwrap();
+        let message_state: (Option<String>, i64, String) = conn
+            .query_row(
+                "SELECT content,remote_revision,sync_state FROM messages
+                 WHERE endpoint_id='endpoint-1' AND owner_scope='user-a'
+                   AND filename='remote-wins.txt'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(message_state, (Some("remote".into()), 2, "synced".into()));
+        let outbox_state: String = conn
+            .query_row(
+                "SELECT state FROM sync_outbox WHERE operation_id='remote-wins-operation'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(outbox_state, "superseded");
+        assert!(list_sync_conflicts(&path, "endpoint-1", "user-a")
+            .unwrap()
+            .is_empty());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pulled_changes_and_checkpoint_rollback_and_replay_atomically() {
+        let path = temp_db_path("pull-checkpoint-atomic");
+        init_db(&path, None).expect("initialize database");
+        let snapshot = serde_json::json!({
+            "id":"00000000-0000-4000-8000-000000000123",
+            "sender":"device-a","timestamp_ms":100,"size":5,
+            "kind":"text","original_name":"message.txt",
+            "legacy_filename":"remote-message.txt","content":"hello",
+            "format":"text","marked":false,"marked_tag_ids":[],
+            "marked_pinned":false,"deleted_at":null
+        });
+        let changes = vec![PulledChange {
+            change_seq: 1,
+            entity_type: "message".into(),
+            entity_id: "00000000-0000-4000-8000-000000000123".into(),
+            change_type: "upsert".into(),
+            revision: 1,
+            snapshot: Some(snapshot),
+        }];
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_checkpoint BEFORE INSERT ON sync_checkpoints
+             BEGIN SELECT RAISE(ABORT, 'checkpoint interrupted'); END;",
+        )
+        .unwrap();
+        drop(conn);
+        assert!(apply_pulled_changes(&path, "profile", "user-a", &changes, 1, 100).is_err());
+        let conn = Connection::open(&path).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        conn.execute_batch("DROP TRIGGER fail_checkpoint;").unwrap();
+        drop(conn);
+
+        apply_pulled_changes(&path, "profile", "user-a", &changes, 1, 101).unwrap();
+        apply_pulled_changes(&path, "profile", "user-a", &changes, 1, 102).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM messages WHERE endpoint_id='profile' AND owner_scope='user-a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(get_sync_checkpoint(&path, "profile", "user-a").unwrap(), 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn scoped_message_feed_isolates_accounts_on_the_same_profile() {
+        let path = temp_db_path("scoped-feed");
+        init_db(&path, None).unwrap();
+        for (owner, id, filename) in [
+            ("user-a", "message-a", "a.txt"),
+            ("user-b", "message-b", "b.txt"),
+        ] {
+            let message = sample_message(filename, 100, &[], false);
+            let operation = NewOutboxOperation {
+                operation_id: format!("operation-{owner}"),
+                endpoint_id: "endpoint-1".into(),
+                owner_scope: owner.into(),
+                entity_type: "message".into(),
+                entity_id: id.into(),
+                action: "upsert".into(),
+                base_revision: 0,
+                payload_json: "{}".into(),
+                payload_hash: format!("hash-{owner}"),
+                created_at_ms: 100,
+            };
+            save_message_and_enqueue(&path, &message, &operation).unwrap();
+        }
+        let a = list_messages_for_scope(&path, "endpoint-1", "user-a", None, None, false, None)
+            .unwrap();
+        let b = list_messages_for_scope(&path, "endpoint-1", "user-b", None, None, false, None)
+            .unwrap();
+        assert_eq!(
+            a.iter()
+                .map(|item| item.filename.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.txt"]
+        );
+        assert_eq!(
+            b.iter()
+                .map(|item| item.filename.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b.txt"]
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn scoped_marked_feed_filters_and_isolates_accounts() {
+        let path = temp_db_path("scoped-marked-feed");
+        init_db(&path, None).unwrap();
+        for (owner, filename, tag_id, due_date, pinned) in [
+            ("user-a", "a-pinned.txt", "tag-a", Some("2026-01-01"), true),
+            ("user-a", "a-untagged.txt", "", None, false),
+            ("user-b", "b.txt", "tag-a", Some("2026-01-01"), false),
+        ] {
+            let tags = if tag_id.is_empty() {
+                vec![]
+            } else {
+                vec![tag_id]
+            };
+            let mut message = sample_message(filename, 100, &tags, pinned);
+            message.marked_due_date = due_date.map(str::to_string);
+            let operation = NewOutboxOperation {
+                operation_id: format!("op-{owner}-{filename}"),
+                endpoint_id: "profile".into(),
+                owner_scope: owner.into(),
+                entity_type: "message".into(),
+                entity_id: format!("id-{owner}-{filename}"),
+                action: "upsert".into(),
+                base_revision: 0,
+                payload_json: "{}".into(),
+                payload_hash: format!("hash-{owner}-{filename}"),
+                created_at_ms: 1,
+            };
+            message.endpoint_id = "profile".into();
+            save_message_and_enqueue(&path, &message, &operation).unwrap();
+        }
+        assert_eq!(
+            list_marked_messages_for_scope(
+                &path,
+                "profile",
+                "user-a",
+                Some("tag-a"),
+                Some("pinned"),
+                None,
+                None,
+                Some("2026-12-31"),
+            )
+            .unwrap()
+            .iter()
+            .map(|message| message.filename.as_str())
+            .collect::<Vec<_>>(),
+            vec!["a-pinned.txt"]
+        );
+        assert_eq!(
+            count_marked_messages_for_scope(
+                &path,
+                "profile",
+                "user-a",
+                Some(UNTAGGED_MARKED_TAG_FILTER_ID),
+                None,
+                None,
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            count_marked_messages_for_scope(&path, "profile", "user-b", None, None, None).unwrap(),
+            1
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tag_delete_waits_for_message_cleanup_and_rebases_followup_changes() {
+        let path = temp_db_path("tag-delete-dependency");
+        init_db(&path, None).unwrap();
+        let mut message = sample_message("marked.txt", 100, &["tag-a"], false);
+        message.endpoint_id = "profile".into();
+        let seed = NewOutboxOperation {
+            operation_id: "seed-message".into(),
+            endpoint_id: "profile".into(),
+            owner_scope: "user-a".into(),
+            entity_type: "message".into(),
+            entity_id: "message-a".into(),
+            action: "upsert".into(),
+            base_revision: 0,
+            payload_json: "{}".into(),
+            payload_hash: "seed-hash".into(),
+            created_at_ms: 1,
+        };
+        save_message_and_enqueue(&path, &message, &seed).unwrap();
+        let seed_claim =
+            claim_outbox_operations(&path, "profile", "user-a", "worker", 2, 30_000, 1, true)
+                .unwrap();
+        apply_outbox_success(&path, &seed_claim[0], "worker", 3, 3).unwrap();
+        let tag = MarkedTag {
+            id: "tag-a".into(),
+            name: "A".into(),
+        };
+        let tag_create = NewOutboxOperation {
+            operation_id: "tag-create".into(),
+            endpoint_id: "profile".into(),
+            owner_scope: "user-a".into(),
+            entity_type: "tag".into(),
+            entity_id: "tag-a".into(),
+            action: "upsert".into(),
+            base_revision: 0,
+            payload_json: "{}".into(),
+            payload_hash: "tag-create-hash".into(),
+            created_at_ms: 4,
+        };
+        save_tag_and_enqueue(&path, "profile", "user-a", &tag, 0, None, &tag_create).unwrap();
+        let tag_claim =
+            claim_outbox_operations(&path, "profile", "user-a", "worker", 5, 30_000, 1, true)
+                .unwrap();
+        apply_outbox_success(&path, &tag_claim[0], "worker", 1, 6).unwrap();
+
+        let cleanup = NewOutboxOperation {
+            operation_id: "message-cleanup".into(),
+            endpoint_id: "profile".into(),
+            owner_scope: "user-a".into(),
+            entity_type: "message".into(),
+            entity_id: "message-a".into(),
+            action: "upsert".into(),
+            base_revision: 3,
+            payload_json: "{}".into(),
+            payload_hash: "cleanup-hash".into(),
+            created_at_ms: 7,
+        };
+        let delete = NewOutboxOperation {
+            operation_id: "tag-delete".into(),
+            endpoint_id: "profile".into(),
+            owner_scope: "user-a".into(),
+            entity_type: "tag".into(),
+            entity_id: "tag-a".into(),
+            action: "delete".into(),
+            base_revision: 1,
+            payload_json: "{}".into(),
+            payload_hash: "tag-delete-hash".into(),
+            created_at_ms: 7,
+        };
+        delete_tag_cleanup_messages_and_enqueue(
+            &path,
+            "profile",
+            "user-a",
+            &tag,
+            1,
+            7,
+            &[("marked.txt".into(), Vec::new(), cleanup)],
+            &delete,
+        )
+        .unwrap();
+        let first =
+            claim_outbox_operations(&path, "profile", "user-a", "worker", 8, 30_000, 1, true)
+                .unwrap();
+        assert_eq!(first[0].operation_id, "message-cleanup");
+        assert!(
+            claim_outbox_operations(&path, "profile", "user-a", "other", 8, 30_000, 1, true,)
+                .unwrap()
+                .is_empty()
+        );
+        apply_outbox_success(&path, &first[0], "worker", 4, 9).unwrap();
+        let second =
+            claim_outbox_operations(&path, "profile", "user-a", "worker", 10, 30_000, 1, true)
+                .unwrap();
+        assert_eq!(second[0].operation_id, "tag-delete");
+        let stored = get_message_for_scope(&path, "profile", "user-a", "marked.txt")
+            .unwrap()
+            .unwrap();
+        assert!(stored.marked_tag_ids.is_empty());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn orphan_cleanup_candidates_exclude_referenced_and_pending_objects() {
+        let path = temp_db_path("orphan-candidates");
+        init_db(&path, None).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        for (id, state, deleted) in [
+            ("safe", "uploaded", Some(10)),
+            ("pending", "uploaded", Some(10)),
+            ("referenced", "uploaded", None),
+            ("uploading", "uploading", Some(10)),
+        ] {
+            conn.execute(
+                "INSERT INTO attachment_sync(endpoint_id,owner_scope,attachment_id,message_id,
+                 original_name,object_path,size,upload_state,deleted_at_ms,updated_at_ms)
+                 VALUES('profile','user-a',?1,'message','x.bin',?2,1,?3,?4,10)",
+                params![id, format!("user/space/{id}/x.bin"), state, deleted],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO sync_outbox(operation_id,endpoint_id,owner_scope,entity_type,entity_id,
+             action,payload_json,payload_hash,state,created_at_ms,updated_at_ms)
+             VALUES('op','profile','user-a','attachment','pending','upsert','{}','hash','pending',10,10)",
+            [],
+        ).unwrap();
+        drop(conn);
+        let candidates =
+            list_orphan_attachment_candidates(&path, "profile", "user-a", 20, 50).unwrap();
+        assert_eq!(
+            candidates,
+            vec![("safe".into(), "user/space/safe/x.bin".into())]
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn repairs_claimed_legacy_attachment_path_atomically() {
+        let path = temp_db_path("repair-legacy-attachment-path");
+        init_db(&path, None).unwrap();
+        let local_path = path.with_extension("bin");
+        std::fs::write(&local_path, b"attachment").unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO messages(endpoint_id,filename,sender,timestamp_ms,size,kind,original_name,
+             local_path,remote_path,message_id,owner_scope,sync_state)
+             VALUES('profile','message','sender',1,10,'file','file.txt',?1,?2,'message-id','user-a','pending')",
+            params![local_path.to_string_lossy(), "user-a//attachment-id/file.txt"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO attachment_sync(endpoint_id,owner_scope,attachment_id,message_id,original_name,
+             local_path,object_path,size,upload_state,updated_at_ms)
+             VALUES('profile','user-a','attachment-id','message-id','file.txt',?1,?2,10,'local',1)",
+            params![local_path.to_string_lossy(), "user-a//attachment-id/file.txt"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_outbox(operation_id,endpoint_id,owner_scope,entity_type,entity_id,action,
+             payload_json,payload_hash,state,lease_owner,created_at_ms,updated_at_ms)
+             VALUES('operation','profile','user-a','attachment','attachment-id','upsert',
+             '{\"objectPath\":\"user-a//attachment-id/file.txt\"}','old','sending','worker',1,1)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let repaired_path = "user-a/space-id/attachment-id/file.txt";
+        assert!(repair_claimed_attachment_object_path(
+            &path,
+            "operation",
+            "worker",
+            "profile",
+            "user-a",
+            "attachment-id",
+            repaired_path,
+            "{\"objectPath\":\"user-a/space-id/attachment-id/file.txt\"}",
+            "new",
+            2,
+        )
+        .unwrap());
+
+        let conn = Connection::open(&path).unwrap();
+        let attachment_path: String = conn
+            .query_row(
+                "SELECT object_path FROM attachment_sync WHERE attachment_id='attachment-id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let message_path: String = conn
+            .query_row(
+                "SELECT remote_path FROM messages WHERE message_id='message-id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let outbox: (String, String) = conn
+            .query_row(
+                "SELECT payload_hash,last_error FROM sync_outbox WHERE operation_id='operation'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            (attachment_path.as_str(), message_path.as_str()),
+            (repaired_path, repaired_path)
+        );
+        assert_eq!(outbox, ("new".into(), String::new()));
+        drop(conn);
+        let _ = std::fs::remove_file(local_path);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn account_scoped_business_keys_allow_same_filename_and_tag_across_users() {
+        let path = temp_db_path("account-scoped-business-keys");
+        init_db(&path, None).expect("initialize database");
+        for owner in ["user-a", "user-b"] {
+            let message = sample_message("same.txt", 100, &[], false);
+            let operation = NewOutboxOperation {
+                operation_id: format!("operation-{owner}"),
+                endpoint_id: message.endpoint_id.clone(),
+                owner_scope: owner.into(),
+                entity_type: "message".into(),
+                entity_id: format!("message-{owner}"),
+                action: "upsert".into(),
+                base_revision: 0,
+                payload_json: "{}".into(),
+                payload_hash: format!("hash-{owner}"),
+                created_at_ms: 100,
+            };
+            save_message_and_enqueue(&path, &message, &operation).unwrap();
+            let tag = MarkedTag {
+                id: "same-tag".into(),
+                name: owner.into(),
+            };
+            let tag_operation = NewOutboxOperation {
+                operation_id: format!("tag-operation-{owner}"),
+                entity_type: "tag".into(),
+                entity_id: tag.id.clone(),
+                payload_hash: format!("tag-hash-{owner}"),
+                ..operation
+            };
+            save_tag_and_enqueue(&path, "endpoint-1", owner, &tag, 0, None, &tag_operation)
+                .unwrap();
+        }
+        assert_eq!(
+            list_messages_for_scope(&path, "endpoint-1", "user-a", None, None, false, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            list_messages_for_scope(&path, "endpoint-1", "user-b", None, None, false, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            list_tags_for_scope(&path, "endpoint-1", "user-a").unwrap()[0]
+                .0
+                .name,
+            "user-a"
+        );
+        assert_eq!(
+            list_tags_for_scope(&path, "endpoint-1", "user-b").unwrap()[0]
+                .0
+                .name,
+            "user-b"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn storage_import_batch_resumes_without_duplicate_business_or_outbox_rows() {
+        let path = temp_db_path("storage-import-resume");
+        init_db(&path, None).expect("initialize database");
+        let item = StorageImportItem {
+            item_type: "message".into(),
+            source_key: "source.txt".into(),
+            entity_id: "00000000-0000-5000-8000-000000000001".into(),
+            attachment_id: None,
+            message_operation_id: "00000000-0000-5000-8000-000000000002".into(),
+            attachment_operation_id: None,
+            state: "pending".into(),
+        };
+        let batch = NewStorageImportBatch {
+            batch_id: "batch",
+            source_profile_id: "source",
+            target_profile_id: "target",
+            target_owner_scope: "user-a",
+            items: std::slice::from_ref(&item),
+            now_ms: 100,
+        };
+        create_or_resume_storage_import(&path, &batch).unwrap();
+        let mut message = sample_message("source.txt", 100, &[], false);
+        message.endpoint_id = "target".into();
+        let operation = NewOutboxOperation {
+            operation_id: item.message_operation_id.clone(),
+            endpoint_id: "target".into(),
+            owner_scope: "user-a".into(),
+            entity_type: "message".into(),
+            entity_id: item.entity_id.clone(),
+            action: "upsert".into(),
+            base_revision: 0,
+            payload_json: "{}".into(),
+            payload_hash: "hash".into(),
+            created_at_ms: 100,
+        };
+        apply_imported_message(
+            &path,
+            "batch",
+            &item.source_key,
+            &message,
+            &operation,
+            None,
+            101,
+        )
+        .unwrap();
+        let staged = get_storage_import_progress(&path, "batch")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (staged.status.as_str(), staged.applied_items),
+            ("running", 0)
+        );
+        let claimed = claim_storage_import_outbox_operations(
+            &path, "target", "user-a", "batch", "worker", 102, 30_000, 1,
+        )
+        .unwrap();
+        assert_eq!(claimed.len(), 1);
+        mark_storage_import_operation_error(
+            &path,
+            &claimed[0].operation_id,
+            "temporary upload failure",
+            103,
+        )
+        .unwrap();
+        let failed = get_storage_import_progress(&path, "batch")
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.status, "error");
+        assert_eq!(
+            failed.last_error.as_deref(),
+            Some("temporary upload failure")
+        );
+        apply_outbox_success(&path, &claimed[0], "worker", 1, 104).unwrap();
+        let completed = get_storage_import_progress(&path, "batch")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (completed.status.as_str(), completed.applied_items),
+            ("completed", 1)
+        );
+        assert_eq!(completed.last_error, None);
+        create_or_resume_storage_import(
+            &path,
+            &NewStorageImportBatch {
+                now_ms: 200,
+                ..batch
+            },
+        )
+        .unwrap();
+        assert!(
+            list_storage_import_items(&path, "batch", &["pending", "error"])
+                .unwrap()
+                .is_empty()
+        );
+        let conn = Connection::open(&path).unwrap();
+        let counts = (
+            conn.query_row(
+                "SELECT count(*) FROM messages WHERE endpoint_id='target' AND owner_scope='user-a'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            conn.query_row(
+                "SELECT count(*) FROM sync_outbox WHERE operation_id=?1",
+                [item.message_operation_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        );
+        assert_eq!(counts, (1, 1));
+        assert_eq!(count_pending_import_outbox(&path, "batch").unwrap(), 0);
+        assert_eq!(count_import_conflicts(&path, "batch").unwrap(), 0);
+        let source_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM messages WHERE endpoint_id='source'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(source_count, 0);
+        drop(conn);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn init_db_clears_stale_error_from_completed_storage_import() {
+        let dir = std::env::temp_dir().join(format!(
+            "transfer-genie-completed-import-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("messages.sqlite");
+        init_db(&path, Some("endpoint")).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO storage_import_batches(
+               batch_id,source_profile_id,target_profile_id,target_owner_scope,status,
+               total_items,applied_items,failed_items,last_error,created_at_ms,updated_at_ms
+             ) VALUES('batch','source','target','owner','completed',3,3,0,'old failure',1,1)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        init_db(&path, Some("endpoint")).unwrap();
+
+        let progress = get_storage_import_progress(&path, "batch")
+            .unwrap()
+            .unwrap();
+        assert_eq!(progress.status, "completed");
+        assert_eq!(progress.last_error, None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

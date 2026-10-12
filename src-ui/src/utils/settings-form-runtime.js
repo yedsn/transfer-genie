@@ -61,6 +61,66 @@
     return normalized || fallback;
   }
 
+  function getSupabaseLoginInput(formState) {
+    var state = formState || {};
+    return {
+      email: String(state.supabaseEmail || '').trim(),
+      password: String(state.supabasePassword || ''),
+    };
+  }
+
+  async function performSupabaseSignIn(formState, dependencies) {
+    var login = getSupabaseLoginInput(formState);
+    if (!login.email || !login.password) {
+      throw new Error('请输入 Supabase 登录邮箱和密码');
+    }
+    var deps = dependencies || {};
+    if (typeof deps.ensureProfileSaved !== 'function' || typeof deps.signIn !== 'function') {
+      throw new Error('Supabase 登录组件尚未就绪');
+    }
+    var profileId = await deps.ensureProfileSaved();
+    return deps.signIn({
+      profileId: profileId,
+      email: login.email,
+      password: login.password,
+    });
+  }
+
+  function normalizeStorageImportProgress(progress, fallbackTotal) {
+    var value = progress || {};
+    var totalItems = Math.max(
+      0,
+      Number(value.totalItems !== undefined ? value.totalItems : value.total_items)
+        || Number(fallbackTotal)
+        || 0,
+    );
+    var appliedItems = Math.max(
+      0,
+      Number(value.appliedItems !== undefined ? value.appliedItems : value.applied_items) || 0,
+    );
+    var failedItems = Math.max(
+      0,
+      Number(value.failedItems !== undefined ? value.failedItems : value.failed_items) || 0,
+    );
+    var processedItems = Math.min(totalItems || appliedItems + failedItems, appliedItems + failedItems);
+    var status = String(value.status || 'pending');
+    var percent = totalItems > 0
+      ? Math.min(100, Math.max(0, Math.round((processedItems / totalItems) * 100)))
+      : status === 'completed'
+        ? 100
+        : 0;
+    return {
+      batchId: String(value.batchId !== undefined ? value.batchId : value.batch_id || ''),
+      status: status,
+      totalItems: totalItems,
+      appliedItems: appliedItems,
+      failedItems: failedItems,
+      processedItems: processedItems,
+      percent: percent,
+      lastError: String(value.lastError !== undefined ? value.lastError : value.last_error || ''),
+    };
+  }
+
   function getManualBackupDialogState(currentState, patch) {
     var current = currentState || {};
     var next = patch || {};
@@ -90,6 +150,9 @@
     getCurrentSenderName: getCurrentSenderName,
     getSendSettingsPayload: getSendSettingsPayload,
     normalizeSaveFilenameRule: normalizeSaveFilenameRule,
+    getSupabaseLoginInput: getSupabaseLoginInput,
+    performSupabaseSignIn: performSupabaseSignIn,
+    normalizeStorageImportProgress: normalizeStorageImportProgress,
     getManualBackupDialogState: getManualBackupDialogState,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

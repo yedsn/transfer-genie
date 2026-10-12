@@ -7,6 +7,8 @@
 </p>
 
 <p align="center"><strong>一个基于 WebDAV 的跨设备文件传输与文本同步工具。</strong></p>
+
+> 存储后端现支持相互独立的 WebDAV 与 Supabase 存储空间。Supabase 个人多设备模式、离线行为和 WebDAV 导入说明见 [Supabase 存储空间](docs/guide/supabase-storage.md)。
 <p align="center">面向 Windows 和 macOS，像聊天一样发送文本、Markdown 和文件，也能通过本机 HTTP API 与 Telegram Bridge 接入自动化流程。</p>
 
 Transfer Genie is a WebDAV-based cross-device file transfer and text sync desktop app. It is useful for self-hosted transfer workflows, Windows/macOS text and file sharing, local HTTP API automation, and Telegram-to-WebDAV synchronization.

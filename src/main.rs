@@ -1,10 +1,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod credential_store;
 mod db;
 mod filenames;
 mod history;
 mod integration_runtime;
 mod media_playback;
 mod media_preview;
+mod storage_provider;
+mod supabase_auth;
+mod supabase_connection;
+mod supabase_sync;
 mod telegram_bridge;
 mod telegram_bridge_runtime;
 mod types;
@@ -31,8 +36,9 @@ use crate::telegram_bridge_runtime::{TelegramBridgeManager, TelegramBridgeStatus
 use crate::types::{
     AiProviderSettings, AiSettings, AiTextAction, BackupSettings, DownloadHistoryRecord,
     LocalHttpApiSettings, MarkedTag, Message, SendSettings, Settings, SpeechToTextSettings,
-    SyncStatus, TelegramBridgeSettings, UploadHistoryRecord, WebDavConflict, WebDavEndpoint,
-    DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS, DEFAULT_LOCAL_HTTP_API_BIND_PORT,
+    StorageProfile, StorageProviderKind, SyncStatus, TelegramBridgeSettings, UploadHistoryRecord,
+    WebDavConflict, WebDavEndpoint, DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS,
+    DEFAULT_LOCAL_HTTP_API_BIND_PORT,
 };
 use crate::webdav_sync_runtime::WebDavSyncRuntimeAdapter;
 use crate::workspace::WorkspaceLayout;
@@ -113,6 +119,8 @@ struct AppState {
     files_base_dir: PathBuf,
     default_download_dir: PathBuf,
     settings: Mutex<Settings>,
+    supabase_sessions: Mutex<HashMap<String, supabase_auth::SupabaseSession>>,
+    supabase_auth_guard: AsyncMutex<()>,
     sync_status: Mutex<SyncStatus>,
     sync_guard: Arc<AsyncMutex<()>>,
     sync_cancel: Mutex<Option<oneshot::Sender<()>>>,
@@ -127,6 +135,24 @@ struct AppState {
     pending_webdav_conflict: Mutex<Option<WebDavConflict>>,
     system_dictation_hidden_main_position: Mutex<Option<PhysicalPosition<i32>>>,
     media_playback: media_playback::PlaybackRegistry,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SupabaseSignInInput {
+    profile_id: String,
+    email: String,
+    password: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SupabaseAccountStatus {
+    profile_id: String,
+    signed_in: bool,
+    user_id: Option<String>,
+    email: Option<String>,
+    expires_at: Option<i64>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -246,6 +272,7 @@ const SEND_HOTKEY_CTRL_ENTER: &str = "ctrl_enter";
 const SYNC_TIMEOUT_SECS: u64 = 45;
 const REFRESH_SYNC_SOURCE: &str = "正在刷新";
 const AUTO_SYNC_SOURCE: &str = "定时同步";
+const REALTIME_SYNC_SOURCE: &str = "实时同步";
 const TELEGRAM_BRIDGE_ARG: &str = "--telegram-bridge";
 const DEFAULT_TELEGRAM_POLL_INTERVAL_SECS: u64 = 5;
 const LOCAL_HTTP_API_ROUTE: &str = "/api/send-file";
@@ -254,6 +281,7 @@ const APP_UPDATE_EVENT: &str = "app-update-event";
 const TRAY_CHECK_UPDATE_EVENT: &str = "tray-check-update";
 const SHORTCUT_SETTINGS_CHANGED_EVENT: &str = "shortcut-settings-changed";
 const SETTINGS_CHANGED_EVENT: &str = "settings-changed";
+const SUPABASE_REALTIME_SYNCED_EVENT: &str = "supabase-realtime-synced";
 const SYSTEM_DICTATION_WINDOW_LABEL: &str = "system-dictation";
 const SYSTEM_DICTATION_WINDOW_WIDTH: f64 = 340.0;
 const SYSTEM_DICTATION_WINDOW_HEIGHT: f64 = 108.0;
@@ -306,6 +334,10 @@ struct ExportBundle {
 
 #[derive(Serialize, Deserialize)]
 struct ExportSettings {
+    #[serde(default)]
+    storage_profiles: Vec<StorageProfile>,
+    #[serde(default)]
+    active_storage_profile_id: Option<String>,
     #[serde(default)]
     webdav_endpoints: Vec<WebDavEndpoint>,
     #[serde(default)]
@@ -874,6 +906,12 @@ struct AppliedSendMarkedOptions {
     cleanup_targets: Vec<crate::history::HistoryEntryTarget>,
 }
 
+struct SupabaseSendMarkedChanges {
+    created_tags: Vec<(MarkedTag, db::NewOutboxOperation)>,
+    cleaned_messages: Vec<(String, Vec<String>, db::NewOutboxOperation)>,
+    deleted_tags: Vec<(MarkedTag, i64, i64, db::NewOutboxOperation)>,
+}
+
 #[derive(Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SendMessageResult {
@@ -1046,6 +1084,1406 @@ fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
     Ok(settings.clone())
 }
 
+fn supabase_profile_config(
+    settings: &Settings,
+    profile_id: &str,
+) -> Result<crate::types::SupabaseStorageConfig, String> {
+    match storage_provider::resolve_provider_by_id(settings, profile_id)? {
+        storage_provider::ProviderConfig::Supabase(profile) => profile
+            .supabase
+            .ok_or_else(|| "Supabase 存储空间配置不完整".to_string()),
+        storage_provider::ProviderConfig::Webdav(_) => Err("该存储空间不是 Supabase".to_string()),
+    }
+}
+
+fn account_status(
+    profile_id: &str,
+    session: Option<&supabase_auth::SupabaseSession>,
+) -> SupabaseAccountStatus {
+    SupabaseAccountStatus {
+        profile_id: profile_id.to_string(),
+        signed_in: session.is_some(),
+        user_id: session.map(|session| session.user_id.clone()),
+        email: session.map(|session| session.email.clone()),
+        expires_at: session.map(|session| session.expires_at),
+    }
+}
+
+fn active_supabase_context(
+    state: &AppState,
+    settings: &Settings,
+) -> Result<Option<(StorageProfile, supabase_auth::SupabaseSession)>, String> {
+    match storage_provider::resolve_active_provider(settings)? {
+        storage_provider::ProviderConfig::Webdav(_) => Ok(None),
+        storage_provider::ProviderConfig::Supabase(profile) => {
+            let session = state
+                .supabase_sessions
+                .lock()
+                .map_err(|_| "读取 Supabase 会话失败".to_string())?
+                .get(&profile.id)
+                .cloned()
+                .ok_or_else(|| "请先登录当前 Supabase 存储空间".to_string())?;
+            Ok(Some((profile, session)))
+        }
+    }
+}
+
+fn auth_error(
+    kind: supabase_auth::SupabaseAuthErrorKind,
+    message: impl Into<String>,
+) -> supabase_auth::SupabaseAuthError {
+    supabase_auth::SupabaseAuthError {
+        kind,
+        message: message.into(),
+    }
+}
+
+fn remove_supabase_session(
+    state: &AppState,
+    profile_id: &str,
+) -> Result<(), supabase_auth::SupabaseAuthError> {
+    state
+        .supabase_sessions
+        .lock()
+        .map_err(|_| {
+            auth_error(
+                supabase_auth::SupabaseAuthErrorKind::Service,
+                "清除 Supabase 会话失败",
+            )
+        })?
+        .remove(profile_id);
+    credential_store::delete_session(profile_id)
+        .map_err(|message| auth_error(supabase_auth::SupabaseAuthErrorKind::Service, message))
+}
+
+async fn valid_supabase_session(
+    state: &AppState,
+    profile_id: &str,
+    force_refresh: bool,
+) -> Result<Option<supabase_auth::SupabaseSession>, supabase_auth::SupabaseAuthError> {
+    let _refresh_guard = state.supabase_auth_guard.lock().await;
+    let config = current_settings(state)
+        .and_then(|settings| supabase_profile_config(&settings, profile_id))
+        .map_err(|message| {
+            auth_error(
+                supabase_auth::SupabaseAuthErrorKind::InvalidResponse,
+                message,
+            )
+        })?;
+    let existing = state
+        .supabase_sessions
+        .lock()
+        .map_err(|_| {
+            auth_error(
+                supabase_auth::SupabaseAuthErrorKind::Service,
+                "读取 Supabase 会话失败",
+            )
+        })?
+        .get(profile_id)
+        .cloned();
+    let Some(existing) = existing else {
+        return Ok(None);
+    };
+    let now_seconds = now_ms() / 1_000;
+    if !force_refresh && !existing.needs_refresh(now_seconds) {
+        return Ok(Some(existing));
+    }
+    match supabase_auth::refresh(
+        &state.http,
+        &config.api_url,
+        &config.anon_key,
+        &existing.refresh_token,
+    )
+    .await
+    {
+        Ok(refreshed) => {
+            if refreshed.user_id != existing.user_id {
+                remove_supabase_session(state, profile_id)?;
+                return Err(auth_error(
+                    supabase_auth::SupabaseAuthErrorKind::SessionRevoked,
+                    "Supabase 登录账号已变化，请重新登录",
+                ));
+            }
+            credential_store::save_session(profile_id, &refreshed).map_err(|message| {
+                auth_error(supabase_auth::SupabaseAuthErrorKind::Service, message)
+            })?;
+            state
+                .supabase_sessions
+                .lock()
+                .map_err(|_| {
+                    auth_error(
+                        supabase_auth::SupabaseAuthErrorKind::Service,
+                        "保存 Supabase 会话失败",
+                    )
+                })?
+                .insert(profile_id.to_string(), refreshed.clone());
+            Ok(Some(refreshed))
+        }
+        Err(error) if error.kind == supabase_auth::SupabaseAuthErrorKind::Network => {
+            // 短期离线不删除 refresh token，恢复网络后仍可继续登录。
+            if force_refresh {
+                Err(error)
+            } else {
+                Ok(Some(existing))
+            }
+        }
+        Err(error) if error.kind == supabase_auth::SupabaseAuthErrorKind::SessionRevoked => {
+            remove_supabase_session(state, profile_id)?;
+            Err(error)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn verified_supabase_session(
+    state: &AppState,
+    profile_id: &str,
+) -> Result<Option<supabase_auth::SupabaseSession>, supabase_auth::SupabaseAuthError> {
+    let Some(session) = valid_supabase_session(state, profile_id, false).await? else {
+        return Ok(None);
+    };
+    let config = current_settings(state)
+        .and_then(|settings| supabase_profile_config(&settings, profile_id))
+        .map_err(|message| {
+            auth_error(
+                supabase_auth::SupabaseAuthErrorKind::InvalidResponse,
+                message,
+            )
+        })?;
+    match supabase_auth::current_user(
+        &state.http,
+        &config.api_url,
+        &config.anon_key,
+        &session.access_token,
+    )
+    .await
+    {
+        Ok((user_id, _)) if user_id == session.user_id => Ok(Some(session)),
+        Ok(_) => {
+            remove_supabase_session(state, profile_id)?;
+            Err(auth_error(
+                supabase_auth::SupabaseAuthErrorKind::SessionRevoked,
+                "Supabase 登录账号已变化，请重新登录",
+            ))
+        }
+        Err(error) if error.kind == supabase_auth::SupabaseAuthErrorKind::Network => {
+            Ok(Some(session))
+        }
+        Err(error) if error.kind == supabase_auth::SupabaseAuthErrorKind::SessionRevoked => {
+            remove_supabase_session(state, profile_id)?;
+            Err(error)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn refresh_supabase_status(state: &AppState, phase: Option<&str>) -> Result<SyncStatus, String> {
+    let settings = current_settings(state)?;
+    let provider = storage_provider::resolve_active_provider(&settings)?;
+    let mut status = state
+        .sync_status
+        .lock()
+        .map_err(|_| "更新同步状态失败".to_string())?;
+    if let storage_provider::ProviderConfig::Supabase(profile) = provider {
+        let session = state
+            .supabase_sessions
+            .lock()
+            .map_err(|_| "读取 Supabase 会话失败".to_string())?
+            .get(&profile.id)
+            .cloned();
+        if let Some(session) = session {
+            let pending = db::count_pending_outbox(&state.db_path, &profile.id, &session.user_id)
+                .map_err(|error| error.to_string())?;
+            let conflicts = db::count_open_conflicts(&state.db_path, &profile.id, &session.user_id)
+                .map_err(|error| error.to_string())?;
+            if pending != status.pending_count || conflicts != status.conflict_count {
+                status.transition_seq = status.transition_seq.wrapping_add(1);
+            }
+            status.pending_count = pending;
+            status.conflict_count = conflicts;
+            status.phase = phase.map(str::to_string).unwrap_or_else(|| {
+                if conflicts > 0 {
+                    "conflict".into()
+                } else if status.running {
+                    "syncing".into()
+                } else if pending > 0 {
+                    "pending".into()
+                } else {
+                    "synced".into()
+                }
+            });
+            status.last_result = Some(match status.phase.as_str() {
+                "conflict" => format!("有 {conflicts} 项冲突需要处理"),
+                "syncing" => format!("同步中，剩余 {pending} 项"),
+                "pending" => format!("已保存到本机，待同步 {pending} 项"),
+                "offline" => format!("已保存到本机，等待连接恢复（{pending} 项）"),
+                "error" => format!("同步失败，仍有 {pending} 项保存在本机"),
+                _ => "已同步".to_string(),
+            });
+        } else {
+            status.phase = "login_required".into();
+            status.last_result = Some("需要登录 Supabase".into());
+        }
+    }
+    Ok(status.clone())
+}
+
+fn outbox_operation(
+    profile_id: &str,
+    owner_scope: &str,
+    entity_type: &str,
+    entity_id: &str,
+    action: &str,
+    base_revision: i64,
+    payload: serde_json::Value,
+) -> Result<db::NewOutboxOperation, String> {
+    outbox_operation_with_id(
+        &uuid::Uuid::new_v4().to_string(),
+        profile_id,
+        owner_scope,
+        entity_type,
+        entity_id,
+        action,
+        base_revision,
+        payload,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn outbox_operation_with_id(
+    operation_id: &str,
+    profile_id: &str,
+    owner_scope: &str,
+    entity_type: &str,
+    entity_id: &str,
+    action: &str,
+    base_revision: i64,
+    payload: serde_json::Value,
+) -> Result<db::NewOutboxOperation, String> {
+    let payload_json =
+        serde_json::to_string(&payload).map_err(|error| format!("序列化同步操作失败: {error}"))?;
+    let mut hasher = Sha256::new();
+    hasher.update(payload_json.as_bytes());
+    let payload_hash = format!("{:x}", hasher.finalize());
+    let created_at_ms = now_ms();
+    Ok(db::NewOutboxOperation {
+        operation_id: operation_id.to_string(),
+        endpoint_id: profile_id.to_string(),
+        owner_scope: owner_scope.to_string(),
+        entity_type: entity_type.to_string(),
+        entity_id: entity_id.to_string(),
+        action: action.to_string(),
+        base_revision,
+        payload_json,
+        payload_hash,
+        created_at_ms,
+    })
+}
+
+fn supabase_message_payload(message: &DbMessage) -> serde_json::Value {
+    serde_json::json!({
+        "sender":message.sender,"timestampMs":message.timestamp_ms,
+        "size":message.size,"kind":message.kind,"originalName":message.original_name,
+        "content":message.content,"format":message.format,"fileHash":message.file_hash,
+        "legacyFilename":message.filename,"transcriptSource":message.transcript_source,
+        "sourceAudioMimeType":message.source_audio_mime_type,
+        "transcriptRawText":message.transcript_raw_text,"marked":message.marked,
+        "markedTagIds":message.marked_tag_ids,"markedPinned":message.marked_pinned,
+        "markedDueDate":message.marked_due_date
+    })
+}
+
+fn supabase_attachment_object_path(
+    user_id: &str,
+    space_id: &str,
+    attachment_id: &str,
+    original_name: &str,
+) -> String {
+    format!(
+        "{user_id}/{space_id}/{attachment_id}/{}",
+        urlencoding::encode(original_name)
+    )
+}
+
+const STORAGE_IMPORT_NAMESPACE: uuid::Uuid =
+    uuid::Uuid::from_u128(0x8a1095ec_687e_5a71_986f_66fd96e3a2d0);
+
+fn storage_import_uuid(kind: &str, source_profile_id: &str, source_key: &str) -> String {
+    uuid::Uuid::new_v5(
+        &STORAGE_IMPORT_NAMESPACE,
+        format!("transfer-genie-import:{kind}:{source_profile_id}:{source_key}").as_bytes(),
+    )
+    .to_string()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageImportRequest {
+    source_profile_id: String,
+    target_profile_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageImportPreview {
+    batch_id: String,
+    message_count: usize,
+    attachment_count: usize,
+    total_bytes: i64,
+    marked_count: usize,
+    tag_count: usize,
+    source_profile_name: String,
+    target_profile_name: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageImportProgressResult {
+    batch_id: String,
+    status: String,
+    total_items: i64,
+    applied_items: i64,
+    failed_items: i64,
+    last_error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingOperationResult {
+    operation_id: String,
+    entity_type: String,
+    entity_id: String,
+    action: String,
+    state: String,
+    attempt_count: i64,
+    last_error: Option<String>,
+    created_at_ms: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncConflictResult {
+    id: i64,
+    entity_type: String,
+    entity_id: String,
+    local_payload: serde_json::Value,
+    remote_payload: Option<serde_json::Value>,
+    local_revision: i64,
+    remote_revision: Option<i64>,
+    created_at_ms: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolveSyncConflictInput {
+    conflict_id: i64,
+    resolution: String,
+}
+
+impl From<db::StorageImportProgress> for StorageImportProgressResult {
+    fn from(value: db::StorageImportProgress) -> Self {
+        Self {
+            batch_id: value.batch_id,
+            status: value.status,
+            total_items: value.total_items,
+            applied_items: value.applied_items,
+            failed_items: value.failed_items,
+            last_error: value.last_error,
+        }
+    }
+}
+
+fn storage_import_context(
+    state: &AppState,
+    input: &StorageImportRequest,
+) -> Result<
+    (
+        WebDavEndpoint,
+        StorageProfile,
+        supabase_auth::SupabaseSession,
+    ),
+    String,
+> {
+    let settings = current_settings(state)?;
+    let source = storage_provider::resolve_webdav_by_id(&settings, &input.source_profile_id)?;
+    let target =
+        match storage_provider::resolve_provider_by_id(&settings, &input.target_profile_id)? {
+            storage_provider::ProviderConfig::Supabase(profile) => profile,
+            storage_provider::ProviderConfig::Webdav(_) => {
+                return Err("导入目标必须是 Supabase 存储空间".into())
+            }
+        };
+    let session = state
+        .supabase_sessions
+        .lock()
+        .map_err(|_| "读取 Supabase 会话失败".to_string())?
+        .get(&target.id)
+        .cloned()
+        .ok_or_else(|| "请先登录目标 Supabase 存储空间".to_string())?;
+    Ok((source, target, session))
+}
+
+fn storage_import_batch_id(
+    source_profile_id: &str,
+    target_profile_id: &str,
+    owner_scope: &str,
+) -> String {
+    storage_import_uuid(
+        "batch",
+        source_profile_id,
+        &format!("{target_profile_id}:{owner_scope}"),
+    )
+}
+
+fn build_storage_import_items(
+    source_profile_id: &str,
+    messages: &[Message],
+    tags: &[MarkedTag],
+) -> Vec<db::StorageImportItem> {
+    let mut items = Vec::with_capacity(messages.len() + tags.len());
+    for tag in tags {
+        items.push(db::StorageImportItem {
+            item_type: "tag".into(),
+            source_key: tag.id.clone(),
+            entity_id: format!("import:{source_profile_id}:{}", tag.id),
+            attachment_id: None,
+            message_operation_id: storage_import_uuid("tag-operation", source_profile_id, &tag.id),
+            attachment_operation_id: None,
+            state: "pending".into(),
+        });
+    }
+    for message in messages {
+        let is_attachment = message.kind == "file"
+            || message.transcript_source.as_deref() == Some("speech-to-text");
+        items.push(db::StorageImportItem {
+            item_type: "message".into(),
+            source_key: message.filename.clone(),
+            entity_id: storage_import_uuid("message", source_profile_id, &message.filename),
+            attachment_id: is_attachment
+                .then(|| storage_import_uuid("attachment", source_profile_id, &message.filename)),
+            message_operation_id: storage_import_uuid(
+                "message-operation",
+                source_profile_id,
+                &message.filename,
+            ),
+            attachment_operation_id: is_attachment.then(|| {
+                storage_import_uuid("attachment-operation", source_profile_id, &message.filename)
+            }),
+            state: "pending".into(),
+        });
+    }
+    items
+}
+
+#[tauri::command]
+fn preview_storage_import(
+    state: State<'_, AppState>,
+    input: StorageImportRequest,
+) -> Result<StorageImportPreview, String> {
+    let (source, target, session) = storage_import_context(&state, &input)?;
+    let messages = db::list_messages_paged(&state.db_path, &source.id, None, None, false, None)
+        .map_err(|error| error.to_string())?;
+    let tags =
+        db::list_marked_tags(&state.db_path, &source.id).map_err(|error| error.to_string())?;
+    Ok(StorageImportPreview {
+        batch_id: storage_import_batch_id(&source.id, &target.id, &session.user_id),
+        message_count: messages.len(),
+        attachment_count: messages
+            .iter()
+            .filter(|message| message.kind == "file" || message.transcript_source.is_some())
+            .count(),
+        total_bytes: messages.iter().map(|message| message.size.max(0)).sum(),
+        marked_count: messages.iter().filter(|message| message.marked).count(),
+        tag_count: tags.len(),
+        source_profile_name: source.name,
+        target_profile_name: target.name,
+    })
+}
+
+#[tauri::command]
+fn get_storage_import_status(
+    state: State<'_, AppState>,
+    batch_id: String,
+) -> Result<Option<StorageImportProgressResult>, String> {
+    db::get_storage_import_progress(&state.db_path, &batch_id)
+        .map(|value| value.map(Into::into))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn start_storage_import(
+    state: State<'_, AppState>,
+    input: StorageImportRequest,
+) -> Result<StorageImportProgressResult, String> {
+    run_storage_import(state.inner(), input).await
+}
+
+#[tauri::command]
+async fn resume_storage_import(
+    state: State<'_, AppState>,
+    input: StorageImportRequest,
+) -> Result<StorageImportProgressResult, String> {
+    run_storage_import(state.inner(), input).await
+}
+
+async fn run_storage_import(
+    state: &AppState,
+    input: StorageImportRequest,
+) -> Result<StorageImportProgressResult, String> {
+    let (source, target, session) = storage_import_context(state, &input)?;
+    let messages = db::list_messages_paged(&state.db_path, &source.id, None, None, false, None)
+        .map_err(|error| error.to_string())?;
+    let tags =
+        db::list_marked_tags(&state.db_path, &source.id).map_err(|error| error.to_string())?;
+    let items = build_storage_import_items(&source.id, &messages, &tags);
+    let batch_id = storage_import_batch_id(&source.id, &target.id, &session.user_id);
+    db::create_or_resume_storage_import(
+        &state.db_path,
+        &db::NewStorageImportBatch {
+            batch_id: &batch_id,
+            source_profile_id: &source.id,
+            target_profile_id: &target.id,
+            target_owner_scope: &session.user_id,
+            items: &items,
+            now_ms: now_ms(),
+        },
+    )
+    .map_err(|error| format!("保存导入批次失败: {error}"))?;
+
+    let source_messages = messages
+        .into_iter()
+        .map(|message| (message.filename.clone(), message))
+        .collect::<HashMap<_, _>>();
+    let source_tags = tags
+        .into_iter()
+        .map(|tag| (tag.id.clone(), tag))
+        .collect::<HashMap<_, _>>();
+    let pending = db::list_storage_import_items(&state.db_path, &batch_id, &["pending", "error"])
+        .map_err(|error| error.to_string())?;
+    for pending_item in pending {
+        let result = if pending_item.item_type == "tag" {
+            let source_tag = source_tags
+                .get(&pending_item.source_key)
+                .ok_or_else(|| "来源标签已不存在".to_string())?;
+            let target_tag = MarkedTag {
+                id: pending_item.entity_id.clone(),
+                name: source_tag.name.clone(),
+            };
+            let operation = outbox_operation_with_id(
+                &pending_item.message_operation_id,
+                &target.id,
+                &session.user_id,
+                "tag",
+                &target_tag.id,
+                "upsert",
+                0,
+                serde_json::json!({"name":target_tag.name}),
+            )?;
+            db::apply_imported_tag(
+                &state.db_path,
+                &batch_id,
+                &pending_item.source_key,
+                &target.id,
+                &session.user_id,
+                &target_tag,
+                &operation,
+                now_ms(),
+            )
+            .map_err(|error| error.to_string())
+        } else {
+            import_storage_message(
+                state,
+                &source,
+                &target,
+                &session,
+                &batch_id,
+                &pending_item,
+                source_messages
+                    .get(&pending_item.source_key)
+                    .ok_or_else(|| "来源消息已不存在".to_string())?,
+            )
+            .await
+        };
+        if let Err(error) = result {
+            db::mark_storage_import_item_error(
+                &state.db_path,
+                &batch_id,
+                &pending_item.item_type,
+                &pending_item.source_key,
+                &error,
+                now_ms(),
+            )
+            .map_err(|db_error| db_error.to_string())?;
+        }
+    }
+    let staged = db::get_storage_import_progress(&state.db_path, &batch_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "导入批次不存在".to_string())?;
+    if staged.failed_items > 0 {
+        return Ok(staged.into());
+    }
+
+    let _sync_guard = state.sync_guard.lock().await;
+    push_supabase_outbox(state, &target, &session, true, Some(&batch_id))
+        .await
+        .map_err(|error| format!("上传导入数据到 Supabase 失败: {error}"))?;
+    let remaining = db::count_pending_import_outbox(&state.db_path, &batch_id)
+        .map_err(|error| format!("检查导入上传状态失败: {error}"))?;
+    if remaining > 0 {
+        return Err(format!("Supabase 仍有 {remaining} 项导入数据等待上传"));
+    }
+    let conflicts = db::count_import_conflicts(&state.db_path, &batch_id)
+        .map_err(|error| format!("检查导入冲突失败: {error}"))?;
+    if conflicts > 0 {
+        return Err(format!("Supabase 导入产生 {conflicts} 项数据冲突"));
+    }
+    let _ = pull_supabase_changes(state, &target, &session).await?;
+    let _ = refresh_supabase_status(state, None);
+    db::get_storage_import_progress(&state.db_path, &batch_id)
+        .map_err(|error| error.to_string())?
+        .map(Into::into)
+        .ok_or_else(|| "导入批次不存在".to_string())
+}
+
+async fn import_storage_message(
+    state: &AppState,
+    source: &WebDavEndpoint,
+    target: &StorageProfile,
+    session: &supabase_auth::SupabaseSession,
+    batch_id: &str,
+    item: &db::StorageImportItem,
+    source_message: &Message,
+) -> Result<(), String> {
+    let mut message = DbMessage {
+        endpoint_id: target.id.clone(),
+        filename: source_message.filename.clone(),
+        sender: source_message.sender.clone(),
+        timestamp_ms: source_message.timestamp_ms,
+        size: source_message.size,
+        kind: source_message.kind.clone(),
+        original_name: source_message.original_name.clone(),
+        etag: None,
+        mtime: None,
+        content: source_message.content.clone(),
+        local_path: None,
+        remote_path: None,
+        file_hash: source_message.file_hash.clone(),
+        marked: source_message.marked,
+        marked_tag_ids: source_message
+            .marked_tag_ids
+            .iter()
+            .map(|tag_id| format!("import:{}:{tag_id}", source.id))
+            .collect(),
+        marked_pinned: source_message.marked_pinned,
+        marked_due_date: source_message.marked_due_date.clone(),
+        format: source_message.format.clone(),
+        transcript_source: source_message.transcript_source.clone(),
+        source_audio_mime_type: source_message.source_audio_mime_type.clone(),
+        transcript_raw_text: source_message.transcript_raw_text.clone(),
+    };
+    let mut attachment_data = None;
+    if let Some(attachment_id) = item.attachment_id.as_deref() {
+        let remote_path = source_message
+            .remote_path
+            .as_deref()
+            .ok_or_else(|| "来源附件缺少 WebDAV 路径".to_string())?;
+        let bytes = webdav::download_file(&state.http, source, remote_path).await?;
+        let local_dir = endpoint_files_dir(state, &target.id)
+            .join(&session.user_id)
+            .join("attachments")
+            .join(attachment_id);
+        fs::create_dir_all(&local_dir).map_err(|error| format!("创建导入附件目录失败: {error}"))?;
+        let local_path = local_dir.join(&message.original_name);
+        fs::write(&local_path, &bytes).map_err(|error| format!("保存导入附件失败: {error}"))?;
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let sha256 = format!("{:x}", hasher.finalize());
+        let object_path = supabase_attachment_object_path(
+            &session.user_id,
+            target
+                .supabase
+                .as_ref()
+                .map(|config| config.space_id.as_str())
+                .unwrap_or_default(),
+            attachment_id,
+            &message.original_name,
+        );
+        message.size = bytes.len() as i64;
+        message.local_path = Some(local_path.to_string_lossy().to_string());
+        message.remote_path = Some(object_path.clone());
+        message.file_hash = Some(sha256);
+        attachment_data = Some((attachment_id.to_string(), object_path));
+    }
+    let message_operation = outbox_operation_with_id(
+        &item.message_operation_id,
+        &target.id,
+        &session.user_id,
+        "message",
+        &item.entity_id,
+        "upsert",
+        0,
+        supabase_message_payload(&message),
+    )?;
+    let attachment = if let Some((attachment_id, object_path)) = attachment_data.as_ref() {
+        let operation_id = item
+            .attachment_operation_id
+            .as_deref()
+            .ok_or_else(|| "导入附件操作 ID 缺失".to_string())?;
+        let payload = serde_json::json!({"messageId":item.entity_id,"originalName":message.original_name,
+            "objectPath":object_path,"previewObjectPath":null,"mimeType":"application/octet-stream",
+            "size":message.size,"sha256":message.file_hash,"uploadStatus":"uploaded"});
+        Some((
+            attachment_id.clone(),
+            object_path.clone(),
+            outbox_operation_with_id(
+                operation_id,
+                &target.id,
+                &session.user_id,
+                "attachment",
+                attachment_id,
+                "upsert",
+                0,
+                payload,
+            )?,
+        ))
+    } else {
+        None
+    };
+    db::apply_imported_message(
+        &state.db_path,
+        batch_id,
+        &item.source_key,
+        &message,
+        &message_operation,
+        attachment
+            .as_ref()
+            .map(|(attachment_id, object_path, operation)| {
+                (
+                    attachment_id.as_str(),
+                    object_path.as_str(),
+                    Some("application/octet-stream"),
+                    operation,
+                )
+            }),
+        now_ms(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn active_supabase_scope(
+    state: &AppState,
+) -> Result<(StorageProfile, supabase_auth::SupabaseSession), String> {
+    let settings = current_settings(state)?;
+    active_supabase_context(state, &settings)?
+        .ok_or_else(|| "当前存储空间不是 Supabase".to_string())
+}
+
+#[tauri::command]
+fn list_pending_operations(
+    state: State<'_, AppState>,
+) -> Result<Vec<PendingOperationResult>, String> {
+    let (profile, session) = active_supabase_scope(&state)?;
+    db::list_pending_operations(&state.db_path, &profile.id, &session.user_id)
+        .map(|items| {
+            items
+                .into_iter()
+                .map(|item| PendingOperationResult {
+                    operation_id: item.operation_id,
+                    entity_type: item.entity_type,
+                    entity_id: item.entity_id,
+                    action: item.action,
+                    state: item.state,
+                    attempt_count: item.attempt_count,
+                    last_error: item.last_error,
+                    created_at_ms: item.created_at_ms,
+                })
+                .collect()
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_sync_conflicts(state: State<'_, AppState>) -> Result<Vec<SyncConflictResult>, String> {
+    let (profile, session) = active_supabase_scope(&state)?;
+    db::list_sync_conflicts(&state.db_path, &profile.id, &session.user_id)
+        .map(|items| {
+            items
+                .into_iter()
+                .map(|item| SyncConflictResult {
+                    id: item.id,
+                    entity_type: item.entity_type,
+                    entity_id: item.entity_id,
+                    local_payload: serde_json::from_str(&item.local_payload_json)
+                        .unwrap_or(serde_json::Value::Null),
+                    remote_payload: item
+                        .remote_payload_json
+                        .and_then(|value| serde_json::from_str(&value).ok()),
+                    local_revision: item.local_revision,
+                    remote_revision: item.remote_revision,
+                    created_at_ms: item.created_at_ms,
+                })
+                .collect()
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn retry_pending_operation(
+    state: State<'_, AppState>,
+    operation_id: String,
+) -> Result<SyncStatus, String> {
+    let (profile, session) = active_supabase_scope(&state)?;
+    if !db::retry_pending_operation(
+        &state.db_path,
+        &profile.id,
+        &session.user_id,
+        &operation_id,
+        now_ms(),
+    )
+    .map_err(|error| error.to_string())?
+    {
+        return Err("待同步操作不存在或已处理".into());
+    }
+    let _ = sync_supabase_profile(&state, &profile, &session, true).await?;
+    refresh_supabase_status(&state, None)
+}
+
+#[tauri::command]
+async fn resolve_sync_conflict(
+    state: State<'_, AppState>,
+    input: ResolveSyncConflictInput,
+) -> Result<SyncStatus, String> {
+    let (profile, session) = active_supabase_scope(&state)?;
+    let conflict = db::get_sync_conflict(
+        &state.db_path,
+        input.conflict_id,
+        &profile.id,
+        &session.user_id,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "冲突不存在或已处理".to_string())?;
+    let resolved = match input.resolution.as_str() {
+        "remote" => db::resolve_sync_conflict_use_remote(
+            &state.db_path,
+            input.conflict_id,
+            &profile.id,
+            &session.user_id,
+            now_ms(),
+        ),
+        "local" => {
+            let payload: serde_json::Value = serde_json::from_str(&conflict.local_payload_json)
+                .map_err(|error| format!("冲突本机内容无效: {error}"))?;
+            let operation = outbox_operation(
+                &profile.id,
+                &session.user_id,
+                &conflict.entity_type,
+                &conflict.entity_id,
+                "upsert",
+                conflict.remote_revision.unwrap_or(0),
+                payload,
+            )?;
+            db::resolve_sync_conflict_keep_local(
+                &state.db_path,
+                input.conflict_id,
+                &profile.id,
+                &session.user_id,
+                &operation,
+                now_ms(),
+            )
+        }
+        _ => return Err("冲突解决方式无效".into()),
+    }
+    .map_err(|error| error.to_string())?;
+    if !resolved {
+        return Err("冲突不存在或已处理".into());
+    }
+    if input.resolution == "local" {
+        let _ = sync_supabase_profile(&state, &profile, &session, true).await?;
+    }
+    refresh_supabase_status(&state, None)
+}
+
+async fn push_supabase_outbox(
+    state: &AppState,
+    profile: &StorageProfile,
+    session: &supabase_auth::SupabaseSession,
+    manual: bool,
+    import_batch_id: Option<&str>,
+) -> Result<usize, String> {
+    db::recover_all_outbox_claims(&state.db_path, now_ms())
+        .map_err(|error| format!("恢复 Supabase 同步任务失败: {error}"))?;
+    let config = profile
+        .supabase
+        .as_ref()
+        .ok_or_else(|| "Supabase 存储空间配置不完整".to_string())?;
+    supabase_sync::ensure_space(&state.http, config, session, &profile.name).await?;
+    let worker_id = uuid::Uuid::new_v4().to_string();
+    let mut applied = 0;
+    loop {
+        let claimed = if let Some(batch_id) = import_batch_id {
+            db::claim_storage_import_outbox_operations(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                batch_id,
+                &worker_id,
+                now_ms(),
+                60_000,
+                1,
+            )
+        } else {
+            db::claim_outbox_operations(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                &worker_id,
+                now_ms(),
+                60_000,
+                1,
+                manual,
+            )
+        }
+        .map_err(|error| format!("领取 Supabase 同步任务失败: {error}"))?;
+        let Some(mut operation) = claimed.into_iter().next() else {
+            break;
+        };
+        if operation.entity_type == "attachment" && operation.action == "upsert" {
+            let upload_result = async {
+                let (local_path, mut object_path, original_name, _size, sha256) =
+                    db::get_attachment_local_path(
+                        &state.db_path,
+                        &profile.id,
+                        &session.user_id,
+                        &operation.entity_id,
+                    )
+                    .map_err(|error| format!("读取本地附件状态失败: {error}"))?
+                    .ok_or_else(|| "附件本地原件不存在".to_string())?;
+                let expected_prefix = format!(
+                    "{}/{}/{}/",
+                    session.user_id, config.space_id, operation.entity_id
+                );
+                if !object_path.starts_with(&expected_prefix) {
+                    object_path = supabase_attachment_object_path(
+                        &session.user_id,
+                        &config.space_id,
+                        &operation.entity_id,
+                        &original_name,
+                    );
+                    let mut payload: serde_json::Value =
+                        serde_json::from_str(&operation.payload_json)
+                            .map_err(|error| format!("修复附件同步信息失败: {error}"))?;
+                    payload["objectPath"] = serde_json::Value::String(object_path.clone());
+                    let payload_json = serde_json::to_string(&payload)
+                        .map_err(|error| format!("修复附件同步信息失败: {error}"))?;
+                    let payload_hash = format!("{:x}", Sha256::digest(payload_json.as_bytes()));
+                    let repaired = db::repair_claimed_attachment_object_path(
+                        &state.db_path,
+                        &operation.operation_id,
+                        &worker_id,
+                        &profile.id,
+                        &session.user_id,
+                        &operation.entity_id,
+                        &object_path,
+                        &payload_json,
+                        &payload_hash,
+                        now_ms(),
+                    )
+                    .map_err(|error| format!("修复附件 Storage 路径失败: {error}"))?;
+                    if !repaired {
+                        return Err(
+                            "修复附件 Storage 路径失败：同步任务已被其他进程接管".to_string()
+                        );
+                    }
+                    operation.payload_json = payload_json;
+                    operation.payload_hash = payload_hash;
+                }
+                let bytes =
+                    fs::read(&local_path).map_err(|error| format!("读取本地附件失败: {error}"))?;
+                supabase_sync::upload_storage_object(
+                    &state.http,
+                    config,
+                    session,
+                    &object_path,
+                    bytes,
+                    "application/octet-stream",
+                    sha256.as_deref(),
+                )
+                .await
+            }
+            .await;
+            if let Err(error) = upload_result {
+                let retry_at = now_ms() + db::outbox_retry_delay_ms(operation.attempt_count);
+                db::release_outbox_operation(
+                    &state.db_path,
+                    &operation.operation_id,
+                    &worker_id,
+                    retry_at,
+                    &error,
+                    now_ms(),
+                )
+                .map_err(|db_error| db_error.to_string())?;
+                if import_batch_id.is_some() {
+                    db::mark_storage_import_operation_error(
+                        &state.db_path,
+                        &operation.operation_id,
+                        &error,
+                        now_ms(),
+                    )
+                    .map_err(|db_error| db_error.to_string())?;
+                }
+                return Err(error);
+            }
+        }
+        match supabase_sync::push_operation(&state.http, config, session, &operation).await {
+            Ok(supabase_sync::PushResult::Applied { revision, .. }) => {
+                db::apply_outbox_success(
+                    &state.db_path,
+                    &operation,
+                    &worker_id,
+                    revision,
+                    now_ms(),
+                )
+                .map_err(|error| format!("确认 Supabase 同步任务失败: {error}"))?;
+                applied += 1;
+            }
+            Ok(supabase_sync::PushResult::Missing) if operation.action == "delete" => {
+                db::apply_outbox_success(
+                    &state.db_path,
+                    &operation,
+                    &worker_id,
+                    operation.base_revision,
+                    now_ms(),
+                )
+                .map_err(|error| format!("确认 Supabase 删除任务失败: {error}"))?;
+                applied += 1;
+            }
+            Ok(supabase_sync::PushResult::Conflict {
+                remote_revision,
+                remote,
+            }) => {
+                let remote_payload = serde_json::to_string(&remote)
+                    .map_err(|error| format!("保存远端冲突版本失败: {error}"))?;
+                db::record_outbox_conflict(
+                    &state.db_path,
+                    &operation,
+                    &worker_id,
+                    remote_revision,
+                    Some(&remote_payload),
+                    now_ms(),
+                )
+                .map_err(|error| format!("记录 Supabase 冲突失败: {error}"))?;
+                break;
+            }
+            Ok(supabase_sync::PushResult::Missing) => {
+                let error = "远端实体不存在";
+                let retry_at = now_ms() + db::outbox_retry_delay_ms(operation.attempt_count);
+                db::release_outbox_operation(
+                    &state.db_path,
+                    &operation.operation_id,
+                    &worker_id,
+                    retry_at,
+                    error,
+                    now_ms(),
+                )
+                .map_err(|db_error| format!("恢复 Supabase 同步任务失败: {db_error}"))?;
+                if import_batch_id.is_some() {
+                    db::mark_storage_import_operation_error(
+                        &state.db_path,
+                        &operation.operation_id,
+                        error,
+                        now_ms(),
+                    )
+                    .map_err(|db_error| db_error.to_string())?;
+                }
+                return Err(error.to_string());
+            }
+            Err(error) => {
+                let retry_at = now_ms() + db::outbox_retry_delay_ms(operation.attempt_count);
+                db::release_outbox_operation(
+                    &state.db_path,
+                    &operation.operation_id,
+                    &worker_id,
+                    retry_at,
+                    &error,
+                    now_ms(),
+                )
+                .map_err(|db_error| format!("恢复 Supabase 同步任务失败: {db_error}"))?;
+                if import_batch_id.is_some() {
+                    db::mark_storage_import_operation_error(
+                        &state.db_path,
+                        &operation.operation_id,
+                        &error,
+                        now_ms(),
+                    )
+                    .map_err(|db_error| db_error.to_string())?;
+                }
+                return Err(error);
+            }
+        }
+    }
+    Ok(applied)
+}
+
+async fn pull_supabase_changes(
+    state: &AppState,
+    profile: &StorageProfile,
+    session: &supabase_auth::SupabaseSession,
+) -> Result<usize, String> {
+    let config = profile
+        .supabase
+        .as_ref()
+        .ok_or_else(|| "Supabase 存储空间配置不完整".to_string())?;
+    let mut checkpoint = db::get_sync_checkpoint(&state.db_path, &profile.id, &session.user_id)
+        .map_err(|error| format!("读取 Supabase 同步游标失败: {error}"))?;
+    let mut applied = 0;
+    loop {
+        let remote =
+            supabase_sync::pull_changes(&state.http, config, session, checkpoint, 200).await?;
+        if remote.is_empty() {
+            break;
+        }
+        let mut changes = Vec::with_capacity(remote.len());
+        for change in &remote {
+            let snapshot = supabase_sync::fetch_entity_snapshot(
+                &state.http,
+                config,
+                session,
+                &change.entity_type,
+                &change.entity_id,
+            )
+            .await?;
+            changes.push(db::PulledChange {
+                change_seq: change.change_seq,
+                entity_type: change.entity_type.clone(),
+                entity_id: change.entity_id.clone(),
+                change_type: change.change_type.clone(),
+                revision: change.revision,
+                snapshot,
+            });
+        }
+        let next_checkpoint = changes
+            .last()
+            .map(|change| change.change_seq)
+            .unwrap_or(checkpoint);
+        db::apply_pulled_changes(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            &changes,
+            next_checkpoint,
+            now_ms(),
+        )
+        .map_err(|error| format!("应用 Supabase 增量变化失败: {error}"))?;
+        checkpoint = next_checkpoint;
+        applied += changes.len();
+        if remote.len() < 200 {
+            break;
+        }
+    }
+    Ok(applied)
+}
+
+async fn sync_supabase_profile(
+    state: &AppState,
+    profile: &StorageProfile,
+    session: &supabase_auth::SupabaseSession,
+    manual: bool,
+) -> Result<(usize, usize), String> {
+    let pushed = push_supabase_outbox(state, profile, session, manual, None).await?;
+    let pulled = pull_supabase_changes(state, profile, session).await?;
+    let _ = cleanup_supabase_orphan_objects(state, profile, session).await;
+    Ok((pushed, pulled))
+}
+
+async fn cleanup_supabase_orphan_objects(
+    state: &AppState,
+    profile: &StorageProfile,
+    session: &supabase_auth::SupabaseSession,
+) -> Result<usize, String> {
+    const GRACE_MS: i64 = 24 * 60 * 60 * 1000;
+    const LIMIT: usize = 50;
+    let candidates = db::list_orphan_attachment_candidates(
+        &state.db_path,
+        &profile.id,
+        &session.user_id,
+        now_ms() - GRACE_MS,
+        LIMIT,
+    )
+    .map_err(|error| error.to_string())?;
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+    let config = profile
+        .supabase
+        .as_ref()
+        .ok_or_else(|| "Supabase 配置不完整".to_string())?;
+    let paths = candidates
+        .iter()
+        .map(|(_, path)| path.clone())
+        .collect::<Vec<_>>();
+    supabase_sync::delete_storage_objects(&state.http, config, session, &paths).await?;
+    for (attachment_id, _) in &candidates {
+        db::mark_attachment_object_cleaned(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            attachment_id,
+            now_ms(),
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(candidates.len())
+}
+
+fn supabase_send_result(profile_id: &str, message: &DbMessage) -> SendMessageResult {
+    SendMessageResult {
+        marked_tag_ids: message.marked_tag_ids.clone(),
+        filename: message.filename.clone(),
+        original_name: message.original_name.clone(),
+        endpoint_id: profile_id.to_string(),
+        transcript_source: message.transcript_source.clone(),
+        source_audio_mime_type: message.source_audio_mime_type.clone(),
+        transcript_text: message
+            .transcript_source
+            .as_ref()
+            .and_then(|_| message.content.clone()),
+        transcript_raw_text: message.transcript_raw_text.clone(),
+    }
+}
+
+#[tauri::command]
+async fn supabase_sign_in(
+    state: State<'_, AppState>,
+    input: SupabaseSignInInput,
+) -> Result<SupabaseAccountStatus, supabase_auth::SupabaseAuthError> {
+    let config = current_settings(&state)
+        .and_then(|settings| supabase_profile_config(&settings, &input.profile_id))
+        .map_err(|message| supabase_auth::SupabaseAuthError {
+            kind: supabase_auth::SupabaseAuthErrorKind::InvalidResponse,
+            message,
+        })?;
+    let session = supabase_auth::sign_in(
+        &state.http,
+        &config.api_url,
+        &config.anon_key,
+        &input.email,
+        &input.password,
+    )
+    .await?;
+    let status = account_status(&input.profile_id, Some(&session));
+    credential_store::save_session(&input.profile_id, &session).map_err(|message| {
+        supabase_auth::SupabaseAuthError {
+            kind: supabase_auth::SupabaseAuthErrorKind::Service,
+            message,
+        }
+    })?;
+    state
+        .supabase_sessions
+        .lock()
+        .map_err(|_| supabase_auth::SupabaseAuthError {
+            kind: supabase_auth::SupabaseAuthErrorKind::Service,
+            message: "保存 Supabase 会话失败".to_string(),
+        })?
+        .insert(input.profile_id, session);
+    signal_sync_loop_reset(&state);
+    Ok(status)
+}
+
+#[tauri::command]
+async fn supabase_refresh_session(
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<SupabaseAccountStatus, supabase_auth::SupabaseAuthError> {
+    let session = valid_supabase_session(&state, &profile_id, true)
+        .await?
+        .ok_or_else(|| {
+            auth_error(
+                supabase_auth::SupabaseAuthErrorKind::SessionRevoked,
+                "Supabase 会话不存在",
+            )
+        })?;
+    Ok(account_status(&profile_id, Some(&session)))
+}
+
+#[tauri::command]
+async fn supabase_current_user(
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<SupabaseAccountStatus, supabase_auth::SupabaseAuthError> {
+    let session = verified_supabase_session(&state, &profile_id).await?;
+    let Some(session) = session else {
+        return Ok(account_status(&profile_id, None));
+    };
+    Ok(account_status(&profile_id, Some(&session)))
+}
+
+#[tauri::command]
+async fn supabase_logout(
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<SupabaseAccountStatus, supabase_auth::SupabaseAuthError> {
+    supabase_logout_impl(&state, profile_id).await
+}
+
+async fn supabase_logout_impl(
+    state: &AppState,
+    profile_id: String,
+) -> Result<SupabaseAccountStatus, supabase_auth::SupabaseAuthError> {
+    let config = current_settings(state)
+        .and_then(|settings| supabase_profile_config(&settings, &profile_id))
+        .map_err(|message| supabase_auth::SupabaseAuthError {
+            kind: supabase_auth::SupabaseAuthErrorKind::InvalidResponse,
+            message,
+        })?;
+    let session = state
+        .supabase_sessions
+        .lock()
+        .map_err(|_| supabase_auth::SupabaseAuthError {
+            kind: supabase_auth::SupabaseAuthErrorKind::Service,
+            message: "读取 Supabase 会话失败".to_string(),
+        })?
+        .get(&profile_id)
+        .cloned();
+    if let Some(session) = session {
+        if let Err(error) = supabase_auth::logout(
+            &state.http,
+            &config.api_url,
+            &config.anon_key,
+            &session.access_token,
+        )
+        .await
+        {
+            log::warn!(
+                "Supabase remote logout failed; local session will still be removed: {}",
+                error.message
+            );
+        }
+    }
+    remove_supabase_session(state, &profile_id)?;
+    signal_sync_loop_reset(state);
+    Ok(account_status(&profile_id, None))
+}
+
+#[tauri::command]
+async fn test_supabase_connection(
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<supabase_connection::SupabaseConnectionCheck, String> {
+    let config = current_settings(&state)
+        .and_then(|settings| supabase_profile_config(&settings, &profile_id))?;
+    let access_token = valid_supabase_session(&state, &profile_id, false)
+        .await
+        .map_err(|error| error.message)?
+        .map(|session| session.access_token);
+    Ok(supabase_connection::check(
+        &state.http,
+        &config.api_url,
+        &config.anon_key,
+        access_token.as_deref(),
+    )
+    .await)
+}
+
 #[tauri::command]
 fn get_telegram_bridge_status(state: State<'_, AppState>) -> Result<TelegramBridgeStatus, String> {
     TelegramBridgeRuntimeAdapter::new(&state).status()
@@ -1087,7 +2525,7 @@ impl<'a> TelegramBridgeRuntimeAdapter<'a> {
     }
 
     async fn refresh(&self) -> Result<SyncStatus, String> {
-        if is_sync_running_from(self.state, AUTO_SYNC_SOURCE)? {
+        if is_sync_running_from(self.state, REALTIME_SYNC_SOURCE)? {
             self.cancel()?;
         }
 
@@ -2716,6 +4154,8 @@ fn export_settings(
     let crypto = encrypt_export_secrets(&password, &secrets)?;
 
     let mut export_settings = ExportSettings {
+        storage_profiles: settings.storage_profiles.clone(),
+        active_storage_profile_id: settings.active_storage_profile_id.clone(),
         webdav_endpoints: settings.webdav_endpoints.clone(),
         active_webdav_id: settings.active_webdav_id.clone(),
         refresh_interval_secs: settings.refresh_interval_secs,
@@ -2741,6 +4181,12 @@ fn export_settings(
     for endpoint in export_settings.webdav_endpoints.iter_mut() {
         endpoint.username.clear();
         endpoint.password.clear();
+    }
+    for profile in export_settings.storage_profiles.iter_mut() {
+        if let Some(webdav) = profile.webdav.as_mut() {
+            webdav.username.clear();
+            webdav.password.clear();
+        }
     }
     export_settings.ai.provider.api_key.clear();
     export_settings.speech_to_text.api_key.clear();
@@ -2782,6 +4228,8 @@ async fn import_settings(
 
     let existing = current_settings(&state)?;
     let mut settings = Settings {
+        storage_profiles: bundle.settings.storage_profiles,
+        active_storage_profile_id: bundle.settings.active_storage_profile_id,
         webdav_endpoints: bundle.settings.webdav_endpoints,
         active_webdav_id: bundle.settings.active_webdav_id,
         sender_name: existing.sender_name,
@@ -3052,6 +4500,156 @@ async fn load_and_apply_send_marked_options(
     })
 }
 
+fn apply_supabase_send_marked_options(
+    state: &AppState,
+    profile: &StorageProfile,
+    session: &supabase_auth::SupabaseSession,
+    message: &mut DbMessage,
+    options: SendMarkedOptionsInput,
+) -> Result<SupabaseSendMarkedChanges, String> {
+    let existing = db::list_tags_for_scope(&state.db_path, &profile.id, &session.user_id)
+        .map_err(|error| error.to_string())?;
+    let existing_tags = existing
+        .iter()
+        .map(|(tag, _)| tag.clone())
+        .collect::<Vec<_>>();
+    let deleted_tag_ids = sanitize_deleted_marked_tag_ids(&existing_tags, options.deleted_tag_ids);
+    let deleted_set = deleted_tag_ids.iter().cloned().collect::<HashSet<_>>();
+    let mut available_tags = existing_tags
+        .iter()
+        .filter(|tag| !deleted_set.contains(&tag.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut created_tags = Vec::new();
+    let mut selected_created_tag_ids = Vec::new();
+    for created in options.created_tags {
+        let normalized = normalize_marked_tag_name(&created.name)?;
+        ensure_unique_marked_tag_name(&available_tags, &normalized, None)?;
+        let tag = MarkedTag {
+            id: generate_marked_tag_id(),
+            name: normalized,
+        };
+        if created.selected {
+            selected_created_tag_ids.push(tag.id.clone());
+        }
+        let operation = outbox_operation(
+            &profile.id,
+            &session.user_id,
+            "tag",
+            &tag.id,
+            "upsert",
+            0,
+            serde_json::json!({"name":tag.name}),
+        )?;
+        available_tags.push(tag.clone());
+        created_tags.push((tag, operation));
+    }
+    let mut selected_tag_ids = sanitize_existing_marked_tag_ids(
+        &available_tags,
+        options
+            .selected_tag_ids
+            .into_iter()
+            .filter(|tag_id| !deleted_set.contains(tag_id))
+            .collect(),
+    );
+    selected_tag_ids.extend(selected_created_tag_ids);
+    selected_tag_ids.sort();
+    selected_tag_ids.dedup();
+    message.marked = options.marked;
+    message.marked_tag_ids = if options.marked {
+        selected_tag_ids
+    } else {
+        Vec::new()
+    };
+    message.marked_pinned = false;
+    message.marked_due_date = if options.marked {
+        normalize_marked_due_date(options.due_date)?
+    } else {
+        None
+    };
+
+    let mut cleaned_messages = Vec::new();
+    if !deleted_set.is_empty() {
+        let marked_messages = db::list_marked_messages_for_scope(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+        for marked_message in marked_messages {
+            if !marked_message
+                .marked_tag_ids
+                .iter()
+                .any(|tag_id| deleted_set.contains(tag_id))
+            {
+                continue;
+            }
+            let Some(mut existing_message) = db::get_message_for_scope(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                &marked_message.filename,
+            )
+            .map_err(|error| error.to_string())?
+            else {
+                continue;
+            };
+            let (message_id, revision) = db::get_message_sync_identity(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                &existing_message.filename,
+            )
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "消息同步标识不存在".to_string())?;
+            existing_message
+                .marked_tag_ids
+                .retain(|tag_id| !deleted_set.contains(tag_id));
+            let operation = outbox_operation(
+                &profile.id,
+                &session.user_id,
+                "message",
+                &message_id,
+                "upsert",
+                revision,
+                supabase_message_payload(&existing_message),
+            )?;
+            cleaned_messages.push((
+                existing_message.filename,
+                existing_message.marked_tag_ids,
+                operation,
+            ));
+        }
+    }
+    let deleted_at_ms = now_ms();
+    let mut deleted_tags = Vec::new();
+    for (tag, revision) in existing {
+        if !deleted_set.contains(&tag.id) {
+            continue;
+        }
+        let operation = outbox_operation(
+            &profile.id,
+            &session.user_id,
+            "tag",
+            &tag.id,
+            "delete",
+            revision,
+            serde_json::json!({}),
+        )?;
+        deleted_tags.push((tag, revision, deleted_at_ms, operation));
+    }
+    Ok(SupabaseSendMarkedChanges {
+        created_tags,
+        cleaned_messages,
+        deleted_tags,
+    })
+}
+
 async fn persist_sent_message_with_marked_options(
     state: &AppState,
     endpoint: &WebDavEndpoint,
@@ -3195,6 +4793,64 @@ async fn set_message_marked(
     due_date: Option<String>,
 ) -> Result<(), String> {
     let settings = current_settings(state)?;
+    if let Some((profile, session)) = active_supabase_context(state, &settings)? {
+        let _guard = state.sync_guard.lock().await;
+        let tags = db::list_tags_for_scope(&state.db_path, &profile.id, &session.user_id)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|(tag, _)| tag)
+            .collect::<Vec<_>>();
+        let valid_tag_ids = sanitize_marked_tag_ids(&tags, tag_ids);
+        let valid_due_date = if marked {
+            normalize_marked_due_date(due_date)?
+        } else {
+            None
+        };
+        let mut message =
+            db::get_message_for_scope(&state.db_path, &profile.id, &session.user_id, &filename)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "未找到消息".to_string())?;
+        let (message_id, base_revision) =
+            db::get_message_sync_identity(&state.db_path, &profile.id, &session.user_id, &filename)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "消息同步标识不存在".to_string())?;
+        apply_marked_state(
+            &mut message.marked,
+            &mut message.marked_tag_ids,
+            &mut message.marked_pinned,
+            &mut message.marked_due_date,
+            marked,
+            &valid_tag_ids,
+            valid_due_date.clone(),
+        );
+        let operation = outbox_operation(
+            &profile.id,
+            &session.user_id,
+            "message",
+            &message_id,
+            "upsert",
+            base_revision,
+            supabase_message_payload(&message),
+        )?;
+        let changed = db::set_message_marked_and_enqueue(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            &filename,
+            message.marked,
+            &message.marked_tag_ids,
+            message.marked_pinned,
+            valid_due_date.as_deref(),
+            &operation,
+        )
+        .map_err(|error| error.to_string())?;
+        return if changed {
+            notify_supabase_outbox_pending(state);
+            Ok(())
+        } else {
+            Err("未找到消息".to_string())
+        };
+    }
     let endpoint = resolve_active_endpoint(&settings)?;
     let _guard = state.sync_guard.lock().await;
     let tags = db::list_marked_tags(&state.db_path, &endpoint.id).map_err(|err| err.to_string())?;
@@ -3365,7 +5021,76 @@ async fn set_marked_messages_tags(
     filenames: Vec<String>,
     tag_ids: Vec<String>,
 ) -> Result<usize, String> {
-    let settings = current_settings(&state)?;
+    set_marked_messages_tags_impl(&state, filenames, tag_ids).await
+}
+
+async fn set_marked_messages_tags_impl(
+    state: &AppState,
+    filenames: Vec<String>,
+    tag_ids: Vec<String>,
+) -> Result<usize, String> {
+    let settings = current_settings(state)?;
+    if let Some((profile, session)) = active_supabase_context(state, &settings)? {
+        let _guard = state.sync_guard.lock().await;
+        let mut unique_filenames: Vec<String> = filenames
+            .into_iter()
+            .map(|filename| filename.trim().to_string())
+            .filter(|filename| !filename.is_empty())
+            .collect();
+        unique_filenames.sort();
+        unique_filenames.dedup();
+        if unique_filenames.is_empty() {
+            return Ok(0);
+        }
+        let tags = db::list_tags_for_scope(&state.db_path, &profile.id, &session.user_id)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|(tag, _)| tag)
+            .collect::<Vec<_>>();
+        let valid_tag_ids = sanitize_marked_tag_ids(&tags, tag_ids);
+        let mut updates = Vec::new();
+        for filename in unique_filenames {
+            let Some(mut message) =
+                db::get_message_for_scope(&state.db_path, &profile.id, &session.user_id, &filename)
+                    .map_err(|error| error.to_string())?
+            else {
+                continue;
+            };
+            if !message.marked || message.marked_tag_ids == valid_tag_ids {
+                continue;
+            }
+            let (message_id, base_revision) = db::get_message_sync_identity(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                &filename,
+            )
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "消息同步标识不存在".to_string())?;
+            message.marked_tag_ids = valid_tag_ids.clone();
+            let operation = outbox_operation(
+                &profile.id,
+                &session.user_id,
+                "message",
+                &message_id,
+                "upsert",
+                base_revision,
+                supabase_message_payload(&message),
+            )?;
+            updates.push((filename, valid_tag_ids.clone(), operation));
+        }
+        let changed = db::set_messages_marked_tags_and_enqueue(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            &updates,
+        )
+        .map_err(|error| error.to_string())?;
+        if changed > 0 {
+            notify_supabase_outbox_pending(state);
+        }
+        return Ok(changed);
+    }
     let endpoint = resolve_active_endpoint(&settings)?;
     let _guard = state.sync_guard.lock().await;
 
@@ -3412,7 +5137,7 @@ async fn set_marked_messages_tags(
         return Ok(0);
     }
     for pending in pending_entries.iter().cloned() {
-        schedule_marked_history_sync(state.inner(), endpoint.clone(), pending);
+        schedule_marked_history_sync(state, endpoint.clone(), pending);
     }
     Ok(pending_entries.len())
 }
@@ -3420,13 +5145,58 @@ async fn set_marked_messages_tags(
 #[tauri::command]
 fn list_marked_tags(state: State<'_, AppState>) -> Result<Vec<MarkedTag>, String> {
     let settings = current_settings(&state)?;
+    if let Some((profile, session)) = active_supabase_context(&state, &settings)? {
+        return db::list_tags_for_scope(&state.db_path, &profile.id, &session.user_id)
+            .map(|items| items.into_iter().map(|(tag, _)| tag).collect())
+            .map_err(|error| error.to_string());
+    }
     let endpoint = resolve_active_endpoint(&settings)?;
     db::list_marked_tags(&state.db_path, &endpoint.id).map_err(|err| err.to_string())
 }
 
 #[tauri::command]
 async fn create_marked_tag(state: State<'_, AppState>, name: String) -> Result<MarkedTag, String> {
-    let settings = current_settings(&state)?;
+    create_marked_tag_impl(&state, name).await
+}
+
+async fn create_marked_tag_impl(state: &AppState, name: String) -> Result<MarkedTag, String> {
+    let settings = current_settings(state)?;
+    if let Some((profile, session)) = active_supabase_context(state, &settings)? {
+        let _guard = state.sync_guard.lock().await;
+        let normalized = normalize_marked_tag_name(&name)?;
+        let existing = db::list_tags_for_scope(&state.db_path, &profile.id, &session.user_id)
+            .map_err(|error| error.to_string())?;
+        let tags = existing
+            .iter()
+            .map(|(tag, _)| tag.clone())
+            .collect::<Vec<_>>();
+        ensure_unique_marked_tag_name(&tags, &normalized, None)?;
+        let tag = MarkedTag {
+            id: generate_marked_tag_id(),
+            name: normalized,
+        };
+        let operation = outbox_operation(
+            &profile.id,
+            &session.user_id,
+            "tag",
+            &tag.id,
+            "upsert",
+            0,
+            serde_json::json!({"name":tag.name}),
+        )?;
+        db::save_tag_and_enqueue(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            &tag,
+            0,
+            None,
+            &operation,
+        )
+        .map_err(|error| error.to_string())?;
+        notify_supabase_outbox_pending(state);
+        return Ok(tag);
+    }
     let endpoint = resolve_active_endpoint(&settings)?;
     let _guard = state.sync_guard.lock().await;
     let mut tags =
@@ -3441,7 +5211,7 @@ async fn create_marked_tag(state: State<'_, AppState>, name: String) -> Result<M
     tags.sort_by(|left, right| left.name.cmp(&right.name));
     crate::history::save_marked_tags(&state.http, &endpoint, &tags).await?;
     invalidate_history_cache_for_paths(
-        state.inner(),
+        state,
         &endpoint.id,
         &[crate::history::HISTORY_TAGS_PATH.to_string()],
     )?;
@@ -3452,6 +5222,84 @@ async fn create_marked_tag(state: State<'_, AppState>, name: String) -> Result<M
 #[tauri::command]
 async fn delete_marked_tag(state: State<'_, AppState>, tag_id: String) -> Result<(), String> {
     let settings = current_settings(&state)?;
+    if let Some((profile, session)) = active_supabase_context(&state, &settings)? {
+        let _guard = state.sync_guard.lock().await;
+        let existing = db::list_tags_for_scope(&state.db_path, &profile.id, &session.user_id)
+            .map_err(|error| error.to_string())?;
+        let (tag, revision) = existing
+            .into_iter()
+            .find(|(tag, _)| tag.id == tag_id)
+            .ok_or_else(|| "未找到标签".to_string())?;
+        let mut message_updates = Vec::new();
+        let marked_messages = db::list_marked_messages_for_scope(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            Some(&tag.id),
+            None,
+            None,
+            None,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+        for marked_message in marked_messages {
+            let Some(mut message) = db::get_message_for_scope(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                &marked_message.filename,
+            )
+            .map_err(|error| error.to_string())?
+            else {
+                continue;
+            };
+            let (message_id, base_revision) = db::get_message_sync_identity(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                &message.filename,
+            )
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "消息同步标识不存在".to_string())?;
+            message.marked_tag_ids.retain(|item| item != &tag.id);
+            let message_operation = outbox_operation(
+                &profile.id,
+                &session.user_id,
+                "message",
+                &message_id,
+                "upsert",
+                base_revision,
+                supabase_message_payload(&message),
+            )?;
+            message_updates.push((
+                message.filename.clone(),
+                message.marked_tag_ids.clone(),
+                message_operation,
+            ));
+        }
+        let operation = outbox_operation(
+            &profile.id,
+            &session.user_id,
+            "tag",
+            &tag.id,
+            "delete",
+            revision,
+            serde_json::json!({}),
+        )?;
+        db::delete_tag_cleanup_messages_and_enqueue(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            &tag,
+            revision,
+            now_ms(),
+            &message_updates,
+            &operation,
+        )
+        .map_err(|error| error.to_string())?;
+        notify_supabase_outbox_pending(&state);
+        return Ok(());
+    }
     let endpoint = resolve_active_endpoint(&settings)?;
     let _guard = state.sync_guard.lock().await;
     let mut tags =
@@ -3514,6 +5362,46 @@ async fn rename_marked_tag(
     name: String,
 ) -> Result<(), String> {
     let settings = current_settings(&state)?;
+    if let Some((profile, session)) = active_supabase_context(&state, &settings)? {
+        let _guard = state.sync_guard.lock().await;
+        let normalized = normalize_marked_tag_name(&name)?;
+        let existing = db::list_tags_for_scope(&state.db_path, &profile.id, &session.user_id)
+            .map_err(|error| error.to_string())?;
+        let tags = existing
+            .iter()
+            .map(|(tag, _)| tag.clone())
+            .collect::<Vec<_>>();
+        ensure_unique_marked_tag_name(&tags, &normalized, Some(&tag_id))?;
+        let (_, revision) = existing
+            .into_iter()
+            .find(|(tag, _)| tag.id == tag_id)
+            .ok_or_else(|| "未找到标签".to_string())?;
+        let tag = MarkedTag {
+            id: tag_id,
+            name: normalized,
+        };
+        let operation = outbox_operation(
+            &profile.id,
+            &session.user_id,
+            "tag",
+            &tag.id,
+            "upsert",
+            revision,
+            serde_json::json!({"name":tag.name}),
+        )?;
+        db::save_tag_and_enqueue(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            &tag,
+            revision,
+            None,
+            &operation,
+        )
+        .map_err(|error| error.to_string())?;
+        notify_supabase_outbox_pending(&state);
+        return Ok(());
+    }
     let endpoint = resolve_active_endpoint(&settings)?;
     let _guard = state.sync_guard.lock().await;
     let mut tags =
@@ -3547,7 +5435,55 @@ async fn toggle_marked_message_pin(
     state: State<'_, AppState>,
     filename: String,
 ) -> Result<bool, String> {
-    let settings = current_settings(&state)?;
+    toggle_marked_message_pin_impl(&state, filename).await
+}
+
+async fn toggle_marked_message_pin_impl(
+    state: &AppState,
+    filename: String,
+) -> Result<bool, String> {
+    let settings = current_settings(state)?;
+    if let Some((profile, session)) = active_supabase_context(state, &settings)? {
+        let _guard = state.sync_guard.lock().await;
+        let mut message =
+            db::get_message_for_scope(&state.db_path, &profile.id, &session.user_id, &filename)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "未找到消息".to_string())?;
+        if !message.marked {
+            return Err("未标记消息不能置顶".to_string());
+        }
+        let (message_id, base_revision) =
+            db::get_message_sync_identity(&state.db_path, &profile.id, &session.user_id, &filename)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "消息同步标识不存在".to_string())?;
+        message.marked_pinned = !message.marked_pinned;
+        let operation = outbox_operation(
+            &profile.id,
+            &session.user_id,
+            "message",
+            &message_id,
+            "upsert",
+            base_revision,
+            supabase_message_payload(&message),
+        )?;
+        let changed = db::set_message_marked_and_enqueue(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            &filename,
+            message.marked,
+            &message.marked_tag_ids,
+            message.marked_pinned,
+            message.marked_due_date.as_deref(),
+            &operation,
+        )
+        .map_err(|error| error.to_string())?;
+        let pinned = changed
+            .then_some(message.marked_pinned)
+            .ok_or_else(|| "未找到消息".to_string())?;
+        notify_supabase_outbox_pending(state);
+        return Ok(pinned);
+    }
     let endpoint = resolve_active_endpoint(&settings)?;
     let _guard = state.sync_guard.lock().await;
     let mut message = db::get_message(&state.db_path, &endpoint.id, &filename)
@@ -3570,7 +5506,7 @@ async fn toggle_marked_message_pin(
         updated_at_ms: now_ms(),
     };
     db::upsert_pending_marked_sync(&state.db_path, &pending).map_err(|err| err.to_string())?;
-    schedule_marked_history_sync(state.inner(), endpoint, pending);
+    schedule_marked_history_sync(state, endpoint, pending);
     Ok(pinned)
 }
 
@@ -3584,6 +5520,45 @@ fn list_marked_messages(
     pending_only: Option<bool>,
 ) -> Result<MessagesResult, String> {
     let settings = current_settings(&state)?;
+    if let Some((profile, session)) = active_supabase_context(&state, &settings)? {
+        let today = today_due_date_string();
+        let pending_due_date = pending_only.unwrap_or(false).then_some(today.as_str());
+        let marked_count = db::count_unfinished_marked_messages_for_scope(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            &today,
+        )
+        .map_err(|error| error.to_string())?;
+        let total = db::count_marked_messages_for_scope(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            tag_id.as_deref(),
+            search_query.as_deref(),
+            pending_due_date,
+        )
+        .map_err(|error| error.to_string())?;
+        let messages = db::list_marked_messages_for_scope(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            tag_id.as_deref(),
+            search_query.as_deref(),
+            limit,
+            offset,
+            pending_due_date,
+        )
+        .map_err(|error| error.to_string())?;
+        let current_offset = offset.unwrap_or(0).max(0);
+        let current_limit = limit.unwrap_or(total).max(0);
+        return Ok(MessagesResult {
+            messages,
+            total,
+            has_more: current_offset + current_limit < total,
+            marked_count,
+        });
+    }
     let endpoint = resolve_active_endpoint(&settings)?;
     let marked_count = count_unfinished_marked_messages(&state, &endpoint.id)?;
     let today = today_due_date_string();
@@ -3625,6 +5600,40 @@ fn list_messages(
     search_query: Option<String>,
 ) -> Result<MessagesResult, String> {
     let settings = current_settings(&state)?;
+    if let Some((profile, session)) = active_supabase_context(&state, &settings)? {
+        let marked_filter = only_marked.unwrap_or(false);
+        let total = db::count_messages_for_scope(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            marked_filter,
+        )
+        .map_err(|error| error.to_string())?;
+        let messages = db::list_messages_for_scope(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            limit,
+            offset,
+            marked_filter,
+            search_query.as_deref(),
+        )
+        .map_err(|error| error.to_string())?;
+        let current_offset = offset.unwrap_or(0);
+        let current_limit = limit.unwrap_or(total);
+        return Ok(MessagesResult {
+            messages,
+            total,
+            has_more: current_offset + current_limit < total,
+            marked_count: db::count_messages_for_scope(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                true,
+            )
+            .map_err(|error| error.to_string())?,
+        });
+    }
     let endpoint = resolve_active_endpoint(&settings)?;
 
     let marked_filter = only_marked.unwrap_or(false);
@@ -3927,52 +5936,124 @@ fn list_messages_window(
     input: Option<ListMessagesWindowInput>,
 ) -> Result<MessagesWindowResult, String> {
     let settings = current_settings(&state)?;
-    let endpoint = resolve_active_endpoint(&settings)?;
+    let provider = storage_provider::resolve_active_provider(&settings)?;
+    let (profile_id, owner_scope) = match &provider {
+        storage_provider::ProviderConfig::Webdav(endpoint) => (endpoint.id.clone(), None),
+        storage_provider::ProviderConfig::Supabase(profile) => {
+            let session = state
+                .supabase_sessions
+                .lock()
+                .map_err(|_| "读取 Supabase 会话失败".to_string())?
+                .get(&profile.id)
+                .cloned()
+                .ok_or_else(|| "请先登录当前 Supabase 存储空间".to_string())?;
+            (profile.id.clone(), Some(session.user_id))
+        }
+    };
     let input = input.unwrap_or_default();
     let marked_filter = input.only_marked.unwrap_or(false);
     let limit = input.limit.unwrap_or(50).clamp(1, 200);
 
-    let total = db::count_messages(&state.db_path, &endpoint.id, marked_filter)
-        .map_err(|err| err.to_string())?;
-    let marked_count = count_unfinished_marked_messages(&state, &endpoint.id)?;
+    let total = if let Some(owner_scope) = owner_scope.as_deref() {
+        db::count_messages_for_scope(&state.db_path, &profile_id, owner_scope, marked_filter)
+    } else {
+        db::count_messages(&state.db_path, &profile_id, marked_filter)
+    }
+    .map_err(|err| err.to_string())?;
+    let today = today_due_date_string();
+    let marked_count = if let Some(owner_scope) = owner_scope.as_deref() {
+        db::count_unfinished_marked_messages_for_scope(
+            &state.db_path,
+            &profile_id,
+            owner_scope,
+            &today,
+        )
+    } else {
+        db::count_unfinished_marked_messages(&state.db_path, &profile_id, &today)
+    }
+    .map_err(|err| err.to_string())?;
 
     let messages = if let (Some(after_timestamp_ms), Some(after_filename)) =
         (input.after_timestamp_ms, input.after_filename.as_deref())
     {
-        db::list_messages_after(
-            &state.db_path,
-            &endpoint.id,
-            after_timestamp_ms,
-            after_filename,
-            limit,
-            marked_filter,
-        )
+        if let Some(owner_scope) = owner_scope.as_deref() {
+            db::list_messages_after_for_scope(
+                &state.db_path,
+                &profile_id,
+                owner_scope,
+                after_timestamp_ms,
+                after_filename,
+                limit,
+                marked_filter,
+            )
+        } else {
+            db::list_messages_after(
+                &state.db_path,
+                &profile_id,
+                after_timestamp_ms,
+                after_filename,
+                limit,
+                marked_filter,
+            )
+        }
         .map_err(|err| err.to_string())?
     } else if let (Some(before_timestamp_ms), Some(before_filename)) =
         (input.before_timestamp_ms, input.before_filename.as_deref())
     {
-        db::list_messages_before(
+        if let Some(owner_scope) = owner_scope.as_deref() {
+            db::list_messages_before_for_scope(
+                &state.db_path,
+                &profile_id,
+                owner_scope,
+                before_timestamp_ms,
+                before_filename,
+                limit,
+                marked_filter,
+            )
+        } else {
+            db::list_messages_before(
+                &state.db_path,
+                &profile_id,
+                before_timestamp_ms,
+                before_filename,
+                limit,
+                marked_filter,
+            )
+        }
+        .map_err(|err| err.to_string())?
+    } else if let Some(owner_scope) = owner_scope.as_deref() {
+        db::list_latest_messages_window_for_scope(
             &state.db_path,
-            &endpoint.id,
-            before_timestamp_ms,
-            before_filename,
+            &profile_id,
+            owner_scope,
             limit,
             marked_filter,
         )
         .map_err(|err| err.to_string())?
     } else {
-        db::list_latest_messages_window(&state.db_path, &endpoint.id, limit, marked_filter)
+        db::list_latest_messages_window(&state.db_path, &profile_id, limit, marked_filter)
             .map_err(|err| err.to_string())?
     };
 
     let has_more_before = if let Some(first) = messages.first() {
-        db::count_messages_before(
-            &state.db_path,
-            &endpoint.id,
-            first.timestamp_ms,
-            &first.filename,
-            marked_filter,
-        )
+        if let Some(owner_scope) = owner_scope.as_deref() {
+            db::count_messages_before_for_scope(
+                &state.db_path,
+                &profile_id,
+                owner_scope,
+                first.timestamp_ms,
+                &first.filename,
+                marked_filter,
+            )
+        } else {
+            db::count_messages_before(
+                &state.db_path,
+                &profile_id,
+                first.timestamp_ms,
+                &first.filename,
+                marked_filter,
+            )
+        }
         .map_err(|err| err.to_string())?
             > 0
     } else {
@@ -4104,6 +6185,14 @@ async fn resolve_local_http_marked_options(
     };
 
     let settings = current_settings(state)?;
+    if let Some((profile, session)) = active_supabase_context(state, &settings)? {
+        let tags = db::list_tags_for_scope(&state.db_path, &profile.id, &session.user_id)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|(tag, _)| tag)
+            .collect::<Vec<_>>();
+        return build_local_http_marked_options(&tags, marked_options).map(Some);
+    }
     let endpoint = resolve_active_endpoint(&settings)?;
     let tags = db::list_marked_tags(&state.db_path, &endpoint.id).map_err(|err| err.to_string())?;
     let resolved = build_local_http_marked_options(&tags, marked_options)?;
@@ -4117,8 +6206,6 @@ async fn send_text_impl(
     marked_options: Option<SendMarkedOptionsInput>,
 ) -> Result<SendMessageResult, String> {
     let settings = current_settings(&state)?;
-    let endpoint = resolve_active_endpoint(&settings)?;
-
     let format = normalize_send_text_format(format)?;
     let is_markdown = format == "markdown";
     let extension = if is_markdown {
@@ -4131,6 +6218,64 @@ async fn send_text_impl(
     let filename = build_message_filename(&settings.sender_name, extension, timestamp_ms);
     let remote_path = message_remote_path(&filename, timestamp_ms);
     let data = text.clone().into_bytes();
+
+    if let Some((profile, session)) = active_supabase_context(state, &settings)? {
+        let _guard = state.sync_guard.lock().await;
+        let message_id = uuid::Uuid::new_v4().to_string();
+        let mut message = DbMessage {
+            endpoint_id: profile.id.clone(),
+            filename: filename.clone(),
+            sender: settings.sender_name.clone(),
+            timestamp_ms,
+            size: data.len() as i64,
+            kind: MessageKind::Text.as_str().to_string(),
+            original_name: extension.to_string(),
+            etag: None,
+            mtime: None,
+            content: Some(text),
+            local_path: None,
+            remote_path: None,
+            file_hash: None,
+            marked: false,
+            marked_tag_ids: Vec::new(),
+            marked_pinned: false,
+            marked_due_date: None,
+            format,
+            transcript_source: None,
+            source_audio_mime_type: None,
+            transcript_raw_text: None,
+        };
+        let marked_changes = apply_supabase_send_marked_options(
+            state,
+            &profile,
+            &session,
+            &mut message,
+            marked_options.unwrap_or_default(),
+        )?;
+        let operation = outbox_operation(
+            &profile.id,
+            &session.user_id,
+            "message",
+            &message_id,
+            "upsert",
+            0,
+            supabase_message_payload(&message),
+        )?;
+        db::save_message_with_marked_changes_and_enqueue(
+            &state.db_path,
+            &message,
+            &marked_changes.created_tags,
+            &marked_changes.cleaned_messages,
+            &operation,
+            &marked_changes.deleted_tags,
+            None,
+        )
+        .map_err(|error| format!("保存 Supabase 消息失败: {error}"))?;
+        notify_supabase_outbox_pending(state);
+        return Ok(supabase_send_result(&profile.id, &message));
+    }
+
+    let endpoint = resolve_active_endpoint(&settings)?;
 
     webdav::upload_file_ensuring_parent(&state.http, &endpoint, &remote_path, data.clone()).await?;
 
@@ -4367,7 +6512,6 @@ async fn send_file_path_impl(
     marked_options: Option<SendMarkedOptionsInput>,
 ) -> Result<SendMessageResult, String> {
     let settings = current_settings(state)?;
-    let endpoint = resolve_active_endpoint(&settings)?;
     let original_name = original_name.trim().to_string();
     if original_name.is_empty() {
         return Err("???????".to_string());
@@ -4380,6 +6524,103 @@ async fn send_file_path_impl(
     let timestamp_ms = now_ms();
     let filename = build_message_filename(&settings.sender_name, &original_name, timestamp_ms);
     let remote_path = message_remote_path(&filename, timestamp_ms);
+    if let Some((profile, session)) = active_supabase_context(state, &settings)? {
+        let _guard = state.sync_guard.lock().await;
+        let message_id = uuid::Uuid::new_v4().to_string();
+        let attachment_id = uuid::Uuid::new_v4().to_string();
+        let local_dir = endpoint_files_dir(state, &profile.id)
+            .join(&session.user_id)
+            .join("attachments")
+            .join(&attachment_id);
+        fs::create_dir_all(&local_dir).map_err(|error| format!("创建附件缓存目录失败: {error}"))?;
+        let local_path = local_dir.join(&original_name);
+        cache_uploaded_file(&source_path, &local_path)?;
+        let hash_path = local_path.clone();
+        let file_hash =
+            tokio::task::spawn_blocking(move || compute_file_hash_from_path(&hash_path))
+                .await
+                .map_err(|error| format!("计算附件摘要失败: {error}"))??;
+        let object_path = supabase_attachment_object_path(
+            &session.user_id,
+            profile
+                .supabase
+                .as_ref()
+                .map(|config| config.space_id.as_str())
+                .unwrap_or_default(),
+            &attachment_id,
+            &original_name,
+        );
+        let mut message = DbMessage {
+            endpoint_id: profile.id.clone(),
+            filename: filename.clone(),
+            sender: settings.sender_name.clone(),
+            timestamp_ms,
+            size: total_bytes as i64,
+            kind: MessageKind::File.as_str().into(),
+            original_name: original_name.clone(),
+            etag: None,
+            mtime: None,
+            content: None,
+            local_path: Some(local_path.to_string_lossy().to_string()),
+            remote_path: Some(object_path.clone()),
+            file_hash: Some(file_hash.clone()),
+            marked: false,
+            marked_tag_ids: Vec::new(),
+            marked_pinned: false,
+            marked_due_date: None,
+            format: "text".into(),
+            transcript_source: None,
+            source_audio_mime_type: None,
+            transcript_raw_text: None,
+        };
+        let marked_changes = apply_supabase_send_marked_options(
+            state,
+            &profile,
+            &session,
+            &mut message,
+            marked_options.unwrap_or_default(),
+        )?;
+        let message_operation = outbox_operation(
+            &profile.id,
+            &session.user_id,
+            "message",
+            &message_id,
+            "upsert",
+            0,
+            supabase_message_payload(&message),
+        )?;
+        let mime_type = "application/octet-stream".to_string();
+        let attachment_payload = serde_json::json!({"messageId":message_id,"originalName":original_name,
+            "objectPath":object_path,"previewObjectPath":null,"mimeType":mime_type,
+            "size":total_bytes,"sha256":file_hash,"uploadStatus":"uploaded"});
+        let attachment_operation = outbox_operation(
+            &profile.id,
+            &session.user_id,
+            "attachment",
+            &attachment_id,
+            "upsert",
+            0,
+            attachment_payload,
+        )?;
+        db::save_message_with_marked_changes_and_enqueue(
+            &state.db_path,
+            &message,
+            &marked_changes.created_tags,
+            &marked_changes.cleaned_messages,
+            &message_operation,
+            &marked_changes.deleted_tags,
+            Some((
+                &attachment_id,
+                &object_path,
+                Some(&mime_type),
+                &attachment_operation,
+            )),
+        )
+        .map_err(|error| format!("保存 Supabase 附件失败: {error}"))?;
+        notify_supabase_outbox_pending(state);
+        return Ok(supabase_send_result(&profile.id, &message));
+    }
+    let endpoint = resolve_active_endpoint(&settings)?;
 
     let client_id = client_id
         .and_then(|value| {
@@ -4586,7 +6827,6 @@ async fn send_speech_message_impl(
     marked_options: Option<SendMarkedOptionsInput>,
 ) -> Result<SendMessageResult, String> {
     let settings = current_settings(state)?;
-    let endpoint = resolve_active_endpoint(&settings)?;
     let transcript = request.transcript.trim().to_string();
     if transcript.is_empty() {
         return Err("转写文本为空".to_string());
@@ -4607,9 +6847,108 @@ async fn send_speech_message_impl(
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| format!("speech-{timestamp_ms}.wav"));
     let filename = build_message_filename(&settings.sender_name, &original_name, timestamp_ms);
-    let remote_path = message_remote_path(&filename, timestamp_ms);
     let audio_data = request.audio_data;
     let mime_type = request.mime_type.filter(|value| !value.trim().is_empty());
+
+    if let Some((profile, session)) = active_supabase_context(state, &settings)? {
+        let _guard = state.sync_guard.lock().await;
+        let message_id = uuid::Uuid::new_v4().to_string();
+        let attachment_id = uuid::Uuid::new_v4().to_string();
+        let local_dir = endpoint_files_dir(state, &profile.id)
+            .join(&session.user_id)
+            .join("attachments")
+            .join(&attachment_id);
+        fs::create_dir_all(&local_dir).map_err(|error| format!("创建语音缓存目录失败: {error}"))?;
+        let local_path = local_dir.join(&original_name);
+        fs::write(&local_path, &audio_data)
+            .map_err(|error| format!("保存语音缓存失败: {error}"))?;
+        let file_hash = format!("{:x}", Sha256::digest(&audio_data));
+        let object_path = supabase_attachment_object_path(
+            &session.user_id,
+            profile
+                .supabase
+                .as_ref()
+                .map(|config| config.space_id.as_str())
+                .unwrap_or_default(),
+            &attachment_id,
+            &original_name,
+        );
+        let mut message = DbMessage {
+            endpoint_id: profile.id.clone(),
+            filename,
+            sender: settings.sender_name.clone(),
+            timestamp_ms,
+            size: audio_data.len() as i64,
+            kind: MessageKind::Text.as_str().to_string(),
+            original_name: original_name.clone(),
+            etag: None,
+            mtime: None,
+            content: Some(transcript),
+            local_path: Some(local_path.to_string_lossy().to_string()),
+            remote_path: Some(object_path.clone()),
+            file_hash: Some(file_hash.clone()),
+            marked: false,
+            marked_tag_ids: Vec::new(),
+            marked_pinned: false,
+            marked_due_date: None,
+            format: "text".to_string(),
+            transcript_source: Some("speech-to-text".to_string()),
+            source_audio_mime_type: mime_type.clone(),
+            transcript_raw_text: raw_transcript,
+        };
+        let marked_changes = apply_supabase_send_marked_options(
+            state,
+            &profile,
+            &session,
+            &mut message,
+            marked_options.unwrap_or_default(),
+        )?;
+        let message_operation = outbox_operation(
+            &profile.id,
+            &session.user_id,
+            "message",
+            &message_id,
+            "upsert",
+            0,
+            supabase_message_payload(&message),
+        )?;
+        let storage_mime_type = mime_type
+            .clone()
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+        let attachment_operation = outbox_operation(
+            &profile.id,
+            &session.user_id,
+            "attachment",
+            &attachment_id,
+            "upsert",
+            0,
+            serde_json::json!({
+                "messageId":message_id,"originalName":original_name,"objectPath":object_path,
+                "previewObjectPath":null,"mimeType":storage_mime_type,"size":audio_data.len(),
+                "sha256":file_hash,"uploadStatus":"uploaded"
+            }),
+        )?;
+        db::save_message_with_marked_changes_and_enqueue(
+            &state.db_path,
+            &message,
+            &marked_changes.created_tags,
+            &marked_changes.cleaned_messages,
+            &message_operation,
+            &marked_changes.deleted_tags,
+            Some((
+                &attachment_id,
+                &object_path,
+                Some(&storage_mime_type),
+                &attachment_operation,
+            )),
+        )
+        .map_err(|error| format!("保存 Supabase 语音消息失败: {error}"))?;
+        notify_supabase_outbox_pending(state);
+        return Ok(supabase_send_result(&profile.id, &message));
+    }
+
+    let endpoint = resolve_active_endpoint(&settings)?;
+    let remote_path = message_remote_path(&filename, timestamp_ms);
 
     webdav::upload_file_ensuring_parent(&state.http, &endpoint, &remote_path, audio_data.clone())
         .await?;
@@ -5139,6 +7478,79 @@ async fn download_message_file_impl(
     endpoint_id: Option<&str>,
 ) -> Result<DownloadResult, String> {
     let settings = current_settings(state)?;
+    if let Some((profile, session)) = active_supabase_context(state, &settings)? {
+        if endpoint_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some_and(|id| id != profile.id)
+        {
+            return Err("当前登录账号不能下载其他存储空间的附件".to_string());
+        }
+        let message =
+            db::get_message_for_scope(&state.db_path, &profile.id, &session.user_id, filename)
+                .map_err(|error| format!("读取消息失败: {error}"))?
+                .ok_or_else(|| "未找到附件消息".to_string())?;
+        let base_dir = resolve_download_dir(state, &settings);
+        fs::create_dir_all(&base_dir).map_err(|error| format!("创建下载目录失败: {error}"))?;
+        let target =
+            build_download_target_path(state, &settings, original_name, message.timestamp_ms);
+        let final_path =
+            match resolve_download_target(&target, parse_conflict_action(conflict_action))? {
+                DownloadDecision::Conflict { suggested } => {
+                    return Ok(DownloadResult {
+                        status: "conflict".into(),
+                        path: None,
+                        suggested_path: Some(suggested.to_string_lossy().to_string()),
+                        transfer_mode: None,
+                    })
+                }
+                DownloadDecision::Ready(path) => path,
+            };
+        ensure_parent_dir(&final_path)?;
+        if let Some(cached) = message
+            .local_path
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|path| path.is_file())
+        {
+            fs::copy(cached, &final_path)
+                .map_err(|error| format!("复制已缓存附件失败: {error}"))?;
+        } else {
+            let object_path = message
+                .remote_path
+                .as_deref()
+                .ok_or_else(|| "附件尚未上传，当前仅保存在原设备".to_string())?;
+            let config = profile
+                .supabase
+                .as_ref()
+                .ok_or_else(|| "Supabase 配置不完整".to_string())?;
+            let bytes =
+                supabase_sync::download_storage_object(&state.http, config, &session, object_path)
+                    .await?;
+            let cache_dir = endpoint_files_dir(state, &profile.id)
+                .join(&session.user_id)
+                .join("downloads");
+            fs::create_dir_all(&cache_dir)
+                .map_err(|error| format!("创建附件缓存目录失败: {error}"))?;
+            let cache_path = cache_dir.join(filename);
+            fs::write(&cache_path, &bytes).map_err(|error| format!("缓存附件失败: {error}"))?;
+            fs::write(&final_path, &bytes).map_err(|error| format!("保存附件失败: {error}"))?;
+            db::set_message_local_path_for_scope(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                filename,
+                &cache_path.to_string_lossy(),
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        return Ok(DownloadResult {
+            status: "saved".into(),
+            path: Some(final_path.to_string_lossy().to_string()),
+            suggested_path: None,
+            transfer_mode: Some("provider".into()),
+        });
+    }
     let endpoint = match endpoint_id
         .as_deref()
         .map(str::trim)
@@ -5198,7 +7610,7 @@ async fn download_message_file_impl(
         Ok(result) => result,
         Err(err) => {
             let _ = persist_download_history(
-                state,
+                &state,
                 &endpoint.id,
                 filename,
                 original_name,
@@ -6208,6 +8620,49 @@ async fn fetch_image_preview(
     filename: String,
 ) -> Result<String, String> {
     let settings = current_settings(&state)?;
+    if let Some((profile, session)) = active_supabase_context(&state, &settings)? {
+        if filename.contains('/') || filename.contains('\\') {
+            return Err("非法文件名".to_string());
+        }
+        let message =
+            db::get_message_for_scope(&state.db_path, &profile.id, &session.user_id, &filename)
+                .map_err(|error| format!("读取消息失败: {error}"))?
+                .ok_or_else(|| "未找到附件消息".to_string())?;
+        if let Some(path) = message
+            .local_path
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|path| path.is_file())
+        {
+            return Ok(path.to_string_lossy().to_string());
+        }
+        let object_path = message
+            .remote_path
+            .as_deref()
+            .ok_or_else(|| "附件未缓存，且尚未上传云端".to_string())?;
+        let config = profile
+            .supabase
+            .as_ref()
+            .ok_or_else(|| "Supabase 配置不完整".to_string())?;
+        let bytes =
+            supabase_sync::download_storage_object(&state.http, config, &session, object_path)
+                .await?;
+        let preview_dir = endpoint_files_dir(&state, &profile.id)
+            .join(&session.user_id)
+            .join("previews");
+        fs::create_dir_all(&preview_dir).map_err(|error| format!("创建预览目录失败: {error}"))?;
+        let path = preview_dir.join(&filename);
+        fs::write(&path, bytes).map_err(|error| format!("保存预览失败: {error}"))?;
+        db::set_message_local_path_for_scope(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            &filename,
+            &path.to_string_lossy(),
+        )
+        .map_err(|error| error.to_string())?;
+        return Ok(path.to_string_lossy().to_string());
+    }
     let endpoint = resolve_active_endpoint(&settings)?;
 
     if filename.contains('/') || filename.contains('\\') {
@@ -6242,6 +8697,14 @@ async fn delete_messages(
     filenames: Vec<String>,
     delete_remote: bool,
 ) -> Result<DeleteSummary, String> {
+    delete_messages_impl(&state, filenames, delete_remote).await
+}
+
+async fn delete_messages_impl(
+    state: &AppState,
+    filenames: Vec<String>,
+    delete_remote: bool,
+) -> Result<DeleteSummary, String> {
     let mut unique = HashSet::new();
     let mut targets: Vec<String> = Vec::new();
     for name in filenames {
@@ -6260,7 +8723,54 @@ async fn delete_messages(
         });
     }
 
-    let settings = current_settings(&state)?;
+    let settings = current_settings(state)?;
+    if let Some((profile, session)) = active_supabase_context(state, &settings)? {
+        if !delete_remote {
+            return Ok(DeleteSummary {
+                deleted: targets.len(),
+                failed: Vec::new(),
+            });
+        }
+        let mut operations = Vec::new();
+        let mut deletable: Vec<String> = Vec::new();
+        for filename in &targets {
+            if let Some((message_id, revision)) = db::get_message_sync_identity(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                filename,
+            )
+            .map_err(|error| error.to_string())?
+            {
+                operations.push(outbox_operation(
+                    &profile.id,
+                    &session.user_id,
+                    "message",
+                    &message_id,
+                    "delete",
+                    revision,
+                    serde_json::json!({}),
+                )?);
+                deletable.push(filename.clone());
+            }
+        }
+        let deleted = db::tombstone_messages_and_enqueue(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            &deletable,
+            &operations,
+            now_ms(),
+        )
+        .map_err(|error| error.to_string())?;
+        if deleted > 0 {
+            notify_supabase_outbox_pending(state);
+        }
+        return Ok(DeleteSummary {
+            deleted,
+            failed: Vec::new(),
+        });
+    }
     let endpoint = resolve_active_endpoint(&settings)?;
     if delete_remote {
         // resolved above
@@ -6286,7 +8796,7 @@ async fn delete_messages(
                     succeeded.push(filename.clone());
                     if let Some(message) = message {
                         delete_remote_media_previews(
-                            &state,
+                            state,
                             &endpoint,
                             &message.filename,
                             &message.original_name,
@@ -6307,11 +8817,7 @@ async fn delete_messages(
                 &succeeded_targets,
             )
             .await?;
-            invalidate_history_cache_for_paths(
-                &state,
-                &endpoint.id,
-                &history_result.touched_paths,
-            )?;
+            invalidate_history_cache_for_paths(state, &endpoint.id, &history_result.touched_paths)?;
         }
     }
 
@@ -6333,7 +8839,7 @@ async fn delete_messages(
 
         for message in &messages {
             delete_local_files_for_entry(
-                &state,
+                state,
                 &settings,
                 &endpoint.id,
                 &message.filename,
@@ -6360,7 +8866,7 @@ async fn delete_messages(
 
         for message in &messages {
             delete_local_files_for_entry(
-                &state,
+                state,
                 &settings,
                 &endpoint.id,
                 &message.filename,
@@ -6505,7 +9011,15 @@ fn cancel_refresh(state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
-    WebDavSyncRuntimeAdapter::new(&state).status()
+    let settings = current_settings(&state)?;
+    if matches!(
+        storage_provider::resolve_active_provider(&settings)?,
+        storage_provider::ProviderConfig::Supabase(_)
+    ) {
+        refresh_supabase_status(&state, None)
+    } else {
+        WebDavSyncRuntimeAdapter::new(&state).status()
+    }
 }
 
 #[derive(Serialize)]
@@ -7611,6 +10125,59 @@ fn signal_sync_loop_reset(state: &AppState) {
     let _ = state.sync_loop_signal.send(next);
 }
 
+fn supabase_sync_context_matches(
+    state: &AppState,
+    profile: &StorageProfile,
+    session: &supabase_auth::SupabaseSession,
+) -> bool {
+    let current_profile = current_settings(state).ok().and_then(|settings| {
+        match storage_provider::resolve_active_provider(&settings).ok()? {
+            storage_provider::ProviderConfig::Supabase(profile) => Some(profile),
+            storage_provider::ProviderConfig::Webdav(_) => None,
+        }
+    });
+    let Some(current_profile) = current_profile else {
+        return false;
+    };
+    if current_profile.id != profile.id || current_profile.supabase != profile.supabase {
+        return false;
+    }
+    state
+        .supabase_sessions
+        .lock()
+        .ok()
+        .and_then(|sessions| sessions.get(&profile.id).cloned())
+        .map(|current| {
+            current.user_id == session.user_id && current.access_token == session.access_token
+        })
+        .unwrap_or(false)
+}
+
+fn supabase_session_refresh_delay(session: &supabase_auth::SupabaseSession) -> Duration {
+    let now_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    supabase_session_refresh_delay_at(session, now_seconds)
+}
+
+fn supabase_session_refresh_delay_at(
+    session: &supabase_auth::SupabaseSession,
+    now_seconds: i64,
+) -> Duration {
+    let seconds = session
+        .expires_at
+        .saturating_sub(now_seconds)
+        .saturating_sub(60)
+        .clamp(1, 86_400);
+    Duration::from_secs(seconds as u64)
+}
+
+fn notify_supabase_outbox_pending(state: &AppState) {
+    let _ = refresh_supabase_status(state, Some("pending"));
+    signal_sync_loop_reset(state);
+}
+
 fn cancel_active_sync(state: &AppState) -> Result<(), String> {
     let cancel_tx = {
         let mut sync_cancel = state
@@ -7951,6 +10518,112 @@ fn normalize_settings(
     settings.global_hotkey_enabled = settings.shortcuts_enabled;
     settings.download_dir = normalize_download_dir(&settings.download_dir, default_download_dir);
     settings.save_filename_rule = normalize_save_filename_rule(&settings.save_filename_rule);
+
+    if settings.storage_profiles.is_empty() && !settings.webdav_endpoints.is_empty() {
+        settings.storage_profiles = settings
+            .webdav_endpoints
+            .iter()
+            .map(StorageProfile::from_webdav)
+            .collect();
+    } else if !settings.webdav_endpoints.is_empty() {
+        let mut profiles: Vec<StorageProfile> = settings
+            .storage_profiles
+            .into_iter()
+            .filter(|profile| profile.provider_kind != StorageProviderKind::Webdav)
+            .collect();
+        profiles.extend(
+            settings
+                .webdav_endpoints
+                .iter()
+                .map(StorageProfile::from_webdav),
+        );
+        settings.storage_profiles = profiles;
+    }
+    if settings.active_storage_profile_id.is_none() {
+        settings.active_storage_profile_id = settings.active_webdav_id.clone();
+    }
+
+    let mut seen_ids = HashSet::new();
+    for profile in settings.storage_profiles.iter_mut() {
+        profile.id = profile.id.trim().to_string();
+        profile.name = profile.name.trim().to_string();
+        if !is_valid_endpoint_id(&profile.id) {
+            return Err("存储空间 ID 无效".to_string());
+        }
+        if !seen_ids.insert(profile.id.clone()) {
+            return Err("存储空间 ID 重复".to_string());
+        }
+        match profile.provider_kind {
+            StorageProviderKind::Webdav => {
+                let webdav = profile
+                    .webdav
+                    .as_mut()
+                    .ok_or_else(|| "WebDAV 存储空间缺少连接配置".to_string())?;
+                webdav.url = webdav.url.trim().to_string();
+                webdav.username = webdav.username.trim().to_string();
+                if profile.enabled && webdav.url.is_empty() {
+                    return Err("启用的 WebDAV 存储空间必须填写 URL".to_string());
+                }
+                profile.supabase = None;
+            }
+            StorageProviderKind::Supabase => {
+                let supabase = profile
+                    .supabase
+                    .as_mut()
+                    .ok_or_else(|| "Supabase 存储空间缺少连接配置".to_string())?;
+                supabase.api_url = supabase.api_url.trim().trim_end_matches('/').to_string();
+                supabase.anon_key = supabase.anon_key.trim().to_string();
+                supabase.space_id = supabase.space_id.trim().to_string();
+                if supabase.space_id.is_empty() {
+                    supabase.space_id = uuid::Uuid::new_v5(
+                        &STORAGE_IMPORT_NAMESPACE,
+                        format!("transfer-genie-space:{}", profile.id).as_bytes(),
+                    )
+                    .to_string();
+                } else if uuid::Uuid::parse_str(&supabase.space_id).is_err() {
+                    supabase.space_id = uuid::Uuid::new_v5(
+                        &STORAGE_IMPORT_NAMESPACE,
+                        format!("transfer-genie-space:{}:{}", profile.id, supabase.space_id)
+                            .as_bytes(),
+                    )
+                    .to_string();
+                }
+                if profile.enabled && (supabase.api_url.is_empty() || supabase.anon_key.is_empty())
+                {
+                    return Err("启用的 Supabase 存储空间必须填写 API URL 和公开 Key".to_string());
+                }
+                profile.webdav = None;
+            }
+        }
+    }
+
+    let active_profile_id = settings
+        .active_storage_profile_id
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    settings.active_storage_profile_id = settings
+        .storage_profiles
+        .iter()
+        .any(|profile| profile.id == active_profile_id && profile.enabled)
+        .then_some(active_profile_id);
+
+    settings.webdav_endpoints = settings
+        .storage_profiles
+        .iter()
+        .filter_map(StorageProfile::to_webdav)
+        .collect();
+    settings.active_webdav_id = settings
+        .active_storage_profile_id
+        .as_ref()
+        .filter(|id| {
+            settings
+                .webdav_endpoints
+                .iter()
+                .any(|endpoint| &endpoint.id == *id)
+        })
+        .cloned();
 
     let mut seen_ids = HashSet::new();
     for endpoint in settings.webdav_endpoints.iter_mut() {
@@ -9322,6 +11995,20 @@ fn apply_export_secrets(settings: &mut Settings, secrets: ExportSecrets) -> Resu
         endpoint.username = secret.username.clone();
         endpoint.password = secret.password.clone();
     }
+    for profile in settings.storage_profiles.iter_mut() {
+        if profile.provider_kind != StorageProviderKind::Webdav {
+            continue;
+        }
+        let secret = map
+            .get(&profile.id)
+            .ok_or_else(|| format!("配置文件缺少存储空间凭据: {}", profile.id))?;
+        let webdav = profile
+            .webdav
+            .as_mut()
+            .ok_or_else(|| format!("WebDAV 存储空间缺少连接配置: {}", profile.id))?;
+        webdav.username = secret.username.clone();
+        webdav.password = secret.password.clone();
+    }
     if let Some(telegram) = secrets.telegram {
         settings.telegram.bot_token = telegram.bot_token;
         settings.telegram.chat_id = telegram.chat_id;
@@ -9419,49 +12106,14 @@ fn decode_export_base64(label: &str, value: &str) -> Result<Vec<u8>, String> {
 }
 
 fn resolve_active_endpoint(settings: &Settings) -> Result<WebDavEndpoint, String> {
-    let active_id = settings
-        .active_webdav_id
-        .as_deref()
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if active_id.is_empty() {
-        return Err("请先选择 WebDAV 端点".to_string());
-    }
-    let endpoint = settings
-        .webdav_endpoints
-        .iter()
-        .find(|item| item.id == active_id)
-        .ok_or_else(|| "当前 WebDAV 端点不存在".to_string())?;
-    if !endpoint.enabled {
-        return Err("当前 WebDAV 端点已禁用".to_string());
-    }
-    if endpoint.url.trim().is_empty() {
-        return Err("当前 WebDAV 地址为空".to_string());
-    }
-    Ok(endpoint.clone())
+    storage_provider::resolve_active_webdav(settings)
 }
 
 fn resolve_endpoint_by_id(
     settings: &Settings,
     endpoint_id: &str,
 ) -> Result<WebDavEndpoint, String> {
-    let trimmed = endpoint_id.trim();
-    if trimmed.is_empty() {
-        return Err("下载记录缺少 WebDAV 端点".to_string());
-    }
-    let endpoint = settings
-        .webdav_endpoints
-        .iter()
-        .find(|item| item.id == trimmed)
-        .ok_or_else(|| format!("下载记录关联的 WebDAV 端点不存在: {trimmed}"))?;
-    if !endpoint.enabled {
-        return Err(format!("下载记录关联的 WebDAV 端点已禁用: {trimmed}"));
-    }
-    if endpoint.url.trim().is_empty() {
-        return Err(format!("下载记录关联的 WebDAV 地址为空: {trimmed}"));
-    }
-    Ok(endpoint.clone())
+    storage_provider::resolve_webdav_by_id(settings, endpoint_id)
 }
 
 fn app_data_base_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
@@ -9608,6 +12260,8 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
                 legacy.sender_name
             };
             Settings {
+                storage_profiles: Vec::new(),
+                active_storage_profile_id: None,
                 webdav_endpoints: endpoints,
                 active_webdav_id: active_id,
                 sender_name,
@@ -9633,6 +12287,8 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
         Ok(normalized)
     } else {
         let settings = Settings {
+            storage_profiles: Vec::new(),
+            active_storage_profile_id: None,
             webdav_endpoints: Vec::new(),
             active_webdav_id: None,
             sender_name: random_sender_name(),
@@ -11218,7 +13874,7 @@ async fn run_sync(
 
     let result = tokio::select! {
       _ = cancel_rx => Err(SYNC_CANCELLED_SENTINEL.to_string()),
-      timed = tokio::time::timeout(Duration::from_secs(SYNC_TIMEOUT_SECS), sync_once(state)) => {
+      timed = tokio::time::timeout(Duration::from_secs(SYNC_TIMEOUT_SECS), sync_once(state, source != REALTIME_SYNC_SOURCE)) => {
         match timed {
           Ok(inner) => inner,
           Err(_) => Err(format!("\u{5237}\u{65B0}\u{8D85}\u{65F6}\u{FF08}\u{8D85}\u{8FC7} {} \u{79D2}\u{FF09}", SYNC_TIMEOUT_SECS)),
@@ -11258,16 +13914,18 @@ async fn run_sync(
             } else {
                 status.last_error = Some(err.clone());
                 status.last_result = Some("\u{540C}\u{6B65}\u{5931}\u{8D25}".to_string());
+                status.phase = "error".to_string();
                 Err(err)
             }
         }
     };
     drop(status);
+    let _ = refresh_supabase_status(state, None);
     let _ = persist_integration_module_statuses(state);
     final_result
 }
 
-async fn sync_once(state: &AppState) -> Result<usize, String> {
+async fn sync_once(state: &AppState, manual: bool) -> Result<usize, String> {
     let _guard = state.sync_guard.lock().await;
     let settings = {
         let settings = state
@@ -11276,6 +13934,16 @@ async fn sync_once(state: &AppState) -> Result<usize, String> {
             .map_err(|_| "读取设置失败".to_string())?;
         settings.clone()
     };
+    if let storage_provider::ProviderConfig::Supabase(profile) =
+        storage_provider::resolve_active_provider(&settings)?
+    {
+        let session = valid_supabase_session(state, &profile.id, false)
+            .await
+            .map_err(|error| error.message)?
+            .ok_or_else(|| "请先登录当前 Supabase 存储空间".to_string())?;
+        let (pushed, pulled) = sync_supabase_profile(state, &profile, &session, manual).await?;
+        return Ok(pushed + pulled);
+    }
 
     let endpoint = resolve_active_endpoint(&settings)?;
     let endpoint_id = endpoint.id.clone();
@@ -12335,7 +15003,132 @@ fn sync_dock_visibility_window(app: &AppHandle, window: &Window) {
     let _ = app.set_dock_visibility(visible && !minimized);
 }
 
-fn start_sync_loop(_app_handle: AppHandle) {}
+fn start_sync_loop(app_handle: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut sync_signal = {
+            let state = app_handle.state::<AppState>();
+            state.sync_loop_signal.subscribe()
+        };
+        let mut reconnect_attempt = 0_u32;
+        let mut initialized_scope: Option<(StorageProfile, String)> = None;
+        loop {
+            let active_profile = {
+                let state = app_handle.state::<AppState>();
+                current_settings(&state).ok().and_then(|settings| {
+                    match storage_provider::resolve_active_provider(&settings).ok()? {
+                        storage_provider::ProviderConfig::Supabase(profile) => Some(profile),
+                        storage_provider::ProviderConfig::Webdav(_) => None,
+                    }
+                })
+            };
+            let Some(profile) = active_profile else {
+                reconnect_attempt = 0;
+                initialized_scope = None;
+                if sync_signal.changed().await.is_err() {
+                    return;
+                }
+                continue;
+            };
+            let session = {
+                let state = app_handle.state::<AppState>();
+                verified_supabase_session(&state, &profile.id)
+                    .await
+                    .ok()
+                    .flatten()
+            };
+            let Some(session) = session else {
+                initialized_scope = None;
+                if sync_signal.changed().await.is_err() {
+                    return;
+                }
+                continue;
+            };
+            let config = match profile.supabase.as_ref() {
+                Some(config) => config.clone(),
+                None => {
+                    if sync_signal.changed().await.is_err() {
+                        return;
+                    }
+                    continue;
+                }
+            };
+            let scope = (profile.clone(), session.user_id.clone());
+            if initialized_scope.as_ref() != Some(&scope) {
+                let state = app_handle.state::<AppState>();
+                // Process durable work once even if the Realtime endpoint is
+                // temporarily unavailable. A successful subscription performs
+                // another checkpoint pull to close the subscribe/catch-up gap.
+                let _ = run_sync(&state, REALTIME_SYNC_SOURCE, false).await;
+                initialized_scope = Some(scope);
+            }
+            match supabase_sync::connect_realtime(&config, &session).await {
+                Ok(mut subscription) => {
+                    reconnect_attempt = 0;
+                    {
+                        let state = app_handle.state::<AppState>();
+                        // Subscribe before pulling so a change committed during catch-up
+                        // still produces a Realtime wake-up after the checkpoint advances.
+                        let _ = run_sync(&state, REALTIME_SYNC_SOURCE, false).await;
+                    }
+                    loop {
+                        tokio::select! {
+                            event = subscription.wait_for_change() => {
+                                match event {
+                                    Ok(()) => {
+                                        let state = app_handle.state::<AppState>();
+                                        if let Ok(status) =
+                                            run_sync(&state, REALTIME_SYNC_SOURCE, false).await
+                                        {
+                                            let _ = app_handle.emit(
+                                                SUPABASE_REALTIME_SYNCED_EVENT,
+                                                status,
+                                            );
+                                        }
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
+                            changed = sync_signal.changed() => {
+                                if changed.is_err() {
+                                    return;
+                                }
+                                let state = app_handle.state::<AppState>();
+                                if supabase_sync_context_matches(&state, &profile, &session) {
+                                    // Local outbox work uses REST immediately while the
+                                    // established Realtime subscription stays connected.
+                                    let _ = run_sync(&state, REALTIME_SYNC_SOURCE, true).await;
+                                } else {
+                                    // Profile or session changed; rebuild the subscription.
+                                    break;
+                                }
+                            }
+                            _ = tokio::time::sleep(supabase_session_refresh_delay(&session)) => {
+                                // Refresh the Auth token before expiry and reconnect with
+                                // the rotated access token. This does not poll business data.
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(_) => {
+                    let delay = supabase_sync::realtime_reconnect_delay(reconnect_attempt);
+                    reconnect_attempt = reconnect_attempt.saturating_add(1);
+                    tokio::select! {
+                        _ = tokio::time::sleep(delay) => {}
+                        changed = sync_signal.changed() => {
+                            if changed.is_err() {
+                                return;
+                            }
+                            let state = app_handle.state::<AppState>();
+                            // Realtime availability must not block local outbox uploads.
+                            let _ = run_sync(&state, REALTIME_SYNC_SOURCE, true).await;
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
 
 fn is_telegram_bridge_mode() -> bool {
     env::args_os()
@@ -12365,9 +15158,11 @@ fn main() {
 
     #[cfg(desktop)]
     {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            show_main_window(app);
-        }));
+        if std::env::var_os("TRANSFER_GENIE_ALLOW_TEST_INSTANCE").is_none() {
+            builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+                show_main_window(app);
+            }));
+        }
         builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
     }
 
@@ -12379,6 +15174,13 @@ fn main() {
             let default_download_dir = default_download_dir(&app.handle())?;
 
             let settings = load_settings(&settings_path, &default_download_dir)?;
+            let restored_supabase_sessions = credential_store::restore_sessions(
+                settings
+                    .storage_profiles
+                    .iter()
+                    .filter(|profile| profile.provider_kind == StorageProviderKind::Supabase)
+                    .map(|profile| profile.id.clone()),
+            );
             let migration_endpoint_id = settings.active_webdav_id.as_deref().or_else(|| {
                 settings
                     .webdav_endpoints
@@ -12397,6 +15199,8 @@ fn main() {
                 &workspace_layout,
             )?;
             db::init_db(&db_path, migration_endpoint_id)?;
+            db::recover_all_outbox_claims(&db_path, now_ms())
+                .map_err(|err| format!("恢复未确认同步任务失败: {err}"))?;
             fs::create_dir_all(&files_base_dir)
                 .map_err(|err| format!("创建文件目录失败: {err}"))?;
 
@@ -12408,6 +15212,8 @@ fn main() {
                 files_base_dir,
                 default_download_dir,
                 settings: Mutex::new(settings),
+                supabase_sessions: Mutex::new(restored_supabase_sessions),
+                supabase_auth_guard: AsyncMutex::new(()),
                 sync_status: Mutex::new(SyncStatus::idle()),
                 sync_guard: Arc::new(AsyncMutex::new(())),
                 sync_cancel: Mutex::new(None),
@@ -12744,6 +15550,19 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             get_settings,
+            supabase_sign_in,
+            supabase_refresh_session,
+            supabase_current_user,
+            supabase_logout,
+            test_supabase_connection,
+            preview_storage_import,
+            start_storage_import,
+            resume_storage_import,
+            get_storage_import_status,
+            list_pending_operations,
+            retry_pending_operation,
+            list_sync_conflicts,
+            resolve_sync_conflict,
             get_telegram_bridge_status,
             list_integration_modules,
             get_auto_backup_status,
@@ -12869,10 +15688,10 @@ fn main() {
 mod tests {
     use super::*;
     use axum::body::Body;
-    use axum::extract::{Path as AxumPath, State as TestAxumState};
-    use axum::http::StatusCode as HttpStatusCode;
+    use axum::extract::{Path as AxumPath, Query, State as TestAxumState};
+    use axum::http::{HeaderMap, StatusCode as HttpStatusCode};
     use axum::response::Response as AxumResponse;
-    use axum::routing::get;
+    use axum::routing::{get, post};
     use axum::Router as TestRouter;
     use std::collections::HashMap as TestHashMap;
     use std::fs;
@@ -12922,6 +15741,44 @@ mod tests {
         urlencoding::decode(path)
             .map(|value| value.into_owned())
             .unwrap_or_else(|_| path.to_string())
+    }
+
+    #[test]
+    fn supabase_attachment_paths_include_the_rls_space_segment() {
+        assert_eq!(
+            supabase_attachment_object_path(
+                "user-id",
+                "space-id",
+                "attachment-id",
+                "客户 合同#1.pdf",
+            ),
+            "user-id/space-id/attachment-id/%E5%AE%A2%E6%88%B7%20%E5%90%88%E5%90%8C%231.pdf"
+        );
+    }
+
+    #[test]
+    fn supabase_realtime_refreshes_session_before_expiry_without_business_polling() {
+        let mut session = supabase_auth::SupabaseSession {
+            access_token: "access".into(),
+            refresh_token: "refresh".into(),
+            user_id: "user".into(),
+            email: "user@example.test".into(),
+            expires_at: 1_000,
+        };
+        assert_eq!(
+            supabase_session_refresh_delay_at(&session, 100),
+            Duration::from_secs(840)
+        );
+        session.expires_at = 120;
+        assert_eq!(
+            supabase_session_refresh_delay_at(&session, 100),
+            Duration::from_secs(1)
+        );
+        session.expires_at = 200_000;
+        assert_eq!(
+            supabase_session_refresh_delay_at(&session, 100),
+            Duration::from_secs(86_400)
+        );
     }
 
     struct TestDavServer {
@@ -13039,6 +15896,60 @@ mod tests {
         }
     }
 
+    async fn test_auth_refresh(
+        Query(query): Query<HashMap<String, String>>,
+        Json(body): Json<serde_json::Value>,
+    ) -> (HttpStatusCode, Json<serde_json::Value>) {
+        if query.get("grant_type").map(String::as_str) == Some("refresh_token")
+            && body["refresh_token"] == "saved-refresh-token"
+        {
+            return (
+                HttpStatusCode::OK,
+                Json(serde_json::json!({
+                    "access_token":"refreshed-access-token",
+                    "refresh_token":"rotated-refresh-token",
+                    "expires_in":3600,
+                    "user":{"id":"user-a","email":"user@example.invalid"}
+                })),
+            );
+        }
+        (
+            HttpStatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"message":"Invalid Refresh Token"})),
+        )
+    }
+
+    async fn test_auth_current_user(
+        headers: HeaderMap,
+    ) -> (HttpStatusCode, Json<serde_json::Value>) {
+        if headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            == Some("Bearer refreshed-access-token")
+        {
+            return (
+                HttpStatusCode::OK,
+                Json(serde_json::json!({
+                    "id":"user-a","email":"user@example.invalid"
+                })),
+            );
+        }
+        (
+            HttpStatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"message":"session revoked"})),
+        )
+    }
+
+    async fn spawn_test_auth() -> String {
+        let app = TestRouter::new()
+            .route("/auth/v1/token", post(test_auth_refresh))
+            .route("/auth/v1/user", get(test_auth_current_user));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{address}")
+    }
+
     async fn test_local_http_file_upload(
         TestAxumState(state): TestAxumState<Arc<AppState>>,
         multipart: Multipart,
@@ -13077,6 +15988,8 @@ mod tests {
 
     fn test_settings() -> Settings {
         Settings {
+            storage_profiles: Vec::new(),
+            active_storage_profile_id: None,
             webdav_endpoints: vec![WebDavEndpoint {
                 id: "endpoint-1".to_string(),
                 name: "Primary".to_string(),
@@ -13105,6 +16018,171 @@ mod tests {
         }
     }
 
+    fn test_supabase_settings() -> Settings {
+        let mut settings = test_settings();
+        settings.storage_profiles = vec![StorageProfile {
+            id: "supabase-1".to_string(),
+            name: "Supabase".to_string(),
+            provider_kind: StorageProviderKind::Supabase,
+            enabled: true,
+            webdav: None,
+            supabase: Some(crate::types::SupabaseStorageConfig {
+                api_url: "https://example.invalid".to_string(),
+                anon_key: "public-test-key".to_string(),
+                space_id: "00000000-0000-4000-8000-000000000001".to_string(),
+            }),
+        }];
+        settings.active_storage_profile_id = Some("supabase-1".to_string());
+        settings.webdav_endpoints.clear();
+        settings.active_webdav_id = None;
+        settings
+    }
+
+    fn install_test_supabase_session(state: &AppState) {
+        state
+            .supabase_sessions
+            .lock()
+            .expect("lock sessions")
+            .insert(
+                "supabase-1".to_string(),
+                supabase_auth::SupabaseSession {
+                    access_token: "access-token".to_string(),
+                    refresh_token: "refresh-token".to_string(),
+                    user_id: "user-a".to_string(),
+                    email: "user@example.invalid".to_string(),
+                    expires_at: i64::MAX,
+                },
+            );
+    }
+
+    fn test_supabase_settings_with_url(api_url: String) -> Settings {
+        let mut settings = test_supabase_settings();
+        settings.storage_profiles[0]
+            .supabase
+            .as_mut()
+            .unwrap()
+            .api_url = api_url;
+        settings
+    }
+
+    #[tokio::test]
+    async fn restored_supabase_session_refreshes_and_persists_rotated_tokens() {
+        let _credential_guard = credential_store::credential_test_guard();
+        let profile_id = format!("supabase-session-refresh-{}", rand::random::<u64>());
+        let api_url = spawn_test_auth().await;
+        let temp_dir = std::env::temp_dir().join(&profile_id);
+        fs::create_dir_all(&temp_dir).unwrap();
+        let mut settings = test_supabase_settings_with_url(api_url);
+        settings.storage_profiles[0].id = profile_id.clone();
+        settings.active_storage_profile_id = Some(profile_id.clone());
+        let saved = supabase_auth::SupabaseSession {
+            access_token: "expired-access-token".into(),
+            refresh_token: "saved-refresh-token".into(),
+            user_id: "user-a".into(),
+            email: "user@example.invalid".into(),
+            expires_at: 1,
+        };
+        credential_store::save_session(&profile_id, &saved).unwrap();
+        let state = test_app_state(&temp_dir, settings);
+        *state.supabase_sessions.lock().unwrap() =
+            credential_store::restore_sessions([profile_id.clone()]);
+
+        let restored = verified_supabase_session(&state, &profile_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.access_token, "refreshed-access-token");
+        assert_eq!(restored.refresh_token, "rotated-refresh-token");
+        let persisted = credential_store::load_session(&profile_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.refresh_token, "rotated-refresh-token");
+
+        credential_store::delete_session(&profile_id).unwrap();
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn revoked_refresh_token_clears_restored_supabase_session() {
+        let _credential_guard = credential_store::credential_test_guard();
+        let profile_id = format!("supabase-session-revoked-{}", rand::random::<u64>());
+        let api_url = spawn_test_auth().await;
+        let temp_dir = std::env::temp_dir().join(&profile_id);
+        fs::create_dir_all(&temp_dir).unwrap();
+        let mut settings = test_supabase_settings_with_url(api_url);
+        settings.storage_profiles[0].id = profile_id.clone();
+        settings.active_storage_profile_id = Some(profile_id.clone());
+        let saved = supabase_auth::SupabaseSession {
+            access_token: "expired-access-token".into(),
+            refresh_token: "revoked-refresh-token".into(),
+            user_id: "user-a".into(),
+            email: "user@example.invalid".into(),
+            expires_at: 1,
+        };
+        credential_store::save_session(&profile_id, &saved).unwrap();
+        let state = test_app_state(&temp_dir, settings);
+        *state.supabase_sessions.lock().unwrap() =
+            credential_store::restore_sessions([profile_id.clone()]);
+
+        let error = verified_supabase_session(&state, &profile_id)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.kind,
+            supabase_auth::SupabaseAuthErrorKind::SessionRevoked
+        );
+        assert!(!state
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .contains_key(&profile_id));
+        assert!(credential_store::load_session(&profile_id)
+            .unwrap()
+            .is_none());
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn local_logout_clears_saved_session_when_remote_is_unreachable() {
+        let _credential_guard = credential_store::credential_test_guard();
+        let profile_id = format!("supabase-local-logout-{}", rand::random::<u64>());
+        let temp_dir = std::env::temp_dir().join(&profile_id);
+        fs::create_dir_all(&temp_dir).unwrap();
+        let mut settings = test_supabase_settings_with_url("http://127.0.0.1:1".into());
+        settings.storage_profiles[0].id = profile_id.clone();
+        settings.active_storage_profile_id = Some(profile_id.clone());
+        let session = supabase_auth::SupabaseSession {
+            access_token: "access-token".into(),
+            refresh_token: "refresh-token".into(),
+            user_id: "user-a".into(),
+            email: "user@example.invalid".into(),
+            expires_at: i64::MAX,
+        };
+        credential_store::save_session(&profile_id, &session).unwrap();
+        let state = test_app_state(&temp_dir, settings);
+        state
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .insert(profile_id.clone(), session);
+
+        let status = supabase_logout_impl(&state, profile_id.clone())
+            .await
+            .unwrap();
+        assert!(!status.signed_in);
+        assert!(credential_store::load_session(&profile_id)
+            .unwrap()
+            .is_none());
+        assert!(!state
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .contains_key(&profile_id));
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
     fn test_app_state(temp_dir: &Path, settings: Settings) -> AppState {
         let settings_path = temp_dir.join("settings.json");
         let db_path = temp_dir.join("messages.sqlite");
@@ -13118,6 +16196,8 @@ mod tests {
             files_base_dir: workspace_layout.endpoints_dir(),
             default_download_dir: temp_dir.join("downloads"),
             settings: Mutex::new(settings),
+            supabase_sessions: Mutex::new(HashMap::new()),
+            supabase_auth_guard: AsyncMutex::new(()),
             sync_status: Mutex::new(SyncStatus::idle()),
             sync_guard: Arc::new(AsyncMutex::new(())),
             sync_cancel: Mutex::new(None),
@@ -14680,6 +17760,134 @@ mod tests {
     }
 
     #[test]
+    fn normalize_settings_migrates_legacy_webdav_profiles_without_loss() {
+        let settings = test_settings();
+        let download_dir = std::env::temp_dir().join("transfer-genie-profile-migration");
+
+        let normalized = normalize_settings(settings, &download_dir).expect("normalize settings");
+
+        assert_eq!(normalized.storage_profiles.len(), 1);
+        assert_eq!(
+            normalized.active_storage_profile_id.as_deref(),
+            Some("endpoint-1")
+        );
+        let profile = &normalized.storage_profiles[0];
+        assert_eq!(profile.provider_kind, StorageProviderKind::Webdav);
+        let webdav = profile.webdav.as_ref().expect("webdav config");
+        assert_eq!(webdav.url, "https://example.com/dav");
+        assert_eq!(webdav.username, "user");
+        assert_eq!(webdav.password, "pass");
+        assert_eq!(normalized.webdav_endpoints[0].password, "pass");
+        assert_eq!(normalized.active_webdav_id.as_deref(), Some("endpoint-1"));
+    }
+
+    #[test]
+    fn normalize_settings_preserves_supabase_and_webdav_as_independent_profiles() {
+        let mut settings = test_settings();
+        settings.storage_profiles = vec![StorageProfile {
+            id: "supabase-1".to_string(),
+            name: "Cloud".to_string(),
+            provider_kind: StorageProviderKind::Supabase,
+            enabled: true,
+            webdav: None,
+            supabase: Some(crate::types::SupabaseStorageConfig {
+                api_url: "https://supabase.example.com/".to_string(),
+                anon_key: "public-key".to_string(),
+                space_id: "space-a".to_string(),
+            }),
+        }];
+        settings.active_storage_profile_id = Some("supabase-1".to_string());
+        let download_dir = std::env::temp_dir().join("transfer-genie-profile-independent");
+
+        let normalized = normalize_settings(settings, &download_dir).expect("normalize settings");
+
+        assert_eq!(normalized.storage_profiles.len(), 2);
+        assert_eq!(
+            normalized.active_storage_profile_id.as_deref(),
+            Some("supabase-1")
+        );
+        assert_eq!(normalized.active_webdav_id, None);
+        assert_eq!(normalized.webdav_endpoints.len(), 1);
+        let supabase = normalized
+            .storage_profiles
+            .iter()
+            .find(|profile| profile.id == "supabase-1")
+            .and_then(|profile| profile.supabase.as_ref())
+            .expect("supabase config");
+        assert_eq!(supabase.api_url, "https://supabase.example.com");
+        assert_eq!(supabase.anon_key, "public-key");
+        assert!(uuid::Uuid::parse_str(&supabase.space_id).is_ok());
+    }
+
+    #[test]
+    fn normalize_settings_assigns_stable_uuid_to_empty_supabase_space() {
+        let mut settings = test_settings();
+        settings.storage_profiles = vec![StorageProfile {
+            id: "supabase-empty-space".to_string(),
+            name: "Cloud".to_string(),
+            provider_kind: StorageProviderKind::Supabase,
+            enabled: true,
+            webdav: None,
+            supabase: Some(crate::types::SupabaseStorageConfig {
+                api_url: "https://supabase.example.com".to_string(),
+                anon_key: "public-key".to_string(),
+                space_id: String::new(),
+            }),
+        }];
+        settings.active_storage_profile_id = Some("supabase-empty-space".to_string());
+        let download_dir = std::env::temp_dir().join("transfer-genie-empty-space-id");
+
+        let first = normalize_settings(settings, &download_dir).expect("normalize settings");
+        let first_space_id = first.storage_profiles[0]
+            .supabase
+            .as_ref()
+            .expect("supabase config")
+            .space_id
+            .clone();
+        let second = normalize_settings(first, &download_dir).expect("normalize again");
+        let second_space_id = &second.storage_profiles[0]
+            .supabase
+            .as_ref()
+            .expect("supabase config")
+            .space_id;
+
+        assert!(uuid::Uuid::parse_str(&first_space_id).is_ok());
+        assert_eq!(&first_space_id, second_space_id);
+    }
+
+    #[test]
+    fn legacy_webdav_settings_round_trip_after_profile_migration() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-storage-profile-round-trip-{}",
+            now_ms()
+        ));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let settings_path = temp_dir.join("settings.json");
+        let legacy = test_settings();
+        fs::write(
+            &settings_path,
+            serde_json::to_vec_pretty(&legacy).expect("serialize legacy settings"),
+        )
+        .expect("write legacy settings");
+
+        let loaded = load_settings(&settings_path, &temp_dir).expect("load migrated settings");
+        let reloaded = load_settings(&settings_path, &temp_dir).expect("reload migrated settings");
+
+        assert_eq!(
+            loaded.active_storage_profile_id.as_deref(),
+            Some("endpoint-1")
+        );
+        assert_eq!(
+            reloaded.active_storage_profile_id,
+            loaded.active_storage_profile_id
+        );
+        assert_eq!(reloaded.storage_profiles, loaded.storage_profiles);
+        assert_eq!(reloaded.webdav_endpoints[0].username, "user");
+        assert_eq!(reloaded.webdav_endpoints[0].password, "pass");
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
     fn normalize_settings_rejects_invalid_local_http_api_bind_address() {
         let mut settings = test_settings();
         settings.local_http_api.bind_address = "not-an-ip".to_string();
@@ -14854,6 +18062,312 @@ mod tests {
         assert_eq!(applied.tags[0].name, "重要");
         assert_eq!(applied.tag_ids, vec![applied.tags[0].id.clone()]);
         assert!(applied.cleanup_targets.is_empty());
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_message_tag_mark_pin_and_delete_commands_enqueue_locally() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-supabase-local-{}", now_ms()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let state = test_app_state(&temp_dir, test_supabase_settings());
+        db::init_db(&state.db_path, None).expect("initialize database");
+        install_test_supabase_session(&state);
+
+        let sent = send_text_impl(&state, "hello cloud".to_string(), None, None)
+            .await
+            .expect("save Supabase text locally");
+        let tag = create_marked_tag_impl(&state, "Important".to_string())
+            .await
+            .expect("create tag locally");
+        set_message_marked(
+            &state,
+            sent.filename.clone(),
+            true,
+            vec![tag.id.clone()],
+            None,
+        )
+        .await
+        .expect("mark message locally");
+        assert!(
+            toggle_marked_message_pin_impl(&state, sent.filename.clone())
+                .await
+                .expect("pin message locally")
+        );
+        assert_eq!(
+            set_marked_messages_tags_impl(&state, vec![sent.filename.clone()], Vec::new())
+                .await
+                .expect("replace message tags locally"),
+            1
+        );
+        let deleted = delete_messages_impl(&state, vec![sent.filename.clone()], true)
+            .await
+            .expect("tombstone message locally");
+        assert_eq!(deleted.deleted, 1);
+
+        let conn = rusqlite::Connection::open(&state.db_path).expect("open database");
+        let message_scope: (String, String, String) = conn
+            .query_row(
+                "SELECT endpoint_id, owner_scope, sync_state FROM messages WHERE filename=?1",
+                rusqlite::params![sent.filename],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read scoped message");
+        assert_eq!(
+            message_scope,
+            ("supabase-1".into(), "user-a".into(), "pending".into())
+        );
+        let tombstoned: i64 = conn
+            .query_row(
+                "SELECT deleted_at_ms IS NOT NULL FROM messages WHERE filename=?1",
+                rusqlite::params![sent.filename],
+                |row| row.get(0),
+            )
+            .expect("read tombstone");
+        assert_eq!(tombstoned, 1);
+        let operations: Vec<(String, String)> = {
+            let mut statement = conn
+                .prepare(
+                    "SELECT entity_type, action FROM sync_outbox
+                     WHERE endpoint_id='supabase-1' AND owner_scope='user-a'
+                     ORDER BY created_at_ms, rowid",
+                )
+                .expect("prepare outbox query");
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .expect("query outbox")
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .expect("collect outbox")
+        };
+        assert_eq!(operations.len(), 6);
+        assert_eq!(operations[0], ("message".into(), "upsert".into()));
+        assert_eq!(operations[1], ("tag".into(), "upsert".into()));
+        assert_eq!(
+            operations.last(),
+            Some(&("message".into(), "delete".into()))
+        );
+        drop(conn);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_send_creates_tag_before_marked_message() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-send-marked-tag-{}", now_ms()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let state = test_app_state(&temp_dir, test_supabase_settings());
+        db::init_db(&state.db_path, None).expect("initialize database");
+        install_test_supabase_session(&state);
+
+        let sent = send_text_impl(
+            &state,
+            "marked cloud message".into(),
+            None,
+            Some(SendMarkedOptionsInput {
+                marked: true,
+                due_date: Some("2026-12-31".into()),
+                created_tags: vec![PendingCreatedTagInput {
+                    name: "Cloud Tag".into(),
+                    selected: true,
+                }],
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("save marked message with new tag");
+
+        assert_eq!(sent.marked_tag_ids.len(), 1);
+        let conn = rusqlite::Connection::open(&state.db_path).unwrap();
+        let operations = {
+            let mut statement = conn
+                .prepare(
+                    "SELECT operation_id,entity_type,depends_on_operation_id FROM sync_outbox
+                     WHERE endpoint_id='supabase-1' AND owner_scope='user-a' ORDER BY rowid",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert_eq!(operations.len(), 2);
+        assert_eq!(operations[0].1, "tag");
+        assert_eq!(operations[1].1, "message");
+        assert_eq!(operations[1].2.as_deref(), Some(operations[0].0.as_str()));
+        let stored =
+            db::get_message_for_scope(&state.db_path, "supabase-1", "user-a", &sent.filename)
+                .unwrap()
+                .unwrap();
+        assert!(stored.marked);
+        assert_eq!(stored.marked_tag_ids, sent.marked_tag_ids);
+        assert_eq!(stored.marked_due_date.as_deref(), Some("2026-12-31"));
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_pending_status_records_fast_zero_nonzero_zero_transitions() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-sync-status-{}", now_ms()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let state = test_app_state(&temp_dir, test_supabase_settings());
+        db::init_db(&state.db_path, None).expect("initialize database");
+        install_test_supabase_session(&state);
+        let initial = refresh_supabase_status(&state, None).expect("initial status");
+        assert_eq!(
+            (initial.phase.as_str(), initial.pending_count),
+            ("synced", 0)
+        );
+
+        let sent = send_text_impl(&state, "observable".into(), None, None)
+            .await
+            .expect("save message");
+        let pending = refresh_supabase_status(&state, None).expect("pending status");
+        assert_eq!(
+            (pending.phase.as_str(), pending.pending_count),
+            ("pending", 1)
+        );
+        assert!(pending.transition_seq > initial.transition_seq);
+
+        let operation_id: String = rusqlite::Connection::open(&state.db_path)
+            .unwrap()
+            .query_row(
+                "SELECT operation_id FROM sync_outbox WHERE entity_type='message' LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let claimed = db::claim_outbox_operations(
+            &state.db_path,
+            "supabase-1",
+            "user-a",
+            "worker",
+            now_ms(),
+            30_000,
+            1,
+            true,
+        )
+        .unwrap();
+        assert_eq!(claimed[0].operation_id, operation_id);
+        db::apply_outbox_success(&state.db_path, &claimed[0], "worker", 1, now_ms()).unwrap();
+        let synced = refresh_supabase_status(&state, None).expect("synced status");
+        assert_eq!((synced.phase.as_str(), synced.pending_count), ("synced", 0));
+        assert!(synced.transition_seq > pending.transition_seq);
+        assert!(!sent.filename.is_empty());
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_mark_mutations_signal_the_background_sync_loop() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-mark-wakeup-{}", now_ms()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let state = test_app_state(&temp_dir, test_supabase_settings());
+        db::init_db(&state.db_path, None).expect("initialize database");
+        install_test_supabase_session(&state);
+        let mut signal = state.sync_loop_signal.subscribe();
+
+        let sent = send_text_impl(&state, "wake mark sync".into(), None, None)
+            .await
+            .expect("save Supabase message");
+        signal
+            .changed()
+            .await
+            .expect("message save should wake sync loop");
+
+        let tag = create_marked_tag_impl(&state, "Wake tag".into())
+            .await
+            .expect("create Supabase tag");
+        signal
+            .changed()
+            .await
+            .expect("tag create should wake sync loop");
+
+        set_message_marked(
+            &state,
+            sent.filename.clone(),
+            true,
+            vec![tag.id],
+            Some("2026-12-31".into()),
+        )
+        .await
+        .expect("mark Supabase message");
+        signal
+            .changed()
+            .await
+            .expect("mark update should wake sync loop");
+
+        assert!(toggle_marked_message_pin_impl(&state, sent.filename)
+            .await
+            .expect("pin Supabase message"));
+        signal
+            .changed()
+            .await
+            .expect("pin update should wake sync loop");
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_file_send_keeps_local_original_and_queues_metadata_without_network() {
+        let temp_dir = std::env::temp_dir().join(format!("transfer-genie-file-local-{}", now_ms()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let source = temp_dir.join("source.bin");
+        fs::write(&source, b"attachment bytes").expect("write source");
+        let state = test_app_state(&temp_dir, test_supabase_settings());
+        db::init_db(&state.db_path, None).expect("initialize database");
+        install_test_supabase_session(&state);
+        let sent = send_file_path_impl(&state, None, &source, "source.bin".into(), None, None)
+            .await
+            .expect("save attachment locally");
+        let conn = rusqlite::Connection::open(&state.db_path).unwrap();
+        let local_path: String = conn.query_row(
+            "SELECT local_path FROM attachment_sync WHERE endpoint_id='supabase-1' AND owner_scope='user-a'",
+            [], |row| row.get(0)).unwrap();
+        assert!(Path::new(&local_path).is_file());
+        assert_eq!(fs::read(&local_path).unwrap(), b"attachment bytes");
+        let outbox: i64 = conn.query_row(
+            "SELECT count(*) FROM sync_outbox WHERE endpoint_id='supabase-1' AND owner_scope='user-a'",
+            [], |row| row.get(0)).unwrap();
+        assert_eq!(outbox, 2);
+        assert!(!sent.filename.is_empty());
+        drop(conn);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_cached_preview_opens_offline_without_network() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-preview-local-{}", now_ms()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let source = temp_dir.join("photo.png");
+        fs::write(&source, b"cached-image").unwrap();
+        let state = test_app_state(&temp_dir, test_supabase_settings());
+        db::init_db(&state.db_path, None).unwrap();
+        install_test_supabase_session(&state);
+        let sent = send_file_path_impl(&state, None, &source, "photo.png".into(), None, None)
+            .await
+            .unwrap();
+        let settings = current_settings(&state).unwrap();
+        let (profile, session) = active_supabase_context(&state, &settings).unwrap().unwrap();
+        let message = db::get_message_for_scope(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            &sent.filename,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            fs::read(message.local_path.unwrap()).unwrap(),
+            b"cached-image"
+        );
         let _ = fs::remove_dir_all(temp_dir);
     }
 
@@ -15766,6 +19280,8 @@ mod tests {
         let mut speech_to_text = SpeechToTextSettings::default();
         speech_to_text.system_dictation_shortcut.clear();
         let settings = ExportSettings {
+            storage_profiles: Vec::new(),
+            active_storage_profile_id: None,
             webdav_endpoints: Vec::new(),
             active_webdav_id: None,
             refresh_interval_secs: 5,
@@ -15789,6 +19305,87 @@ mod tests {
         assert_eq!(value["global_hotkey"], "");
         assert_eq!(value["send_hotkey"], "");
         assert_eq!(value["speech_to_text"]["system_dictation_shortcut"], "");
+    }
+
+    #[test]
+    fn storage_profile_export_keeps_webdav_secret_out_of_plain_settings() {
+        let mut settings = normalize_settings(
+            test_settings(),
+            &std::env::temp_dir().join("transfer-genie-export-profile"),
+        )
+        .expect("normalize settings");
+        settings.storage_profiles.push(StorageProfile {
+            id: "cloud".into(),
+            name: "Cloud".into(),
+            provider_kind: StorageProviderKind::Supabase,
+            enabled: true,
+            webdav: None,
+            supabase: Some(crate::types::SupabaseStorageConfig {
+                api_url: "https://supabase.example.com".into(),
+                anon_key: "public-anon-key".into(),
+                space_id: "space-a".into(),
+            }),
+        });
+        let secrets = extract_export_secrets(&settings);
+        assert_eq!(secrets.endpoints[0].password, "pass");
+
+        let mut profiles = settings.storage_profiles.clone();
+        for profile in profiles.iter_mut() {
+            if let Some(webdav) = profile.webdav.as_mut() {
+                webdav.username.clear();
+                webdav.password.clear();
+            }
+        }
+        let serialized = serde_json::to_string(&profiles).expect("serialize profiles");
+        assert!(!serialized.contains("\"password\":\"pass\""));
+        assert!(!serialized.contains("\"username\":\"user\""));
+        assert!(serialized.contains("public-anon-key"));
+    }
+
+    #[test]
+    fn legacy_export_settings_normalize_to_storage_profiles() {
+        let legacy: ExportSettings = serde_json::from_value(serde_json::json!({
+            "webdav_endpoints":[{
+                "id":"legacy-webdav","name":"Legacy",
+                "url":"https://example.com/dav","username":"","password":"",
+                "enabled":true
+            }],
+            "active_webdav_id":"legacy-webdav",
+            "refresh_interval_secs":5
+        }))
+        .expect("parse legacy export settings");
+        let settings = Settings {
+            storage_profiles: legacy.storage_profiles,
+            active_storage_profile_id: legacy.active_storage_profile_id,
+            webdav_endpoints: legacy.webdav_endpoints,
+            active_webdav_id: legacy.active_webdav_id,
+            sender_name: "tester".into(),
+            refresh_interval_secs: legacy.refresh_interval_secs,
+            download_dir: String::new(),
+            save_filename_rule: legacy.save_filename_rule,
+            send_hotkey: legacy.send_hotkey.unwrap_or_default(),
+            shortcuts_enabled: legacy.shortcuts_enabled.unwrap_or(true),
+            global_hotkey_enabled: legacy.global_hotkey_enabled,
+            global_hotkey: legacy.global_hotkey.unwrap_or_default(),
+            auto_start: false,
+            auto_update_enabled: legacy.auto_update_enabled,
+            local_http_api: legacy.local_http_api,
+            send: legacy.send,
+            telegram: TelegramBridgeSettings::default(),
+            backup: BackupSettings::default(),
+            ai: legacy.ai,
+            speech_to_text: legacy.speech_to_text,
+        };
+        let normalized = normalize_settings(
+            settings,
+            &std::env::temp_dir().join("transfer-genie-import-legacy-profile"),
+        )
+        .expect("normalize legacy export");
+        assert_eq!(normalized.storage_profiles.len(), 1);
+        assert_eq!(
+            normalized.active_storage_profile_id.as_deref(),
+            Some("legacy-webdav")
+        );
     }
 
     #[test]

@@ -178,6 +178,19 @@ const app = createApp({
     settingsWebdavCardClasses(endpoint: any): Record<string, boolean> {
       return { "is-disabled": !!(endpoint && !endpoint.enabled) };
     },
+    supabaseAccountLabel(): string {
+      const status = this.settingsFormState().supabaseAccountStatus;
+      if (!status?.signedIn) return "未登录";
+      const email = String(status.email || "");
+      const [name, domain] = email.split("@");
+      return domain ? `${name.slice(0, 2)}***@${domain}` : "已登录";
+    },
+    supabaseConnectionLabel(): string {
+      const status = this.settingsFormState().supabaseConnectionStatus;
+      if (!status) return "尚未检查";
+      if (status.realtime && status.storage && status.rls) return `已就绪 · ${status.schemaVersion || "Schema 已部署"}`;
+      return status.message || status.errorCode || "检查未通过";
+    },
 
     // --- Transfer tasks ---
     transferTaskState(): Record<string, any> {
@@ -375,6 +388,10 @@ const app = createApp({
     submitManualBackupDialog: (...args: any[]) => callAction("submitManualBackupDialog", ...args),
     updateSettingsAutoBackupField: (...args: any[]) => callAction("updateSettingsAutoBackupField", ...args),
     updateSettingsFormField: (...args: any[]) => callAction("updateSettingsFormField", ...args),
+    testSupabaseSettings: (...args: any[]) => callAction("testSupabaseSettings", ...args),
+    signInSupabase: (...args: any[]) => callAction("signInSupabase", ...args),
+    logoutSupabase: (...args: any[]) => callAction("logoutSupabase", ...args),
+    importWebdavToSupabase: (...args: any[]) => callAction("importWebdavToSupabase", ...args),
     updateAiActionField: (...args: any[]) => callAction("updateAiActionField", ...args),
     updateAiActionFavorite: (...args: any[]) => callAction("updateAiActionFavorite", ...args),
     addAiAction: (...args: any[]) => callAction("addAiAction", ...args),

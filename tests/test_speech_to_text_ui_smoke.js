@@ -132,6 +132,7 @@ function mockSettings() {
     global_hotkey: 'alt+t',
     default_editor_format: 'text',
     active_webdav_id: 'endpoint-1',
+    active_storage_profile_id: 'endpoint-1',
     webdav_endpoints: [{
       id: 'endpoint-1',
       name: 'Smoke Endpoint',
@@ -139,6 +140,13 @@ function mockSettings() {
       username: 'smoke',
       password: 'secret',
       enabled: true,
+    }],
+    storage_profiles: [{
+      id: 'endpoint-1',
+      name: 'Smoke Endpoint',
+      provider_kind: 'webdav',
+      enabled: true,
+      webdav: { url: 'https://example.test/dav', username: 'smoke', password: 'secret' },
     }],
     send: { copy_after_send: false },
     backup: {},
@@ -222,6 +230,9 @@ function preloadScript() {
       failAiPolish: false,
       aiStreamDelayMs: 0,
       systemDictationStatus: '',
+      failSupabaseLogin: false,
+      storageImportStatus: null,
+      storageImportStarted: false,
       chunkDurationMs: 0,
       nextSampleCount: 0,
       chunkTextPrefix: '',
@@ -306,6 +317,31 @@ function preloadScript() {
             throw new Error('thumbnail unavailable');
           }
           if (command === 'save_settings') return args.settings;
+          if (command === 'supabase_sign_in') {
+            await new Promise((resolve) => setTimeout(resolve, 80));
+            if (window.__speechSmoke.failSupabaseLogin) throw new Error('Invalid login credentials');
+            return {
+              profileId: args?.input?.profileId || '',
+              signedIn: true,
+              userId: 'supabase-user-1',
+              email: args?.input?.email || '',
+              expiresAt: Date.now() + 3600000,
+            };
+          }
+          if (command === 'preview_storage_import') {
+            return { batchId: 'import-batch-1', sourceProfileName: 'Smoke Endpoint', targetProfileName: 'Supabase', messageCount: 3, attachmentCount: 1, totalBytes: 2048, markedCount: 1, tagCount: 1 };
+          }
+          if (command === 'get_storage_import_status') {
+            return window.__speechSmoke.storageImportStatus;
+          }
+          if (command === 'start_storage_import') {
+            window.__speechSmoke.storageImportStarted = true;
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            window.__speechSmoke.storageImportStatus = { batchId: 'import-batch-1', status: 'running', totalItems: 4, appliedItems: 1, failedItems: 0, lastError: null };
+            await new Promise((resolve) => setTimeout(resolve, 350));
+            window.__speechSmoke.storageImportStatus = { batchId: 'import-batch-1', status: 'completed', totalItems: 4, appliedItems: 4, failedItems: 0, lastError: null };
+            return window.__speechSmoke.storageImportStatus;
+          }
           if (command === 'paste_dictation_text') {
             const text = String(args?.text || '');
             const pasted = !window.__speechSmoke.pasteWithoutFocus && !window.__speechSmoke.pasteReturnsNoPaste;
@@ -611,11 +647,121 @@ async function run() {
           && window.transferGenieDownloadBulkResource
           && window.transferGenieBulkDownloadDialogReady
         ) resolve(true);
-        else if (Date.now() - start > 15000) reject(new Error('speech UI did not initialize'));
+        else if (Date.now() - start > 15000) reject(new Error('speech UI did not initialize: ' + JSON.stringify({
+          toggle: !!document.querySelector('#speech-to-text-toggle'),
+          enabled: document.querySelector('#speech-to-text-enabled')?.checked,
+          endpoint: document.querySelector('#active-endpoint')?.value,
+          endpointText: document.querySelector('#active-endpoint')?.selectedOptions?.[0]?.textContent,
+          status: document.querySelector('#sync-status')?.textContent,
+          dictationHandler: !!window.__speechSmoke?.eventHandlers?.['system-dictation-toggle'],
+          bulkRuntime: !!window.transferGenieBulkDownloadRuntime,
+          bulkResource: !!window.transferGenieDownloadBulkResource,
+          bulkReady: !!window.transferGenieBulkDownloadDialogReady,
+          calls: window.__speechSmoke?.calls?.slice(-8),
+        })));
         else setTimeout(tick, 100);
       };
       tick();
     })`);
+    const supabaseLoginResult = await evaluate(client, `(async () => {
+      document.querySelector('[data-tab-target="settings"]')?.click();
+      const setInput = (selector, value) => {
+        const input = document.querySelector(selector);
+        input.value = value;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      };
+      setInput('#supabase-api-url', 'https://supabase.example.test');
+      setInput('#supabase-anon-key', 'public-anon-key');
+      setInput('#supabase-email', 'user@example.test');
+      setInput('#supabase-password', 'password-before-save');
+      window.__speechSmoke.calls = [];
+      document.querySelector('#supabase-login').click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const busyVisible = document.querySelector('#supabase-login').textContent.includes('登录中');
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const message = document.querySelector('.supabase-auth-message')?.textContent || '';
+          if (message.includes('登录成功')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('Supabase success feedback missing: ' + message));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const signInCall = window.__speechSmoke.calls.find((call) => call.command === 'supabase_sign_in');
+      const saveCall = window.__speechSmoke.calls.find((call) => call.command === 'save_settings');
+      setInput('#supabase-password', 'wrong-password');
+      window.__speechSmoke.failSupabaseLogin = true;
+      document.querySelector('#supabase-login').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const message = document.querySelector('.supabase-auth-message')?.textContent || '';
+          if (message.includes('Invalid login credentials')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('Supabase error feedback missing: ' + message));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      return {
+        busyVisible,
+        savedProfile: !!saveCall?.args?.settings?.storage_profiles?.find((item) => item.provider_kind === 'supabase'),
+        passwordReceived: signInCall?.args?.input?.password || '',
+        accountText: document.querySelector('.supabase-auth-message')?.textContent || '',
+        buttonEnabled: !document.querySelector('#supabase-login').disabled,
+      };
+    })()`);
+    assert.equal(supabaseLoginResult.busyVisible, true, 'Supabase login immediately shows a busy state');
+    assert.equal(supabaseLoginResult.savedProfile, true, 'Supabase profile is saved before login');
+    assert.equal(supabaseLoginResult.passwordReceived, 'password-before-save', 'profile save does not clear the submitted login password');
+    assert.match(supabaseLoginResult.accountText, /Invalid login credentials/, 'Supabase Auth failure is visible inside settings');
+    assert.equal(supabaseLoginResult.buttonEnabled, true, 'Supabase login button is restored after failure');
+    const storageImportResult = await evaluate(client, `(async () => {
+      window.prompt = () => '1';
+      window.__speechSmoke.storageImportStatus = null;
+      window.__speechSmoke.storageImportStarted = false;
+      document.querySelector('#supabase-import-webdav').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const title = document.querySelector('.dialog-overlay .dialog-title')?.textContent || '';
+          if (title.includes('确认导入到 Supabase')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('storage import confirmation missing'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      document.querySelector('.dialog-overlay .dialog-actions .primary').click();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const button = document.querySelector('#supabase-import-webdav');
+      const busyVisible = button.disabled && button.textContent.includes('导入中');
+      const progressVisible = document.querySelector('[role="progressbar"]') !== null;
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      const progressDuringImport = Number(document.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow') || 0);
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const title = document.querySelector('.dialog-overlay .dialog-title')?.textContent || '';
+          if (title.includes('导入完成')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('storage import completion missing: ' + title));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const completedMessage = document.querySelector('.dialog-overlay .dialog-text')?.textContent || '';
+      const restored = !button.disabled && button.textContent.includes('从 WebDAV 导入');
+      const progressHidden = document.querySelector('[role="progressbar"]') === null;
+      document.querySelector('.dialog-overlay .dialog-actions .primary')?.click();
+      return { busyVisible, progressVisible, progressDuringImport, completedMessage, progressHidden, restored, started: window.__speechSmoke.storageImportStarted };
+    })()`);
+    assert.equal(storageImportResult.started, true, 'confirmed WebDAV import invokes the backend command');
+    assert.equal(storageImportResult.busyVisible, true, 'WebDAV import immediately shows a busy button');
+    assert.equal(storageImportResult.progressVisible, true, 'WebDAV import renders a progress bar');
+    assert.equal(storageImportResult.progressDuringImport, 25, 'WebDAV import displays persisted batch progress while running');
+    assert.match(storageImportResult.completedMessage, /数据库记录和相关附件写入 Supabase/, 'completion confirms Supabase database and Storage writes');
+    assert.equal(storageImportResult.progressHidden, true, 'completed WebDAV import hides the progress bar');
+    assert.equal(storageImportResult.restored, true, 'WebDAV import button is restored after completion');
+    await evaluate(client, `document.querySelector('[data-tab-target="home"]')?.click()`);
     const bulkDownloadResult = JSON.parse(await evaluate(client, `(async () => JSON.stringify(await (async () => {
       document.querySelector('#open-bulk-download').click();
       await new Promise((resolve, reject) => {

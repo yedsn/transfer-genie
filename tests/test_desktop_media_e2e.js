@@ -205,6 +205,7 @@ async function runTest() {
     env: {
       ...process.env,
       TRANSFER_GENIE_APP_DATA_DIR: appData,
+      TRANSFER_GENIE_ALLOW_TEST_INSTANCE: '1',
       TRANSFER_GENIE_FFMPEG: FFMPEG,
       WEBVIEW2_USER_DATA_FOLDER: join(work, 'webview2'),
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port} --autoplay-policy=no-user-gesture-required`,
@@ -232,7 +233,7 @@ async function runTest() {
     assert.equal(uploadA.length, 6);
 
     console.log('Desktop E2E: switching to endpoint B');
-    const settingsB = await evaluate(client, `(async () => { const invoke = window.__TAURI__.core.invoke; const settings = await invoke('get_settings'); settings.active_webdav_id = 'desktop-b'; return invoke('save_settings', { settings }); })()`);
+    const settingsB = await evaluate(client, `(async () => { const invoke = window.__TAURI__.core.invoke; const settings = await invoke('get_settings'); settings.active_storage_profile_id = 'desktop-b'; settings.active_webdav_id = 'desktop-b'; return invoke('save_settings', { settings }); })()`);
     assert.equal(settingsB.active_webdav_id, 'desktop-b');
     const uploadB = await evaluate(client, `window.__TAURI__.core.invoke('send_file', { path: ${JSON.stringify(fixtures.png)}, clientId: 'desktop-e2e-b', markedOptions: null })`);
     assert.equal(uploadB.endpointId, 'desktop-b');
@@ -255,7 +256,7 @@ async function runTest() {
     assert.match(previewB, /desktop-b/i);
 
     console.log('Desktop E2E: verifying remote playback cache');
-    await evaluate(client, `(async () => { const invoke = window.__TAURI__.core.invoke; const settings = await invoke('get_settings'); settings.active_webdav_id = 'desktop-a'; return invoke('save_settings', { settings }); })()`);
+    await evaluate(client, `(async () => { const invoke = window.__TAURI__.core.invoke; const settings = await invoke('get_settings'); settings.active_storage_profile_id = 'desktop-a'; settings.active_webdav_id = 'desktop-a'; return invoke('save_settings', { settings }); })()`);
     const remoteTarget = byOriginal.get('movie.mp4');
     const messagesA = await evaluate(client, `window.__TAURI__.core.invoke('list_messages', { limit: 100 })`);
     const remoteMessage = messagesA.messages.find((item) => item.filename === remoteTarget.filename);
@@ -268,7 +269,7 @@ async function runTest() {
     assert.equal(bulkA.resources.find((item) => item.filename === remoteTarget.filename)?.status, 'notDownloaded');
 
     console.log('Desktop E2E: rendering and exercising media UI');
-    await evaluate(client, `(async () => { const invoke = window.__TAURI__.core.invoke; const settings = await invoke('get_settings'); settings.active_webdav_id = 'desktop-a'; await invoke('save_settings', { settings }); await invoke('refresh'); return true; })()`);
+    await evaluate(client, `(async () => { const invoke = window.__TAURI__.core.invoke; const settings = await invoke('get_settings'); settings.active_storage_profile_id = 'desktop-a'; settings.active_webdav_id = 'desktop-a'; await invoke('save_settings', { settings }); await invoke('refresh'); document.querySelector('#refresh-btn')?.click(); return true; })()`);
     await evaluate(client, `new Promise((resolve, reject) => { const started = Date.now(); const tick = () => document.querySelectorAll('#message-list .message-card').length >= 6 ? resolve(true) : Date.now() - started > 20000 ? reject(new Error('messages not rendered')) : setTimeout(tick, 100); tick(); })`);
     const ui = await evaluate(client, `(async () => {
       const cards = [...document.querySelectorAll('#message-list .message-card')];
@@ -277,7 +278,7 @@ async function runTest() {
       imageCard?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
       const imageOpened = !!document.querySelector('#message-preview.is-active .message-preview-image');
       document.querySelector('#message-preview .message-preview-close')?.click();
-      const playAndClose = async (card) => { card?.querySelector('.message-media-play-button')?.click(); await new Promise((r) => setTimeout(r, 80)); const load = document.querySelector('#message-preview .message-preview-media-load'); load?.click(); await new Promise((r) => setTimeout(r, 350)); const ready = !!document.querySelector('#message-preview audio:not([hidden]), #message-preview video:not([hidden])'); document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); return ready && !document.querySelector('#message-preview')?.classList.contains('is-active'); };
+      const playAndClose = async (card) => { card?.querySelector('.message-media-play-button')?.click(); await new Promise((r) => setTimeout(r, 80)); const load = document.querySelector('#message-preview .message-preview-media-load'); load?.click(); const started = Date.now(); while (Date.now() - started < 2000 && !document.querySelector('#message-preview audio:not([hidden]), #message-preview video:not([hidden])')) await new Promise((r) => setTimeout(r, 50)); const ready = !!document.querySelector('#message-preview audio:not([hidden]), #message-preview video:not([hidden])'); document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); return ready && !document.querySelector('#message-preview')?.classList.contains('is-active'); };
       const mp3Played = await playAndClose(mp3Card); const wavPlayed = await playAndClose(wavCard); const mp4Played = await playAndClose(mp4Card); const webmPlayed = await playAndClose(webmCard);
       mkvCard?.querySelector('.message-media-play-button')?.click(); document.querySelector('#message-preview .message-preview-media-load')?.click(); await new Promise((r) => setTimeout(r, 500)); const unsupported = document.querySelector('#message-preview .message-preview-media-status')?.textContent || ''; document.querySelector('#message-preview .message-preview-close')?.click();
       document.querySelector('#open-bulk-download')?.click();

@@ -394,7 +394,9 @@ function updateSettingsFormField(field, value, options = {}) {
   }
   syncVueSettingsForm(currentSettingsFormState);
   syncSendOptionsMenuState();
-  queueSettingsAutoSave(options);
+  if (field !== 'supabaseEmail' && field !== 'supabasePassword') {
+    queueSettingsAutoSave(options);
+  }
 }
 
 function defaultAiActions() {
@@ -1152,6 +1154,8 @@ let refreshTimer = null;
 let activeRefreshIntervalSecs = 5;
 let refreshCountdownSecs = 5;
 let didInitialSync = false;
+let supabaseRealtimeRefreshPending = false;
+let supabaseRealtimeRefreshQueued = false;
 let settingsSnapshots = [];
 let settingsBackupArchives = [];
 let currentSettingsFormState = {
@@ -1203,6 +1207,23 @@ let currentSettingsFormState = {
   speechToTextPolishDeepThinkingEnabled: false,
   speechToTextPolishTemperature: DEFAULT_SPEECH_POLISH_TEMPERATURE,
   speechToTextPolishTimeoutSecs: DEFAULT_SPEECH_POLISH_TIMEOUT_SECS,
+  storageProfiles: [],
+  activeStorageProfileId: null,
+  supabaseProfileId: '',
+  supabaseProfileName: 'Supabase',
+  supabaseApiUrl: '',
+  supabaseAnonKey: '',
+  supabaseEmail: '',
+  supabasePassword: '',
+  supabaseAccountStatus: null,
+  supabaseConnectionStatus: null,
+  supabaseAuthBusy: false,
+  supabaseAuthMessage: '',
+  supabaseAuthMessageKind: '',
+  storageImportBusy: false,
+  storageImportProgress: null,
+  storageImportMessage: '',
+  storageImportMessageKind: '',
 };
 let currentAutoBackupStatusState = {
   enabled: false,
@@ -1718,6 +1739,50 @@ function normalizeSendHotkey(value) {
     return SEND_HOTKEY.CTRL_ENTER;
   }
   return SEND_HOTKEY.ENTER;
+}
+
+async function openSupabaseSyncIssues() {
+  const profile = getActiveEndpoint();
+  if (profile?.provider_kind !== 'supabase') return;
+  try {
+    const [pending, conflicts] = await Promise.all([
+      invoke('list_pending_operations'),
+      invoke('list_sync_conflicts'),
+    ]);
+    if (conflicts.length) {
+      const conflict = conflicts[0];
+      const choice = window.prompt(
+        `有 ${conflicts.length} 项同步冲突。\n实体：${conflict.entityType} / ${conflict.entityId}\n本机 revision：${conflict.localRevision}，云端 revision：${conflict.remoteRevision ?? '无'}\n\n输入 local 保留本机内容并重提，输入 remote 采用云端内容。`,
+        'remote',
+      );
+      if (!choice) return;
+      const resolution = choice.trim().toLowerCase();
+      if (!['local', 'remote'].includes(resolution)) throw new Error('请输入 local 或 remote');
+      await invoke('resolve_sync_conflict', { input: { conflictId: conflict.id, resolution } });
+      setSuccessStatus('同步冲突已处理');
+      await refreshMessages();
+      return;
+    }
+    if (pending.length) {
+      const item = pending[0];
+      const details = pending.slice(0, 10).map((entry) =>
+        `${entry.entityType}/${entry.action} · ${entry.state}${entry.lastError ? ` · ${entry.lastError}` : ''}`,
+      ).join('\n');
+      const confirmed = await showConfirmationDialog({
+        title: `待同步 ${pending.length} 项`,
+        message: `${details}${pending.length > 10 ? '\n…' : ''}\n\n是否立即重试第一项？`,
+        confirmLabel: '立即重试',
+      });
+      if (confirmed) {
+        await invoke('retry_pending_operation', { operationId: item.operationId });
+        await loadSyncStatus();
+      }
+      return;
+    }
+    await showInfoDialog({ title: '同步状态', message: '当前没有待同步操作或冲突。' });
+  } catch (error) {
+    setErrorStatus(`读取同步问题失败：${error?.message || error}`);
+  }
 }
 
 function syncShortcutsEnabledState() {
@@ -4421,21 +4486,38 @@ function getEndpointLabel(endpoint) {
 }
 
 function getActiveEndpoint() {
-  return webdavEndpoints.find(
+  const webdav = webdavEndpoints.find(
     (endpoint) => endpoint.id === activeEndpointId && endpoint.enabled && endpoint.url.trim(),
   );
+  if (webdav) return webdav;
+  const profile = (currentSettingsFormState.storageProfiles || []).find(
+    (item) => item?.id === activeEndpointId && item?.enabled,
+  );
+  if (!profile) return null;
+  if (profile.provider_kind === 'supabase') {
+    return { id: profile.id, name: profile.name || 'Supabase', enabled: true,
+      url: profile.supabase?.api_url || '', provider_kind: 'supabase' };
+  }
+  return null;
+}
+
+function isActiveSupabaseEndpoint() {
+  return getActiveEndpoint()?.provider_kind === 'supabase';
 }
 
 function renderEndpointSelect() {
   if (!endpointSelect) return;
   endpointSelect.innerHTML = '';
-  const enabledEndpoints = webdavEndpoints.filter(
-    (endpoint) => endpoint.enabled && endpoint.url.trim(),
-  );
+  const enabledEndpoints = (currentSettingsFormState.storageProfiles || [])
+    .filter((profile) => profile?.enabled && (profile.provider_kind === 'supabase'
+      ? profile.supabase?.api_url?.trim() : profile.webdav?.url?.trim()))
+    .map((profile) => ({ id: profile.id, name: profile.name, enabled: true,
+      url: profile.provider_kind === 'supabase' ? profile.supabase?.api_url : profile.webdav?.url,
+      provider_kind: profile.provider_kind }));
   if (enabledEndpoints.length === 0) {
     const option = document.createElement('option');
     option.value = '';
-    option.textContent = '未启用 WebDAV 端点';
+    option.textContent = '未启用存储空间';
     endpointSelect.appendChild(option);
     endpointSelect.disabled = true;
     return;
@@ -4445,7 +4527,7 @@ function renderEndpointSelect() {
   if (!hasActive) {
     const placeholder = document.createElement('option');
     placeholder.value = '';
-    placeholder.textContent = '请选择 WebDAV 端点';
+    placeholder.textContent = '请选择存储空间';
     placeholder.disabled = true;
     placeholder.selected = true;
     endpointSelect.appendChild(placeholder);
@@ -4453,7 +4535,7 @@ function renderEndpointSelect() {
   enabledEndpoints.forEach((endpoint) => {
     const option = document.createElement('option');
     option.value = endpoint.id;
-    option.textContent = getEndpointLabel(endpoint);
+    option.textContent = `${endpoint.provider_kind === 'supabase' ? 'Supabase · ' : 'WebDAV · '}${getEndpointLabel(endpoint)}`;
     if (endpoint.id === activeEndpointId) {
       option.selected = true;
     }
@@ -9113,6 +9195,7 @@ function renderPreviewActions(message) {
 
 function renderPreviewContent(message) {
   if (!messagePreviewBody || !messagePreviewMeta || !message) return;
+  const viewModel = createMessageViewModel(message);
   messagePreviewBody.innerHTML = '';
   messagePreviewBody.className = 'message-preview-body';
 
@@ -10386,11 +10469,15 @@ async function loadSyncStatus() {
 function startRefreshTimer(intervalSecs) {
   if (refreshTimer) {
     clearInterval(refreshTimer);
+    refreshTimer = null;
   }
   const interval = Math.max(1, Number(intervalSecs) || 5);
   activeRefreshIntervalSecs = interval;
   refreshCountdownSecs = interval;
   updateRefreshCountdown();
+  if (isActiveSupabaseEndpoint()) {
+    return;
+  }
   refreshTimer = setInterval(async () => {
     if (isRefreshRunning) {
       updateRefreshCountdown();
@@ -10462,6 +10549,11 @@ function updateRefreshCountdown() {
 
   if (isRefreshRunning) {
     refreshLabel.textContent = '刷新中...';
+    return;
+  }
+
+  if (isActiveSupabaseEndpoint()) {
+    refreshLabel.textContent = refreshLabelDefault || '刷新';
     return;
   }
 
@@ -11071,6 +11163,10 @@ function scheduleAutoUpdateCheck() {
 
 function applySettings(settings) {
   syncVueSettings(settings);
+  const storageProfiles = Array.isArray(settings.storage_profiles)
+    ? settings.storage_profiles
+    : [];
+  const supabaseProfile = storageProfiles.find((profile) => profile?.provider_kind === 'supabase') || null;
   const previousActiveEndpointId = activeEndpointId;
   const endpoints = Array.isArray(settings.webdav_endpoints)
     ? settings.webdav_endpoints
@@ -11085,13 +11181,15 @@ function applySettings(settings) {
     speedTestRunning: false,
     speedTestResult: null,
   }));
-  activeEndpointId = settings.active_webdav_id || null;
+  activeEndpointId = settings.active_storage_profile_id || settings.active_webdav_id || null;
   if (
     activeEndpointId &&
-    !webdavEndpoints.some(
-      (endpoint) =>
-        endpoint.id === activeEndpointId && endpoint.enabled && endpoint.url.trim(),
-    )
+    !storageProfiles.some((profile) => {
+      if (profile?.id !== activeEndpointId || !profile?.enabled) return false;
+      return profile.provider_kind === 'supabase'
+        ? !!profile.supabase?.api_url?.trim()
+        : !!profile.webdav?.url?.trim();
+    })
   ) {
     activeEndpointId = null;
   }
@@ -11226,6 +11324,23 @@ function applySettings(settings) {
     speechToTextPolishDeepThinkingEnabled: !!speechToText.polish_deep_thinking_enabled,
     speechToTextPolishTemperature: normalizeSpeechPolishTemperature(speechToText.polish_temperature ?? DEFAULT_SPEECH_POLISH_TEMPERATURE),
     speechToTextPolishTimeoutSecs: normalizeSpeechPolishTimeoutSecs(speechToText.polish_timeout_secs ?? DEFAULT_SPEECH_POLISH_TIMEOUT_SECS),
+    storageProfiles,
+    activeStorageProfileId: settings.active_storage_profile_id || settings.active_webdav_id || null,
+    supabaseProfileId: supabaseProfile?.id || '',
+    supabaseProfileName: supabaseProfile?.name || 'Supabase',
+    supabaseApiUrl: supabaseProfile?.supabase?.api_url || '',
+    supabaseAnonKey: supabaseProfile?.supabase?.anon_key || '',
+    supabaseEmail: currentSettingsFormState.supabaseEmail || '',
+    supabasePassword: '',
+    supabaseAccountStatus: currentSettingsFormState.supabaseAccountStatus || null,
+    supabaseConnectionStatus: currentSettingsFormState.supabaseConnectionStatus || null,
+    supabaseAuthBusy: !!currentSettingsFormState.supabaseAuthBusy,
+    supabaseAuthMessage: currentSettingsFormState.supabaseAuthMessage || '',
+    supabaseAuthMessageKind: currentSettingsFormState.supabaseAuthMessageKind || '',
+    storageImportBusy: !!currentSettingsFormState.storageImportBusy,
+    storageImportProgress: currentSettingsFormState.storageImportProgress || null,
+    storageImportMessage: currentSettingsFormState.storageImportMessage || '',
+    storageImportMessageKind: currentSettingsFormState.storageImportMessageKind || '',
   };
   syncVueSettingsForm(currentSettingsFormState);
   syncShortcutsEnabledState();
@@ -11305,6 +11420,28 @@ async function loadSettings() {
     }
     const settings = await invoke('get_settings');
     applySettings(settings);
+    const supabaseProfiles = (settings.storage_profiles || [])
+      .filter((profile) => profile?.provider_kind === 'supabase' && profile?.enabled);
+    for (const profile of supabaseProfiles) {
+      try {
+        const status = await invoke('supabase_current_user', { profileId: profile.id });
+        if (profile.id === currentSettingsFormState.supabaseProfileId) {
+          setSupabaseAuthFeedback({
+            supabaseAccountStatus: status,
+            supabaseAuthMessage: status?.signedIn ? '已恢复 Supabase 登录' : '',
+            supabaseAuthMessageKind: status?.signedIn ? 'success' : '',
+          });
+        }
+      } catch (error) {
+        if (profile.id === currentSettingsFormState.supabaseProfileId) {
+          setSupabaseAuthFeedback({
+            supabaseAccountStatus: null,
+            supabaseAuthMessage: `Supabase 登录已失效：${supabaseErrorMessage(error)}`,
+            supabaseAuthMessageKind: 'error',
+          });
+        }
+      }
+    }
     await loadLocalHttpApiStatus({ silent: true });
     await loadAutoBackupStatus({ silent: true });
     await loadIntegrationModules({ silent: true });
@@ -11350,6 +11487,7 @@ async function saveSettings(options = {}) {
     setErrorStatus('全局快捷键需包含修饰键，例如 Ctrl+Alt+T');
     return;
   }
+
   const systemDictationEnabled = !!currentSettingsFormState.systemDictationEnabled;
   const speechToTextEnabled = !!currentSettingsFormState.speechToTextEnabled || systemDictationEnabled;
   const speechToTextApiKey = (currentSettingsFormState.speechToTextApiKey || '').trim();
@@ -11487,7 +11625,38 @@ async function saveSettings(options = {}) {
   const activeCandidate = endpoints.find(
     (endpoint) => endpoint.id === activeEndpointId && endpoint.enabled && endpoint.url,
   );
+  const existingProfiles = Array.isArray(currentSettingsFormState.storageProfiles)
+    ? currentSettingsFormState.storageProfiles
+    : [];
+  const supabaseApiUrl = String(currentSettingsFormState.supabaseApiUrl || '').trim().replace(/\/$/, '');
+  const supabaseAnonKey = String(currentSettingsFormState.supabaseAnonKey || '').trim();
+  const supabaseProfileId = String(currentSettingsFormState.supabaseProfileId || '').trim() || `supabase-${Date.now()}`;
+  const storageProfiles = [
+    ...endpoints.map((endpoint) => ({
+      id: endpoint.id,
+      name: endpoint.name,
+      provider_kind: 'webdav',
+      enabled: endpoint.enabled,
+      webdav: { url: endpoint.url, username: endpoint.username, password: endpoint.password },
+    })),
+    ...(supabaseApiUrl || supabaseAnonKey ? [{
+      id: supabaseProfileId,
+      name: String(currentSettingsFormState.supabaseProfileName || 'Supabase').trim() || 'Supabase',
+      provider_kind: 'supabase',
+      enabled: true,
+      supabase: {
+        api_url: supabaseApiUrl,
+        anon_key: supabaseAnonKey,
+        space_id: existingProfiles.find((profile) => profile?.id === supabaseProfileId)?.supabase?.space_id || '',
+      },
+    }] : []),
+  ];
+  const activeStorageProfileId = storageProfiles.some(
+    (profile) => profile.id === currentSettingsFormState.activeStorageProfileId && profile.enabled,
+  ) ? currentSettingsFormState.activeStorageProfileId : (activeCandidate ? activeEndpointId : null);
   const payload = {
+    storage_profiles: storageProfiles,
+    active_storage_profile_id: activeStorageProfileId,
     webdav_endpoints: endpoints,
     active_webdav_id: activeCandidate ? activeEndpointId : null,
     sender_name: (currentSettingsFormState.senderName || '').trim(),
@@ -12022,7 +12191,7 @@ async function sendText() {
   }
 
   if (!getActiveEndpoint()) {
-    setErrorStatus('请先选择 WebDAV 端点');
+    setErrorStatus('请先选择存储空间');
     return;
   }
 
@@ -12179,7 +12348,7 @@ async function selectFiles() {
       return;
     }
     if (!getActiveEndpoint()) {
-      setErrorStatus('请先选择 WebDAV 端点');
+      setErrorStatus('请先选择存储空间');
       return;
     }
     if (!openDialog) {
@@ -12542,7 +12711,9 @@ async function switchActiveEndpoint() {
       return;
     }
     const settings = await invoke('get_settings');
-    settings.active_webdav_id = targetId;
+    const targetProfile = (settings.storage_profiles || []).find((profile) => profile?.id === targetId);
+    settings.active_storage_profile_id = targetId;
+    settings.active_webdav_id = targetProfile?.provider_kind === 'webdav' ? targetId : null;
     const updated = await invoke('save_settings', { settings });
     applySettings(updated);
     setSelectionMode(false);
@@ -12627,7 +12798,7 @@ async function refreshMessages(options = {}) {
       return;
     }
     if (!getActiveEndpoint()) {
-      setErrorStatus('请先选择 WebDAV 端点');
+      setErrorStatus('请先选择存储空间');
       return;
     }
     didStartRefresh = true;
@@ -12659,6 +12830,27 @@ async function refreshMessages(options = {}) {
 }
 
 if (listen) {
+  listen('supabase-realtime-synced', async () => {
+    if (!isActiveSupabaseEndpoint()) return;
+    supabaseRealtimeRefreshQueued = true;
+    if (supabaseRealtimeRefreshPending) return;
+    supabaseRealtimeRefreshPending = true;
+    try {
+      while (supabaseRealtimeRefreshQueued && isActiveSupabaseEndpoint()) {
+        supabaseRealtimeRefreshQueued = false;
+        const tasks = [
+          loadMessages({ checkNew: true, scrollToBottom: false }),
+          loadSyncStatus(),
+        ];
+        if (getActiveMainTab() === 'marked') {
+          tasks.push(loadMarkedTags(), loadMarkedMessages());
+        }
+        await Promise.all(tasks);
+      }
+    } finally {
+      supabaseRealtimeRefreshPending = false;
+    }
+  });
   listen('media-playback-progress', (event) => {
     const payload = event.payload || {};
     const endpointId = String(payload.endpointId || payload.endpoint_id || '');
@@ -12832,12 +13024,17 @@ refreshButton.addEventListener('click', async () => {
   }
   await refreshMessages();
 });
+if (syncStatus) {
+  syncStatus.title = '点击查看 Supabase 待同步操作或冲突';
+  syncStatus.style.cursor = 'pointer';
+  syncStatus.addEventListener('click', openSupabaseSyncIssues);
+}
 
 // 标签页刷新按钮
 if (markedRefreshButton) {
   markedRefreshButton.addEventListener('click', async () => {
     if (!getActiveEndpoint()) {
-      showToast('请先选择 WebDAV 端点', 'error');
+      showToast('请先选择存储空间', 'error');
       return;
     }
     markedRefreshButton.disabled = true;
@@ -12879,6 +13076,265 @@ sendTextButton.addEventListener('click', sendText);
 if (speechToTextButton) {
   // Keep the composer editor focused when dictation is started with the mouse.
   speechToTextButton.addEventListener('mousedown', (event) => event.preventDefault());
+}
+
+async function ensureSupabaseProfileSaved() {
+  const apiUrl = String(currentSettingsFormState.supabaseApiUrl || '').trim().replace(/\/$/, '');
+  const anonKey = String(currentSettingsFormState.supabaseAnonKey || '').trim();
+  if (!apiUrl || !anonKey) {
+    throw new Error('请先填写 Supabase API URL 和公开 Key');
+  }
+  const existingProfile = (currentSettingsFormState.storageProfiles || []).find(
+    (item) => item?.id === currentSettingsFormState.supabaseProfileId
+      && item?.provider_kind === 'supabase',
+  );
+  if (
+    existingProfile?.id
+    && String(existingProfile.supabase?.api_url || '').trim().replace(/\/$/, '') === apiUrl
+    && String(existingProfile.supabase?.anon_key || '').trim() === anonKey
+    && String(existingProfile.supabase?.space_id || '').trim()
+  ) {
+    return existingProfile.id;
+  }
+  const updated = await saveSettings({ silent: true });
+  if (!updated) {
+    throw new Error(syncStatus?.textContent || 'Supabase 配置保存失败，请检查设置');
+  }
+  const profile = updated?.storage_profiles?.find((item) => item.provider_kind === 'supabase');
+  if (!profile?.id) {
+    throw new Error('请先填写 Supabase API URL 和公开 Key');
+  }
+  currentSettingsFormState = {
+    ...currentSettingsFormState,
+    supabaseProfileId: profile.id,
+    storageProfiles: updated.storage_profiles || [],
+  };
+  syncVueSettingsForm(currentSettingsFormState);
+  return profile.id;
+}
+
+function setSupabaseAuthFeedback(patch) {
+  currentSettingsFormState = {
+    ...currentSettingsFormState,
+    ...patch,
+  };
+  syncVueSettingsForm(currentSettingsFormState);
+}
+
+function supabaseErrorMessage(error) {
+  if (typeof error === 'string') return error;
+  return error?.message || error?.error || '未知错误';
+}
+
+function normalizeStorageImportProgress(progress, fallbackTotal = 0) {
+  if (settingsFormRuntime?.normalizeStorageImportProgress) {
+    return settingsFormRuntime.normalizeStorageImportProgress(progress, fallbackTotal);
+  }
+  const value = progress || {};
+  const totalItems = Math.max(0, Number(value.totalItems ?? value.total_items ?? fallbackTotal) || 0);
+  const appliedItems = Math.max(0, Number(value.appliedItems ?? value.applied_items) || 0);
+  const failedItems = Math.max(0, Number(value.failedItems ?? value.failed_items) || 0);
+  const processedItems = Math.min(totalItems || appliedItems + failedItems, appliedItems + failedItems);
+  const status = String(value.status || 'pending');
+  return {
+    batchId: String(value.batchId ?? value.batch_id ?? ''),
+    status,
+    totalItems,
+    appliedItems,
+    failedItems,
+    processedItems,
+    percent: totalItems > 0
+      ? Math.min(100, Math.max(0, Math.round((processedItems / totalItems) * 100)))
+      : status === 'completed'
+        ? 100
+        : 0,
+    lastError: String(value.lastError ?? value.last_error ?? ''),
+  };
+}
+
+function setStorageImportState(patch) {
+  currentSettingsFormState = {
+    ...currentSettingsFormState,
+    ...patch,
+  };
+  syncVueSettingsForm(currentSettingsFormState);
+}
+
+async function pollStorageImportProgress(batchId, fallbackTotal, isActive) {
+  while (isActive()) {
+    try {
+      const value = await invoke('get_storage_import_status', { batchId });
+      if (value) {
+        const progress = normalizeStorageImportProgress(value, fallbackTotal);
+        setStorageImportState({
+          storageImportProgress: progress,
+          storageImportMessage: `正在复制并上传到 Supabase ${progress.processedItems}/${progress.totalItems} 项`,
+          storageImportMessageKind: progress.failedItems > 0 ? 'error' : 'info',
+        });
+      }
+    } catch (_) {
+      // The import command owns the final result; a transient status read must not replace it.
+    }
+    if (isActive()) await delay(300);
+  }
+}
+
+async function testSupabaseSettings() {
+  try {
+    const profileId = await ensureSupabaseProfileSaved();
+    const status = await invoke('test_supabase_connection', { profileId });
+    currentSettingsFormState = { ...currentSettingsFormState, supabaseConnectionStatus: status };
+    syncVueSettingsForm(currentSettingsFormState);
+    status?.realtime && status?.storage
+      ? setSuccessStatus('Supabase Auth、RLS、Realtime 和 Storage 检查通过')
+      : setErrorStatus(status?.message || 'Supabase 连接检查未通过');
+  } catch (error) {
+    setErrorStatus(`Supabase 连接检查失败：${error?.message || error}`);
+  }
+}
+
+async function signInSupabase() {
+  if (currentSettingsFormState.supabaseAuthBusy) return;
+  setSupabaseAuthFeedback({
+    supabaseAuthBusy: true,
+    supabaseAuthMessage: '正在登录 Supabase...',
+    supabaseAuthMessageKind: 'info',
+  });
+  try {
+    const status = await settingsFormRuntime.performSupabaseSignIn(currentSettingsFormState, {
+      ensureProfileSaved: ensureSupabaseProfileSaved,
+      signIn: (input) => invoke('supabase_sign_in', { input }),
+    });
+    setSupabaseAuthFeedback({
+      supabasePassword: '',
+      supabaseAccountStatus: status,
+      supabaseAuthBusy: false,
+      supabaseAuthMessage: 'Supabase 登录成功',
+      supabaseAuthMessageKind: 'success',
+    });
+    setSuccessStatus('Supabase 登录成功');
+    showToast('Supabase 登录成功', 'success');
+    return status;
+  } catch (error) {
+    const message = `Supabase 登录失败：${supabaseErrorMessage(error)}`;
+    setSupabaseAuthFeedback({
+      supabaseAuthBusy: false,
+      supabaseAuthMessage: message,
+      supabaseAuthMessageKind: 'error',
+    });
+    setErrorStatus(message);
+    showToast(message, 'error');
+    return null;
+  }
+}
+
+async function logoutSupabase() {
+  try {
+    const profileId = currentSettingsFormState.supabaseProfileId;
+    if (!profileId) return;
+    const status = await invoke('supabase_logout', { profileId });
+    currentSettingsFormState = { ...currentSettingsFormState, supabaseAccountStatus: status };
+    syncVueSettingsForm(currentSettingsFormState);
+    setSuccessStatus('Supabase 已退出登录');
+  } catch (error) {
+    setErrorStatus(`Supabase 退出失败：${error?.message || error}`);
+  }
+}
+
+async function importWebdavToSupabase() {
+  if (currentSettingsFormState.storageImportBusy) return null;
+  let importBusy = false;
+  try {
+    const targetProfileId = await ensureSupabaseProfileSaved();
+    const profiles = Array.isArray(currentSettingsFormState.storageProfiles)
+      ? currentSettingsFormState.storageProfiles
+      : [];
+    const sources = profiles.filter((profile) => profile?.provider_kind === 'webdav' && profile?.enabled);
+    if (!sources.length) throw new Error('没有可导入的 WebDAV 存储空间');
+    const labels = sources.map((profile, index) => `${index + 1}. ${profile.name || profile.id}`).join('\n');
+    const selected = window.prompt(`选择 WebDAV 来源编号：\n${labels}`, '1');
+    if (!selected) return;
+    const source = sources[Number(selected) - 1];
+    if (!source) throw new Error('WebDAV 来源编号无效');
+    const input = { sourceProfileId: source.id, targetProfileId };
+    const preview = await invoke('preview_storage_import', { input });
+    const confirmed = await showConfirmationDialog({
+      title: '确认导入到 Supabase',
+      message: `来源：${preview.sourceProfileName}\n目标：${preview.targetProfileName}\n消息：${preview.messageCount} 条\n附件：${preview.attachmentCount} 个\n总大小：${formatBytes(preview.totalBytes || 0)}\n标记：${preview.markedCount} 条，标签：${preview.tagCount} 个\n\n导入会复制数据，WebDAV 原件保持不变。`,
+      confirmLabel: '开始导入',
+    });
+    if (!confirmed) return;
+    const fallbackTotal = Number(preview.messageCount || 0) + Number(preview.tagCount || 0);
+    const initialProgress = normalizeStorageImportProgress({
+      batchId: preview.batchId,
+      status: 'pending',
+      totalItems: fallbackTotal,
+      appliedItems: 0,
+      failedItems: 0,
+    }, fallbackTotal);
+    importBusy = true;
+    setStorageImportState({
+      storageImportBusy: true,
+      storageImportProgress: initialProgress,
+      storageImportMessage: `正在准备复制并上传 0/${initialProgress.totalItems} 项`,
+      storageImportMessageKind: 'info',
+    });
+    setStatus('正在导入 WebDAV 数据到 Supabase...');
+    showToast('已开始从 WebDAV 导入，可在设置页查看进度', 'info');
+    let polling = true;
+    const pollingPromise = pollStorageImportProgress(
+      preview.batchId,
+      fallbackTotal,
+      () => polling,
+    );
+    let rawProgress;
+    try {
+      rawProgress = await invoke('start_storage_import', { input });
+    } finally {
+      polling = false;
+      await pollingPromise;
+    }
+    const progress = normalizeStorageImportProgress(rawProgress, fallbackTotal);
+    setStorageImportState({
+      storageImportBusy: false,
+      storageImportProgress: progress,
+      storageImportMessage: progress.status === 'completed'
+        ? `导入完成，共处理 ${progress.totalItems} 项`
+        : `导入尚未完成，成功 ${progress.appliedItems} 项，失败 ${progress.failedItems} 项`,
+      storageImportMessageKind: progress.status === 'completed' ? 'success' : 'error',
+    });
+    importBusy = false;
+    if (progress.status === 'completed') {
+      setSuccessStatus(`导入完成：${progress.appliedItems}/${progress.totalItems}`);
+      showToast('WebDAV 数据导入完成', 'success');
+      setStorageImportState({
+        storageImportProgress: null,
+        storageImportMessage: '',
+        storageImportMessageKind: '',
+      });
+      await showSettingsResultDialog(
+        '导入完成',
+        `已确认 ${progress.appliedItems} 项数据库记录和相关附件写入 Supabase，WebDAV 原件未修改。`,
+      );
+    } else {
+      setErrorStatus(`导入可继续：${progress.appliedItems}/${progress.totalItems}`);
+      await showSettingsResultDialog('导入尚未完成', `${progress.failedItems} 项失败，可再次点击“从 WebDAV 导入”继续。\n${progress.lastError || ''}`);
+    }
+    return progress;
+  } catch (error) {
+    const message = `导入失败：${supabaseErrorMessage(error)}`;
+    if (importBusy) {
+      setStorageImportState({
+        storageImportBusy: false,
+        storageImportMessage: message,
+        storageImportMessageKind: 'error',
+      });
+    }
+    setErrorStatus(message);
+    showToast(message, 'error');
+    await showSettingsResultDialog('导入失败', supabaseErrorMessage(error));
+    return null;
+  }
 }
 
 async function downloadBulkResource(resource) {
@@ -13684,6 +14140,14 @@ vueBridge?.setActions?.({
   updateSettingsFormField: (field, value) => {
     updateSettingsFormField(field, value);
   },
+  testSupabaseSettings: () => {
+    testSupabaseSettings();
+  },
+  signInSupabase: () => signInSupabase(),
+  logoutSupabase: () => {
+    logoutSupabase();
+  },
+  importWebdavToSupabase: () => importWebdavToSupabase(),
   updateAiActionField: (index, field, value) => {
     updateAiActionField(index, field, value);
   },
@@ -13813,7 +14277,7 @@ async function sendFileByPath(path) {
       return;
     }
     if (!getActiveEndpoint()) {
-      setErrorStatus('请先选择 WebDAV 端点');
+      setErrorStatus('请先选择存储空间');
       return;
     }
     clientId = `upload-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -13928,7 +14392,7 @@ async function sendFileData(data, originalName) {
       return;
     }
     if (!getActiveEndpoint()) {
-      setErrorStatus('请先选择 WebDAV 端点');
+      setErrorStatus('请先选择存储空间');
       return;
     }
     clientId = `upload-${Date.now()}-${Math.random().toString(16).slice(2)}`;

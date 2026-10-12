@@ -39,6 +39,18 @@
     async saveSendHotkey(sendHotkey) {
       return invoke('save_send_hotkey', { sendHotkey });
     },
+    async supabaseSignIn(input) {
+      return invoke('supabase_sign_in', { input });
+    },
+    async supabaseCurrentUser(profileId) {
+      return invoke('supabase_current_user', { profileId });
+    },
+    async supabaseLogout(profileId) {
+      return invoke('supabase_logout', { profileId });
+    },
+    async testSupabaseConnection(profileId) {
+      return invoke('test_supabase_connection', { profileId });
+    },
   };
 
   // Sync/WebDAV API
@@ -105,11 +117,11 @@
     async getMarkedMessages(params) {
       return invoke('get_marked_messages', params);
     },
-    async toggleMarkedPin(filename, pinned) {
-      return invoke('toggle_marked_pin', { filename, pinned });
+    async toggleMarkedPin(filename) {
+      return invoke('toggle_marked_message_pin', { filename });
     },
     async updateMarkedTags(filename, tagIds) {
-      return invoke('update_marked_tags', { filename, tagIds });
+      return invoke('set_marked_messages_tags', { filenames: [filename], tagIds });
     },
     async listMarkedTags() {
       return invoke('list_marked_tags');

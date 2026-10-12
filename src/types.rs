@@ -559,7 +559,7 @@ impl Default for SendSettings {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct WebDavEndpoint {
     pub id: String,
     #[serde(default)]
@@ -569,6 +569,79 @@ pub struct WebDavEndpoint {
     pub password: String,
     #[serde(default = "default_endpoint_enabled")]
     pub enabled: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageProviderKind {
+    Webdav,
+    Supabase,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Default, Debug)]
+pub struct WebDavStorageConfig {
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub password: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Default, Debug)]
+pub struct SupabaseStorageConfig {
+    #[serde(default)]
+    pub api_url: String,
+    #[serde(default)]
+    pub anon_key: String,
+    #[serde(default)]
+    pub space_id: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
+pub struct StorageProfile {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    pub provider_kind: StorageProviderKind,
+    #[serde(default = "default_endpoint_enabled")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webdav: Option<WebDavStorageConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supabase: Option<SupabaseStorageConfig>,
+}
+
+impl StorageProfile {
+    pub fn from_webdav(endpoint: &WebDavEndpoint) -> Self {
+        Self {
+            id: endpoint.id.clone(),
+            name: endpoint.name.clone(),
+            provider_kind: StorageProviderKind::Webdav,
+            enabled: endpoint.enabled,
+            webdav: Some(WebDavStorageConfig {
+                url: endpoint.url.clone(),
+                username: endpoint.username.clone(),
+                password: endpoint.password.clone(),
+            }),
+            supabase: None,
+        }
+    }
+
+    pub fn to_webdav(&self) -> Option<WebDavEndpoint> {
+        if self.provider_kind != StorageProviderKind::Webdav {
+            return None;
+        }
+        let config = self.webdav.as_ref()?;
+        Some(WebDavEndpoint {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            url: config.url.clone(),
+            username: config.username.clone(),
+            password: config.password.clone(),
+            enabled: self.enabled,
+        })
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -799,6 +872,10 @@ pub struct MarkedTag {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
+    pub storage_profiles: Vec<StorageProfile>,
+    #[serde(default)]
+    pub active_storage_profile_id: Option<String>,
+    #[serde(default)]
     pub webdav_endpoints: Vec<WebDavEndpoint>,
     #[serde(default)]
     pub active_webdav_id: Option<String>,
@@ -876,6 +953,10 @@ pub struct SyncStatus {
     pub last_result: Option<String>,
     pub current_source: Option<String>,
     pub conflict: Option<WebDavConflict>,
+    pub phase: String,
+    pub pending_count: i64,
+    pub conflict_count: i64,
+    pub transition_seq: u64,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
@@ -931,6 +1012,10 @@ impl SyncStatus {
             last_result: Some("尚未同步".to_string()),
             current_source: None,
             conflict: None,
+            phase: "synced".to_string(),
+            pending_count: 0,
+            conflict_count: 0,
+            transition_seq: 0,
         }
     }
 }

@@ -4,6 +4,17 @@ import '../src-ui/src/utils/settings-form-runtime.js';
 
 const runtime = globalThis.transferGenieSettingsFormRuntime;
 
+function testEndpointSwitchAndPreviewRegressionGuards() {
+  const tauriApiSource = readFileSync(new URL('../src-ui/src/services/tauri-api.js', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('../src-ui/src/legacy-main.js', import.meta.url), 'utf8');
+  assert.match(source, /const viewModel = createMessageViewModel\(message\);[\s\S]*messagePreviewBody\.innerHTML/);
+  assert.match(source, /settings\.active_storage_profile_id = targetId/);
+  assert.match(source, /targetProfile\?\.provider_kind === 'webdav' \? targetId : null/);
+  assert.match(source, /activeEndpointId = settings\.active_storage_profile_id \|\| settings\.active_webdav_id \|\| null/);
+  assert.match(tauriApiSource, /toggle_marked_message_pin/);
+  assert.match(tauriApiSource, /set_marked_messages_tags/);
+}
+
 function testNormalizeTelegramPollInterval() {
   assert.equal(runtime.normalizeTelegramPollInterval(undefined, 5), 5);
   assert.equal(runtime.normalizeTelegramPollInterval(3, 5), 5);
@@ -103,6 +114,67 @@ function testNormalizeSaveFilenameRule() {
   );
 }
 
+async function testSupabaseLoginCapturesCredentialsBeforeSavingProfile() {
+  const formState = {
+    supabaseEmail: ' user@example.com ',
+    supabasePassword: 'secret-before-save',
+  };
+  let received = null;
+  const result = await runtime.performSupabaseSignIn(formState, {
+    async ensureProfileSaved() {
+      formState.supabasePassword = '';
+      return 'profile-1';
+    },
+    async signIn(input) {
+      received = input;
+      return { signedIn: true };
+    },
+  });
+  assert.deepEqual(received, {
+    profileId: 'profile-1',
+    email: 'user@example.com',
+    password: 'secret-before-save',
+  });
+  assert.equal(result.signedIn, true);
+  await assert.rejects(
+    runtime.performSupabaseSignIn({ supabaseEmail: '', supabasePassword: '' }, {}),
+    /请输入 Supabase 登录邮箱和密码/,
+  );
+}
+
+function testNormalizeStorageImportProgress() {
+  assert.deepEqual(runtime.normalizeStorageImportProgress({
+    batchId: 'batch-1',
+    status: 'running',
+    totalItems: 10,
+    appliedItems: 3,
+    failedItems: 1,
+  }), {
+    batchId: 'batch-1',
+    status: 'running',
+    totalItems: 10,
+    appliedItems: 3,
+    failedItems: 1,
+    processedItems: 4,
+    percent: 40,
+    lastError: '',
+  });
+
+  const snakeCase = runtime.normalizeStorageImportProgress({
+    batch_id: 'batch-2',
+    status: 'error',
+    total_items: 5,
+    applied_items: 4,
+    failed_items: 1,
+    last_error: 'one failed',
+  });
+  assert.equal(snakeCase.processedItems, 5);
+  assert.equal(snakeCase.percent, 100);
+  assert.equal(snakeCase.lastError, 'one failed');
+
+  assert.equal(runtime.normalizeStorageImportProgress({ status: 'completed' }, 0).percent, 100);
+}
+
 function testManualBackupDialogState() {
   const opened = runtime.getManualBackupDialogState({}, {
     open: true,
@@ -159,6 +231,21 @@ function testShortcutSettingsMarkup() {
   assert.doesNotMatch(sectionHtml(html, 'settings-section-send'), /name="send-hotkey"|发送快捷键/);
   assert.doesNotMatch(sectionHtml(html, 'settings-section-system'), /global-hotkey|全局快捷键|启用全局快捷键/);
   assert.doesNotMatch(sectionHtml(html, 'settings-section-speech'), /system-dictation-shortcut|系统听写快捷键/);
+  assert.match(html, /supabaseAuthBusy/);
+  assert.match(html, /登录中.../);
+  assert.match(html, /supabase-auth-message/);
+  assert.match(html, /id="supabase-import-webdav"/);
+  assert.match(html, /storageImportBusy/);
+  assert.match(html, /role="progressbar"/);
+  assert.match(html, /WebDAV 刷新间隔（秒）/);
+  assert.match(html, /Supabase 使用 Realtime WebSocket 实时同步/);
+
+  const legacyMain = readFileSync(new URL('../src-ui/src/legacy-main.js', import.meta.url), 'utf8');
+  assert.match(legacyMain, /updateRefreshCountdown\(\);\n  if \(isActiveSupabaseEndpoint\(\)\) \{\n    return;\n  \}\n  refreshTimer = setInterval/);
+  assert.match(legacyMain, /if \(isActiveSupabaseEndpoint\(\)\) \{\n    refreshLabel\.textContent = refreshLabelDefault \|\| '刷新';\n    return;\n  \}/);
+  assert.match(legacyMain, /listen\('supabase-realtime-synced'/);
+  assert.match(legacyMain, /loadMessages\(\{ checkNew: true, scrollToBottom: false \}\)/);
+  assert.match(legacyMain, /while \(supabaseRealtimeRefreshQueued && isActiveSupabaseEndpoint\(\)\)/);
 }
 
 testNormalizeTelegramPollInterval();
@@ -168,7 +255,10 @@ testGetLocalHttpApiConfiguredUrl();
 testGetCurrentSenderName();
 testSendSettingsPayload();
 testNormalizeSaveFilenameRule();
+await testSupabaseLoginCapturesCredentialsBeforeSavingProfile();
+testNormalizeStorageImportProgress();
 testManualBackupDialogState();
+testEndpointSwitchAndPreviewRegressionGuards();
 testShortcutSettingsMarkup();
 
 console.log('settings-form-runtime tests passed');

@@ -675,7 +675,7 @@
               <aside class="settings-nav" aria-label="设置导航">
                 <div class="settings-nav-title">快捷导航</div>
                 <div class="settings-nav-list">
-                  <button class="settings-nav-button is-active" type="button" data-settings-nav-target="settings-section-webdav">WebDAV 端点</button>
+                  <button class="settings-nav-button is-active" type="button" data-settings-nav-target="settings-section-webdav">存储空间</button>
                   <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-basic">基本设置</button>
                   <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-shortcuts">快捷键</button>
                   <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-send">发送设置</button>
@@ -765,6 +765,88 @@
                 <span class="field-hint">仅启用的端点可在首页选择。</span>
               </div>
 
+              <div class="settings-group">
+                <h3 class="settings-group-title">Supabase 存储空间</h3>
+                <div class="settings-group-content">
+                  <label>
+                    空间名称
+                    <input type="text" placeholder="例如：个人云端" :value="ui.settingsForm.supabaseProfileName" @input="updateSettingsFormField('supabaseProfileName', $event.target.value)" />
+                  </label>
+                  <label>
+                    Supabase API URL
+                    <input id="supabase-api-url" type="url" placeholder="https://your-supabase.example.com" :value="ui.settingsForm.supabaseApiUrl" @input="updateSettingsFormField('supabaseApiUrl', $event.target.value)" />
+                  </label>
+                  <label>
+                    公开 Key（anon Key）
+                    <input id="supabase-anon-key" type="password" autocomplete="off" :value="ui.settingsForm.supabaseAnonKey" @input="updateSettingsFormField('supabaseAnonKey', $event.target.value)" />
+                  </label>
+                  <span class="field-hint">这里只使用公开 Key；不需要数据库密码、service-role 或管理密钥。业务 Schema 和私有文件桶由应用版本管理。</span>
+                  <div class="endpoint-actions">
+                    <button class="button ghost small" type="button" @click="testSupabaseSettings()">分层检查连接</button>
+                    <span class="field-hint">{{ supabaseConnectionLabel() }}</span>
+                  </div>
+                  <label>
+                    登录邮箱
+                    <input id="supabase-email" type="email" autocomplete="username" :value="ui.settingsForm.supabaseEmail" @input="updateSettingsFormField('supabaseEmail', $event.target.value)" />
+                  </label>
+                  <label>
+                    登录密码
+                    <input id="supabase-password" type="password" autocomplete="current-password" :value="ui.settingsForm.supabasePassword" @input="updateSettingsFormField('supabasePassword', $event.target.value)" />
+                  </label>
+                  <div class="endpoint-actions">
+                    <button id="supabase-login" class="button primary small" :class="{ 'has-spinner': ui.settingsForm.supabaseAuthBusy }" type="button" :disabled="ui.settingsForm.supabaseAuthBusy" @click="signInSupabase()">
+                      <span v-if="ui.settingsForm.supabaseAuthBusy" class="button-spinner" aria-hidden="true"></span>
+                      {{ ui.settingsForm.supabaseAuthBusy ? '登录中...' : '登录' }}
+                    </button>
+                    <button class="button ghost small" type="button" :disabled="ui.settingsForm.supabaseAuthBusy" @click="logoutSupabase()">退出</button>
+                    <span class="field-hint">账号：{{ supabaseAccountLabel() }}。密码只用于本次登录，不会保存。</span>
+                  </div>
+                  <span v-if="ui.settingsForm.supabaseAuthMessage" class="supabase-auth-message" :class="`is-${ui.settingsForm.supabaseAuthMessageKind || 'info'}`">{{ ui.settingsForm.supabaseAuthMessage }}</span>
+                  <div class="endpoint-actions">
+                    <button
+                      id="supabase-import-webdav"
+                      class="button ghost small"
+                      :class="{ 'has-spinner': ui.settingsForm.storageImportBusy, 'is-loading': ui.settingsForm.storageImportBusy }"
+                      type="button"
+                      :disabled="ui.settingsForm.storageImportBusy"
+                      @click="importWebdavToSupabase()"
+                    >
+                      <span v-if="ui.settingsForm.storageImportBusy" class="button-spinner" aria-hidden="true"></span>
+                      {{ ui.settingsForm.storageImportBusy ? '导入中...' : '从 WebDAV 导入' }}
+                    </button>
+                    <span class="field-hint">先预览数量与大小，再把数据库记录和附件完整上传到当前 Supabase 账号；来源 WebDAV 不会修改或删除。</span>
+                  </div>
+                  <div v-if="ui.settingsForm.storageImportProgress" class="storage-import-progress">
+                    <div class="storage-import-progress-head">
+                      <span>{{ ui.settingsForm.storageImportMessage || '准备导入...' }}</span>
+                      <strong>{{ ui.settingsForm.storageImportProgress.percent }}%</strong>
+                    </div>
+                    <div
+                      class="storage-import-progress-track"
+                      role="progressbar"
+                      :aria-valuenow="ui.settingsForm.storageImportProgress.percent"
+                      aria-valuemin="0"
+                      aria-valuemax="100"
+                    >
+                      <div
+                        class="storage-import-progress-fill"
+                        :style="{ width: `${ui.settingsForm.storageImportProgress.percent}%` }"
+                      ></div>
+                    </div>
+                    <span
+                      class="storage-import-progress-detail"
+                      :class="`is-${ui.settingsForm.storageImportMessageKind || 'info'}`"
+                    >
+                      已处理 {{ ui.settingsForm.storageImportProgress.processedItems }}
+                      / {{ ui.settingsForm.storageImportProgress.totalItems }} 项
+                      <span v-if="ui.settingsForm.storageImportProgress.failedItems">
+                        ，失败 {{ ui.settingsForm.storageImportProgress.failedItems }} 项
+                      </span>
+                    </span>
+                  </div>
+                </div>
+              </div>
+
               <div class="settings-section-anchor" id="settings-section-basic" data-settings-section aria-hidden="true"></div>
               <div class="settings-group">
                 <h3 class="settings-group-title">基本设置</h3>
@@ -774,8 +856,9 @@
                     <input id="sender-name" type="text" :value="ui.settingsForm.senderName" @input="updateSettingsFormField('senderName', $event.target.value)" />
                   </label>
                   <label>
-                    刷新间隔（秒）
+                    WebDAV 刷新间隔（秒）
                     <input id="refresh-interval" type="number" min="1" step="1" :value="ui.settingsForm.refreshIntervalSecs" @input="updateSettingsFormField('refreshIntervalSecs', Number($event.target.value || 5))" />
+                    <span class="field-hint">仅用于 WebDAV；Supabase 使用 Realtime WebSocket 实时同步。</span>
                   </label>
                   <label>
                     下载目录

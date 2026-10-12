@@ -43,12 +43,22 @@ Supabase 消息、标签和附件元数据修改 SHALL 通过校验身份、oper
 - **THEN** 服务端拒绝该请求
 
 ### Requirement: Supabase Realtime wake-up
-Supabase 模式 SHALL 订阅当前用户可读的变更日志 Realtime 事件。事件到达时客户端 SHALL 触发权威增量补拉，而不是直接把 WebSocket payload 当作唯一持久状态。
+Supabase 模式 SHALL 通过持久 WebSocket 订阅当前用户可读的变更日志 Realtime 事件。事件到达时客户端 SHALL 触发权威增量补拉，而不是直接把 WebSocket payload 当作唯一持久状态。正常在线期间 MUST NOT 使用固定时间间隔轮询业务变化；连接中断时 SHALL 退避重连，并在重新订阅成功后执行一次 checkpoint 补拉。
 
 #### Scenario: Receive change on another device
 - **WHEN** 同一账号的设备 A 提交消息变化
 - **THEN** 设备 B 收到 Realtime 提醒并执行增量补拉
 - **AND** SQLite 更新后消息列表刷新
+
+#### Scenario: Realtime connection remains idle
+- **WHEN** Supabase 空间在线且一段时间内没有本机或远端业务变化
+- **THEN** 客户端仅维持 WebSocket 心跳
+- **AND** 不按固定时间间隔执行数据库补拉
+
+#### Scenario: Reconnect after network interruption
+- **WHEN** Realtime 连接因网络中断而关闭
+- **THEN** 客户端使用有上限的退避策略重新连接
+- **AND** 重新订阅成功后立即按 checkpoint 补拉断线期间的变化
 
 ### Requirement: Private attachment lifecycle
 附件 SHALL 先可靠保存到本机，再上传到独立私有 bucket。对象路径 MUST 包含用户、空间和附件稳定 ID；数据库只保存稳定对象路径。上传确认前附件不得标记为云端可用。
