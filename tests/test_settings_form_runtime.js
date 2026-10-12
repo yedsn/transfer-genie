@@ -8,6 +8,7 @@ function testEndpointSwitchAndPreviewRegressionGuards() {
   const tauriApiSource = readFileSync(new URL('../src-ui/src/services/tauri-api.js', import.meta.url), 'utf8');
   const source = readFileSync(new URL('../src-ui/src/legacy-main.js', import.meta.url), 'utf8');
   assert.match(source, /const viewModel = createMessageViewModel\(message\);[\s\S]*messagePreviewBody\.innerHTML/);
+  assert.match(source, /pageMessages\.forEach\(\(message\) => \{\s*const viewModel = createMessageViewModel\(message\);/);
   assert.match(source, /settings\.active_storage_profile_id = targetId/);
   assert.match(source, /targetProfile\?\.provider_kind === 'webdav' \? targetId : null/);
   assert.match(source, /activeEndpointId = settings\.active_storage_profile_id \|\| settings\.active_webdav_id \|\| null/);

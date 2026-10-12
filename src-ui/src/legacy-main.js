@@ -15153,6 +15153,7 @@ function renderMarkedMessages(messages = [], options = {}) {
   syncVueMarkedPageState();
 
   pageMessages.forEach((message) => {
+    const viewModel = createMessageViewModel(message);
     const item = document.createElement('li');
     item.className = 'message-card';
     item.dataset.filename = message.filename;
