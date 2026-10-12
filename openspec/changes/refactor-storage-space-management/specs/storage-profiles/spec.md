@@ -1,9 +1,5 @@
 # Spec Delta
 
-## Purpose
-
-定义用户如何在统一列表中管理多个 WebDAV 与 Supabase 存储空间，并在保持空间相互独立的前提下安全、可恢复地复制完整数据。
-
 ## ADDED Requirements
 
 ### Requirement: Unified storage space management
@@ -50,7 +46,7 @@
 - **AND** 客户端不会在后台按时间间隔自动刷新 WebDAV
 
 ### Requirement: Safe profile editing and removal
-已使用的存储空间 SHALL 防止用户在无明确确认的情况下改变远端数据目的地。移除配置 MUST NOT 删除远端数据；若空间存在未完成写入或复制任务，客户端 MUST 阻止移除并说明原因。移除 Supabase 空间时 MUST 清除该 profile 的持久 Session。
+已使用的存储空间 SHALL 防止用户在无明确确认的情况下改变远端数据目的地。移除配置 MUST NOT 删除远端数据；若空间存在未完成写入或数据传输任务，客户端 MUST 阻止移除并说明原因。移除 Supabase 空间时 MUST 清除该 profile 的持久 Session。
 
 #### Scenario: Protect destination fields
 - **WHEN** 用户尝试修改已有数据或待同步任务的 Supabase API 地址、公开 Key 或 `space_id`
@@ -62,63 +58,45 @@
 - **AND** 远端消息和附件保持不变
 
 #### Scenario: Reject removal with pending work
-- **WHEN** 存储空间仍有待上传、冲突或未完成复制项目
+- **WHEN** 存储空间仍有待上传、冲突或未完成数据传输项目
 - **THEN** 客户端阻止移除并显示未完成项目摘要
 
-### Requirement: Cross-profile data copy
-客户端 SHALL 允许用户在任意两个不同的存储空间之间显式复制消息、附件、标签和标记元数据。第一版 MUST 支持 WebDAV → WebDAV、WebDAV → Supabase、Supabase → WebDAV 和 Supabase → Supabase。复制 MUST 保留来源数据、保留目标已有数据，并且 MUST NOT 建立持续同步或自动反向复制。
+### Requirement: Transfer preview and source readiness
+客户端 SHALL 在写入目标前刷新或增量补拉来源空间，建立固定传输计划并展示预览。预览 MUST 包含来源与目标名称、消息数、附件数、附件总大小、标签数、标记数以及预计重复或冲突摘要；预览阶段 MUST NOT 修改目标空间。
 
-#### Scenario: Select source and target
-- **WHEN** 用户打开“复制存储空间数据”
-- **THEN** 客户端允许从所有已启用且可连接的空间中选择来源和目标
-- **AND** 不允许来源与目标是同一个存储空间
-
-#### Scenario: Copy between each Provider combination
-- **WHEN** 用户选择任一受支持的来源与目标 Provider 组合并开始复制
-- **THEN** 客户端读取来源消息和附件并按目标 Provider 的格式写入目标
-- **AND** 当前活动存储空间不会因复制而隐式改变
-
-#### Scenario: Source remains independent after copy
-- **WHEN** 一次复制成功完成后来源空间出现新数据或数据被修改
-- **THEN** 目标空间不会自动随之改变
-- **AND** 用户可再次发起复制以补充数据
-
-### Requirement: Copy preview and source readiness
-客户端 SHALL 在写入目标前刷新或增量补拉来源空间，建立固定复制计划并展示预览。预览 MUST 包含来源与目标名称、消息数、附件数、附件总大小、标签数、标记数以及预计重复或冲突摘要；预览阶段 MUST NOT 修改目标空间。
-
-#### Scenario: Preview a copy plan
+#### Scenario: Preview a transfer plan
 - **WHEN** 用户选择来源和目标并请求检查数据
-- **THEN** 客户端先同步来源并创建可恢复的复制计划
-- **AND** 展示将要复制的数据摘要而不写入目标
+- **THEN** 客户端先同步来源并创建可恢复的数据传输计划
+- **AND** 展示将要传输的数据摘要而不写入目标
 
 #### Scenario: Source cannot be refreshed
 - **WHEN** 来源空间认证失败、未登录或无法完成刷新
-- **THEN** 客户端不得开始复制
+- **THEN** 客户端不得开始数据传输
 - **AND** 明确显示需要修复的来源空间状态
 
-### Requirement: Recoverable and idempotent copy
-复制任务 SHALL 持久保存来源、目标、目标账号作用域、来源项目标识、稳定目标映射和逐项状态。中断后 MUST 能继续；相同来源项目再次复制到相同目标时 MUST 跳过已确认的相同数据，不得重复创建消息或附件。
+### Requirement: Recoverable and idempotent transfer
+数据传输任务 SHALL 持久保存来源、目标、目标账号作用域、来源项目标识、稳定目标映射和逐项状态。中断后 MUST 能继续；相同来源项目再次传输到相同目标时 MUST 跳过已确认的相同数据，不得重复创建消息或附件。
 
-#### Scenario: Resume interrupted copy
-- **WHEN** 复制在部分项目完成后因退出应用或网络中断而停止
-- **THEN** 用户可以继续同一复制任务
+#### Scenario: Resume interrupted transfer
+- **WHEN** 数据传输在部分项目完成后因退出应用或网络中断而停止
+- **THEN** 用户可以继续同一数据传输任务
 - **AND** 已确认成功的项目不会重复写入
 
-#### Scenario: Repeat copy after new source data
-- **WHEN** 用户在首次复制完成后再次选择相同来源和目标
-- **THEN** 客户端将来源新增项目加入复制计划
+#### Scenario: Repeat transfer after new source data
+- **WHEN** 用户在首次数据传输完成后再次选择相同来源和目标
+- **THEN** 客户端将来源新增项目加入传输计划
 - **AND** 已存在且内容一致的项目被标记为跳过
 
 #### Scenario: Existing target data differs
 - **WHEN** 稳定目标标识已经存在但内容或版本与来源不一致
 - **THEN** 客户端记录冲突并且不得静默覆盖目标
-- **AND** 其他无冲突项目可以继续复制
+- **AND** 其他无冲突项目可以继续传输
 
-### Requirement: Copy progress and completion verification
-客户端 SHALL 持续展示复制阶段、已处理数、总数、失败数和附件字节进度，并持久保存进度。完成前 MUST 核验目标元数据和附件；附件至少 MUST 核验大小与摘要。任务结束后 SHALL 隐藏活动进度条并保留成功、跳过、冲突和失败结果摘要。
+### Requirement: Transfer progress and completion verification
+客户端 SHALL 持续展示数据传输阶段、已处理数、总数、失败数和附件字节进度，并持久保存进度。完成前 MUST 核验目标元数据和附件；附件至少 MUST 核验大小与摘要。任务结束后 SHALL 隐藏活动进度条并保留成功、跳过、冲突和失败结果摘要。
 
-#### Scenario: Show active copy progress
-- **WHEN** 复制正在执行
+#### Scenario: Show active transfer progress
+- **WHEN** 数据传输正在执行
 - **THEN** 客户端显示当前阶段与处理数量
 - **AND** 上传或下载大型附件时显示字节进度
 
@@ -128,6 +106,42 @@
 - **AND** 只有核验通过的项目才计入成功
 
 #### Scenario: Report partial failure
-- **WHEN** 部分项目复制或核验失败
+- **WHEN** 部分项目传输或核验失败
 - **THEN** 客户端保留成功项目并展示失败和冲突明细
 - **AND** 用户可以只继续未完成项目
+
+## MODIFIED Requirements
+
+### Requirement: Storage space data transfer
+客户端 SHALL 提供“存储空间数据传输”，允许用户在任意两个不同的存储空间之间显式传输消息、附件、标签和标记元数据。第一版 MUST 支持 WebDAV → WebDAV、WebDAV → Supabase、Supabase → WebDAV 和 Supabase → Supabase。数据传输 MUST 采用非破坏性复制语义，保留来源数据和目标已有数据，并且 MUST NOT 建立持续同步或自动反向传输。
+
+#### Scenario: Select source and target
+- **WHEN** 用户打开“存储空间数据传输”
+- **THEN** 客户端允许从所有已启用且可连接的空间中选择来源和目标
+- **AND** 不允许来源与目标是同一个存储空间
+
+#### Scenario: Transfer between each Provider combination
+- **WHEN** 用户选择任一受支持的来源与目标 Provider 组合并开始传输
+- **THEN** 客户端读取来源消息和附件并按目标 Provider 的格式写入目标
+- **AND** 当前活动存储空间不会因数据传输而隐式改变
+
+#### Scenario: Source remains independent after transfer
+- **WHEN** 一次数据传输成功完成后来源空间出现新数据或数据被修改
+- **THEN** 目标空间不会自动随之改变
+- **AND** 用户可再次发起数据传输以补充数据
+
+#### Scenario: Preview WebDAV import
+- **WHEN** 用户选择来源和目标并请求预览
+- **THEN** 客户端显示消息数、附件数、总大小、标记和标签摘要
+- **AND** 尚不修改任一空间
+
+#### Scenario: Resume interrupted import
+- **WHEN** 数据传输在部分记录完成后中断并重新执行
+- **THEN** 已确认项目不会重复创建
+- **AND** 未完成项目继续处理
+- **AND** 来源空间数据保持不变
+
+## RENAMED Requirements
+
+- FROM: `### Requirement: Explicit cross-profile import`
+- TO: `### Requirement: Storage space data transfer`
