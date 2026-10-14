@@ -23,10 +23,23 @@ function testSyncLoadedMessageBoundaries() {
   assert.deepEqual(boundaries.oldestLoadedMessageRef, {
     timestamp_ms: 100,
     filename: '001.txt',
+    message_id: null,
   });
   assert.deepEqual(boundaries.newestLoadedMessageRef, {
     timestamp_ms: 300,
     filename: '003.txt',
+    message_id: null,
+  });
+}
+
+function testSupabaseBoundaryIncludesStableMessageId() {
+  const boundary = feedState.buildMessageBoundary(
+    message('legacy-name.txt', 100, { message_id: 'message-uuid' }),
+  );
+  assert.deepEqual(boundary, {
+    timestamp_ms: 100,
+    filename: 'legacy-name.txt',
+    message_id: 'message-uuid',
   });
 }
 
@@ -67,10 +80,12 @@ function testPruneLoadedMessagesStateAfterDelete() {
   assert.deepEqual(result.state.oldestLoadedMessageRef, {
     timestamp_ms: 100,
     filename: '001.txt',
+    message_id: null,
   });
   assert.deepEqual(result.state.newestLoadedMessageRef, {
     timestamp_ms: 300,
     filename: '003.txt',
+    message_id: null,
   });
 }
 
@@ -231,6 +246,7 @@ function testShouldAutoRefreshTick() {
 
 function run() {
   testSyncLoadedMessageBoundaries();
+  testSupabaseBoundaryIncludesStableMessageId();
   testResetLoadedMessagesStateForEndpointSwitch();
   testPruneLoadedMessagesStateAfterDelete();
   testResolveDeletedFilenames();

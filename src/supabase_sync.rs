@@ -5,8 +5,11 @@ use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::path::Path;
+use std::pin::Pin;
 use std::time::Duration;
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use url::Url;
@@ -18,6 +21,28 @@ type RealtimeSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 pub struct RealtimeSubscription {
     socket: RealtimeSocket,
+}
+
+pub struct StorageDownloadStreamResponse {
+    pub stream: Pin<Box<dyn futures_util::Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RemoteMessagePage {
+    pub messages: Vec<Value>,
+    pub tags: Vec<Value>,
+    pub attachments: Vec<Value>,
+    pub has_more: bool,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct RemoteSpaceSummary {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub message_count: i64,
+    #[serde(default)]
+    pub updated_at: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -96,6 +121,207 @@ pub async fn fetch_entity_snapshot(
         .map_err(|error| format!("读取 Supabase {entity_type} 快照失败: {error}"))?;
     let rows: Vec<Value> = parse_json_response(response, table).await?;
     Ok(rows.into_iter().next())
+}
+
+pub async fn list_spaces(
+    client: &Client,
+    config: &SupabaseStorageConfig,
+    session: &SupabaseSession,
+) -> Result<Vec<RemoteSpaceSummary>, String> {
+    let response = client
+        .get(format!(
+            "{}/rest/v1/spaces",
+            config.api_url.trim_end_matches('/')
+        ))
+        .header("apikey", &config.anon_key)
+        .bearer_auth(&session.access_token)
+        .header("Accept-Profile", APP_SCHEMA)
+        .query(&[
+            ("select", "id,name,updated_at"),
+            ("order", "updated_at.desc,id.asc"),
+        ])
+        .send()
+        .await
+        .map_err(|error| format!("读取 Supabase 存储空间失败: {error}"))?;
+    let rows: Vec<Value> = parse_json_response(response, "spaces").await?;
+    let mut spaces = Vec::with_capacity(rows.len());
+    for row in rows {
+        let Some(id) = row["id"].as_str() else {
+            continue;
+        };
+        let count_response = client
+            .get(format!(
+                "{}/rest/v1/messages",
+                config.api_url.trim_end_matches('/')
+            ))
+            .header("apikey", &config.anon_key)
+            .bearer_auth(&session.access_token)
+            .header("Accept-Profile", APP_SCHEMA)
+            .header("Prefer", "count=exact")
+            .query(&[
+                ("space_id", format!("eq.{id}")),
+                ("deleted_at", "is.null".to_string()),
+                ("select", "id".to_string()),
+                ("limit", "1".to_string()),
+            ])
+            .send()
+            .await
+            .map_err(|error| format!("统计 Supabase 存储空间消息失败: {error}"))?;
+        let status = count_response.status();
+        let content_range = count_response
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let body = count_response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(format!(
+                "统计 Supabase 存储空间消息失败 ({status}): {}",
+                sanitize_error(&body)
+            ));
+        }
+        let message_count = content_range
+            .as_deref()
+            .and_then(parse_content_range_count)
+            .unwrap_or(0);
+        spaces.push(RemoteSpaceSummary {
+            id: id.to_string(),
+            name: row["name"].as_str().unwrap_or("Supabase").to_string(),
+            message_count,
+            updated_at: row["updated_at"].as_str().map(str::to_string),
+        });
+    }
+    Ok(spaces)
+}
+
+fn parse_content_range_count(value: &str) -> Option<i64> {
+    value
+        .rsplit('/')
+        .next()
+        .filter(|total| *total != "*")
+        .and_then(|total| total.parse::<i64>().ok())
+}
+
+pub async fn fetch_message_page(
+    client: &Client,
+    config: &SupabaseStorageConfig,
+    session: &SupabaseSession,
+    before: Option<(i64, &str)>,
+    limit: usize,
+) -> Result<RemoteMessagePage, String> {
+    let limit = limit.clamp(1, 200);
+    let query = build_message_page_query(config, before, limit);
+    let response = client
+        .get(format!(
+            "{}/rest/v1/messages",
+            config.api_url.trim_end_matches('/')
+        ))
+        .header("apikey", &config.anon_key)
+        .bearer_auth(&session.access_token)
+        .header("Accept-Profile", APP_SCHEMA)
+        .query(&query)
+        .send()
+        .await
+        .map_err(|error| format!("读取 Supabase 历史消息失败: {error}"))?;
+    let mut messages: Vec<Value> = parse_json_response(response, "messages").await?;
+    let has_more = messages.len() > limit;
+    messages.truncate(limit);
+
+    let message_ids = messages
+        .iter()
+        .filter_map(|row| row["id"].as_str())
+        .collect::<Vec<_>>();
+    let tag_ids = messages
+        .iter()
+        .flat_map(|row| {
+            row["marked_tag_ids"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let attachments = fetch_rows_by_ids(
+        client,
+        config,
+        session,
+        "attachments",
+        "message_id",
+        &message_ids,
+    )
+    .await?;
+    let tag_ids = tag_ids.into_iter().collect::<Vec<_>>();
+    let tags = fetch_rows_by_ids(client, config, session, "tags", "id", &tag_ids).await?;
+
+    Ok(RemoteMessagePage {
+        messages,
+        tags,
+        attachments,
+        has_more,
+    })
+}
+
+async fn fetch_rows_by_ids(
+    client: &Client,
+    config: &SupabaseStorageConfig,
+    session: &SupabaseSession,
+    table: &str,
+    column: &str,
+    ids: &[&str],
+) -> Result<Vec<Value>, String> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let filter = format!("in.({})", ids.join(","));
+    let response = client
+        .get(format!(
+            "{}/rest/v1/{table}",
+            config.api_url.trim_end_matches('/')
+        ))
+        .header("apikey", &config.anon_key)
+        .bearer_auth(&session.access_token)
+        .header("Accept-Profile", APP_SCHEMA)
+        .query(&[
+            ("space_id", format!("eq.{}", config.space_id)),
+            ("deleted_at", "is.null".to_string()),
+            (column, filter),
+            ("select", "*".to_string()),
+        ])
+        .send()
+        .await
+        .map_err(|error| format!("读取 Supabase {table} 历史元数据失败: {error}"))?;
+    parse_json_response(response, table).await
+}
+
+pub async fn fetch_tag_by_name(
+    client: &Client,
+    config: &SupabaseStorageConfig,
+    session: &SupabaseSession,
+    name: &str,
+) -> Result<Option<Value>, String> {
+    let response = client
+        .get(format!(
+            "{}/rest/v1/tags",
+            config.api_url.trim_end_matches('/')
+        ))
+        .header("apikey", &config.anon_key)
+        .bearer_auth(&session.access_token)
+        .header("Accept-Profile", APP_SCHEMA)
+        .query(&[
+            ("name", format!("ilike.{}", name.trim())),
+            ("deleted_at", "is.null".to_string()),
+            ("select", "*".to_string()),
+            ("limit", "10".to_string()),
+        ])
+        .send()
+        .await
+        .map_err(|error| format!("按名称读取 Supabase 标签失败: {error}"))?;
+    let rows: Vec<Value> = parse_json_response(response, "tags").await?;
+    Ok(rows.into_iter().find(|row| {
+        row["name"]
+            .as_str()
+            .is_some_and(|remote_name| remote_name.trim().eq_ignore_ascii_case(name.trim()))
+    }))
 }
 
 async fn parse_json_response<T: serde::de::DeserializeOwned>(
@@ -293,6 +519,90 @@ pub async fn upload_storage_object(
     Ok(())
 }
 
+pub async fn upload_storage_object_path(
+    client: &Client,
+    config: &SupabaseStorageConfig,
+    session: &SupabaseSession,
+    object_path: &str,
+    local_path: &Path,
+    mime_type: &str,
+    expected_sha256: Option<&str>,
+) -> Result<(), String> {
+    let expected = std::fs::metadata(local_path)
+        .map_err(|error| format!("读取待上传文件失败: {error}"))?
+        .len();
+    let file =
+        std::fs::File::open(local_path).map_err(|error| format!("打开待上传文件失败: {error}"))?;
+    let (tx, rx) = mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(4);
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let mut file = file;
+        let mut buffer = vec![0u8; 512 * 1024];
+        loop {
+            match file.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    if tx
+                        .blocking_send(Ok(bytes::Bytes::copy_from_slice(&buffer[..read])))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = tx.blocking_send(Err(error));
+                    break;
+                }
+            }
+        }
+    });
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    });
+    let upload_url = storage_object_url(
+        &config.api_url,
+        "storage/v1/object/transfer-genie-files",
+        object_path,
+    )?;
+    let response = client
+        .post(upload_url)
+        .header("apikey", &config.anon_key)
+        .bearer_auth(&session.access_token)
+        .header("x-upsert", "true")
+        .header("content-type", mime_type)
+        .header("content-length", expected)
+        .body(reqwest::Body::wrap_stream(stream))
+        .send()
+        .await
+        .map_err(|error| format!("上传 Supabase Storage 失败: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!(
+            "上传 Supabase Storage 失败 ({status}): {}",
+            sanitize_error(&body)
+        ));
+    }
+    let mut verified = download_storage_object_stream(client, config, session, object_path).await?;
+    let mut actual = 0u64;
+    let mut hasher = Sha256::new();
+    while let Some(chunk) = verified.stream.next().await {
+        let chunk = chunk.map_err(|error| format!("读取 Storage 校验数据失败: {error}"))?;
+        actual += chunk.len() as u64;
+        hasher.update(&chunk);
+    }
+    if actual != expected {
+        return Err(format!("Storage 文件大小不一致: {actual}/{expected}"));
+    }
+    if let Some(expected_hash) = expected_sha256 {
+        let actual_hash = format!("{:x}", hasher.finalize());
+        if actual_hash != expected_hash {
+            return Err("Storage 文件摘要不一致".to_string());
+        }
+    }
+    Ok(())
+}
+
 pub async fn download_storage_object(
     client: &Client,
     config: &SupabaseStorageConfig,
@@ -324,6 +634,37 @@ pub async fn download_storage_object(
         .await
         .map(|bytes| bytes.to_vec())
         .map_err(|error| format!("读取 Supabase 附件失败: {error}"))
+}
+
+pub async fn download_storage_object_stream(
+    client: &Client,
+    config: &SupabaseStorageConfig,
+    session: &SupabaseSession,
+    object_path: &str,
+) -> Result<StorageDownloadStreamResponse, String> {
+    let download_url = storage_object_url(
+        &config.api_url,
+        "storage/v1/object/authenticated/transfer-genie-files",
+        object_path,
+    )?;
+    let response = client
+        .get(download_url)
+        .header("apikey", &config.anon_key)
+        .bearer_auth(&session.access_token)
+        .send()
+        .await
+        .map_err(|error| format!("下载 Supabase 附件失败: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!(
+            "下载 Supabase 附件失败 ({status}): {}",
+            sanitize_error(&body)
+        ));
+    }
+    Ok(StorageDownloadStreamResponse {
+        stream: Box::pin(response.bytes_stream()),
+    })
 }
 
 pub async fn delete_storage_objects(
@@ -400,6 +741,30 @@ fn sanitize_error(body: &str) -> String {
                 plain.chars().take(300).collect()
             }
         })
+}
+
+fn build_message_page_query(
+    config: &SupabaseStorageConfig,
+    before: Option<(i64, &str)>,
+    limit: usize,
+) -> Vec<(String, String)> {
+    let limit = limit.clamp(1, 200);
+    let mut query = vec![
+        ("space_id".to_string(), format!("eq.{}", config.space_id)),
+        ("deleted_at".to_string(), "is.null".to_string()),
+        ("order".to_string(), "timestamp_ms.desc,id.desc".to_string()),
+        ("limit".to_string(), (limit + 1).to_string()),
+        ("select".to_string(), "*".to_string()),
+    ];
+    if let Some((timestamp_ms, message_id)) = before {
+        query.push((
+            "or".to_string(),
+            format!(
+                "(timestamp_ms.lt.{timestamp_ms},and(timestamp_ms.eq.{timestamp_ms},id.lt.{message_id}))"
+            ),
+        ));
+    }
+    query
 }
 
 pub async fn connect_realtime(
@@ -523,7 +888,11 @@ pub fn realtime_reconnect_delay(attempt: u32) -> Duration {
 
 #[cfg(test)]
 mod tests {
-    use super::{realtime_reconnect_delay, sanitize_error, storage_object_url};
+    use super::{
+        build_message_page_query, parse_content_range_count, realtime_reconnect_delay,
+        sanitize_error, storage_object_url,
+    };
+    use crate::types::SupabaseStorageConfig;
     use std::time::Duration;
 
     #[test]
@@ -576,5 +945,34 @@ mod tests {
             "<html>gateway error</html>"
         );
         assert_eq!(sanitize_error(""), "远端拒绝请求，未返回错误详情");
+    }
+
+    #[test]
+    fn message_page_query_uses_space_and_stable_history_boundary() {
+        let config = SupabaseStorageConfig {
+            api_url: "https://example.invalid".into(),
+            anon_key: "anon".into(),
+            space_id: "space-a".into(),
+        };
+        let query = build_message_page_query(
+            &config,
+            Some((123, "00000000-0000-4000-8000-000000000002")),
+            50,
+        );
+        assert!(query.contains(&("space_id".into(), "eq.space-a".into())));
+        assert!(query.contains(&("limit".into(), "51".into())));
+        assert!(query.contains(&("order".into(), "timestamp_ms.desc,id.desc".into())));
+        assert!(query.contains(&(
+            "or".into(),
+            "(timestamp_ms.lt.123,and(timestamp_ms.eq.123,id.lt.00000000-0000-4000-8000-000000000002))".into()
+        )));
+    }
+
+    #[test]
+    fn content_range_count_supports_non_empty_and_empty_spaces() {
+        assert_eq!(parse_content_range_count("0-0/377"), Some(377));
+        assert_eq!(parse_content_range_count("*/0"), Some(0));
+        assert_eq!(parse_content_range_count("0-0/*"), None);
+        assert_eq!(parse_content_range_count("invalid"), None);
     }
 }

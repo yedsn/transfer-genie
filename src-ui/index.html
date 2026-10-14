@@ -691,160 +691,53 @@
                 <div class="endpoint-settings settings-section" id="settings-section-webdav" data-settings-section>
                 <div class="endpoint-header">
                   <div>
-                    <h3>WebDAV 端点</h3>
-                    <p>可配置多个地址，并在首页切换。</p>
+                    <h3>存储空间</h3>
+                    <p>WebDAV 与 Supabase 都是彼此独立的存储空间，可配置多个并在首页切换。</p>
                   </div>
                   <div class="endpoint-header-actions">
+                    <button id="storage-space-transfer" class="button ghost small" type="button" @click="openStorageTransferWizard()">
+                      存储空间数据传输
+                    </button>
                     <button id="batch-speed-test" class="button ghost small" type="button">
                       批量测速
                     </button>
-                    <button id="add-webdav" class="button ghost small" type="button">
-                      新增端点
+                    <button id="add-storage-profile" class="button primary small" type="button" @click="openStorageProfileEditor()">
+                      新增存储空间
                     </button>
                   </div>
                 </div>
-                <div id="webdav-list" class="endpoint-list">
-                  <template v-if="ui.settingsWebdav.useVueList">
-                    <div v-if="!currentSettingsWebdavEndpoints().length" class="endpoint-empty">
-                      {{ ui.settingsWebdav.emptyMessage || '暂无 WebDAV 端点' }}
-                    </div>
-                    <div
-                      v-else
-                      class="endpoint-card"
-                      v-for="endpoint in currentSettingsWebdavEndpoints()"
-                      :key="endpoint.id"
-                      :data-endpoint-id="endpoint.id"
-                      :class="settingsWebdavCardClasses(endpoint)"
-                    >
-                      <div class="endpoint-card-header">
-                        <span class="endpoint-title">{{ endpoint.title }}</span>
-                        <button class="button ghost small" type="button" @click="removeSettingsWebdavEndpoint(endpoint)">移除</button>
-                      </div>
-                      <div class="endpoint-fields">
-                        <label>
-                          名称
-                          <input type="text" :value="endpoint.name" placeholder="例如：公司网盘" @input="updateSettingsWebdavField(endpoint, 'name', $event.target.value)" />
-                        </label>
-                        <label>
-                          WebDAV URL
-                          <input type="text" :value="endpoint.url" placeholder="https://example.com/webdav/" @input="updateSettingsWebdavField(endpoint, 'url', $event.target.value)" />
-                        </label>
-                        <label>
-                          用户名
-                          <input type="text" :value="endpoint.username" @input="updateSettingsWebdavField(endpoint, 'username', $event.target.value)" />
-                        </label>
-                        <label>
-                          密码
-                          <input type="password" :value="endpoint.password" @input="updateSettingsWebdavField(endpoint, 'password', $event.target.value)" />
-                        </label>
-                      </div>
-                      <div class="endpoint-actions">
-                        <label class="toggle">
-                          <input type="checkbox" :checked="endpoint.enabled" @change="toggleSettingsWebdavEnabled(endpoint, $event.target.checked)" />
-                          启用
-                        </label>
-                        <label class="toggle">
-                          <input type="radio" name="active-endpoint-radio" :checked="endpoint.isActive" :disabled="endpoint.activeDisabled" @change="activateSettingsWebdavEndpoint(endpoint, $event.target.checked)" />
-                          当前
-                        </label>
-                        <button class="button ghost small" type="button" :disabled="endpoint.speedTestDisabled" @click="testSettingsWebdavEndpoint(endpoint)">{{ endpoint.speedTestLabel }}</button>
-                      </div>
-                      <div v-if="endpoint.speedTestResult" class="speed-test-result" style="display: flex;">
-                        <div class="speed-test-item">
-                          <span class="speed-test-label">上传：</span>
-                          <span class="speed-test-value">{{ endpoint.speedTestResult.uploadText }}</span>
+                <div class="endpoint-list">
+                  <div
+                    v-for="profile in allStorageProfiles()"
+                    :key="`space-${profile.id}`"
+                    class="endpoint-card"
+                    :class="{ 'is-disabled': profile.enabled === false, 'is-active': profile.id === ui.settingsForm.activeStorageProfileId, 'is-supabase': profile.provider_kind === 'supabase' }"
+                  >
+                    <div class="endpoint-card-main">
+                      <div class="endpoint-provider-mark" aria-hidden="true">{{ profile.provider_kind === 'supabase' ? 'S' : 'W' }}</div>
+                      <div class="endpoint-card-content">
+                        <div class="endpoint-card-header">
+                          <span class="endpoint-title">{{ profile.name || profile.id }}</span>
+                          <div class="endpoint-badges">
+                            <span class="integration-card-state">{{ profile.provider_kind === 'supabase' ? 'Supabase' : 'WebDAV' }}</span>
+                            <span v-if="profile.id === ui.settingsForm.activeStorageProfileId" class="endpoint-current-state">当前使用</span>
+                          </div>
                         </div>
-                        <div class="speed-test-item">
-                          <span class="speed-test-label">下载：</span>
-                          <span class="speed-test-value">{{ endpoint.speedTestResult.downloadText }}</span>
+                        <div class="integration-card-meta">
+                          <span class="endpoint-address" :title="storageProfileAddress(profile)">{{ storageProfileAddress(profile) }}</span>
+                          <span class="endpoint-runtime">{{ profile.enabled === false ? '已禁用' : '可用' }} · {{ storageProfileRuntimeLabel(profile) }}</span>
                         </div>
                       </div>
                     </div>
-                  </template>
-                </div>
-                <span class="field-hint">仅启用的端点可在首页选择。</span>
-              </div>
-
-              <div class="settings-group">
-                <h3 class="settings-group-title">Supabase 存储空间</h3>
-                <div class="settings-group-content">
-                  <label>
-                    空间名称
-                    <input type="text" placeholder="例如：个人云端" :value="ui.settingsForm.supabaseProfileName" @input="updateSettingsFormField('supabaseProfileName', $event.target.value)" />
-                  </label>
-                  <label>
-                    Supabase API URL
-                    <input id="supabase-api-url" type="url" placeholder="https://your-supabase.example.com" :value="ui.settingsForm.supabaseApiUrl" @input="updateSettingsFormField('supabaseApiUrl', $event.target.value)" />
-                  </label>
-                  <label>
-                    公开 Key（anon Key）
-                    <input id="supabase-anon-key" type="password" autocomplete="off" :value="ui.settingsForm.supabaseAnonKey" @input="updateSettingsFormField('supabaseAnonKey', $event.target.value)" />
-                  </label>
-                  <span class="field-hint">这里只使用公开 Key；不需要数据库密码、service-role 或管理密钥。业务 Schema 和私有文件桶由应用版本管理。</span>
-                  <div class="endpoint-actions">
-                    <button class="button ghost small" type="button" @click="testSupabaseSettings()">分层检查连接</button>
-                    <span class="field-hint">{{ supabaseConnectionLabel() }}</span>
-                  </div>
-                  <label>
-                    登录邮箱
-                    <input id="supabase-email" type="email" autocomplete="username" :value="ui.settingsForm.supabaseEmail" @input="updateSettingsFormField('supabaseEmail', $event.target.value)" />
-                  </label>
-                  <label>
-                    登录密码
-                    <input id="supabase-password" type="password" autocomplete="current-password" :value="ui.settingsForm.supabasePassword" @input="updateSettingsFormField('supabasePassword', $event.target.value)" />
-                  </label>
-                  <div class="endpoint-actions">
-                    <button id="supabase-login" class="button primary small" :class="{ 'has-spinner': ui.settingsForm.supabaseAuthBusy }" type="button" :disabled="ui.settingsForm.supabaseAuthBusy" @click="signInSupabase()">
-                      <span v-if="ui.settingsForm.supabaseAuthBusy" class="button-spinner" aria-hidden="true"></span>
-                      {{ ui.settingsForm.supabaseAuthBusy ? '登录中...' : '登录' }}
-                    </button>
-                    <button class="button ghost small" type="button" :disabled="ui.settingsForm.supabaseAuthBusy" @click="logoutSupabase()">退出</button>
-                    <span class="field-hint">账号：{{ supabaseAccountLabel() }}。密码只用于本次登录，不会保存。</span>
-                  </div>
-                  <span v-if="ui.settingsForm.supabaseAuthMessage" class="supabase-auth-message" :class="`is-${ui.settingsForm.supabaseAuthMessageKind || 'info'}`">{{ ui.settingsForm.supabaseAuthMessage }}</span>
-                  <div class="endpoint-actions">
-                    <button
-                      id="supabase-import-webdav"
-                      class="button ghost small"
-                      :class="{ 'has-spinner': ui.settingsForm.storageImportBusy, 'is-loading': ui.settingsForm.storageImportBusy }"
-                      type="button"
-                      :disabled="ui.settingsForm.storageImportBusy"
-                      @click="importWebdavToSupabase()"
-                    >
-                      <span v-if="ui.settingsForm.storageImportBusy" class="button-spinner" aria-hidden="true"></span>
-                      {{ ui.settingsForm.storageImportBusy ? '导入中...' : '从 WebDAV 导入' }}
-                    </button>
-                    <span class="field-hint">先预览数量与大小，再把数据库记录和附件完整上传到当前 Supabase 账号；来源 WebDAV 不会修改或删除。</span>
-                  </div>
-                  <div v-if="ui.settingsForm.storageImportProgress" class="storage-import-progress">
-                    <div class="storage-import-progress-head">
-                      <span>{{ ui.settingsForm.storageImportMessage || '准备导入...' }}</span>
-                      <strong>{{ ui.settingsForm.storageImportProgress.percent }}%</strong>
+                    <div class="endpoint-actions">
+                      <button class="button ghost small" type="button" @click="editStorageProfile(profile)">编辑</button>
+                      <button class="button ghost small" type="button" :disabled="profile.enabled === false || profile.id === ui.settingsForm.activeStorageProfileId" @click="activateStorageProfile(profile)">设为当前</button>
+                      <button class="button ghost small endpoint-remove-button" type="button" @click="removeStorageProfile(profile)">移除</button>
                     </div>
-                    <div
-                      class="storage-import-progress-track"
-                      role="progressbar"
-                      :aria-valuenow="ui.settingsForm.storageImportProgress.percent"
-                      aria-valuemin="0"
-                      aria-valuemax="100"
-                    >
-                      <div
-                        class="storage-import-progress-fill"
-                        :style="{ width: `${ui.settingsForm.storageImportProgress.percent}%` }"
-                      ></div>
-                    </div>
-                    <span
-                      class="storage-import-progress-detail"
-                      :class="`is-${ui.settingsForm.storageImportMessageKind || 'info'}`"
-                    >
-                      已处理 {{ ui.settingsForm.storageImportProgress.processedItems }}
-                      / {{ ui.settingsForm.storageImportProgress.totalItems }} 项
-                      <span v-if="ui.settingsForm.storageImportProgress.failedItems">
-                        ，失败 {{ ui.settingsForm.storageImportProgress.failedItems }} 项
-                      </span>
-                    </span>
                   </div>
                 </div>
+                <span v-if="!allStorageProfiles().length" class="field-hint">暂无存储空间，请点击“新增存储空间”。</span>
+                <span class="field-hint">只有点击“保存此空间”才会写入配置；WebDAV 仅手动刷新。</span>
               </div>
 
               <div class="settings-section-anchor" id="settings-section-basic" data-settings-section aria-hidden="true"></div>
@@ -854,11 +747,6 @@
                   <label>
                     发送者名称
                     <input id="sender-name" type="text" :value="ui.settingsForm.senderName" @input="updateSettingsFormField('senderName', $event.target.value)" />
-                  </label>
-                  <label>
-                    WebDAV 刷新间隔（秒）
-                    <input id="refresh-interval" type="number" min="1" step="1" :value="ui.settingsForm.refreshIntervalSecs" @input="updateSettingsFormField('refreshIntervalSecs', Number($event.target.value || 5))" />
-                    <span class="field-hint">仅用于 WebDAV；Supabase 使用 Realtime WebSocket 实时同步。</span>
                   </label>
                   <label>
                     下载目录
@@ -1772,6 +1660,327 @@
             <button class="button primary small" type="button" :disabled="ui.manualBackupDialog.loading" @click="submitManualBackupDialog">
               {{ ui.manualBackupDialog.loading ? '备份中...' : '确认备份' }}
             </button>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="ui.settingsForm.storageProfileEditorOpen" class="message-preview storage-profile-editor-modal is-active" aria-hidden="false">
+        <div class="message-preview-backdrop" @click="cancelStorageProfileEditor()"></div>
+        <div class="message-preview-dialog storage-profile-editor-dialog" role="dialog" aria-modal="true" aria-labelledby="storage-profile-editor-title">
+          <div class="storage-profile-editor-header">
+            <div>
+              <div id="storage-profile-editor-title" class="dialog-title">{{ ui.settingsForm.storageProfileEditorMode === 'edit' ? '编辑存储空间' : '新增存储空间' }}</div>
+              <div class="dialog-text">配置只会在点击“保存此空间”后写入；可以先使用当前草稿测试连接。</div>
+            </div>
+            <button type="button" class="message-preview-close" :disabled="ui.settingsForm.storageProfileTestBusy || ui.settingsForm.supabaseAuthBusy" aria-label="关闭存储空间编辑弹框" @click="cancelStorageProfileEditor()">×</button>
+          </div>
+          <div class="storage-profile-editor-body">
+            <div class="storage-profile-editor-grid">
+              <label>
+                存储类型
+                <select id="storage-profile-provider" :disabled="ui.settingsForm.storageProfileEditorMode === 'edit'" :value="ui.settingsForm.storageProfileDraft?.provider_kind || ''" @change="updateStorageProfileDraft('provider_kind', $event.target.value)">
+                  <option value="">请选择 WebDAV 或 Supabase</option>
+                  <option value="webdav">WebDAV</option>
+                  <option value="supabase">Supabase</option>
+                </select>
+              </label>
+              <label v-if="ui.settingsForm.storageProfileDraft?.provider_kind">
+                空间名称
+                <input id="storage-profile-name" type="text" :value="ui.settingsForm.storageProfileDraft?.name || ''" placeholder="例如：个人云端" @input="updateStorageProfileDraft('name', $event.target.value)" />
+              </label>
+              <template v-if="ui.settingsForm.storageProfileDraft?.provider_kind === 'webdav'">
+                <label class="is-wide">WebDAV URL<input id="storage-profile-webdav-url" type="url" :value="ui.settingsForm.storageProfileDraft?.webdav?.url || ''" placeholder="https://example.com/webdav/" @input="updateStorageProfileDraft('webdav.url', $event.target.value)" /></label>
+                <label>用户名<input id="storage-profile-webdav-username" type="text" :value="ui.settingsForm.storageProfileDraft?.webdav?.username || ''" @input="updateStorageProfileDraft('webdav.username', $event.target.value)" /></label>
+                <label>密码<input id="storage-profile-webdav-password" type="password" :value="ui.settingsForm.storageProfileDraft?.webdav?.password || ''" @input="updateStorageProfileDraft('webdav.password', $event.target.value)" /></label>
+              </template>
+              <template v-if="ui.settingsForm.storageProfileDraft?.provider_kind === 'supabase'">
+                <label class="is-wide">Supabase API URL<input id="storage-profile-supabase-url" type="url" :value="ui.settingsForm.storageProfileDraft?.supabase?.api_url || ''" placeholder="https://your-supabase.example.com" @input="updateStorageProfileDraft('supabase.api_url', $event.target.value)" /></label>
+                <label class="is-wide">公开 Key（anon Key）<input id="storage-profile-supabase-key" type="password" autocomplete="off" :value="ui.settingsForm.storageProfileDraft?.supabase?.anon_key || ''" @input="updateStorageProfileDraft('supabase.anon_key', $event.target.value)" /></label>
+                <label class="is-wide">Space ID（高级设置，可留空；登录后可从空间列表选择）<input id="storage-profile-space-id" type="text" :value="ui.settingsForm.storageProfileDraft?.supabase?.space_id || ''" @input="updateStorageProfileDraft('supabase.space_id', $event.target.value)" /></label>
+              </template>
+            </div>
+            <label v-if="ui.settingsForm.storageProfileDraft?.provider_kind" class="toggle storage-profile-enabled"><input type="checkbox" :checked="ui.settingsForm.storageProfileDraft?.enabled !== false" @change="updateStorageProfileDraft('enabled', $event.target.checked)" />启用这个存储空间</label>
+            <div v-if="ui.settingsForm.storageProfileTestMessage" class="storage-profile-test-result" :class="`is-${ui.settingsForm.storageProfileTestMessageKind || 'info'}`">
+              <span class="storage-profile-test-dot" aria-hidden="true"></span>
+              <span>{{ ui.settingsForm.storageProfileTestMessage }}</span>
+            </div>
+            <span class="field-hint">测试连接只使用弹框里的草稿，不会自动保存或切换当前空间。</span>
+            <section v-if="ui.settingsForm.storageProfileDraft?.provider_kind === 'supabase'" class="storage-profile-auth-panel">
+              <div class="storage-profile-auth-heading">
+                <div>
+                  <strong>Supabase 账号</strong>
+                  <span v-if="ui.settingsForm.storageProfileEditorMode === 'create'">请先保存这个存储空间，再登录账号。</span>
+                  <span v-else-if="ui.settingsForm.supabaseAccountStatus?.signedIn">账号已连接，会话只属于这个存储空间。</span>
+                  <span v-else>登录后可在多台设备上访问这个存储空间。</span>
+                </div>
+                <span class="storage-profile-auth-state" :class="{ 'is-signed-in': ui.settingsForm.supabaseAccountStatus?.signedIn }">{{ ui.settingsForm.supabaseAccountStatus?.signedIn ? '已登录' : '未登录' }}</span>
+              </div>
+              <template v-if="ui.settingsForm.supabaseAccountStatus?.signedIn">
+                <div class="storage-profile-account-summary">
+                  <div class="storage-profile-account-item is-wide">
+                    <span>账号邮箱</span>
+                    <strong>{{ ui.settingsForm.supabaseAccountStatus?.email || '未提供' }}</strong>
+                  </div>
+                  <div class="storage-profile-account-item">
+                    <span>用户 ID</span>
+                    <strong>{{ compactSupabaseAccountId(ui.settingsForm.supabaseAccountStatus?.userId) }}</strong>
+                  </div>
+                  <div class="storage-profile-account-item">
+                    <span>Space ID</span>
+                    <strong>{{ ui.settingsForm.storageProfileDraft?.supabase?.space_id || '自动分配' }}</strong>
+                  </div>
+                  <div class="storage-profile-account-item is-wide">
+                    <span>会话有效期</span>
+                    <strong>{{ supabaseSessionExpiryLabel() }}</strong>
+                  </div>
+                </div>
+                <section class="supabase-space-picker" aria-labelledby="supabase-space-picker-title">
+                  <div class="supabase-space-picker-heading">
+                    <div>
+                      <strong id="supabase-space-picker-title">账号中的存储空间</strong>
+                      <span>这里会列出当前账号在这个 Supabase 项目中可访问的全部空间。</span>
+                    </div>
+                    <button class="button ghost small" type="button" :disabled="ui.settingsForm.supabaseSpacesLoading || ui.settingsForm.supabaseAuthBusy" @click="loadSupabaseSpaces()">
+                      {{ ui.settingsForm.supabaseSpacesLoading ? '读取中...' : '刷新列表' }}
+                    </button>
+                  </div>
+                  <div v-if="ui.settingsForm.supabaseSpacesLoading && !ui.settingsForm.supabaseSpaces?.length" class="supabase-space-loading">
+                    <span class="button-spinner" aria-hidden="true"></span>
+                    正在读取远端空间...
+                  </div>
+                  <div v-else-if="ui.settingsForm.supabaseSpaces?.length" class="supabase-space-list">
+                    <article v-for="space in ui.settingsForm.supabaseSpaces" :key="space.id" class="supabase-space-item" :class="{ 'is-current': space.current }">
+                      <div class="supabase-space-main">
+                      <div class="supabase-space-title-row">
+                        <strong>{{ space.name || 'Supabase 空间' }}</strong>
+                        <span v-if="space.current" class="supabase-space-state is-current">正在使用</span>
+                          <span v-else class="supabase-space-state is-remote">可切换</span>
+                        </div>
+                        <div class="supabase-space-meta">
+                          <span><b>{{ space.messageCount || 0 }}</b> 条消息</span>
+                          <span :title="space.id">ID {{ compactSupabaseAccountId(space.id) }}</span>
+                        </div>
+                      </div>
+                      <button class="button small" :class="space.current ? 'ghost' : 'primary'" type="button" :disabled="space.current || ui.settingsForm.supabaseAuthBusy" @click="useSupabaseSpace(space)">
+                        {{ space.current ? '正在使用' : '切换' }}
+                      </button>
+                    </article>
+                  </div>
+                  <div v-else class="supabase-space-empty">{{ ui.settingsForm.supabaseSpacesMessage || '暂未读取到可访问空间' }}</div>
+                  <span v-if="ui.settingsForm.supabaseSpacesMessage && ui.settingsForm.supabaseSpaces?.length" class="supabase-space-message">{{ ui.settingsForm.supabaseSpacesMessage }}</span>
+                </section>
+                <div class="storage-profile-auth-actions is-signed-in">
+                  <span class="field-hint">该账号仅用于当前 Supabase 存储空间。</span>
+                  <button id="supabase-logout" class="button ghost small" :class="{ 'has-spinner': ui.settingsForm.supabaseAuthBusy }" type="button" :disabled="ui.settingsForm.supabaseAuthBusy" @click="logoutSupabase()">
+                    <span v-if="ui.settingsForm.supabaseAuthBusy" class="button-spinner" aria-hidden="true"></span>
+                    {{ ui.settingsForm.supabaseAuthBusy ? '退出中...' : '退出登录' }}
+                  </button>
+                </div>
+              </template>
+              <template v-else>
+                <div class="storage-profile-editor-grid">
+                  <label>
+                    登录邮箱
+                    <input id="supabase-email" type="email" autocomplete="username" :disabled="ui.settingsForm.storageProfileEditorMode === 'create' || ui.settingsForm.supabaseAuthBusy" :value="ui.settingsForm.supabaseEmail" @input="updateSettingsFormField('supabaseEmail', $event.target.value)" />
+                  </label>
+                  <label>
+                    登录密码
+                    <input id="supabase-password" type="password" autocomplete="current-password" :disabled="ui.settingsForm.storageProfileEditorMode === 'create' || ui.settingsForm.supabaseAuthBusy" :value="ui.settingsForm.supabasePassword" @input="updateSettingsFormField('supabasePassword', $event.target.value)" />
+                  </label>
+                </div>
+                <div class="storage-profile-auth-actions">
+                  <button id="supabase-login" class="button primary small" :class="{ 'has-spinner': ui.settingsForm.supabaseAuthBusy }" type="button" :disabled="ui.settingsForm.storageProfileEditorMode === 'create' || ui.settingsForm.supabaseAuthBusy" @click="signInSupabase()">
+                    <span v-if="ui.settingsForm.supabaseAuthBusy" class="button-spinner" aria-hidden="true"></span>
+                    {{ ui.settingsForm.supabaseAuthBusy ? '登录中...' : '登录' }}
+                  </button>
+                  <span class="field-hint">密码只用于本次登录，不会保存到普通设置中。</span>
+                </div>
+              </template>
+              <span v-if="ui.settingsForm.supabaseAuthMessage" class="supabase-auth-message" :class="`is-${ui.settingsForm.supabaseAuthMessageKind || 'info'}`">{{ ui.settingsForm.supabaseAuthMessage }}</span>
+            </section>
+          </div>
+          <div class="storage-profile-editor-actions">
+            <button id="test-storage-profile" class="button ghost small" type="button" :class="{ 'has-spinner': ui.settingsForm.storageProfileTestBusy }" :disabled="ui.settingsForm.storageProfileTestBusy || !ui.settingsForm.storageProfileDraft?.provider_kind" @click="testStorageProfileDraftConnection()">
+              <span v-if="ui.settingsForm.storageProfileTestBusy" class="button-spinner" aria-hidden="true"></span>
+              {{ ui.settingsForm.storageProfileTestBusy ? '测试中...' : '测试连接' }}
+            </button>
+            <span class="storage-profile-editor-actions-spacer"></span>
+            <button class="button ghost small" type="button" :disabled="ui.settingsForm.storageProfileTestBusy || ui.settingsForm.supabaseAuthBusy" @click="cancelStorageProfileEditor()">{{ ui.settingsForm.storageProfileEditorMode === 'edit' ? '关闭' : '取消' }}</button>
+            <button id="save-storage-profile" class="button primary small" type="button" :disabled="ui.settingsForm.storageProfileTestBusy || ui.settingsForm.supabaseAuthBusy || !ui.settingsForm.storageProfileDraft?.provider_kind" @click="saveStorageProfileDraft()">{{ ui.settingsForm.storageProfileEditorMode === 'edit' ? '保存修改' : '保存此空间' }}</button>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="ui.settingsForm.storageTransferWizardOpen" class="message-preview storage-transfer-modal is-active" aria-hidden="false">
+        <div class="message-preview-backdrop" @click="closeStorageTransferWizard()"></div>
+        <div class="message-preview-dialog storage-transfer-dialog" role="dialog" aria-modal="true" aria-labelledby="storage-transfer-title">
+          <div class="storage-transfer-header">
+            <div>
+              <div id="storage-transfer-title" class="dialog-title">存储空间数据传输</div>
+              <div class="dialog-text">复制来源空间中的消息、附件、标签和标记数据；来源不会删除，目标不会清空。</div>
+            </div>
+            <button
+              type="button"
+              class="message-preview-close"
+              :title="ui.settingsForm.storageImportBusy ? '关闭窗口，传输将在后台继续' : '关闭'"
+              aria-label="关闭存储空间数据传输"
+              @click="closeStorageTransferWizard()"
+            >×</button>
+          </div>
+
+          <ol class="storage-transfer-steps" aria-label="数据传输步骤">
+            <li :class="{ 'is-active': ui.settingsForm.storageTransferWizardStep === 'select', 'is-done': ['overview', 'confirm', 'progress', 'complete'].includes(ui.settingsForm.storageTransferWizardStep) }"><span>1</span>选择空间</li>
+            <li :class="{ 'is-active': ui.settingsForm.storageTransferWizardStep === 'overview', 'is-done': ['confirm', 'progress', 'complete'].includes(ui.settingsForm.storageTransferWizardStep) }"><span>2</span>传输概览</li>
+            <li :class="{ 'is-active': ui.settingsForm.storageTransferWizardStep === 'confirm', 'is-done': ['progress', 'complete'].includes(ui.settingsForm.storageTransferWizardStep) }"><span>3</span>确认传输</li>
+            <li :class="{ 'is-active': ui.settingsForm.storageTransferWizardStep === 'progress', 'is-done': ui.settingsForm.storageTransferWizardStep === 'complete' }"><span>4</span>传输进度</li>
+            <li :class="{ 'is-active': ui.settingsForm.storageTransferWizardStep === 'complete' }"><span>5</span>完成</li>
+          </ol>
+
+          <div class="storage-transfer-body">
+            <section v-if="ui.settingsForm.storageTransferWizardStep === 'select'" class="storage-transfer-stage">
+              <div class="storage-transfer-stage-heading">
+                <span class="storage-transfer-stage-kicker">配置传输路线</span>
+                <strong>选择来源空间和目标空间</strong>
+                <span>数据将从来源复制到目标。两个空间必须不同，并且都处于启用状态。</span>
+              </div>
+              <div v-if="storageTransferTasks().length" class="storage-transfer-recovery-list">
+              <div v-for="task in storageTransferTasks()" :key="task.batchId" class="storage-transfer-recovery">
+                <div class="storage-transfer-recovery-heading">
+                  <div>
+                    <span>发现未完成任务</span>
+                    <strong>{{ storageProfileName(task.sourceProfileId) }} → {{ storageProfileName(task.targetProfileId) }}</strong>
+                    <small>{{ ui.settingsForm.storageImportBusy && ui.settingsForm.storageImportProgress?.batchId === task.batchId ? '正在后台传输' : (task.status === 'prepared' ? '已检查，尚未开始写入' : '上次传输已中断') }}</small>
+                  </div>
+                  <button class="button ghost small" type="button" @click="toggleStorageTransferRecovery(task.batchId)">{{ ui.settingsForm.storageTransferRecoveryExpanded && ui.settingsForm.storageTransferActiveBatchId === task.batchId ? '收起' : '查看' }}</button>
+                </div>
+                <div v-if="ui.settingsForm.storageTransferRecoveryExpanded && ui.settingsForm.storageTransferActiveBatchId === task.batchId" class="storage-transfer-recovery-detail">
+                  <div><span>项目</span><strong>{{ task.processedItems }} / {{ task.totalItems }}</strong></div>
+                  <div><span>附件缓存</span><strong>{{ formatBytes(task.transferredBytes || 0) }} / {{ formatBytes(task.totalBytes || 0) }}</strong></div>
+                  <div><span>阶段</span><strong>{{ task.phase }}</strong></div>
+                  <div class="storage-transfer-recovery-actions">
+                    <button v-if="!ui.settingsForm.storageImportBusy" class="button ghost small danger" type="button" @click="abandonRecoverableStorageTransfer(task.batchId)">放弃任务</button>
+                    <button v-if="!ui.settingsForm.storageImportBusy" class="button primary small" type="button" @click="resumeRecoverableStorageTransfer(task.batchId)">继续任务</button>
+                    <button v-else-if="ui.settingsForm.storageImportProgress?.batchId === task.batchId" class="button primary small" type="button" @click="viewRunningStorageTransferProgress()">查看进度</button>
+                  </div>
+                </div>
+              </div>
+              </div>
+              <div class="storage-transfer-route">
+                <label class="storage-transfer-picker">
+                  <span class="storage-transfer-picker-order">01</span>
+                  <span class="storage-transfer-picker-label">来源空间</span>
+                  <small>读取消息、附件和标记数据</small>
+                  <select id="storage-transfer-source" :value="ui.settingsForm.storageTransferSourceProfileId" @change="updateSettingsFormField('storageTransferSourceProfileId', $event.target.value)">
+                    <option value="">请选择来源</option>
+                    <option v-for="profile in enabledStorageProfiles()" :key="profile.id" :value="profile.id">{{ storageProfileOptionLabel(profile) }}</option>
+                  </select>
+                </label>
+                <div class="storage-transfer-route-arrow" aria-hidden="true">→</div>
+                <label class="storage-transfer-picker">
+                  <span class="storage-transfer-picker-order">02</span>
+                  <span class="storage-transfer-picker-label">目标空间</span>
+                  <small>写入副本并保留已有数据</small>
+                  <select id="storage-transfer-target" :value="ui.settingsForm.storageTransferTargetProfileId" @change="updateSettingsFormField('storageTransferTargetProfileId', $event.target.value)">
+                    <option value="">请选择目标</option>
+                    <option v-for="profile in enabledStorageProfiles()" :key="profile.id" :value="profile.id" :disabled="profile.id === ui.settingsForm.storageTransferSourceProfileId">{{ storageProfileOptionLabel(profile) }}</option>
+                  </select>
+                </label>
+              </div>
+              <div class="storage-transfer-note"><strong>复制模式</strong><span>这是一次性数据传输，不会删除来源，也不会在两个空间之间建立持续同步。</span></div>
+            </section>
+
+            <section v-else-if="ui.settingsForm.storageTransferWizardStep === 'overview'" class="storage-transfer-stage">
+              <div class="storage-transfer-stage-heading">
+                <span class="storage-transfer-stage-kicker">检查结果</span>
+                <strong>传输概览</strong>
+                <span>以下数据已经过来源检查，此时尚未写入目标空间。</span>
+              </div>
+              <div class="storage-transfer-summary-route">
+                <div class="is-source"><span>来源空间</span><strong>{{ ui.settingsForm.storageTransferPreview?.sourceProfileName }}</strong><small>{{ ui.settingsForm.storageTransferPreview?.sourceProviderKind }}</small></div>
+                <b aria-hidden="true">→</b>
+                <div class="is-target"><span>目标空间</span><strong>{{ ui.settingsForm.storageTransferPreview?.targetProfileName }}</strong><small>{{ ui.settingsForm.storageTransferPreview?.targetProviderKind }}</small></div>
+              </div>
+              <div class="storage-transfer-stats">
+                <div><span>消息</span><strong>{{ ui.settingsForm.storageTransferPreview?.messageCount || 0 }}</strong><small>条记录</small></div>
+                <div><span>附件</span><strong>{{ ui.settingsForm.storageTransferPreview?.attachmentCount || 0 }}</strong><small>个文件</small></div>
+                <div><span>附件大小</span><strong>{{ formatBytes(ui.settingsForm.storageTransferPreview?.totalBytes || 0) }}</strong><small>预计传输量</small></div>
+                <div><span>标签</span><strong>{{ ui.settingsForm.storageTransferPreview?.tagCount || 0 }}</strong><small>组分类</small></div>
+                <div><span>标记</span><strong>{{ ui.settingsForm.storageTransferPreview?.markedCount || 0 }}</strong><small>条状态</small></div>
+                <div class="has-caution"><span>预计跳过 / 待覆盖</span><strong>{{ ui.settingsForm.storageTransferPreview?.skippedCount || 0 }} / {{ Math.max(0, (ui.settingsForm.storageTransferPreview?.messageCount || 0) + (ui.settingsForm.storageTransferPreview?.tagCount || 0) - (ui.settingsForm.storageTransferPreview?.skippedCount || 0)) }}</strong><small>差异内容以来源为准</small></div>
+              </div>
+            </section>
+
+            <section v-else-if="ui.settingsForm.storageTransferWizardStep === 'confirm'" class="storage-transfer-stage storage-transfer-confirm">
+              <div class="storage-transfer-confirm-mark">✓</div>
+              <div class="storage-transfer-stage-heading">
+                <span class="storage-transfer-stage-kicker">最后确认</span>
+                <strong>确认开始传输</strong>
+                <span>确认后将开始写入目标空间，过程中请保持应用运行和网络连接。</span>
+              </div>
+              <div class="storage-transfer-confirm-list">
+                <div><span>01</span><p><strong>来源保持不变</strong><small>来源数据不会被移动或删除。</small></p></div>
+                <div><span>02</span><p><strong>目标合并写入</strong><small>相同数据会跳过，差异数据会以来源内容覆盖。</small></p></div>
+                <div><span>03</span><p><strong>完成前核验</strong><small>目标记录和附件通过核验后才计入成功。</small></p></div>
+              </div>
+            </section>
+
+            <section v-else-if="ui.settingsForm.storageTransferWizardStep === 'progress'" class="storage-transfer-stage">
+              <div class="storage-transfer-stage-heading">
+                <span class="storage-transfer-stage-kicker">任务执行中</span>
+                <strong>正在传输数据</strong>
+                <span>{{ ui.settingsForm.storageImportMessage || '正在准备传输...' }}</span>
+              </div>
+              <div v-if="ui.settingsForm.storageImportProgress" class="storage-import-progress is-wizard">
+                <div class="storage-import-progress-head"><span><small>当前阶段</small>{{ ui.settingsForm.storageImportProgress.phase || '传输中' }}</span><strong>{{ ui.settingsForm.storageImportProgress.percent }}%</strong></div>
+                <div class="storage-import-progress-track" role="progressbar" :aria-valuenow="ui.settingsForm.storageImportProgress.percent" aria-valuemin="0" aria-valuemax="100"><div class="storage-import-progress-fill" :style="{ width: `${ui.settingsForm.storageImportProgress.percent}%` }"></div></div>
+                <div class="storage-transfer-progress-metrics">
+                  <div><span>已处理</span><strong>{{ ui.settingsForm.storageImportProgress.processedItems }} / {{ ui.settingsForm.storageImportProgress.totalItems }}</strong></div>
+                  <div v-if="ui.settingsForm.storageImportProgress.totalBytes"><span>附件流量</span><strong>{{ formatBytes(ui.settingsForm.storageImportProgress.transferredBytes || 0) }} / {{ formatBytes(ui.settingsForm.storageImportProgress.totalBytes) }}</strong></div>
+                  <div><span>异常</span><strong>{{ (ui.settingsForm.storageImportProgress.failedItems || 0) + (ui.settingsForm.storageImportProgress.conflictItems || 0) }}</strong></div>
+                </div>
+              </div>
+              <div v-if="ui.settingsForm.storageImportProgress?.lastError" class="storage-transfer-error">{{ ui.settingsForm.storageImportProgress.lastError }}</div>
+              <div class="storage-transfer-lock-note"><strong>传输将在后台继续</strong><span>可以关闭此窗口；请保持应用运行，再次打开可查看最新进度。</span></div>
+            </section>
+
+            <section v-else class="storage-transfer-stage storage-transfer-complete">
+              <div class="storage-transfer-complete-mark" :class="{ 'has-warning': ui.settingsForm.storageTransferResult?.status !== 'completed' }">{{ ui.settingsForm.storageTransferResult?.status === 'completed' ? '✓' : '!' }}</div>
+              <div class="storage-transfer-stage-heading">
+                <span class="storage-transfer-stage-kicker">执行结果</span>
+                <strong>{{ ui.settingsForm.storageTransferResult?.status === 'completed' ? '传输完成' : '传输已结束，可继续处理' }}</strong>
+                <span>来源数据未删除，目标已有数据未清空。</span>
+              </div>
+              <div class="storage-transfer-result-grid">
+                <div class="is-success"><span>成功</span><strong>{{ ui.settingsForm.storageTransferResult?.appliedItems || 0 }}</strong><small>已核验写入</small></div>
+                <div class="is-skipped"><span>跳过</span><strong>{{ ui.settingsForm.storageTransferResult?.skippedItems || 0 }}</strong><small>目标已有相同数据</small></div>
+                <div class="is-conflict"><span>冲突</span><strong>{{ ui.settingsForm.storageTransferResult?.conflictItems || 0 }}</strong><small>来源变化等需人工处理</small></div>
+                <div class="is-failed"><span>失败</span><strong>{{ ui.settingsForm.storageTransferResult?.failedItems || 0 }}</strong><small>{{ ui.settingsForm.storageTransferResult?.failedItems ? '下方查看异常原因' : '无失败项目' }}</small></div>
+              </div>
+              <div v-if="ui.settingsForm.storageTransferWizardError || ui.settingsForm.storageTransferResult?.lastError" class="storage-transfer-error">{{ ui.settingsForm.storageTransferWizardError || ui.settingsForm.storageTransferResult?.lastError }}</div>
+              <section v-if="ui.settingsForm.storageTransferResult?.failedDetails?.length" class="storage-transfer-failure-details">
+                <div class="storage-transfer-failure-heading"><strong>异常详情</strong><span>以下项目可在修复问题后继续传输</span></div>
+                <article v-for="(item, index) in ui.settingsForm.storageTransferResult.failedDetails" :key="`${item.itemType}-${item.sourceKey}-${index}`">
+                  <div><span>{{ item.itemType === 'tag' ? '标签' : '消息' }}</span><code>{{ item.sourceKey }}</code></div>
+                  <p>{{ item.error }}</p>
+                </article>
+                <small v-if="ui.settingsForm.storageTransferResult.failedDetailCount > ui.settingsForm.storageTransferResult.failedDetails.length">仅显示前 {{ ui.settingsForm.storageTransferResult.failedDetails.length }} 条，共 {{ ui.settingsForm.storageTransferResult.failedDetailCount }} 条异常。</small>
+              </section>
+            </section>
+
+            <div v-if="ui.settingsForm.storageTransferWizardError && ui.settingsForm.storageTransferWizardStep !== 'complete'" class="storage-transfer-error">{{ ui.settingsForm.storageTransferWizardError }}</div>
+          </div>
+
+          <div class="storage-transfer-actions">
+            <button v-if="ui.settingsForm.storageTransferWizardStep === 'select'" class="button ghost small" type="button" @click="closeStorageTransferWizard()">取消</button>
+            <button v-if="ui.settingsForm.storageTransferWizardStep === 'select'" class="button primary small" type="button" :disabled="ui.settingsForm.storageTransferPreviewBusy || !ui.settingsForm.storageTransferSourceProfileId || !ui.settingsForm.storageTransferTargetProfileId || ui.settingsForm.storageTransferSourceProfileId === ui.settingsForm.storageTransferTargetProfileId" @click="previewStorageTransferWizard()">{{ ui.settingsForm.storageTransferPreviewBusy ? '检查中...' : '下一步' }}</button>
+            <button v-if="ui.settingsForm.storageTransferWizardStep === 'overview'" class="button ghost small" type="button" @click="setStorageTransferWizardStep('select')">上一步</button>
+            <button v-if="ui.settingsForm.storageTransferWizardStep === 'overview'" class="button primary small" type="button" @click="setStorageTransferWizardStep('confirm')">下一步</button>
+            <button v-if="ui.settingsForm.storageTransferWizardStep === 'confirm'" class="button ghost small" type="button" @click="setStorageTransferWizardStep('overview')">上一步</button>
+            <button v-if="ui.settingsForm.storageTransferWizardStep === 'confirm'" class="button primary small" type="button" @click="transferStorageSpaceData()">确认传输</button>
+            <span v-if="ui.settingsForm.storageTransferWizardStep === 'progress'" class="storage-transfer-progress-action"><span class="button-spinner" aria-hidden="true"></span>正在传输，请稍候</span>
+            <button v-if="ui.settingsForm.storageTransferWizardStep === 'complete' && ui.settingsForm.storageTransferResult?.status !== 'completed'" class="button ghost small" type="button" @click="closeStorageTransferWizard(true)">稍后处理</button>
+            <button v-if="ui.settingsForm.storageTransferWizardStep === 'complete' && ui.settingsForm.storageTransferResult?.status !== 'completed'" class="button primary small" type="button" @click="resumeRecoverableStorageTransfer()">继续未完成项目</button>
+            <button v-if="ui.settingsForm.storageTransferWizardStep === 'complete' && ui.settingsForm.storageTransferResult?.status === 'completed'" class="button primary small" type="button" @click="closeStorageTransferWizard(true)">完成</button>
           </div>
         </div>
       </div>

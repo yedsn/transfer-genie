@@ -190,7 +190,9 @@ function preloadScript() {
       return { key: 'endpoint-1::bulk-' + number + '::file', endpointId: 'endpoint-1', filename: 'bulk-' + number, originalName: 'resource-' + String(number).padStart(3, '0') + '.' + extension, category, extension, size: number * 1000, timestampMs: 100000 - number, status: number === 1 ? 'downloaded' : 'notDownloaded', isSpeechAudio: false };
     });
     window.__speechSmokeBulkResources = bulkResources;
+    window.__TRANSFER_GENIE_STORAGE_TRANSFER_PREVIEW_TIMEOUT_MS__ = 80;
     window.__speechSmoke = {
+      settings,
       calls: [],
       sentMessages: [],
       emittedEvents: [],
@@ -231,8 +233,13 @@ function preloadScript() {
       aiStreamDelayMs: 0,
       systemDictationStatus: '',
       failSupabaseLogin: false,
+      supabaseSessions: {},
       storageImportStatus: null,
+      storageTransferTasks: null,
       storageImportStarted: false,
+      storageTransferResumed: false,
+      storageTransferCancelled: false,
+      hangStorageTransferPreview: false,
       chunkDurationMs: 0,
       nextSampleCount: 0,
       chunkTextPrefix: '',
@@ -316,30 +323,123 @@ function preloadScript() {
             if (window.__speechSmoke.previewPaths[previewName]) return window.__speechSmoke.previewPaths[previewName];
             throw new Error('thumbnail unavailable');
           }
-          if (command === 'save_settings') return args.settings;
+          if (command === 'save_settings') {
+            Object.assign(settings, structuredClone(args.settings));
+            return structuredClone(settings);
+          }
+          if (command === 'save_storage_profile') {
+            const input = args?.input || {};
+            const originalProfileId = String(input.originalProfileId || '');
+            const profile = structuredClone(input.profile);
+            const index = originalProfileId
+              ? settings.storage_profiles.findIndex((item) => item.id === originalProfileId)
+              : -1;
+            if (originalProfileId && index < 0) throw new Error('正在编辑的存储空间已不存在');
+            if (index >= 0) {
+              profile.id = originalProfileId;
+              settings.storage_profiles.splice(index, 1, profile);
+            } else {
+              settings.storage_profiles.push(profile);
+            }
+            settings.webdav_endpoints = settings.storage_profiles
+              .filter((item) => item.provider_kind === 'webdav')
+              .map((item) => ({ id: item.id, name: item.name, enabled: item.enabled, ...item.webdav }));
+            return structuredClone(settings);
+          }
+          if (command === 'switch_supabase_space') {
+            const profile = settings.storage_profiles.find((item) => item.id === args?.input?.sourceProfileId);
+            if (!profile?.supabase) throw new Error('Supabase profile not found');
+            profile.supabase.space_id = args?.input?.spaceId || profile.supabase.space_id;
+            settings.active_storage_profile_id = profile.id;
+            return structuredClone(settings);
+          }
+          if (command === 'remove_storage_profile') {
+            const profileId = String(args?.input?.profileId || '');
+            settings.storage_profiles = settings.storage_profiles.filter((item) => item.id !== profileId);
+            settings.webdav_endpoints = settings.webdav_endpoints.filter((item) => item.id !== profileId);
+            if (settings.active_storage_profile_id === profileId) settings.active_storage_profile_id = null;
+            if (settings.active_webdav_id === profileId) settings.active_webdav_id = null;
+            return structuredClone(settings);
+          }
           if (command === 'supabase_sign_in') {
             await new Promise((resolve) => setTimeout(resolve, 80));
             if (window.__speechSmoke.failSupabaseLogin) throw new Error('Invalid login credentials');
-            return {
+            const status = {
               profileId: args?.input?.profileId || '',
               signedIn: true,
               userId: 'supabase-user-1',
               email: args?.input?.email || '',
-              expiresAt: Date.now() + 3600000,
+              expiresAt: Math.floor(Date.now() / 1000) + 3600,
+            };
+            window.__speechSmoke.supabaseSessions[status.profileId] = status;
+            return status;
+          }
+          if (command === 'supabase_current_user') {
+            return window.__speechSmoke.supabaseSessions[args?.profileId] || {
+              profileId: args?.profileId || '',
+              signedIn: false,
+              userId: null,
+              email: null,
+              expiresAt: null,
             };
           }
-          if (command === 'preview_storage_import') {
-            return { batchId: 'import-batch-1', sourceProfileName: 'Smoke Endpoint', targetProfileName: 'Supabase', messageCount: 3, attachmentCount: 1, totalBytes: 2048, markedCount: 1, tagCount: 1 };
+          if (command === 'list_supabase_spaces') {
+            const profile = settings.storage_profiles.find((item) => item.id === args?.profileId);
+            return [
+              {
+                id: profile?.supabase?.space_id || '00000000-0000-4000-8000-000000000001',
+                name: profile?.name || 'Smoke Supabase',
+                messageCount: 1,
+                updatedAt: '2026-10-13T10:00:00Z',
+                localProfileId: profile?.id || null,
+                current: settings.active_storage_profile_id === profile?.id,
+              },
+              {
+                id: '00000000-0000-4000-8000-000000000002',
+                name: '历史空间',
+                messageCount: 377,
+                updatedAt: '2026-10-12T10:00:00Z',
+                localProfileId: null,
+                current: false,
+              },
+            ];
           }
-          if (command === 'get_storage_import_status') {
+          if (command === 'supabase_logout') {
+            const status = { profileId: args?.profileId || '', signedIn: false, userId: null, email: null, expiresAt: null };
+            window.__speechSmoke.supabaseSessions[status.profileId] = status;
+            return status;
+          }
+          if (command === 'test_supabase_draft_connection') {
+            await new Promise((resolve) => setTimeout(resolve, 40));
+            return { network: true, publicKey: true, auth: false, schema: false, rpc: false, rls: false, realtime: false, storage: false, errorCode: 'AUTH_REQUIRED', message: '请先登录 Supabase 账号' };
+          }
+          if (command === 'test_webdav_connection') return { reachable: true };
+          if (command === 'preview_storage_transfer') {
+            if (window.__speechSmoke.hangStorageTransferPreview) return new Promise(() => {});
+            window.__speechSmoke.storageImportStatus = { batchId: 'import-batch-1', sourceProfileId: args?.input?.sourceProfileId || '', targetProfileId: args?.input?.targetProfileId || '', status: 'prepared', phase: 'prepared', totalItems: 4, appliedItems: 0, skippedItems: 0, conflictItems: 0, failedItems: 0, totalBytes: 2048, transferredBytes: 0, lastError: null };
+            return { batchId: 'import-batch-1', sourceProfileName: 'Smoke Endpoint', targetProfileName: 'Supabase', sourceProviderKind: 'webdav', targetProviderKind: 'supabase', messageCount: 3, attachmentCount: 1, totalBytes: 2048, markedCount: 1, tagCount: 1, skippedCount: 0, conflictCount: 0 };
+          }
+          if (command === 'list_resumable_storage_transfers') {
+            if (Array.isArray(window.__speechSmoke.storageTransferTasks)) {
+              return window.__speechSmoke.storageTransferTasks;
+            }
+            return window.__speechSmoke.storageImportStatus ? [window.__speechSmoke.storageImportStatus] : [];
+          }
+          if (command === 'get_storage_transfer_status' || command === 'get_latest_storage_transfer_status') {
             return window.__speechSmoke.storageImportStatus;
           }
-          if (command === 'start_storage_import') {
+          if (command === 'cancel_storage_transfer') {
+            window.__speechSmoke.storageTransferCancelled = true;
+            window.__speechSmoke.storageImportStatus = null;
+            return true;
+          }
+          if (command === 'start_storage_transfer' || command === 'resume_storage_transfer') {
             window.__speechSmoke.storageImportStarted = true;
+            window.__speechSmoke.storageTransferResumed = command === 'resume_storage_transfer';
             await new Promise((resolve) => setTimeout(resolve, 100));
-            window.__speechSmoke.storageImportStatus = { batchId: 'import-batch-1', status: 'running', totalItems: 4, appliedItems: 1, failedItems: 0, lastError: null };
+            window.__speechSmoke.storageImportStatus = { batchId: 'import-batch-1', sourceProfileId: 'endpoint-1', targetProfileId: args?.input?.targetProfileId || '', status: 'running', phase: 'transferring', totalItems: 4, appliedItems: 1, failedItems: 0, lastError: null };
             await new Promise((resolve) => setTimeout(resolve, 350));
-            window.__speechSmoke.storageImportStatus = { batchId: 'import-batch-1', status: 'completed', totalItems: 4, appliedItems: 4, failedItems: 0, lastError: null };
+            window.__speechSmoke.storageImportStatus = { batchId: 'import-batch-1', sourceProfileId: 'endpoint-1', targetProfileId: args?.input?.targetProfileId || '', status: 'completed', phase: 'completed', totalItems: 4, appliedItems: 4, failedItems: 0, lastError: null };
             return window.__speechSmoke.storageImportStatus;
           }
           if (command === 'paste_dictation_text') {
@@ -670,11 +770,69 @@ async function run() {
         input.value = value;
         input.dispatchEvent(new Event('input', { bubbles: true }));
       };
-      setInput('#supabase-api-url', 'https://supabase.example.test');
-      setInput('#supabase-anon-key', 'public-anon-key');
+      document.querySelector('#add-storage-profile')?.click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#storage-profile-provider')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('storage profile editor did not open'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const typeSelect = document.querySelector('#storage-profile-provider');
+      typeSelect.value = 'supabase';
+      typeSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      setInput('#storage-profile-name', 'Smoke Supabase');
+      setInput('#storage-profile-supabase-url', 'https://supabase.example.test');
+      setInput('#storage-profile-supabase-key', 'public-anon-key');
+      const saveCallsBeforeTest = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').length;
+      document.querySelector('#test-storage-profile').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const message = document.querySelector('.storage-profile-test-result')?.textContent || '';
+          if (message.includes('基础连接成功')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('draft connection test result missing: ' + message));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const draftTestCall = window.__speechSmoke.calls.find((call) => call.command === 'test_supabase_draft_connection');
+      const saveCallsAfterTest = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').length;
+      document.querySelector('#save-storage-profile').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#supabase-email') && !document.querySelector('#supabase-email').disabled) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('Supabase profile draft did not save'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const editorStayedOpen = !!document.querySelector('.storage-profile-editor-modal');
+      const editorSwitchedToEdit = document.querySelector('#save-storage-profile')?.textContent?.includes('保存修改');
+      const firstProfileSave = window.__speechSmoke.calls.find((call) => call.command === 'save_storage_profile');
+      const savedProfileId = firstProfileSave?.args?.input?.profile?.id || '';
+      const profileCountAfterCreate = window.__speechSmoke.settings.storage_profiles.length;
+      setInput('#storage-profile-name', 'Smoke Supabase Renamed');
+      document.querySelector('#save-storage-profile').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const saveCalls = window.__speechSmoke.calls.filter((call) => call.command === 'save_storage_profile');
+          if (saveCalls.length >= 2 && window.__speechSmoke.settings.storage_profiles.some((item) => item.id === savedProfileId && item.name === 'Smoke Supabase Renamed')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('Supabase profile edit did not update in place'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const profileSaveCalls = window.__speechSmoke.calls.filter((call) => call.command === 'save_storage_profile');
+      const editSaveCall = profileSaveCalls[1];
+      const profileCountAfterEdit = window.__speechSmoke.settings.storage_profiles.length;
       setInput('#supabase-email', 'user@example.test');
       setInput('#supabase-password', 'password-before-save');
-      window.__speechSmoke.calls = [];
       document.querySelector('#supabase-login').click();
       await new Promise((resolve) => setTimeout(resolve, 20));
       const busyVisible = document.querySelector('#supabase-login').textContent.includes('登录中');
@@ -689,8 +847,60 @@ async function run() {
         tick();
       });
       const signInCall = window.__speechSmoke.calls.find((call) => call.command === 'supabase_sign_in');
-      const saveCall = window.__speechSmoke.calls.find((call) => call.command === 'save_settings');
+      const signedInState = document.querySelector('.storage-profile-auth-state')?.textContent || '';
+      const accountSummaryVisible = !!document.querySelector('.storage-profile-account-summary');
+      const loginFormHidden = !document.querySelector('#supabase-email') && !document.querySelector('#supabase-password') && !document.querySelector('#supabase-login');
+      const signedInEmail = document.querySelector('.storage-profile-account-summary')?.textContent || '';
+      const remoteSpaceList = document.querySelector('.supabase-space-list')?.textContent || '';
+      const profileCountBeforeSpaceSwitch = window.__speechSmoke.settings.storage_profiles.length;
+      const remoteSpaceButton = Array.from(document.querySelectorAll('.supabase-space-item'))
+        .find((item) => (item.textContent || '').includes('历史空间'))
+        ?.querySelector('button');
+      const remoteSpaceButtonLabel = remoteSpaceButton?.textContent.trim() || '';
+      remoteSpaceButton?.click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const call = window.__speechSmoke.calls.find((item) => item.command === 'switch_supabase_space');
+          if (call && !document.querySelector('.storage-profile-editor-modal')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('Supabase space switch did not complete'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const switchSpaceCall = window.__speechSmoke.calls.find((item) => item.command === 'switch_supabase_space');
+      const profileCountAfterSpaceSwitch = window.__speechSmoke.settings.storage_profiles.length;
+      const switchedProfile = window.__speechSmoke.settings.storage_profiles.find((item) => item.id === savedProfileId);
+      document.querySelector('[data-tab-target="settings"]')?.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const switchedCard = Array.from(document.querySelectorAll('.endpoint-card'))
+        .find((item) => (item.textContent || '').includes('Smoke Supabase Renamed'));
+      switchedCard?.querySelector('button')?.click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#supabase-logout')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('switched Supabase profile editor did not reopen'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      document.querySelector('#supabase-logout').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const message = document.querySelector('.supabase-auth-message')?.textContent || '';
+          if (message.includes('已退出登录')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('Supabase logout feedback missing: ' + message));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const logoutCall = window.__speechSmoke.calls.find((call) => call.command === 'supabase_logout');
+      const loginFormRestored = !!document.querySelector('#supabase-email') && !!document.querySelector('#supabase-password') && !!document.querySelector('#supabase-login');
+      setInput('#supabase-email', 'user@example.test');
       setInput('#supabase-password', 'wrong-password');
+      await new Promise((resolve) => setTimeout(resolve, 20));
       window.__speechSmoke.failSupabaseLogin = true;
       document.querySelector('#supabase-login').click();
       await new Promise((resolve, reject) => {
@@ -703,64 +913,309 @@ async function run() {
         };
         tick();
       });
+      const failureText = document.querySelector('.supabase-auth-message')?.textContent || '';
+      const buttonEnabled = !document.querySelector('#supabase-login').disabled;
+      Array.from(document.querySelectorAll('.storage-profile-editor-actions button')).find((button) => button.textContent.trim() === '关闭')?.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
       return {
         busyVisible,
-        savedProfile: !!saveCall?.args?.settings?.storage_profiles?.find((item) => item.provider_kind === 'supabase'),
+        editorStayedOpen,
+        editorSwitchedToEdit,
+        editorClosed: !document.querySelector('.storage-profile-editor-modal'),
+        draftTestUrl: draftTestCall?.args?.input?.apiUrl || '',
+        draftTestDidNotSave: saveCallsAfterTest === saveCallsBeforeTest,
+        savedProfile: window.__speechSmoke.settings.storage_profiles.some((item) => item.provider_kind === 'supabase'),
+        profileCountAfterCreate,
+        profileCountAfterEdit,
+        savedProfileId,
+        editedOriginalProfileId: editSaveCall?.args?.input?.originalProfileId || '',
+        editedProfileId: editSaveCall?.args?.input?.profile?.id || '',
         passwordReceived: signInCall?.args?.input?.password || '',
-        accountText: document.querySelector('.supabase-auth-message')?.textContent || '',
-        buttonEnabled: !document.querySelector('#supabase-login').disabled,
+        signedInState,
+        accountSummaryVisible,
+        loginFormHidden,
+        signedInEmail,
+        remoteSpaceList,
+        remoteSpaceButtonLabel,
+        profileCountBeforeSpaceSwitch,
+        profileCountAfterSpaceSwitch,
+        switchedProfileId: switchSpaceCall?.args?.input?.sourceProfileId || '',
+        switchedSpaceId: switchedProfile?.supabase?.space_id || '',
+        loginFormRestored,
+        logoutProfileId: logoutCall?.args?.profileId || '',
+        accountText: failureText,
+        buttonEnabled,
       };
     })()`);
     assert.equal(supabaseLoginResult.busyVisible, true, 'Supabase login immediately shows a busy state');
+    assert.equal(supabaseLoginResult.editorStayedOpen, true, 'storage profile modal stays open after saving Supabase');
+    assert.equal(supabaseLoginResult.editorSwitchedToEdit, true, 'saved Supabase modal switches to edit mode');
+    assert.equal(supabaseLoginResult.editorClosed, true, 'storage profile modal can close after account operations finish');
+    assert.equal(supabaseLoginResult.draftTestUrl, 'https://supabase.example.test', 'draft connection test uses unsaved Supabase URL');
+    assert.equal(supabaseLoginResult.draftTestDidNotSave, true, 'testing a draft does not save settings');
     assert.equal(supabaseLoginResult.savedProfile, true, 'Supabase profile is saved before login');
+    assert.equal(supabaseLoginResult.profileCountAfterEdit, supabaseLoginResult.profileCountAfterCreate, 'editing a profile does not append another storage profile');
+    assert.equal(supabaseLoginResult.editedOriginalProfileId, supabaseLoginResult.savedProfileId, 'edit save keeps the original profile identity');
+    assert.equal(supabaseLoginResult.editedProfileId, supabaseLoginResult.savedProfileId, 'edit payload cannot generate a new profile id');
     assert.equal(supabaseLoginResult.passwordReceived, 'password-before-save', 'profile save does not clear the submitted login password');
+    assert.match(supabaseLoginResult.signedInState, /已登录/, 'Supabase account status is shown inside the editor');
+    assert.equal(supabaseLoginResult.accountSummaryVisible, true, 'signed-in Supabase shows an account summary');
+    assert.equal(supabaseLoginResult.loginFormHidden, true, 'signed-in Supabase hides the login form');
+    assert.match(supabaseLoginResult.signedInEmail, /user@example.test/, 'account summary shows the signed-in email');
+    assert.match(supabaseLoginResult.remoteSpaceList, /历史空间/, 'signed-in account lists remote Supabase spaces');
+    assert.match(supabaseLoginResult.remoteSpaceList, /377 条消息/, 'remote space list shows message counts');
+    assert.equal(supabaseLoginResult.remoteSpaceButtonLabel, '切换', 'remote Supabase space offers switching without adding');
+    assert.equal(supabaseLoginResult.profileCountAfterSpaceSwitch, supabaseLoginResult.profileCountBeforeSpaceSwitch, 'switching a remote Supabase space does not append a profile');
+    assert.equal(supabaseLoginResult.switchedProfileId, supabaseLoginResult.savedProfileId, 'space switching updates the current local profile');
+    assert.equal(supabaseLoginResult.switchedSpaceId, '00000000-0000-4000-8000-000000000002', 'space switching replaces the current profile space id');
+    assert.equal(supabaseLoginResult.loginFormRestored, true, 'logging out restores the login form');
+    assert.match(supabaseLoginResult.logoutProfileId, /^supabase-/, 'logout targets the saved Supabase profile');
     assert.match(supabaseLoginResult.accountText, /Invalid login credentials/, 'Supabase Auth failure is visible inside settings');
     assert.equal(supabaseLoginResult.buttonEnabled, true, 'Supabase login button is restored after failure');
+    const storagePreviewTimeoutResult = await evaluate(client, `(async () => {
+      window.__speechSmoke.hangStorageTransferPreview = true;
+      document.querySelector('#storage-space-transfer').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('.storage-transfer-dialog') && document.querySelector('#storage-transfer-source')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('storage transfer timeout wizard did not open'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const sourceSelect = document.querySelector('#storage-transfer-source');
+      const targetSelect = document.querySelector('#storage-transfer-target');
+      sourceSelect.value = 'endpoint-1';
+      sourceSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      targetSelect.value = document.querySelector('option[value^="supabase-"]')?.value || '';
+      targetSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const nextButton = document.querySelector('.storage-transfer-actions .primary');
+      nextButton.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const busyLabel = nextButton.textContent.trim();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('.storage-transfer-error')?.textContent.includes('检查超时')) resolve();
+          else if (Date.now() - start > 1000) reject(new Error('storage transfer timeout error missing'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const errorText = document.querySelector('.storage-transfer-error')?.textContent || '';
+      const restoredLabel = nextButton.textContent.trim();
+      const restoredEnabled = !nextButton.disabled;
+      window.__speechSmoke.hangStorageTransferPreview = false;
+      document.querySelector('.storage-transfer-actions .ghost')?.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return { busyLabel, errorText, restoredLabel, restoredEnabled, closed: !document.querySelector('.storage-transfer-dialog') };
+    })()`);
+    assert.equal(storagePreviewTimeoutResult.busyLabel, '检查中...', 'storage transfer preview shows a busy state');
+    assert.match(storagePreviewTimeoutResult.errorText, /检查超时/, 'storage transfer preview shows an actionable timeout error');
+    assert.equal(storagePreviewTimeoutResult.restoredLabel, '下一步', 'storage transfer preview restores the action label after timeout');
+    assert.equal(storagePreviewTimeoutResult.restoredEnabled, true, 'storage transfer preview restores the action button after timeout');
+    assert.equal(storagePreviewTimeoutResult.closed, true, 'storage transfer wizard remains closable after timeout');
+    const preparedTransferResult = await evaluate(client, `(async () => {
+      window.__speechSmoke.storageImportStatus = null;
+      window.__speechSmoke.storageTransferCancelled = false;
+      document.querySelector('#storage-space-transfer').click();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const sourceSelect = document.querySelector('#storage-transfer-source');
+      const targetSelect = document.querySelector('#storage-transfer-target');
+      sourceSelect.value = 'endpoint-1';
+      sourceSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      targetSelect.value = document.querySelector('option[value^="supabase-"]')?.value || '';
+      targetSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      document.querySelector('.storage-transfer-actions .primary')?.click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('.storage-transfer-stage-heading strong')?.textContent.includes('传输概览')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('prepared transfer overview missing'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      document.querySelector('[aria-label="关闭存储空间数据传输"]')?.click();
+      document.querySelector('#storage-space-transfer').click();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const selectionStep = document.querySelector('.storage-transfer-stage-heading strong')?.textContent.includes('选择来源空间和目标空间');
+      const taskText = document.querySelector('.storage-transfer-recovery')?.textContent || '';
+      document.querySelector('.storage-transfer-recovery-heading .button')?.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      document.querySelector('.storage-transfer-recovery-actions .danger')?.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      document.querySelector('.dialog-overlay .button.primary')?.click();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const taskRemoved = !document.querySelector('.storage-transfer-recovery');
+      document.querySelector('.storage-transfer-actions .ghost')?.click();
+      return { selectionStep, taskText, taskRemoved, cancelled: window.__speechSmoke.storageTransferCancelled };
+    })()`);
+    assert.equal(preparedTransferResult.selectionStep, true, 'a prepared transfer reopens on route selection');
+    assert.match(preparedTransferResult.taskText, /已检查，尚未开始写入/, 'a prepared plan is shown as a separate task card');
+    assert.equal(preparedTransferResult.cancelled, true, 'the prepared plan can be explicitly abandoned');
+    assert.equal(preparedTransferResult.taskRemoved, true, 'abandoning removes the prepared task card');
+    const resumableTransferListResult = await evaluate(client, `(async () => {
+      const targetProfileId = document.querySelector('option[value^="supabase-"]')?.value || '';
+      window.__speechSmoke.storageTransferTasks = [
+        { batchId: 'transfer-newer', sourceProfileId: 'endpoint-1', targetProfileId, status: 'interrupted', phase: 'interrupted', totalItems: 4, appliedItems: 1, failedItems: 1, totalBytes: 10, transferredBytes: 5 },
+        { batchId: 'transfer-older', sourceProfileId: targetProfileId, targetProfileId: 'endpoint-1', status: 'prepared', phase: 'prepared', totalItems: 2, appliedItems: 0, failedItems: 0, totalBytes: 0, transferredBytes: 0 },
+      ];
+      document.querySelector('#storage-space-transfer').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelectorAll('.storage-transfer-recovery').length === 2) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('resumable transfer list missing'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const cards = [...document.querySelectorAll('.storage-transfer-recovery')];
+      const cardCount = cards.length;
+      const listText = cards.map((card) => card.textContent || '').join(' ');
+      cards[1].querySelector('.storage-transfer-recovery-heading .button')?.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const secondExpanded = cards[1].querySelector('.storage-transfer-recovery-detail') !== null;
+      document.querySelector('.storage-transfer-actions .ghost')?.click();
+      window.__speechSmoke.storageTransferTasks = null;
+      return { cardCount, listText, secondExpanded };
+    })()`);
+    assert.equal(resumableTransferListResult.cardCount, 2, 'all unfinished storage transfers are visible');
+    assert.match(resumableTransferListResult.listText, /上次传输已中断/, 'interrupted task status is visible');
+    assert.match(resumableTransferListResult.listText, /已检查，尚未开始写入/, 'prepared task status is visible');
+    assert.equal(resumableTransferListResult.secondExpanded, true, 'each unfinished transfer card can be inspected independently');
     const storageImportResult = await evaluate(client, `(async () => {
-      window.prompt = () => '1';
       window.__speechSmoke.storageImportStatus = null;
       window.__speechSmoke.storageImportStarted = false;
-      document.querySelector('#supabase-import-webdav').click();
+      document.querySelector('#storage-space-transfer').click();
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
-          const title = document.querySelector('.dialog-overlay .dialog-title')?.textContent || '';
-          if (title.includes('确认导入到 Supabase')) resolve();
-          else if (Date.now() - start > 3000) reject(new Error('storage import confirmation missing'));
+          if (document.querySelector('.storage-transfer-dialog') && document.querySelector('#storage-transfer-source')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('storage transfer wizard did not open'));
           else setTimeout(tick, 20);
         };
         tick();
       });
-      document.querySelector('.dialog-overlay .dialog-actions .primary').click();
+      const sourceSelect = document.querySelector('#storage-transfer-source');
+      const targetSelect = document.querySelector('#storage-transfer-target');
+      sourceSelect.value = 'endpoint-1';
+      sourceSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      targetSelect.value = document.querySelector('option[value^="supabase-"]')?.value || '';
+      targetSelect.dispatchEvent(new Event('change', { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 30));
-      const button = document.querySelector('#supabase-import-webdav');
-      const busyVisible = button.disabled && button.textContent.includes('导入中');
-      const progressVisible = document.querySelector('[role="progressbar"]') !== null;
-      await new Promise((resolve) => setTimeout(resolve, 350));
-      const progressDuringImport = Number(document.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow') || 0);
+      document.querySelector('.storage-transfer-actions .primary').click();
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
-          const title = document.querySelector('.dialog-overlay .dialog-title')?.textContent || '';
-          if (title.includes('导入完成')) resolve();
-          else if (Date.now() - start > 3000) reject(new Error('storage import completion missing: ' + title));
+          if (document.querySelector('.storage-transfer-stage-heading strong')?.textContent.includes('传输概览')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('storage transfer overview missing'));
           else setTimeout(tick, 20);
         };
         tick();
       });
-      const completedMessage = document.querySelector('.dialog-overlay .dialog-text')?.textContent || '';
-      const restored = !button.disabled && button.textContent.includes('从 WebDAV 导入');
-      const progressHidden = document.querySelector('[role="progressbar"]') === null;
-      document.querySelector('.dialog-overlay .dialog-actions .primary')?.click();
-      return { busyVisible, progressVisible, progressDuringImport, completedMessage, progressHidden, restored, started: window.__speechSmoke.storageImportStarted };
+      const overviewText = document.querySelector('.storage-transfer-body')?.textContent || '';
+      document.querySelector('.storage-transfer-actions .primary').click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const confirmationVisible = document.querySelector('.storage-transfer-stage-heading strong')?.textContent.includes('确认开始传输');
+      document.querySelector('.storage-transfer-actions .primary').click();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const button = document.querySelector('#storage-space-transfer');
+      const busyVisible = document.querySelector('.storage-transfer-stage-heading strong')?.textContent.includes('正在传输数据');
+      const progressVisible = document.querySelector('.storage-transfer-dialog [role="progressbar"]') !== null;
+      const closeButton = document.querySelector('[aria-label="关闭存储空间数据传输"]');
+      const closeEnabledDuringTransfer = !closeButton?.disabled;
+      closeButton?.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const closedDuringTransfer = !document.querySelector('.storage-transfer-dialog');
+      document.querySelector('#storage-space-transfer').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const title = document.querySelector('.storage-transfer-stage-heading strong')?.textContent || '';
+          if (title.includes('选择来源空间和目标空间') && document.querySelector('.storage-transfer-recovery')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('running storage transfer did not reopen on selection'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const reopenedOnSelection = document.querySelector('#storage-transfer-source')?.value === ''
+        && document.querySelector('.storage-transfer-dialog [role="progressbar"]') === null;
+      document.querySelector('.storage-transfer-recovery-heading .button')?.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const runningTaskVisible = (document.querySelector('.storage-transfer-recovery')?.textContent || '').includes('正在后台传输');
+      document.querySelector('.storage-transfer-recovery-actions .primary')?.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const reopenedOnProgress = document.querySelector('.storage-transfer-dialog [role="progressbar"]') !== null;
+      await new Promise((resolve) => setTimeout(resolve, 280));
+      const progressDuringImport = Number(document.querySelector('.storage-transfer-dialog [role="progressbar"]')?.getAttribute('aria-valuenow') || 0);
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const title = document.querySelector('.storage-transfer-stage-heading strong')?.textContent || '';
+          if (title.includes('传输完成')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('storage transfer completion missing: ' + title));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const completedMessage = document.querySelector('.storage-transfer-stage')?.textContent || '';
+      const restored = !button.disabled && button.textContent.includes('存储空间数据传输');
+      const progressHidden = document.querySelector('.storage-transfer-dialog [role="progressbar"]') === null;
+      const doneButton = document.querySelector('.storage-transfer-actions .primary');
+      const doneLabel = doneButton?.textContent.trim();
+      doneButton?.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return { busyVisible, progressVisible, closeEnabledDuringTransfer, closedDuringTransfer, reopenedOnSelection, runningTaskVisible, reopenedOnProgress, progressDuringImport, overviewText, confirmationVisible, completedMessage, progressHidden, restored, doneLabel, closed: !document.querySelector('.storage-transfer-dialog'), started: window.__speechSmoke.storageImportStarted };
     })()`);
-    assert.equal(storageImportResult.started, true, 'confirmed WebDAV import invokes the backend command');
-    assert.equal(storageImportResult.busyVisible, true, 'WebDAV import immediately shows a busy button');
-    assert.equal(storageImportResult.progressVisible, true, 'WebDAV import renders a progress bar');
-    assert.equal(storageImportResult.progressDuringImport, 25, 'WebDAV import displays persisted batch progress while running');
-    assert.match(storageImportResult.completedMessage, /数据库记录和相关附件写入 Supabase/, 'completion confirms Supabase database and Storage writes');
-    assert.equal(storageImportResult.progressHidden, true, 'completed WebDAV import hides the progress bar');
-    assert.equal(storageImportResult.restored, true, 'WebDAV import button is restored after completion');
+    assert.equal(storageImportResult.started, true, 'confirmed storage transfer invokes the backend command');
+    assert.match(storageImportResult.overviewText, /传输概览|消息|附件/, 'wizard displays the transfer overview');
+    assert.equal(storageImportResult.confirmationVisible, true, 'wizard has an explicit confirmation step');
+    assert.equal(storageImportResult.busyVisible, true, 'storage transfer immediately enters the progress step');
+    assert.equal(storageImportResult.progressVisible, true, 'storage transfer renders a progress bar');
+    assert.equal(storageImportResult.closeEnabledDuringTransfer, true, 'storage transfer close button remains enabled while running');
+    assert.equal(storageImportResult.closedDuringTransfer, true, 'storage transfer dialog can close while running');
+    assert.equal(storageImportResult.reopenedOnSelection, true, 'reopening a running storage transfer starts from route selection');
+    assert.equal(storageImportResult.runningTaskVisible, true, 'a running transfer is shown as a separate task card');
+    assert.equal(storageImportResult.reopenedOnProgress, true, 'the running task card can explicitly reopen progress');
+    assert.equal(storageImportResult.progressDuringImport, 25, 'storage transfer displays persisted batch progress while running');
+    assert.match(storageImportResult.completedMessage, /来源数据未删除，目标已有数据未清空/, 'completion confirms non-destructive copy semantics');
+    assert.equal(storageImportResult.progressHidden, true, 'completed storage transfer hides the progress bar');
+    assert.equal(storageImportResult.restored, true, 'storage transfer button is restored after completion');
+    assert.equal(storageImportResult.doneLabel, '完成', 'completion step exposes a finish button');
+    assert.equal(storageImportResult.closed, true, 'finish button closes the wizard');
+    const storageWizardReopenResult = await evaluate(client, `(async () => {
+      document.querySelector('#storage-space-transfer').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('.storage-transfer-dialog') && document.querySelector('#storage-transfer-source')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('storage transfer wizard did not reopen'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const result = {
+        source: document.querySelector('#storage-transfer-source')?.value || '',
+        target: document.querySelector('#storage-transfer-target')?.value || '',
+        selectionStep: document.querySelector('.storage-transfer-stage-heading strong')?.textContent.includes('选择来源空间和目标空间') || false,
+        nextDisabled: document.querySelector('.storage-transfer-actions .primary')?.disabled || false,
+        hasPreviousResult: (document.querySelector('.storage-transfer-body')?.textContent || '').includes('传输完成'),
+      };
+      document.querySelector('.storage-transfer-actions .ghost')?.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return { ...result, closed: !document.querySelector('.storage-transfer-dialog') };
+    })()`);
+    assert.equal(storageWizardReopenResult.source, '', 'reopening storage transfer clears the previous source');
+    assert.equal(storageWizardReopenResult.target, '', 'reopening storage transfer clears the previous target');
+    assert.equal(storageWizardReopenResult.selectionStep, true, 'reopening storage transfer starts from the selection step');
+    assert.equal(storageWizardReopenResult.nextDisabled, true, 'reopening storage transfer requires a fresh route selection');
+    assert.equal(storageWizardReopenResult.hasPreviousResult, false, 'reopening storage transfer does not show the previous result');
+    assert.equal(storageWizardReopenResult.closed, true, 'fresh storage transfer wizard remains closable');
     await evaluate(client, `document.querySelector('[data-tab-target="home"]')?.click()`);
     const bulkDownloadResult = JSON.parse(await evaluate(client, `(async () => JSON.stringify(await (async () => {
       document.querySelector('#open-bulk-download').click();
@@ -3518,6 +3973,57 @@ async function run() {
     })()`);
     assert.equal(retentionResult.count, 2, `speech task retention keeps configured count: ${JSON.stringify(retentionResult)}`);
     assert.match(retentionResult.summary, /保留最近 2 条/, 'speech task retention summary reflects configured count');
+
+    const forceRemoveStorageProfileResult = await evaluate(client, `(async () => {
+      document.querySelector('[data-tab-target="settings"]')?.click();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const card = Array.from(document.querySelectorAll('.endpoint-card'))
+        .find((item) => (item.textContent || '').includes('Smoke Endpoint'));
+      const removeButton = card?.querySelector('.endpoint-remove-button');
+      const enabled = !!removeButton && !removeButton.disabled;
+      removeButton?.click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const title = Array.from(document.querySelectorAll('.dialog-title'))
+            .find((item) => (item.textContent || '').includes('确认强制移除'));
+          if (title) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('force remove confirmation missing'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const confirmationTitle = Array.from(document.querySelectorAll('.dialog-title'))
+        .find((item) => (item.textContent || '').includes('确认强制移除'));
+      const confirmationDialog = confirmationTitle?.closest('.dialog');
+      const confirmationText = confirmationDialog?.querySelector('.dialog-text')?.textContent || '';
+      confirmationDialog?.querySelector('.dialog-actions .primary')?.click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const call = window.__speechSmoke.calls.filter((item) => item.command === 'remove_storage_profile').at(-1);
+          if (call && !window.__speechSmoke.settings.storage_profiles.some((item) => item.id === 'endpoint-1')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('force remove did not complete'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const call = window.__speechSmoke.calls.filter((item) => item.command === 'remove_storage_profile').at(-1);
+      return {
+        enabled,
+        confirmationText,
+        force: call?.args?.input?.force,
+        profileId: call?.args?.input?.profileId || '',
+        activeProfileId: window.__speechSmoke.settings.active_storage_profile_id,
+        removed: !window.__speechSmoke.settings.storage_profiles.some((item) => item.id === 'endpoint-1'),
+      };
+    })()`);
+    assert.equal(forceRemoveStorageProfileResult.enabled, true, 'active storage profile remove button is available');
+    assert.match(forceRemoveStorageProfileResult.confirmationText, /待上传操作、同步冲突和未完成数据传输/, 'force removal explains abandoned work');
+    assert.equal(forceRemoveStorageProfileResult.force, true, 'confirmed removal invokes force mode');
+    assert.equal(forceRemoveStorageProfileResult.profileId, 'endpoint-1', 'force removal targets the selected profile');
+    assert.notEqual(forceRemoveStorageProfileResult.activeProfileId, 'endpoint-1', 'removing a profile never leaves it selected');
+    assert.equal(forceRemoveStorageProfileResult.removed, true, 'confirmed force removal removes the local profile');
 
     console.log('speech-to-text UI smoke tests passed');
   } finally {

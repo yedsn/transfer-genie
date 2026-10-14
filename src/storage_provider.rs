@@ -13,6 +13,20 @@ impl ProviderConfig {
             Self::Supabase(profile) => &profile.id,
         }
     }
+
+    pub fn profile_name(&self) -> &str {
+        match self {
+            Self::Webdav(endpoint) => &endpoint.name,
+            Self::Supabase(profile) => &profile.name,
+        }
+    }
+
+    pub fn provider_kind(&self) -> &'static str {
+        match self {
+            Self::Webdav(_) => "webdav",
+            Self::Supabase(_) => "supabase",
+        }
+    }
 }
 
 pub fn resolve_active_provider(settings: &Settings) -> Result<ProviderConfig, String> {

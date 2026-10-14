@@ -175,6 +175,33 @@ const app = createApp({
     currentSettingsWebdavEndpoints(): any[] {
       return this.settingsWebdavState().endpoints || [];
     },
+    enabledStorageProfiles(): any[] {
+      const profiles = this.settingsFormState().storageProfiles;
+      return Array.isArray(profiles) ? profiles.filter((profile: any) => profile?.enabled !== false) : [];
+    },
+    allStorageProfiles(): any[] {
+      const profiles = this.settingsFormState().storageProfiles;
+      return Array.isArray(profiles) ? profiles : [];
+    },
+    supabaseStorageProfiles(): any[] {
+      return this.enabledStorageProfiles().filter((profile: any) => profile?.provider_kind === "supabase");
+    },
+    storageProfileOptionLabel(profile: any): string {
+      const provider = profile?.provider_kind === "supabase" ? "Supabase" : "WebDAV";
+      return `${provider} · ${profile?.name || profile?.id || "未命名"}`;
+    },
+    storageProfileAddress(profile: any): string {
+      if (profile?.provider_kind === "supabase") return profile?.supabase?.api_url || "未配置地址";
+      return profile?.webdav?.url || "未配置地址";
+    },
+    storageProfileRuntimeLabel(profile: any): string {
+      if (profile?.provider_kind !== "supabase") return "手动刷新";
+      const auth = this.settingsFormState().supabaseProfileStatuses?.[profile.id];
+      if (!auth?.signedIn) return "未登录";
+      const email = String(auth.email || "");
+      const [name, domain] = email.split("@");
+      return domain ? `${name.slice(0, 2)}***@${domain}` : "已登录";
+    },
     settingsWebdavCardClasses(endpoint: any): Record<string, boolean> {
       return { "is-disabled": !!(endpoint && !endpoint.enabled) };
     },
@@ -184,6 +211,17 @@ const app = createApp({
       const email = String(status.email || "");
       const [name, domain] = email.split("@");
       return domain ? `${name.slice(0, 2)}***@${domain}` : "已登录";
+    },
+    compactSupabaseAccountId(value: unknown): string {
+      const id = String(value || "");
+      if (!id) return "未提供";
+      if (id.length <= 18) return id;
+      return `${id.slice(0, 8)}…${id.slice(-6)}`;
+    },
+    supabaseSessionExpiryLabel(): string {
+      const expiresAt = Number(this.settingsFormState().supabaseAccountStatus?.expiresAt || 0);
+      if (!expiresAt) return "自动续期";
+      return new Date(expiresAt * 1000).toLocaleString("zh-CN", { hour12: false });
     },
     supabaseConnectionLabel(): string {
       const status = this.settingsFormState().supabaseConnectionStatus;
@@ -389,9 +427,33 @@ const app = createApp({
     updateSettingsAutoBackupField: (...args: any[]) => callAction("updateSettingsAutoBackupField", ...args),
     updateSettingsFormField: (...args: any[]) => callAction("updateSettingsFormField", ...args),
     testSupabaseSettings: (...args: any[]) => callAction("testSupabaseSettings", ...args),
+    saveSupabaseProfile: (...args: any[]) => callAction("saveSupabaseProfile", ...args),
+    openStorageProfileEditor: (...args: any[]) => callAction("openStorageProfileEditor", ...args),
+    cancelStorageProfileEditor: (...args: any[]) => callAction("cancelStorageProfileEditor", ...args),
+    updateStorageProfileDraft: (...args: any[]) => callAction("updateStorageProfileDraft", ...args),
+    testStorageProfileDraftConnection: (...args: any[]) => callAction("testStorageProfileDraftConnection", ...args),
+    saveStorageProfileDraft: (...args: any[]) => callAction("saveStorageProfileDraft", ...args),
+    removeStorageProfile: (...args: any[]) => callAction("removeStorageProfile", ...args),
     signInSupabase: (...args: any[]) => callAction("signInSupabase", ...args),
+    loadSupabaseSpaces: (...args: any[]) => callAction("loadSupabaseSpaces", ...args),
+    useSupabaseSpace: (...args: any[]) => callAction("useSupabaseSpace", ...args),
     logoutSupabase: (...args: any[]) => callAction("logoutSupabase", ...args),
-    importWebdavToSupabase: (...args: any[]) => callAction("importWebdavToSupabase", ...args),
+    openStorageTransferWizard: (...args: any[]) => callAction("openStorageTransferWizard", ...args),
+    closeStorageTransferWizard: (...args: any[]) => callAction("closeStorageTransferWizard", ...args),
+    setStorageTransferWizardStep: (...args: any[]) => callAction("setStorageTransferWizardStep", ...args),
+    previewStorageTransferWizard: (...args: any[]) => callAction("previewStorageTransferWizard", ...args),
+    toggleStorageTransferRecovery: (...args: any[]) => callAction("toggleStorageTransferRecovery", ...args),
+    storageTransferTasks: (...args: any[]) => callAction("storageTransferTasks", ...args),
+    viewRunningStorageTransferProgress: (...args: any[]) => callAction("viewRunningStorageTransferProgress", ...args),
+    resumeRecoverableStorageTransfer: (...args: any[]) => callAction("resumeRecoverableStorageTransfer", ...args),
+    abandonRecoverableStorageTransfer: (...args: any[]) => callAction("abandonRecoverableStorageTransfer", ...args),
+    storageProfileName: (...args: any[]) => callAction("storageProfileName", ...args),
+    transferStorageSpaceData: (...args: any[]) => callAction("transferStorageSpaceData", ...args),
+    selectSupabaseProfile: (...args: any[]) => callAction("selectSupabaseProfile", ...args),
+    addSupabaseProfile: (...args: any[]) => callAction("addSupabaseProfile", ...args),
+    removeSupabaseProfile: (...args: any[]) => callAction("removeSupabaseProfile", ...args),
+    editStorageProfile: (...args: any[]) => callAction("editStorageProfile", ...args),
+    activateStorageProfile: (...args: any[]) => callAction("activateStorageProfile", ...args),
     updateAiActionField: (...args: any[]) => callAction("updateAiActionField", ...args),
     updateAiActionFavorite: (...args: any[]) => callAction("updateAiActionFavorite", ...args),
     addAiAction: (...args: any[]) => callAction("addAiAction", ...args),

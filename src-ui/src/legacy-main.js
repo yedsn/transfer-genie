@@ -394,7 +394,12 @@ function updateSettingsFormField(field, value, options = {}) {
   }
   syncVueSettingsForm(currentSettingsFormState);
   syncSendOptionsMenuState();
-  if (field !== 'supabaseEmail' && field !== 'supabasePassword') {
+  const isSupabaseDraftField = [
+    'supabaseProfileName',
+    'supabaseApiUrl',
+    'supabaseAnonKey',
+  ].includes(field);
+  if (field !== 'supabaseEmail' && field !== 'supabasePassword' && !isSupabaseDraftField) {
     queueSettingsAutoSave(options);
   }
 }
@@ -693,6 +698,7 @@ function buildMessageBoundary(message) {
   return {
     timestamp_ms: message.timestamp_ms || 0,
     filename: message.filename,
+    message_id: message.message_id || null,
   };
 }
 
@@ -1209,13 +1215,26 @@ let currentSettingsFormState = {
   speechToTextPolishTimeoutSecs: DEFAULT_SPEECH_POLISH_TIMEOUT_SECS,
   storageProfiles: [],
   activeStorageProfileId: null,
+  storageProfileEditorOpen: false,
+  storageProfileEditorMode: 'create',
+  storageProfileOriginalId: '',
+  storageProfileDraft: null,
+  storageProfileTestBusy: false,
+  storageProfileTestResult: null,
+  storageProfileTestMessage: '',
+  storageProfileTestMessageKind: '',
   supabaseProfileId: '',
   supabaseProfileName: 'Supabase',
+  supabaseProfileEnabled: true,
   supabaseApiUrl: '',
   supabaseAnonKey: '',
+  supabaseSpaceId: '',
   supabaseEmail: '',
   supabasePassword: '',
   supabaseAccountStatus: null,
+  supabaseSpaces: [],
+  supabaseSpacesLoading: false,
+  supabaseSpacesMessage: '',
   supabaseConnectionStatus: null,
   supabaseAuthBusy: false,
   supabaseAuthMessage: '',
@@ -1224,7 +1243,20 @@ let currentSettingsFormState = {
   storageImportProgress: null,
   storageImportMessage: '',
   storageImportMessageKind: '',
+  storageTransferSourceProfileId: '',
+  storageTransferTargetProfileId: '',
+  storageTransferResult: null,
+  storageTransferWizardOpen: false,
+  storageTransferWizardStep: 'select',
+  storageTransferPreview: null,
+  storageTransferPreviewBusy: false,
+  storageTransferWizardError: '',
+  storageTransferRecoverable: null,
+  storageTransferRecoverableTasks: [],
+  storageTransferActiveBatchId: '',
+  storageTransferRecoveryExpanded: false,
 };
+let storageTransferWizardGeneration = 0;
 let currentAutoBackupStatusState = {
   enabled: false,
   intervalMinutes: 5,
@@ -1337,6 +1369,9 @@ const transferTaskCounts = {
 };
 const TRANSFER_TASKS_PER_PAGE = 10;
 const MANUAL_REFRESH_TIMEOUT_MS = 45_000;
+const STORAGE_TRANSFER_PREVIEW_TIMEOUT_MS = Number(
+  window.__TRANSFER_GENIE_STORAGE_TRANSFER_PREVIEW_TIMEOUT_MS__,
+) || 45_000;
 const DEFAULT_TELEGRAM_POLL_INTERVAL_SECS = 5;
 const DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS = '127.0.0.1';
 const DEFAULT_LOCAL_HTTP_API_BIND_PORT = 6011;
@@ -1741,6 +1776,81 @@ function normalizeSendHotkey(value) {
   return SEND_HOTKEY.ENTER;
 }
 
+function showSyncConflictResolutionDialog(conflicts) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+
+    const dialog = document.createElement('div');
+    dialog.className = 'dialog sync-conflict-dialog';
+
+    const title = document.createElement('h3');
+    title.className = 'dialog-title';
+    title.textContent = `批量处理 ${conflicts.length} 项同步冲突`;
+
+    const message = document.createElement('p');
+    message.className = 'dialog-text';
+    message.textContent = '请选择统一处理方式。本次选择会应用到当前存储空间、当前账号下的全部未解决冲突，不需要逐项确认。';
+
+    const summary = document.createElement('div');
+    summary.className = 'sync-conflict-summary';
+    const typeCounts = conflicts.reduce((result, conflict) => {
+      const type = conflict.entityType || 'unknown';
+      result[type] = (result[type] || 0) + 1;
+      return result;
+    }, {});
+    summary.textContent = Object.entries(typeCounts)
+      .map(([type, count]) => `${type} ${count} 项`)
+      .join(' · ');
+
+    const hint = document.createElement('p');
+    hint.className = 'dialog-text sync-conflict-hint';
+    hint.textContent = '使用云端：用云端版本覆盖本机冲突数据。保留本地：按云端最新版本重新提交本机数据。';
+
+    const actions = document.createElement('div');
+    actions.className = 'dialog-actions';
+
+    const remoteButton = document.createElement('button');
+    remoteButton.className = 'button small';
+    remoteButton.textContent = '全部使用云端';
+
+    const localButton = document.createElement('button');
+    localButton.className = 'button primary small';
+    localButton.textContent = '全部保留本地';
+
+    const cancelButton = document.createElement('button');
+    cancelButton.className = 'button ghost small';
+    cancelButton.textContent = '取消';
+
+    const cleanup = (choice) => {
+      document.removeEventListener('keydown', onKeyDown);
+      overlay.remove();
+      resolve(choice);
+    };
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') cleanup('cancel');
+    };
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) cleanup('cancel');
+    });
+    remoteButton.addEventListener('click', () => cleanup('remote'));
+    localButton.addEventListener('click', () => cleanup('local'));
+    cancelButton.addEventListener('click', () => cleanup('cancel'));
+
+    actions.appendChild(remoteButton);
+    actions.appendChild(localButton);
+    actions.appendChild(cancelButton);
+    dialog.appendChild(title);
+    dialog.appendChild(message);
+    dialog.appendChild(summary);
+    dialog.appendChild(hint);
+    dialog.appendChild(actions);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    document.addEventListener('keydown', onKeyDown);
+  });
+}
+
 async function openSupabaseSyncIssues() {
   const profile = getActiveEndpoint();
   if (profile?.provider_kind !== 'supabase') return;
@@ -1750,16 +1860,27 @@ async function openSupabaseSyncIssues() {
       invoke('list_sync_conflicts'),
     ]);
     if (conflicts.length) {
-      const conflict = conflicts[0];
-      const choice = window.prompt(
-        `有 ${conflicts.length} 项同步冲突。\n实体：${conflict.entityType} / ${conflict.entityId}\n本机 revision：${conflict.localRevision}，云端 revision：${conflict.remoteRevision ?? '无'}\n\n输入 local 保留本机内容并重提，输入 remote 采用云端内容。`,
-        'remote',
-      );
-      if (!choice) return;
-      const resolution = choice.trim().toLowerCase();
-      if (!['local', 'remote'].includes(resolution)) throw new Error('请输入 local 或 remote');
-      await invoke('resolve_sync_conflict', { input: { conflictId: conflict.id, resolution } });
-      setSuccessStatus('同步冲突已处理');
+      const resolution = await showSyncConflictResolutionDialog(conflicts);
+      if (resolution === 'cancel') return;
+      const hideLoading = showLoadingToast(`正在批量处理 ${conflicts.length} 项同步冲突...`);
+      let result;
+      try {
+        result = await invoke('resolve_all_sync_conflicts', { input: { resolution } });
+      } finally {
+        hideLoading();
+      }
+      const strategy = resolution === 'remote' ? '使用云端数据' : '保留本地数据';
+      const pending = Number(result?.status?.pending_count ?? result?.status?.pendingCount ?? 0);
+      const details = [`已按“${strategy}”处理 ${result?.resolved || 0}/${result?.found || conflicts.length} 项冲突。`];
+      if (result?.remaining > 0) details.push(`仍有 ${result.remaining} 项新产生或未完成的冲突。`);
+      if (pending > 0) details.push(`还有 ${pending} 项等待同步。`);
+      if (result?.syncError) details.push(`本机选择已保存，立即同步失败：${result.syncError}`);
+      await showInfoDialog({
+        title: result?.remaining > 0 || result?.syncError ? '批量处理已完成，仍有待处理项' : '同步冲突已全部处理',
+        message: details.join('\n'),
+        preserveWhitespace: true,
+      });
+      await loadSyncStatus();
       await refreshMessages();
       return;
     }
@@ -10249,7 +10370,7 @@ async function loadMessages(options = {}) {
         input: {
           limit: PAGE_SIZE,
           beforeTimestampMs: oldestLoadedMessageRef.timestamp_ms,
-          beforeFilename: oldestLoadedMessageRef.filename,
+          beforeFilename: oldestLoadedMessageRef.message_id || oldestLoadedMessageRef.filename,
         },
       });
       isLoadingMore = false;
@@ -10280,7 +10401,7 @@ async function loadMessages(options = {}) {
             input: {
               limit: PAGE_SIZE,
               afterTimestampMs: newestLoadedMessageRef.timestamp_ms,
-              afterFilename: newestLoadedMessageRef.filename,
+              afterFilename: newestLoadedMessageRef.message_id || newestLoadedMessageRef.filename,
             },
           })
         : latestResult;
@@ -10475,62 +10596,6 @@ function startRefreshTimer(intervalSecs) {
   activeRefreshIntervalSecs = interval;
   refreshCountdownSecs = interval;
   updateRefreshCountdown();
-  if (isActiveSupabaseEndpoint()) {
-    return;
-  }
-  refreshTimer = setInterval(async () => {
-    if (isRefreshRunning) {
-      updateRefreshCountdown();
-      return;
-    }
-
-    if (!getActiveEndpoint()) {
-      refreshCountdownSecs = interval;
-      updateRefreshCountdown();
-      return;
-    }
-
-    const hasSearchQuery = searchInput && searchInput.value.trim().length > 0;
-    if (hasSearchQuery || hasActiveContentTransfer() || isMessageSelectionRefreshPaused()) {
-      updateRefreshCountdown();
-      return;
-    }
-
-    // 标签页不自动刷新
-    if (getActiveMainTab() === 'marked') {
-      refreshCountdownSecs = interval;
-      updateRefreshCountdown();
-      return;
-    }
-
-    if (feedState?.shouldAutoRefreshTick) {
-      const tickResult = feedState.shouldAutoRefreshTick({
-        isRefreshRunning,
-        hasActiveEndpoint: !!getActiveEndpoint(),
-        hasSearchQuery,
-        hasActiveTransfer: hasActiveContentTransfer(),
-        selectionPaused: isMessageSelectionRefreshPaused(),
-        activeTab: getActiveMainTab(),
-        refreshCountdownSecs,
-        intervalSecs: interval,
-      });
-      refreshCountdownSecs = tickResult.nextCountdownSecs;
-      updateRefreshCountdown();
-      if (tickResult.shouldRefresh) {
-        await refreshMessages({ manual: false });
-      }
-      return;
-    }
-
-    refreshCountdownSecs = Math.max(0, refreshCountdownSecs - 1);
-    updateRefreshCountdown();
-
-    if (refreshCountdownSecs > 0) {
-      return;
-    }
-
-    await refreshMessages({ manual: false });
-  }, 1000);
 }
 
 function restartRefreshTimer() {
@@ -10552,19 +10617,7 @@ function updateRefreshCountdown() {
     return;
   }
 
-  if (isActiveSupabaseEndpoint()) {
-    refreshLabel.textContent = refreshLabelDefault || '刷新';
-    return;
-  }
-
-  // 标签页时不显示倒计时
-  if (getActiveMainTab() === 'marked') {
-    refreshLabel.textContent = refreshLabelDefault || '刷新';
-    return;
-  }
-
-  const remaining = Math.max(1, Math.ceil(Number(refreshCountdownSecs) || activeRefreshIntervalSecs || 1));
-  refreshLabel.textContent = `${refreshLabelDefault || '刷新'} (${remaining}s)`;
+  refreshLabel.textContent = refreshLabelDefault || '刷新';
 }
 
 function delay(ms) {
@@ -11166,7 +11219,10 @@ function applySettings(settings) {
   const storageProfiles = Array.isArray(settings.storage_profiles)
     ? settings.storage_profiles
     : [];
-  const supabaseProfile = storageProfiles.find((profile) => profile?.provider_kind === 'supabase') || null;
+  const preferredSupabaseProfileId = currentSettingsFormState.supabaseProfileId;
+  const supabaseProfile = storageProfiles.find(
+    (profile) => profile?.provider_kind === 'supabase' && profile?.id === preferredSupabaseProfileId,
+  ) || storageProfiles.find((profile) => profile?.provider_kind === 'supabase') || null;
   const previousActiveEndpointId = activeEndpointId;
   const endpoints = Array.isArray(settings.webdav_endpoints)
     ? settings.webdav_endpoints
@@ -11326,21 +11382,48 @@ function applySettings(settings) {
     speechToTextPolishTimeoutSecs: normalizeSpeechPolishTimeoutSecs(speechToText.polish_timeout_secs ?? DEFAULT_SPEECH_POLISH_TIMEOUT_SECS),
     storageProfiles,
     activeStorageProfileId: settings.active_storage_profile_id || settings.active_webdav_id || null,
+    storageProfileEditorOpen: !!currentSettingsFormState.storageProfileEditorOpen,
+    storageProfileEditorMode: currentSettingsFormState.storageProfileEditorMode || 'create',
+    storageProfileOriginalId: currentSettingsFormState.storageProfileOriginalId || '',
+    storageProfileDraft: currentSettingsFormState.storageProfileDraft || null,
+    storageProfileTestBusy: !!currentSettingsFormState.storageProfileTestBusy,
+    storageProfileTestResult: currentSettingsFormState.storageProfileTestResult || null,
+    storageProfileTestMessage: currentSettingsFormState.storageProfileTestMessage || '',
+    storageProfileTestMessageKind: currentSettingsFormState.storageProfileTestMessageKind || '',
     supabaseProfileId: supabaseProfile?.id || '',
     supabaseProfileName: supabaseProfile?.name || 'Supabase',
+    supabaseProfileEnabled: supabaseProfile?.enabled !== false,
     supabaseApiUrl: supabaseProfile?.supabase?.api_url || '',
     supabaseAnonKey: supabaseProfile?.supabase?.anon_key || '',
+    supabaseSpaceId: supabaseProfile?.supabase?.space_id || '',
     supabaseEmail: currentSettingsFormState.supabaseEmail || '',
     supabasePassword: '',
     supabaseAccountStatus: currentSettingsFormState.supabaseAccountStatus || null,
+    supabaseSpaces: currentSettingsFormState.supabaseSpaces || [],
+    supabaseSpacesLoading: !!currentSettingsFormState.supabaseSpacesLoading,
+    supabaseSpacesMessage: currentSettingsFormState.supabaseSpacesMessage || '',
     supabaseConnectionStatus: currentSettingsFormState.supabaseConnectionStatus || null,
     supabaseAuthBusy: !!currentSettingsFormState.supabaseAuthBusy,
     supabaseAuthMessage: currentSettingsFormState.supabaseAuthMessage || '',
     supabaseAuthMessageKind: currentSettingsFormState.supabaseAuthMessageKind || '',
+    supabaseProfileStatuses: currentSettingsFormState.supabaseProfileStatuses || {},
+    supabaseConnectionStatuses: currentSettingsFormState.supabaseConnectionStatuses || {},
     storageImportBusy: !!currentSettingsFormState.storageImportBusy,
     storageImportProgress: currentSettingsFormState.storageImportProgress || null,
     storageImportMessage: currentSettingsFormState.storageImportMessage || '',
     storageImportMessageKind: currentSettingsFormState.storageImportMessageKind || '',
+    storageTransferSourceProfileId: currentSettingsFormState.storageTransferSourceProfileId || '',
+    storageTransferTargetProfileId: currentSettingsFormState.storageTransferTargetProfileId || '',
+    storageTransferResult: currentSettingsFormState.storageTransferResult || null,
+    storageTransferWizardOpen: !!currentSettingsFormState.storageTransferWizardOpen,
+    storageTransferWizardStep: currentSettingsFormState.storageTransferWizardStep || 'select',
+    storageTransferPreview: currentSettingsFormState.storageTransferPreview || null,
+    storageTransferPreviewBusy: !!currentSettingsFormState.storageTransferPreviewBusy,
+    storageTransferWizardError: currentSettingsFormState.storageTransferWizardError || '',
+    storageTransferRecoverable: currentSettingsFormState.storageTransferRecoverable || null,
+    storageTransferRecoverableTasks: currentSettingsFormState.storageTransferRecoverableTasks || [],
+    storageTransferActiveBatchId: currentSettingsFormState.storageTransferActiveBatchId || '',
+    storageTransferRecoveryExpanded: !!currentSettingsFormState.storageTransferRecoveryExpanded,
   };
   syncVueSettingsForm(currentSettingsFormState);
   syncShortcutsEnabledState();
@@ -11425,6 +11508,14 @@ async function loadSettings() {
     for (const profile of supabaseProfiles) {
       try {
         const status = await invoke('supabase_current_user', { profileId: profile.id });
+        currentSettingsFormState = {
+          ...currentSettingsFormState,
+          supabaseProfileStatuses: {
+            ...(currentSettingsFormState.supabaseProfileStatuses || {}),
+            [profile.id]: status,
+          },
+        };
+        syncVueSettingsForm(currentSettingsFormState);
         if (profile.id === currentSettingsFormState.supabaseProfileId) {
           setSupabaseAuthFeedback({
             supabaseAccountStatus: status,
@@ -11440,6 +11531,44 @@ async function loadSettings() {
             supabaseAuthMessageKind: 'error',
           });
         }
+      }
+    }
+    try {
+      const transfers = await invoke('list_resumable_storage_transfers');
+      const resumableTasks = Array.isArray(transfers)
+        ? transfers.map((value) => normalizeStorageImportProgress(value))
+        : [];
+      if (resumableTasks.length) {
+        setStorageImportState({
+          storageImportBusy: false,
+          storageImportProgress: null,
+          storageTransferResult: null,
+          storageTransferWizardStep: 'select',
+          storageTransferRecoverable: resumableTasks[0],
+          storageTransferRecoverableTasks: resumableTasks,
+          storageTransferActiveBatchId: '',
+          storageTransferRecoveryExpanded: false,
+          storageImportMessage: '',
+          storageImportMessageKind: '',
+        });
+      } else {
+        setStorageImportState({
+          storageTransferRecoverable: null,
+          storageTransferRecoverableTasks: [],
+          storageTransferActiveBatchId: '',
+        });
+      }
+    } catch (_) {
+      try {
+        const latestTransfer = await invoke('get_latest_storage_transfer_status');
+        const progress = latestTransfer ? normalizeStorageImportProgress(latestTransfer) : null;
+        setStorageImportState({
+          storageTransferRecoverable: progress,
+          storageTransferRecoverableTasks: progress ? [progress] : [],
+          storageTransferActiveBatchId: '',
+        });
+      } catch (_) {
+        // Older backends may not expose persisted transfer status yet.
       }
     }
     await loadLocalHttpApiStatus({ silent: true });
@@ -11631,6 +11760,9 @@ async function saveSettings(options = {}) {
   const supabaseApiUrl = String(currentSettingsFormState.supabaseApiUrl || '').trim().replace(/\/$/, '');
   const supabaseAnonKey = String(currentSettingsFormState.supabaseAnonKey || '').trim();
   const supabaseProfileId = String(currentSettingsFormState.supabaseProfileId || '').trim() || `supabase-${Date.now()}`;
+  const preservedSupabaseProfiles = existingProfiles.filter(
+    (profile) => profile?.provider_kind === 'supabase' && profile?.id !== supabaseProfileId,
+  );
   const storageProfiles = [
     ...endpoints.map((endpoint) => ({
       id: endpoint.id,
@@ -11639,15 +11771,18 @@ async function saveSettings(options = {}) {
       enabled: endpoint.enabled,
       webdav: { url: endpoint.url, username: endpoint.username, password: endpoint.password },
     })),
+    ...preservedSupabaseProfiles,
     ...(supabaseApiUrl || supabaseAnonKey ? [{
       id: supabaseProfileId,
       name: String(currentSettingsFormState.supabaseProfileName || 'Supabase').trim() || 'Supabase',
       provider_kind: 'supabase',
-      enabled: true,
+      enabled: currentSettingsFormState.supabaseProfileEnabled !== false,
       supabase: {
         api_url: supabaseApiUrl,
         anon_key: supabaseAnonKey,
-        space_id: existingProfiles.find((profile) => profile?.id === supabaseProfileId)?.supabase?.space_id || '',
+        space_id: String(currentSettingsFormState.supabaseSpaceId || '').trim()
+          || existingProfiles.find((profile) => profile?.id === supabaseProfileId)?.supabase?.space_id
+          || '',
       },
     }] : []),
   ];
@@ -13100,7 +13235,9 @@ async function ensureSupabaseProfileSaved() {
   if (!updated) {
     throw new Error(syncStatus?.textContent || 'Supabase 配置保存失败，请检查设置');
   }
-  const profile = updated?.storage_profiles?.find((item) => item.provider_kind === 'supabase');
+  const profile = updated?.storage_profiles?.find(
+    (item) => item.provider_kind === 'supabase' && item.id === currentSettingsFormState.supabaseProfileId,
+  ) || updated?.storage_profiles?.find((item) => item.provider_kind === 'supabase');
   if (!profile?.id) {
     throw new Error('请先填写 Supabase API URL 和公开 Key');
   }
@@ -13113,12 +13250,549 @@ async function ensureSupabaseProfileSaved() {
   return profile.id;
 }
 
+async function saveSupabaseProfile() {
+  try {
+    const profileId = await ensureSupabaseProfileSaved();
+    setSuccessStatus('Supabase 存储空间已保存');
+    return profileId;
+  } catch (error) {
+    const message = `保存 Supabase 存储空间失败：${supabaseErrorMessage(error)}`;
+    setErrorStatus(message);
+    showToast(message, 'error');
+    return null;
+  }
+}
+
+function selectSupabaseProfile(profileId) {
+  const profile = (currentSettingsFormState.storageProfiles || []).find(
+    (item) => item?.id === profileId && item?.provider_kind === 'supabase',
+  );
+  currentSettingsFormState = {
+    ...currentSettingsFormState,
+    supabaseProfileId: profile?.id || '',
+    supabaseProfileName: profile?.name || 'Supabase',
+    supabaseProfileEnabled: profile?.enabled !== false,
+    supabaseApiUrl: profile?.supabase?.api_url || '',
+    supabaseAnonKey: profile?.supabase?.anon_key || '',
+    supabaseSpaceId: profile?.supabase?.space_id || '',
+    supabaseEmail: '',
+    supabasePassword: '',
+    supabaseAccountStatus: null,
+    supabaseSpaces: [],
+    supabaseSpacesLoading: false,
+    supabaseSpacesMessage: '',
+    supabaseConnectionStatus: null,
+    supabaseAuthMessage: '',
+    supabaseAuthMessageKind: '',
+  };
+  syncVueSettingsForm(currentSettingsFormState);
+  if (profile?.id) {
+    void invoke('supabase_current_user', { profileId: profile.id })
+      .then((status) => setSupabaseAuthFeedback({ supabaseAccountStatus: status }))
+      .catch((error) => setSupabaseAuthFeedback({
+        supabaseAuthMessage: `登录状态读取失败：${supabaseErrorMessage(error)}`,
+        supabaseAuthMessageKind: 'error',
+      }));
+  }
+}
+
+function addSupabaseProfile() {
+  openStorageProfileEditor('supabase');
+}
+
+function editStorageProfile(profile) {
+  if (!profile?.id) return;
+  const providerKind = profile.provider_kind === 'supabase' ? 'supabase' : 'webdav';
+  const cachedAccountStatus = providerKind === 'supabase'
+    ? currentSettingsFormState.supabaseProfileStatuses?.[profile.id] || null
+    : null;
+  currentSettingsFormState = {
+    ...currentSettingsFormState,
+    storageProfileEditorOpen: true,
+    storageProfileEditorMode: 'edit',
+    storageProfileOriginalId: profile.id,
+    storageProfileTestBusy: false,
+    storageProfileTestResult: null,
+    storageProfileTestMessage: '',
+    storageProfileTestMessageKind: '',
+    storageProfileDraft: {
+      id: profile.id,
+      provider_kind: providerKind,
+      name: profile.name || (providerKind === 'supabase' ? 'Supabase' : 'WebDAV'),
+      enabled: profile.enabled !== false,
+      webdav: providerKind === 'webdav' ? {
+        url: profile.webdav?.url || '',
+        username: profile.webdav?.username || '',
+        password: profile.webdav?.password || '',
+      } : null,
+      supabase: providerKind === 'supabase' ? {
+        api_url: profile.supabase?.api_url || '',
+        anon_key: profile.supabase?.anon_key || '',
+        space_id: profile.supabase?.space_id || '',
+      } : null,
+    },
+    supabaseProfileId: providerKind === 'supabase' ? profile.id : '',
+    supabaseProfileName: providerKind === 'supabase' ? profile.name || 'Supabase' : 'Supabase',
+    supabaseProfileEnabled: providerKind === 'supabase' ? profile.enabled !== false : true,
+    supabaseApiUrl: providerKind === 'supabase' ? profile.supabase?.api_url || '' : '',
+    supabaseAnonKey: providerKind === 'supabase' ? profile.supabase?.anon_key || '' : '',
+    supabaseSpaceId: providerKind === 'supabase' ? profile.supabase?.space_id || '' : '',
+    supabaseEmail: '',
+    supabasePassword: '',
+    supabaseAccountStatus: cachedAccountStatus,
+    supabaseSpaces: [],
+    supabaseSpacesLoading: false,
+    supabaseSpacesMessage: '',
+    supabaseConnectionStatus: providerKind === 'supabase'
+      ? currentSettingsFormState.supabaseConnectionStatuses?.[profile.id] || null
+      : null,
+    supabaseAuthBusy: false,
+    supabaseAuthMessage: '',
+    supabaseAuthMessageKind: '',
+  };
+  syncVueSettingsForm(currentSettingsFormState);
+  if (providerKind === 'supabase') {
+    void loadSupabaseProfileAccountStatus(profile.id).then((status) => {
+      if (status?.signedIn) void loadSupabaseSpaces(profile.id);
+    });
+  }
+}
+
+function newStorageProfileDraft(providerKind = '') {
+  const normalizedKind = providerKind === 'webdav' || providerKind === 'supabase' ? providerKind : '';
+  return {
+    id: normalizedKind ? `${normalizedKind}-${Date.now()}` : '',
+    provider_kind: normalizedKind,
+    name: normalizedKind === 'supabase' ? 'Supabase' : normalizedKind === 'webdav' ? 'WebDAV' : '',
+    enabled: true,
+    webdav: normalizedKind === 'webdav' ? { url: '', username: '', password: '' } : null,
+    supabase: normalizedKind === 'supabase' ? { api_url: '', anon_key: '', space_id: '' } : null,
+  };
+}
+
+function openStorageProfileEditor(providerKind = '') {
+  currentSettingsFormState = {
+    ...currentSettingsFormState,
+    storageProfileEditorOpen: true,
+    storageProfileEditorMode: 'create',
+    storageProfileOriginalId: '',
+    storageProfileDraft: newStorageProfileDraft(providerKind),
+    storageProfileTestBusy: false,
+    storageProfileTestResult: null,
+    storageProfileTestMessage: '',
+    storageProfileTestMessageKind: '',
+    supabaseProfileId: '',
+    supabaseEmail: '',
+    supabasePassword: '',
+    supabaseAccountStatus: null,
+    supabaseSpaces: [],
+    supabaseSpacesLoading: false,
+    supabaseSpacesMessage: '',
+    supabaseConnectionStatus: null,
+    supabaseAuthBusy: false,
+    supabaseAuthMessage: '',
+    supabaseAuthMessageKind: '',
+  };
+  syncVueSettingsForm(currentSettingsFormState);
+}
+
+function cancelStorageProfileEditor() {
+  if (currentSettingsFormState.storageProfileTestBusy || currentSettingsFormState.supabaseAuthBusy) return;
+  currentSettingsFormState = {
+    ...currentSettingsFormState,
+    storageProfileEditorOpen: false,
+    storageProfileEditorMode: 'create',
+    storageProfileOriginalId: '',
+    storageProfileDraft: null,
+    storageProfileTestBusy: false,
+    storageProfileTestResult: null,
+    storageProfileTestMessage: '',
+    storageProfileTestMessageKind: '',
+    supabaseProfileId: '',
+    supabaseEmail: '',
+    supabasePassword: '',
+    supabaseAccountStatus: null,
+    supabaseSpaces: [],
+    supabaseSpacesLoading: false,
+    supabaseSpacesMessage: '',
+    supabaseConnectionStatus: null,
+    supabaseAuthBusy: false,
+    supabaseAuthMessage: '',
+    supabaseAuthMessageKind: '',
+  };
+  syncVueSettingsForm(currentSettingsFormState);
+}
+
+function updateStorageProfileDraft(field, value) {
+  const current = currentSettingsFormState.storageProfileDraft || newStorageProfileDraft();
+  let draft = { ...current };
+  if (field === 'provider_kind') {
+    const next = newStorageProfileDraft(value);
+    draft = { ...next, name: current.name || next.name };
+  } else if (field.startsWith('webdav.')) {
+    draft.webdav = { ...(current.webdav || {}), [field.slice(7)]: value };
+  } else if (field.startsWith('supabase.')) {
+    draft.supabase = { ...(current.supabase || {}), [field.slice(9)]: value };
+  } else {
+    draft[field] = value;
+  }
+  currentSettingsFormState = {
+    ...currentSettingsFormState,
+    storageProfileDraft: draft,
+    storageProfileTestResult: null,
+    storageProfileTestMessage: '',
+    storageProfileTestMessageKind: '',
+    ...(field === 'provider_kind' ? {
+      supabaseProfileId: '',
+      supabaseEmail: '',
+      supabasePassword: '',
+      supabaseAccountStatus: null,
+      supabaseSpaces: [],
+      supabaseSpacesLoading: false,
+      supabaseSpacesMessage: '',
+      supabaseConnectionStatus: null,
+      supabaseAuthBusy: false,
+      supabaseAuthMessage: '',
+      supabaseAuthMessageKind: '',
+    } : {}),
+  };
+  syncVueSettingsForm(currentSettingsFormState);
+}
+
+async function testStorageProfileDraftConnection() {
+  if (currentSettingsFormState.storageProfileTestBusy) return null;
+  const draft = currentSettingsFormState.storageProfileDraft;
+  const providerKind = draft?.provider_kind;
+  if (providerKind !== 'webdav' && providerKind !== 'supabase') {
+    setStorageImportState({
+      storageProfileTestMessage: '请先选择存储类型',
+      storageProfileTestMessageKind: 'error',
+    });
+    return null;
+  }
+  setStorageImportState({
+    storageProfileTestBusy: true,
+    storageProfileTestResult: null,
+    storageProfileTestMessage: providerKind === 'webdav' ? '正在测试 WebDAV 连接...' : '正在检查 Supabase 环境...',
+    storageProfileTestMessageKind: 'info',
+  });
+  try {
+    let result;
+    if (providerKind === 'webdav') {
+      const url = String(draft.webdav?.url || '').trim();
+      if (!url) throw new Error('请填写 WebDAV URL');
+      result = await invoke('test_webdav_connection', {
+        endpoint: {
+          id: String(draft.id || `webdav-test-${Date.now()}`),
+          name: String(draft.name || 'WebDAV'),
+          url,
+          username: String(draft.webdav?.username || '').trim(),
+          password: String(draft.webdav?.password || ''),
+          enabled: draft.enabled !== false,
+        },
+      });
+      setStorageImportState({
+        storageProfileTestBusy: false,
+        storageProfileTestResult: { ...result, providerKind },
+        storageProfileTestMessage: 'WebDAV 连接成功，当前配置可以访问远端目录',
+        storageProfileTestMessageKind: 'success',
+      });
+    } else {
+      const apiUrl = String(draft.supabase?.api_url || '').trim();
+      const anonKey = String(draft.supabase?.anon_key || '').trim();
+      if (!apiUrl || !anonKey) throw new Error('请填写 Supabase API URL 和公开 Key');
+      result = await invoke('test_supabase_draft_connection', {
+        input: {
+          profileId: currentSettingsFormState.storageProfileEditorMode === 'edit' ? draft.id : null,
+          apiUrl,
+          anonKey,
+        },
+      });
+      const ready = !!(result?.network && result?.publicKey);
+      const fullyReady = !!(result?.auth && result?.schema && result?.rpc && result?.rls && result?.realtime && result?.storage);
+      setStorageImportState({
+        storageProfileTestBusy: false,
+        storageProfileTestResult: { ...result, providerKind },
+        storageProfileTestMessage: fullyReady
+          ? '连接成功，Auth、RLS、Realtime 和 Storage 均已就绪'
+          : ready
+            ? `基础连接成功；${result?.message || '保存并登录后可完成账号权限检查'}`
+            : (result?.message || '连接检查未通过'),
+        storageProfileTestMessageKind: fullyReady || ready ? 'success' : 'error',
+      });
+    }
+    return result;
+  } catch (error) {
+    const message = supabaseErrorMessage(error);
+    setStorageImportState({
+      storageProfileTestBusy: false,
+      storageProfileTestResult: null,
+      storageProfileTestMessage: `测试连接失败：${message}`,
+      storageProfileTestMessageKind: 'error',
+    });
+    return null;
+  }
+}
+
+async function saveStorageProfileDraft() {
+  const draft = currentSettingsFormState.storageProfileDraft;
+  const providerKind = draft?.provider_kind;
+  if (providerKind !== 'webdav' && providerKind !== 'supabase') {
+    setErrorStatus('请先选择存储类型');
+    return null;
+  }
+  const name = String(draft.name || '').trim() || (providerKind === 'supabase' ? 'Supabase' : 'WebDAV');
+  const id = String(draft.id || '').trim() || `${providerKind}-${Date.now()}`;
+  if (providerKind === 'webdav' && !String(draft.webdav?.url || '').trim()) {
+    setErrorStatus('请填写 WebDAV URL');
+    return null;
+  }
+  if (providerKind === 'supabase' && (!String(draft.supabase?.api_url || '').trim()
+    || !String(draft.supabase?.anon_key || '').trim())) {
+    setErrorStatus('请填写 Supabase API URL 和公开 Key');
+    return null;
+  }
+  const previousState = currentSettingsFormState;
+  try {
+    const originalProfileId = currentSettingsFormState.storageProfileEditorMode === 'edit'
+      ? String(currentSettingsFormState.storageProfileOriginalId || '').trim()
+      : '';
+    if (currentSettingsFormState.storageProfileEditorMode === 'edit' && !originalProfileId) {
+      throw new Error('编辑状态已失效，请关闭弹框后重新打开');
+    }
+    const profile = {
+      id: originalProfileId || id,
+      name,
+      provider_kind: providerKind,
+      enabled: draft.enabled !== false,
+      webdav: providerKind === 'webdav' ? {
+        url: String(draft.webdav?.url || '').trim(),
+        username: String(draft.webdav?.username || '').trim(),
+        password: String(draft.webdav?.password || ''),
+      } : null,
+      supabase: providerKind === 'supabase' ? {
+        api_url: String(draft.supabase?.api_url || '').trim().replace(/\/$/, ''),
+        anon_key: String(draft.supabase?.anon_key || '').trim(),
+        space_id: String(draft.supabase?.space_id || '').trim(),
+      } : null,
+    };
+    const updated = await invoke('save_storage_profile', {
+      input: {
+        originalProfileId: originalProfileId || null,
+        profile,
+      },
+    });
+    applySettings(updated);
+    if (providerKind === 'supabase') {
+      const savedProfile = (updated.storage_profiles || []).find(
+        (item) => item?.id === profile.id && item?.provider_kind === 'supabase',
+      );
+      if (!savedProfile) throw new Error('保存后未找到 Supabase 存储空间');
+      currentSettingsFormState = {
+        ...currentSettingsFormState,
+        storageProfiles: updated.storage_profiles || [],
+        storageProfileEditorOpen: true,
+        storageProfileEditorMode: 'edit',
+        storageProfileOriginalId: savedProfile.id,
+        storageProfileDraft: {
+          id: savedProfile.id,
+          provider_kind: 'supabase',
+          name: savedProfile.name || name,
+          enabled: savedProfile.enabled !== false,
+          webdav: null,
+          supabase: {
+            api_url: savedProfile.supabase?.api_url || '',
+            anon_key: savedProfile.supabase?.anon_key || '',
+            space_id: savedProfile.supabase?.space_id || '',
+          },
+        },
+        supabaseProfileId: savedProfile.id,
+        supabaseProfileName: savedProfile.name || name,
+        supabaseProfileEnabled: savedProfile.enabled !== false,
+        supabaseApiUrl: savedProfile.supabase?.api_url || '',
+        supabaseAnonKey: savedProfile.supabase?.anon_key || '',
+        supabaseSpaceId: savedProfile.supabase?.space_id || '',
+        supabaseEmail: '',
+        supabasePassword: '',
+        supabaseAccountStatus: currentSettingsFormState.supabaseProfileStatuses?.[savedProfile.id] || null,
+        supabaseAuthBusy: false,
+        supabaseAuthMessage: '存储空间已保存，现在可以登录 Supabase 账号',
+        supabaseAuthMessageKind: 'success',
+      };
+      syncVueSettingsForm(currentSettingsFormState);
+      await loadSupabaseProfileAccountStatus(savedProfile.id, { preserveMessage: true });
+    } else {
+      cancelStorageProfileEditor();
+    }
+    setSuccessStatus(`${name} 已保存`);
+    return updated;
+  } catch (error) {
+    currentSettingsFormState = previousState;
+    syncVueSettingsForm(currentSettingsFormState);
+    setErrorStatus(`保存存储空间失败：${supabaseErrorMessage(error)}`);
+    return null;
+  }
+}
+
+async function removeStorageProfile(profile) {
+  if (!profile?.id) return;
+  const isActive = profile.id === currentSettingsFormState.activeStorageProfileId;
+  const confirmed = await showConfirmationDialog({
+    title: '确认强制移除存储空间',
+    message: `${isActive ? '这是当前正在使用的存储空间，删除后会停止当前同步并清空当前选择。' : ''}确认后会移除本机配置和登录状态，并放弃该空间的待上传操作、同步冲突和未完成数据传输。已经写入远端的数据不会删除，本机历史缓存也会保留。确定继续吗？`,
+    confirmLabel: '确认删除',
+  });
+  if (!confirmed) return;
+  try {
+    const updated = await invoke('remove_storage_profile', {
+      input: { profileId: profile.id, force: true },
+    });
+    applySettings(updated);
+    setSuccessStatus('存储空间已强制移除，关联未完成任务已放弃，远端数据未删除');
+  } catch (error) {
+    setErrorStatus(`移除存储空间失败：${supabaseErrorMessage(error)}`);
+  }
+}
+
+async function activateStorageProfile(profile) {
+  if (!profile?.id || profile.enabled === false) return;
+  activeEndpointId = profile.id;
+  currentSettingsFormState = {
+    ...currentSettingsFormState,
+    activeStorageProfileId: profile.id,
+  };
+  syncVueSettingsForm(currentSettingsFormState);
+  renderEndpointSelect();
+  await saveSettings({ silent: true });
+}
+
+async function removeSupabaseProfile() {
+  const profileId = currentSettingsFormState.supabaseProfileId;
+  if (!profileId) return;
+  const isActive = profileId === currentSettingsFormState.activeStorageProfileId;
+  const confirmed = await showConfirmationDialog({
+    title: '确认强制移除 Supabase 存储空间',
+    message: `${isActive ? '这是当前正在使用的存储空间，删除后会停止当前同步并清空当前选择。' : ''}确认后会移除本机配置和登录状态，并放弃该空间的待上传操作、同步冲突和未完成数据传输。Supabase 远端数据不会删除，本机历史缓存也会保留。确定继续吗？`,
+    confirmLabel: '确认删除',
+  });
+  if (!confirmed) return;
+  try {
+    const updated = await invoke('remove_storage_profile', {
+      input: { profileId, force: true },
+    });
+    applySettings(updated);
+    selectSupabaseProfile('');
+    setSuccessStatus('Supabase 存储空间已移除，远端数据未删除');
+  } catch (error) {
+    setErrorStatus(`移除存储空间失败：${supabaseErrorMessage(error)}`);
+  }
+}
+
 function setSupabaseAuthFeedback(patch) {
   currentSettingsFormState = {
     ...currentSettingsFormState,
     ...patch,
   };
   syncVueSettingsForm(currentSettingsFormState);
+}
+
+async function loadSupabaseProfileAccountStatus(profileId, options = {}) {
+  if (!profileId) return null;
+  try {
+    const status = await invoke('supabase_current_user', { profileId });
+    const isCurrentEditor = currentSettingsFormState.storageProfileEditorOpen
+      && currentSettingsFormState.storageProfileDraft?.provider_kind === 'supabase'
+      && currentSettingsFormState.storageProfileDraft?.id === profileId;
+    const patch = {
+      supabaseProfileStatuses: {
+        ...(currentSettingsFormState.supabaseProfileStatuses || {}),
+        [profileId]: status,
+      },
+    };
+    if (isCurrentEditor) {
+      patch.supabaseProfileId = profileId;
+      patch.supabaseAccountStatus = status;
+      if (!options.preserveMessage) {
+        patch.supabaseAuthMessage = status?.signedIn ? '已恢复此存储空间的 Supabase 登录' : '';
+        patch.supabaseAuthMessageKind = status?.signedIn ? 'success' : '';
+      }
+    }
+    setSupabaseAuthFeedback(patch);
+    return status;
+  } catch (error) {
+    const isCurrentEditor = currentSettingsFormState.storageProfileEditorOpen
+      && currentSettingsFormState.storageProfileDraft?.provider_kind === 'supabase'
+      && currentSettingsFormState.storageProfileDraft?.id === profileId;
+    if (isCurrentEditor) {
+      setSupabaseAuthFeedback({
+        supabaseAccountStatus: null,
+        supabaseAuthMessage: `登录状态读取失败：${supabaseErrorMessage(error)}`,
+        supabaseAuthMessageKind: 'error',
+      });
+    }
+    return null;
+  }
+}
+
+async function loadSupabaseSpaces(profileId = currentSettingsFormState.supabaseProfileId) {
+  if (!profileId || currentSettingsFormState.supabaseSpacesLoading) return [];
+  const requestedProfileId = profileId;
+  setSupabaseAuthFeedback({
+    supabaseSpacesLoading: true,
+    supabaseSpacesMessage: '正在读取这个账号的存储空间...',
+  });
+  try {
+    const spaces = await invoke('list_supabase_spaces', { profileId });
+    if (currentSettingsFormState.supabaseProfileId !== requestedProfileId) return [];
+    setSupabaseAuthFeedback({
+      supabaseSpaces: Array.isArray(spaces) ? spaces : [],
+      supabaseSpacesLoading: false,
+      supabaseSpacesMessage: spaces?.length
+        ? `已找到 ${spaces.length} 个可访问空间`
+        : '这个账号暂时没有可访问的存储空间',
+    });
+    return spaces || [];
+  } catch (error) {
+    if (currentSettingsFormState.supabaseProfileId !== requestedProfileId) return [];
+    setSupabaseAuthFeedback({
+      supabaseSpaces: [],
+      supabaseSpacesLoading: false,
+      supabaseSpacesMessage: `空间列表读取失败：${supabaseErrorMessage(error)}`,
+    });
+    return [];
+  }
+}
+
+async function useSupabaseSpace(space) {
+  if (!space?.id || currentSettingsFormState.supabaseAuthBusy) return null;
+  if (space.current) {
+    setSuccessStatus('当前已经在使用这个 Supabase 空间');
+    return null;
+  }
+  setSupabaseAuthFeedback({
+    supabaseAuthBusy: true,
+    supabaseSpacesMessage: `正在切换到 ${space.name || 'Supabase 空间'}...`,
+  });
+  try {
+    const updated = await invoke('switch_supabase_space', {
+      input: {
+        sourceProfileId: currentSettingsFormState.supabaseProfileId,
+        spaceId: space.id,
+      },
+    });
+    setSupabaseAuthFeedback({ supabaseAuthBusy: false });
+    applySettings(updated);
+    cancelStorageProfileEditor();
+    await loadMessages({ scrollToBottom: true });
+    setSuccessStatus(`已切换到 ${space.name || 'Supabase 空间'}`);
+    return updated;
+  } catch (error) {
+    setSupabaseAuthFeedback({
+      supabaseAuthBusy: false,
+      supabaseSpacesMessage: `切换空间失败：${supabaseErrorMessage(error)}`,
+    });
+    return null;
+  }
 }
 
 function supabaseErrorMessage(error) {
@@ -13134,14 +13808,35 @@ function normalizeStorageImportProgress(progress, fallbackTotal = 0) {
   const totalItems = Math.max(0, Number(value.totalItems ?? value.total_items ?? fallbackTotal) || 0);
   const appliedItems = Math.max(0, Number(value.appliedItems ?? value.applied_items) || 0);
   const failedItems = Math.max(0, Number(value.failedItems ?? value.failed_items) || 0);
-  const processedItems = Math.min(totalItems || appliedItems + failedItems, appliedItems + failedItems);
+  const skippedItems = Math.max(0, Number(value.skippedItems ?? value.skipped_items) || 0);
+  const conflictItems = Math.max(0, Number(value.conflictItems ?? value.conflict_items) || 0);
+  const rawFailedDetails = value.failedDetails ?? value.failed_details;
+  const failedDetails = Array.isArray(rawFailedDetails)
+    ? rawFailedDetails.map((item) => ({
+      itemType: String(item?.itemType ?? item?.item_type ?? ''),
+      sourceKey: String(item?.sourceKey ?? item?.source_key ?? ''),
+      state: String(item?.state || 'error'),
+      error: String(item?.error || ''),
+    })).filter((item) => item.error)
+    : [];
+  const processedItems = Math.min(
+    totalItems || appliedItems + skippedItems + conflictItems + failedItems,
+    appliedItems + skippedItems + conflictItems + failedItems,
+  );
   const status = String(value.status || 'pending');
   return {
     batchId: String(value.batchId ?? value.batch_id ?? ''),
+    sourceProfileId: String(value.sourceProfileId ?? value.source_profile_id ?? ''),
+    targetProfileId: String(value.targetProfileId ?? value.target_profile_id ?? ''),
     status,
     totalItems,
     appliedItems,
+    skippedItems,
+    conflictItems,
     failedItems,
+    phase: String(value.phase || status),
+    totalBytes: Math.max(0, Number(value.totalBytes ?? value.total_bytes) || 0),
+    transferredBytes: Math.max(0, Number(value.transferredBytes ?? value.transferred_bytes) || 0),
     processedItems,
     percent: totalItems > 0
       ? Math.min(100, Math.max(0, Math.round((processedItems / totalItems) * 100)))
@@ -13149,6 +13844,11 @@ function normalizeStorageImportProgress(progress, fallbackTotal = 0) {
         ? 100
         : 0,
     lastError: String(value.lastError ?? value.last_error ?? ''),
+    failedDetails,
+    failedDetailCount: Math.max(
+      failedDetails.length,
+      Number(value.failedDetailCount ?? value.failed_detail_count) || 0,
+    ),
   };
 }
 
@@ -13160,16 +13860,39 @@ function setStorageImportState(patch) {
   syncVueSettingsForm(currentSettingsFormState);
 }
 
+async function refreshResumableStorageTransfers() {
+  try {
+    const transfers = await invoke('list_resumable_storage_transfers');
+    const tasks = Array.isArray(transfers)
+      ? transfers.map((value) => normalizeStorageImportProgress(value))
+      : [];
+    setStorageImportState({
+      storageTransferRecoverableTasks: tasks,
+      storageTransferRecoverable: tasks[0] || null,
+      storageTransferActiveBatchId: tasks.some(
+        (task) => task.batchId === currentSettingsFormState.storageTransferActiveBatchId,
+      ) ? currentSettingsFormState.storageTransferActiveBatchId : '',
+      storageTransferRecoveryExpanded: tasks.some(
+        (task) => task.batchId === currentSettingsFormState.storageTransferActiveBatchId,
+      ) && currentSettingsFormState.storageTransferRecoveryExpanded,
+    });
+    return tasks;
+  } catch (_) {
+    return storageTransferTasks();
+  }
+}
+
 async function pollStorageImportProgress(batchId, fallbackTotal, isActive) {
   while (isActive()) {
     try {
-      const value = await invoke('get_storage_import_status', { batchId });
+      const value = await invoke('get_storage_transfer_status', { batchId });
       if (value) {
         const progress = normalizeStorageImportProgress(value, fallbackTotal);
         setStorageImportState({
           storageImportProgress: progress,
-          storageImportMessage: `正在复制并上传到 Supabase ${progress.processedItems}/${progress.totalItems} 项`,
-          storageImportMessageKind: progress.failedItems > 0 ? 'error' : 'info',
+          storageTransferRecoverable: progress.status === 'completed' ? null : progress,
+          storageImportMessage: `正在执行${progress.phase ? ` · ${progress.phase}` : ''} ${progress.processedItems}/${progress.totalItems} 项`,
+          storageImportMessageKind: progress.failedItems > 0 || progress.conflictItems > 0 ? 'error' : 'info',
         });
       }
     } catch (_) {
@@ -13183,7 +13906,14 @@ async function testSupabaseSettings() {
   try {
     const profileId = await ensureSupabaseProfileSaved();
     const status = await invoke('test_supabase_connection', { profileId });
-    currentSettingsFormState = { ...currentSettingsFormState, supabaseConnectionStatus: status };
+    currentSettingsFormState = {
+      ...currentSettingsFormState,
+      supabaseConnectionStatus: status,
+      supabaseConnectionStatuses: {
+        ...(currentSettingsFormState.supabaseConnectionStatuses || {}),
+        [profileId]: status,
+      },
+    };
     syncVueSettingsForm(currentSettingsFormState);
     status?.realtime && status?.storage
       ? setSuccessStatus('Supabase Auth、RLS、Realtime 和 Storage 检查通过')
@@ -13208,10 +13938,18 @@ async function signInSupabase() {
     setSupabaseAuthFeedback({
       supabasePassword: '',
       supabaseAccountStatus: status,
+      supabaseSpaces: [],
+      supabaseSpacesLoading: false,
+      supabaseSpacesMessage: '',
+      supabaseProfileStatuses: {
+        ...(currentSettingsFormState.supabaseProfileStatuses || {}),
+        [status.profileId || currentSettingsFormState.supabaseProfileId]: status,
+      },
       supabaseAuthBusy: false,
       supabaseAuthMessage: 'Supabase 登录成功',
       supabaseAuthMessageKind: 'success',
     });
+    await loadSupabaseSpaces(status.profileId || currentSettingsFormState.supabaseProfileId);
     setSuccessStatus('Supabase 登录成功');
     showToast('Supabase 登录成功', 'success');
     return status;
@@ -13229,45 +13967,284 @@ async function signInSupabase() {
 }
 
 async function logoutSupabase() {
+  if (currentSettingsFormState.supabaseAuthBusy) return null;
+  const profileId = currentSettingsFormState.supabaseProfileId;
+  if (!profileId) return null;
+  setSupabaseAuthFeedback({
+    supabaseAuthBusy: true,
+    supabaseAuthMessage: '正在退出 Supabase...',
+    supabaseAuthMessageKind: 'info',
+  });
   try {
-    const profileId = currentSettingsFormState.supabaseProfileId;
-    if (!profileId) return;
     const status = await invoke('supabase_logout', { profileId });
-    currentSettingsFormState = { ...currentSettingsFormState, supabaseAccountStatus: status };
-    syncVueSettingsForm(currentSettingsFormState);
+    setSupabaseAuthFeedback({
+      supabasePassword: '',
+      supabaseAccountStatus: status,
+      supabaseSpaces: [],
+      supabaseSpacesLoading: false,
+      supabaseSpacesMessage: '',
+      supabaseProfileStatuses: {
+        ...(currentSettingsFormState.supabaseProfileStatuses || {}),
+        [profileId]: status,
+      },
+      supabaseAuthBusy: false,
+      supabaseAuthMessage: 'Supabase 已退出登录',
+      supabaseAuthMessageKind: 'success',
+    });
     setSuccessStatus('Supabase 已退出登录');
+    return status;
   } catch (error) {
-    setErrorStatus(`Supabase 退出失败：${error?.message || error}`);
+    const message = `Supabase 退出失败：${supabaseErrorMessage(error)}`;
+    setSupabaseAuthFeedback({
+      supabaseAuthBusy: false,
+      supabaseAuthMessage: message,
+      supabaseAuthMessageKind: 'error',
+    });
+    setErrorStatus(message);
+    return null;
   }
 }
 
-async function importWebdavToSupabase() {
+function openStorageTransferWizard() {
+  storageTransferWizardGeneration += 1;
+  setStorageImportState({
+    storageTransferWizardOpen: true,
+    storageTransferWizardStep: 'select',
+    storageTransferSourceProfileId: '',
+    storageTransferTargetProfileId: '',
+    storageTransferPreview: null,
+    storageTransferPreviewBusy: false,
+    storageTransferResult: null,
+    storageTransferWizardError: '',
+    storageTransferRecoveryExpanded: false,
+  });
+  void refreshResumableStorageTransfers();
+}
+
+function closeStorageTransferWizard(force = false) {
+  const running = !!currentSettingsFormState.storageImportBusy;
+  storageTransferWizardGeneration += 1;
+  setStorageImportState({
+    storageTransferWizardOpen: false,
+    storageTransferWizardStep: running ? 'progress' : 'select',
+    storageTransferSourceProfileId: running
+      ? currentSettingsFormState.storageTransferSourceProfileId
+      : '',
+    storageTransferTargetProfileId: running
+      ? currentSettingsFormState.storageTransferTargetProfileId
+      : '',
+    storageTransferPreview: running ? currentSettingsFormState.storageTransferPreview : null,
+    storageTransferPreviewBusy: false,
+    storageTransferResult: running ? currentSettingsFormState.storageTransferResult : null,
+    storageTransferWizardError: '',
+    storageImportProgress: running
+      ? currentSettingsFormState.storageImportProgress
+      : null,
+    storageImportMessage: running
+      ? currentSettingsFormState.storageImportMessage
+      : '',
+    storageImportMessageKind: running
+      ? currentSettingsFormState.storageImportMessageKind
+      : '',
+  });
+  return true;
+}
+
+function setStorageTransferWizardStep(step) {
+  if (!['select', 'overview', 'confirm', 'progress', 'complete'].includes(step)) return;
+  setStorageImportState({ storageTransferWizardStep: step, storageTransferWizardError: '' });
+}
+
+function storageProfileName(profileId) {
+  return (currentSettingsFormState.storageProfiles || [])
+    .find((profile) => profile?.id === profileId)?.name || profileId || '未知空间';
+}
+
+function toggleStorageTransferRecovery(batchId = '') {
+  const isSameTask = !batchId
+    || currentSettingsFormState.storageTransferActiveBatchId === batchId;
+  setStorageImportState({
+    storageTransferActiveBatchId: batchId || currentSettingsFormState.storageTransferActiveBatchId,
+    storageTransferRecoveryExpanded: isSameTask
+      ? !currentSettingsFormState.storageTransferRecoveryExpanded
+      : true,
+  });
+}
+
+function storageTransferTasks() {
+  const tasks = Array.isArray(currentSettingsFormState.storageTransferRecoverableTasks)
+    ? currentSettingsFormState.storageTransferRecoverableTasks
+    : [];
+  if (tasks.length) return tasks;
+  return currentSettingsFormState.storageTransferRecoverable
+    ? [currentSettingsFormState.storageTransferRecoverable]
+    : [];
+}
+
+function selectRecoverableStorageTransfer(batchId) {
+  const task = storageTransferTasks().find((item) => item?.batchId === batchId);
+  if (!task) return null;
+  setStorageImportState({
+    storageTransferRecoverable: task,
+    storageTransferActiveBatchId: task.batchId,
+    storageTransferRecoveryExpanded: true,
+  });
+  return task;
+}
+
+function viewRunningStorageTransferProgress() {
+  if (!currentSettingsFormState.storageImportBusy || !currentSettingsFormState.storageImportProgress) return;
+  setStorageImportState({
+    storageTransferWizardStep: 'progress',
+    storageTransferRecoveryExpanded: false,
+  });
+}
+
+async function resumeRecoverableStorageTransfer(batchId = '') {
+  const recoverable = batchId
+    ? selectRecoverableStorageTransfer(batchId)
+    : currentSettingsFormState.storageTransferRecoverable;
+  if (!recoverable?.sourceProfileId || !recoverable?.targetProfileId
+    || currentSettingsFormState.storageImportBusy) return null;
+  setStorageImportState({
+    storageTransferSourceProfileId: recoverable.sourceProfileId,
+    storageTransferTargetProfileId: recoverable.targetProfileId,
+    storageTransferPreview: {
+      batchId: recoverable.batchId,
+      sourceProfileName: storageProfileName(recoverable.sourceProfileId),
+      targetProfileName: storageProfileName(recoverable.targetProfileId),
+      messageCount: recoverable.totalItems,
+      attachmentCount: 0,
+      totalBytes: recoverable.totalBytes,
+      markedCount: 0,
+      tagCount: 0,
+      skippedCount: recoverable.skippedItems,
+      conflictCount: recoverable.conflictItems,
+    },
+    storageTransferRecoveryExpanded: false,
+  });
+  return transferStorageSpaceData({ command: 'resume_storage_transfer' });
+}
+
+async function abandonRecoverableStorageTransfer(batchId = '') {
+  const recoverable = batchId
+    ? selectRecoverableStorageTransfer(batchId)
+    : currentSettingsFormState.storageTransferRecoverable;
+  if (!recoverable?.batchId || currentSettingsFormState.storageImportBusy) return false;
+  const confirmed = await showConfirmationDialog({
+    title: '放弃未完成的数据传输',
+    message: '只会放弃此传输任务并清理临时缓存，不会删除来源或目标空间中的远端数据。确定继续吗？',
+    confirmLabel: '放弃任务',
+  });
+  if (!confirmed) return false;
+  try {
+    await invoke('cancel_storage_transfer', { batchId: recoverable.batchId });
+    const remainingTasks = storageTransferTasks()
+      .filter((item) => item?.batchId !== recoverable.batchId);
+    setStorageImportState({
+      storageTransferRecoverable: remainingTasks[0] || null,
+      storageTransferRecoverableTasks: remainingTasks,
+      storageTransferActiveBatchId: '',
+      storageTransferRecoveryExpanded: false,
+      storageTransferWizardError: '',
+    });
+    setSuccessStatus('未完成的数据传输任务已放弃');
+    return true;
+  } catch (error) {
+    const message = `放弃数据传输失败：${supabaseErrorMessage(error)}`;
+    setStorageImportState({ storageTransferWizardError: message });
+    setErrorStatus(message);
+    return false;
+  }
+}
+
+function storageTransferInput() {
+  const profiles = Array.isArray(currentSettingsFormState.storageProfiles)
+    ? currentSettingsFormState.storageProfiles
+    : [];
+  const sourceProfileId = String(currentSettingsFormState.storageTransferSourceProfileId || '');
+  const targetProfileId = String(currentSettingsFormState.storageTransferTargetProfileId || '');
+  if (!sourceProfileId || !targetProfileId) throw new Error('请选择来源空间和目标空间');
+  if (sourceProfileId === targetProfileId) throw new Error('来源和目标不能是同一个存储空间');
+  if (!profiles.some((profile) => profile?.id === sourceProfileId && profile?.enabled !== false)) {
+    throw new Error('来源存储空间不可用');
+  }
+  if (!profiles.some((profile) => profile?.id === targetProfileId && profile?.enabled !== false)) {
+    throw new Error('目标存储空间不可用');
+  }
+  return { sourceProfileId, targetProfileId };
+}
+
+async function previewStorageTransferWizard() {
+  if (currentSettingsFormState.storageTransferPreviewBusy) return null;
+  const wizardGeneration = storageTransferWizardGeneration;
+  setStorageImportState({ storageTransferPreviewBusy: true, storageTransferWizardError: '' });
+  let timeoutId = null;
+  try {
+    const input = storageTransferInput();
+    const preview = await Promise.race([
+      invoke('preview_storage_transfer', { input }),
+      new Promise((_, reject) => {
+        timeoutId = window.setTimeout(() => {
+          reject(new Error('检查超时，请检查来源空间网络、登录状态或附件数量后重试'));
+        }, STORAGE_TRANSFER_PREVIEW_TIMEOUT_MS);
+      }),
+    ]);
+    if (wizardGeneration !== storageTransferWizardGeneration
+      || !currentSettingsFormState.storageTransferWizardOpen) return null;
+    const preparedProgress = normalizeStorageImportProgress({
+      batchId: preview.batchId,
+      sourceProfileId: input.sourceProfileId,
+      targetProfileId: input.targetProfileId,
+      status: 'prepared',
+      phase: 'prepared',
+      totalItems: Number(preview.messageCount || 0) + Number(preview.tagCount || 0),
+      skippedItems: preview.skippedCount,
+      conflictItems: preview.conflictCount,
+      totalBytes: preview.totalBytes,
+    });
+    setStorageImportState({
+      storageTransferPreview: preview,
+      storageTransferRecoverable: preparedProgress,
+      storageTransferRecoverableTasks: [
+        preparedProgress,
+        ...storageTransferTasks().filter((item) => item?.batchId !== preparedProgress.batchId),
+      ],
+      storageTransferWizardStep: 'overview',
+    });
+    return preview;
+  } catch (error) {
+    if (wizardGeneration !== storageTransferWizardGeneration
+      || !currentSettingsFormState.storageTransferWizardOpen) return null;
+    const message = supabaseErrorMessage(error);
+    setStorageImportState({
+      storageTransferWizardError: message,
+    });
+    setErrorStatus(`无法生成传输概览：${message}`);
+    return null;
+  } finally {
+    if (timeoutId) window.clearTimeout(timeoutId);
+    if (wizardGeneration === storageTransferWizardGeneration) {
+      setStorageImportState({ storageTransferPreviewBusy: false });
+    }
+  }
+}
+
+async function transferStorageSpaceData(options = {}) {
   if (currentSettingsFormState.storageImportBusy) return null;
   let importBusy = false;
   try {
-    const targetProfileId = await ensureSupabaseProfileSaved();
-    const profiles = Array.isArray(currentSettingsFormState.storageProfiles)
-      ? currentSettingsFormState.storageProfiles
-      : [];
-    const sources = profiles.filter((profile) => profile?.provider_kind === 'webdav' && profile?.enabled);
-    if (!sources.length) throw new Error('没有可导入的 WebDAV 存储空间');
-    const labels = sources.map((profile, index) => `${index + 1}. ${profile.name || profile.id}`).join('\n');
-    const selected = window.prompt(`选择 WebDAV 来源编号：\n${labels}`, '1');
-    if (!selected) return;
-    const source = sources[Number(selected) - 1];
-    if (!source) throw new Error('WebDAV 来源编号无效');
-    const input = { sourceProfileId: source.id, targetProfileId };
-    const preview = await invoke('preview_storage_import', { input });
-    const confirmed = await showConfirmationDialog({
-      title: '确认导入到 Supabase',
-      message: `来源：${preview.sourceProfileName}\n目标：${preview.targetProfileName}\n消息：${preview.messageCount} 条\n附件：${preview.attachmentCount} 个\n总大小：${formatBytes(preview.totalBytes || 0)}\n标记：${preview.markedCount} 条，标签：${preview.tagCount} 个\n\n导入会复制数据，WebDAV 原件保持不变。`,
-      confirmLabel: '开始导入',
-    });
-    if (!confirmed) return;
+    const input = storageTransferInput();
+    const preview = currentSettingsFormState.storageTransferPreview
+      || await previewStorageTransferWizard();
+    if (!preview) return null;
     const fallbackTotal = Number(preview.messageCount || 0) + Number(preview.tagCount || 0);
     const initialProgress = normalizeStorageImportProgress({
       batchId: preview.batchId,
-      status: 'pending',
+      sourceProfileId: input.sourceProfileId,
+      targetProfileId: input.targetProfileId,
+      status: 'running',
+      phase: 'preparing',
       totalItems: fallbackTotal,
       appliedItems: 0,
       failedItems: 0,
@@ -13276,11 +14253,19 @@ async function importWebdavToSupabase() {
     setStorageImportState({
       storageImportBusy: true,
       storageImportProgress: initialProgress,
-      storageImportMessage: `正在准备复制并上传 0/${initialProgress.totalItems} 项`,
+      storageTransferRecoverable: initialProgress,
+      storageTransferRecoverableTasks: [
+        initialProgress,
+        ...storageTransferTasks().filter((item) => item?.batchId !== initialProgress.batchId),
+      ],
+      storageTransferResult: null,
+      storageTransferWizardStep: 'progress',
+      storageTransferWizardError: '',
+      storageImportMessage: `正在准备传输 0/${initialProgress.totalItems} 项`,
       storageImportMessageKind: 'info',
     });
-    setStatus('正在导入 WebDAV 数据到 Supabase...');
-    showToast('已开始从 WebDAV 导入，可在设置页查看进度', 'info');
+    setStatus('正在执行存储空间数据传输...');
+    showToast('存储空间数据传输已开始', 'info');
     let polling = true;
     const pollingPromise = pollStorageImportProgress(
       preview.batchId,
@@ -13289,50 +14274,81 @@ async function importWebdavToSupabase() {
     );
     let rawProgress;
     try {
-      rawProgress = await invoke('start_storage_import', { input });
+      rawProgress = await invoke(options.command || 'start_storage_transfer', { input });
     } finally {
       polling = false;
       await pollingPromise;
     }
     const progress = normalizeStorageImportProgress(rawProgress, fallbackTotal);
+    const showResultInCurrentWizard = currentSettingsFormState.storageTransferWizardOpen
+      && currentSettingsFormState.storageTransferWizardStep === 'progress';
     setStorageImportState({
       storageImportBusy: false,
       storageImportProgress: progress,
+      storageTransferResult: progress,
+      storageTransferRecoverable: progress.status === 'completed' ? null : progress,
+      storageTransferRecoverableTasks: progress.status === 'completed'
+        ? storageTransferTasks().filter((item) => item?.batchId !== progress.batchId)
+        : [progress, ...storageTransferTasks().filter((item) => item?.batchId !== progress.batchId)],
+      storageTransferWizardStep: showResultInCurrentWizard
+        ? 'complete'
+        : currentSettingsFormState.storageTransferWizardStep,
       storageImportMessage: progress.status === 'completed'
-        ? `导入完成，共处理 ${progress.totalItems} 项`
-        : `导入尚未完成，成功 ${progress.appliedItems} 项，失败 ${progress.failedItems} 项`,
+        ? `传输完成，共处理 ${progress.totalItems} 项`
+        : `传输尚未完成，成功 ${progress.appliedItems} 项，跳过 ${progress.skippedItems} 项，冲突 ${progress.conflictItems} 项，失败 ${progress.failedItems} 项`,
       storageImportMessageKind: progress.status === 'completed' ? 'success' : 'error',
     });
     importBusy = false;
     if (progress.status === 'completed') {
-      setSuccessStatus(`导入完成：${progress.appliedItems}/${progress.totalItems}`);
-      showToast('WebDAV 数据导入完成', 'success');
-      setStorageImportState({
-        storageImportProgress: null,
-        storageImportMessage: '',
-        storageImportMessageKind: '',
-      });
-      await showSettingsResultDialog(
-        '导入完成',
-        `已确认 ${progress.appliedItems} 项数据库记录和相关附件写入 Supabase，WebDAV 原件未修改。`,
-      );
+      setSuccessStatus(`传输完成：成功 ${progress.appliedItems}，跳过 ${progress.skippedItems}`);
+      showToast('存储空间数据传输完成', 'success');
     } else {
-      setErrorStatus(`导入可继续：${progress.appliedItems}/${progress.totalItems}`);
-      await showSettingsResultDialog('导入尚未完成', `${progress.failedItems} 项失败，可再次点击“从 WebDAV 导入”继续。\n${progress.lastError || ''}`);
+      setErrorStatus(`传输可继续：${progress.processedItems}/${progress.totalItems}`);
     }
     return progress;
   } catch (error) {
-    const message = `导入失败：${supabaseErrorMessage(error)}`;
-    if (importBusy) {
-      setStorageImportState({
-        storageImportBusy: false,
-        storageImportMessage: message,
-        storageImportMessageKind: 'error',
-      });
+    const message = `数据传输失败：${supabaseErrorMessage(error)}`;
+    const showResultInCurrentWizard = currentSettingsFormState.storageTransferWizardOpen
+      && currentSettingsFormState.storageTransferWizardStep === 'progress';
+    let persistedProgress = null;
+    const activeBatchId = currentSettingsFormState.storageImportProgress?.batchId
+      || currentSettingsFormState.storageTransferPreview?.batchId
+      || '';
+    if (activeBatchId) {
+      try {
+        const value = await invoke('get_storage_transfer_status', { batchId: activeBatchId });
+        if (value) persistedProgress = normalizeStorageImportProgress(value);
+      } catch (_) {
+        // Use the last visible progress if the status query is temporarily unavailable.
+      }
     }
+    const interruptedProgress = persistedProgress || (currentSettingsFormState.storageImportProgress
+      ? {
+          ...currentSettingsFormState.storageImportProgress,
+          status: 'interrupted',
+          phase: 'interrupted',
+          lastError: message,
+        }
+      : null);
+    setStorageImportState({
+      storageImportBusy: false,
+      storageTransferWizardStep: importBusy && showResultInCurrentWizard
+        ? 'complete'
+        : currentSettingsFormState.storageTransferWizardStep,
+      storageTransferWizardError: message,
+      storageTransferResult: interruptedProgress,
+      storageTransferRecoverable: interruptedProgress,
+      storageTransferRecoverableTasks: interruptedProgress
+        ? [
+            interruptedProgress,
+            ...storageTransferTasks().filter((item) => item?.batchId !== interruptedProgress.batchId),
+          ]
+        : storageTransferTasks(),
+      storageImportMessage: message,
+      storageImportMessageKind: 'error',
+    });
     setErrorStatus(message);
     showToast(message, 'error');
-    await showSettingsResultDialog('导入失败', supabaseErrorMessage(error));
     return null;
   }
 }
@@ -14143,11 +15159,35 @@ vueBridge?.setActions?.({
   testSupabaseSettings: () => {
     testSupabaseSettings();
   },
+  saveSupabaseProfile: () => saveSupabaseProfile(),
   signInSupabase: () => signInSupabase(),
+  loadSupabaseSpaces: () => loadSupabaseSpaces(),
+  useSupabaseSpace: (space) => useSupabaseSpace(space),
   logoutSupabase: () => {
     logoutSupabase();
   },
-  importWebdavToSupabase: () => importWebdavToSupabase(),
+  openStorageTransferWizard: () => openStorageTransferWizard(),
+  closeStorageTransferWizard: (force) => closeStorageTransferWizard(force),
+  setStorageTransferWizardStep: (step) => setStorageTransferWizardStep(step),
+  toggleStorageTransferRecovery: (batchId) => toggleStorageTransferRecovery(batchId),
+  storageTransferTasks: () => storageTransferTasks(),
+  viewRunningStorageTransferProgress: () => viewRunningStorageTransferProgress(),
+  resumeRecoverableStorageTransfer: (batchId) => resumeRecoverableStorageTransfer(batchId),
+  abandonRecoverableStorageTransfer: (batchId) => abandonRecoverableStorageTransfer(batchId),
+  storageProfileName: (profileId) => storageProfileName(profileId),
+  previewStorageTransferWizard: () => previewStorageTransferWizard(),
+  transferStorageSpaceData: () => transferStorageSpaceData(),
+  selectSupabaseProfile: (profileId) => selectSupabaseProfile(profileId),
+  addSupabaseProfile: () => addSupabaseProfile(),
+  removeSupabaseProfile: () => removeSupabaseProfile(),
+  openStorageProfileEditor: (providerKind) => openStorageProfileEditor(providerKind),
+  cancelStorageProfileEditor: () => cancelStorageProfileEditor(),
+  updateStorageProfileDraft: (field, value) => updateStorageProfileDraft(field, value),
+  testStorageProfileDraftConnection: () => testStorageProfileDraftConnection(),
+  saveStorageProfileDraft: () => saveStorageProfileDraft(),
+  removeStorageProfile: (profile) => removeStorageProfile(profile),
+  editStorageProfile: (profile) => editStorageProfile(profile),
+  activateStorageProfile: (profile) => activateStorageProfile(profile),
   updateAiActionField: (index, field, value) => {
     updateAiActionField(index, field, value);
   },

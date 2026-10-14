@@ -18,6 +18,7 @@
     return {
       timestamp_ms: message.timestamp_ms || 0,
       filename: message.filename,
+      message_id: message.message_id || null,
     };
   }
 

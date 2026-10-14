@@ -2814,41 +2814,57 @@ body.is-capturing-system-shortcut {
 .endpoint-settings {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: #fffdf9;
+  gap: 16px;
+  padding: 18px;
+  border: 1px solid rgba(207, 145, 67, 0.2);
+  border-radius: 16px;
+  background:
+    radial-gradient(circle at 100% 0, rgba(255, 122, 47, 0.08), transparent 34%),
+    #fffdf9;
+  box-shadow: 0 12px 32px rgba(76, 49, 25, 0.06);
 }
 
 .endpoint-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 12px;
+  gap: 18px;
 }
 
 .endpoint-header-actions {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.endpoint-header-actions .button,
+.endpoint-actions .button,
+.storage-profile-editor-actions .button,
+.storage-profile-auth-actions .button {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .endpoint-header h3 {
   margin: 0;
-  font-size: 16px;
+  font-size: 18px;
+  letter-spacing: -0.02em;
   color: var(--ink);
 }
 
 .endpoint-header p {
-  margin: 4px 0 0;
+  max-width: 620px;
+  margin: 6px 0 0;
   font-size: 12px;
+  line-height: 1.6;
   color: var(--muted);
 }
 
 .endpoint-list {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr));
   gap: 12px;
 }
 
@@ -2859,17 +2875,79 @@ body.is-capturing-system-shortcut {
 }
 
 .endpoint-card {
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  background: #ffffff;
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  overflow: hidden;
+  padding: 14px;
+  border: 1px solid #e6ddd5;
+  border-radius: 14px;
+  background: linear-gradient(145deg, #ffffff, #fffcf8);
+  box-shadow: 0 6px 18px rgba(53, 38, 25, 0.045);
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.endpoint-card::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: #8c9aa5;
+  content: "";
+}
+
+.endpoint-card.is-supabase::before {
+  background: #3ea884;
+}
+
+.endpoint-card:hover {
+  border-color: rgba(255, 122, 47, 0.35);
+  box-shadow: 0 10px 24px rgba(53, 38, 25, 0.08);
+  transform: translateY(-1px);
+}
+
+.endpoint-card.is-active {
+  border-color: rgba(255, 122, 47, 0.42);
+  background: linear-gradient(145deg, #fffdf9, #fff7ef);
+  box-shadow: 0 8px 24px rgba(233, 100, 27, 0.1);
 }
 
 .endpoint-card.is-disabled {
-  opacity: 0.65;
+  opacity: 0.62;
+  filter: saturate(0.7);
+}
+
+.endpoint-card-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.endpoint-provider-mark {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  place-items: center;
+  border: 1px solid rgba(83, 103, 118, 0.16);
+  border-radius: 11px;
+  background: #edf2f5;
+  color: #526775;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.endpoint-card.is-supabase .endpoint-provider-mark {
+  border-color: rgba(62, 168, 132, 0.18);
+  background: #eaf8f2;
+  color: #27846a;
+}
+
+.endpoint-card-content {
+  min-width: 0;
 }
 
 .endpoint-card-header {
@@ -2880,9 +2958,49 @@ body.is-capturing-system-shortcut {
 }
 
 .endpoint-title {
-  font-weight: 600;
-  font-size: 13px;
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 700;
+  font-size: 14px;
   color: var(--ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.endpoint-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.endpoint-current-state {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(255, 122, 47, 0.12);
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.endpoint-card .integration-card-meta {
+  gap: 3px;
+  margin-top: 6px;
+}
+
+.endpoint-address {
+  min-width: 0;
+  overflow: hidden;
+  color: #5f5a56;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.endpoint-runtime {
+  color: var(--muted);
 }
 
 .endpoint-fields {
@@ -2894,7 +3012,17 @@ body.is-capturing-system-shortcut {
 .endpoint-actions {
   display: flex;
   align-items: center;
-  gap: 12px;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.endpoint-actions .endpoint-remove-button:not(:disabled) {
+  color: #b94a38;
+}
+
+.endpoint-actions .endpoint-remove-button:not(:disabled):hover {
+  border-color: rgba(185, 74, 56, 0.26);
+  background: rgba(185, 74, 56, 0.06);
 }
 
 .supabase-auth-message {
@@ -2964,6 +3092,1157 @@ body.is-capturing-system-shortcut {
 
 .storage-import-progress-detail.is-error {
   color: #d6452d;
+}
+
+.storage-transfer-dialog {
+  width: min(820px, calc(100vw - 32px));
+  min-height: 560px;
+  max-height: min(860px, calc(100vh - 28px));
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid rgba(207, 145, 67, 0.2);
+  border-radius: 18px;
+  background: #fffdf9;
+  box-shadow: 0 30px 90px rgba(45, 31, 20, 0.22);
+}
+
+.storage-profile-editor-dialog {
+  width: min(700px, calc(100vw - 32px));
+  max-height: min(820px, calc(100vh - 28px));
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid rgba(207, 145, 67, 0.22);
+  border-radius: 18px;
+  background: #fffdf9;
+  box-shadow: 0 28px 80px rgba(45, 31, 20, 0.2);
+}
+
+.storage-profile-editor-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 22px 26px 19px;
+  border-bottom: 1px solid rgba(207, 145, 67, 0.18);
+  background:
+    radial-gradient(circle at 86% -20%, rgba(255, 122, 47, 0.15), transparent 42%),
+    linear-gradient(135deg, #fff9f1, #fffefb);
+}
+
+.storage-profile-editor-header .dialog-title {
+  font-size: 18px;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+}
+
+.storage-profile-editor-header .dialog-text {
+  max-width: 540px;
+  margin-top: 6px;
+  line-height: 1.55;
+}
+
+.storage-profile-editor-body {
+  display: flex;
+  flex-direction: column;
+  gap: 17px;
+  padding: 22px 26px 24px;
+  overflow: auto;
+}
+
+.storage-profile-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 15px;
+}
+
+.storage-profile-editor-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.storage-profile-editor-grid label.is-wide {
+  grid-column: 1 / -1;
+}
+
+.storage-profile-editor-grid input,
+.storage-profile-editor-grid select {
+  width: 100%;
+  min-height: 42px;
+  padding: 9px 12px;
+  border: 1px solid #ddd2c8;
+  border-radius: 10px;
+  outline: none;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  box-shadow: inset 0 1px 2px rgba(53, 38, 25, 0.025);
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, background-color 0.16s ease;
+}
+
+.storage-profile-editor-grid input:hover,
+.storage-profile-editor-grid select:hover {
+  border-color: #cdbdb0;
+}
+
+.storage-profile-editor-grid input:focus,
+.storage-profile-editor-grid select:focus {
+  border-color: rgba(255, 122, 47, 0.72);
+  box-shadow: 0 0 0 3px rgba(255, 122, 47, 0.12);
+}
+
+.storage-profile-editor-grid input:disabled,
+.storage-profile-editor-grid select:disabled {
+  cursor: not-allowed;
+  background: #f5f1ed;
+  color: #8b8179;
+}
+
+.storage-profile-enabled {
+  width: fit-content;
+  min-height: 36px;
+  padding: 7px 11px;
+  border: 1px solid #e4d9cf;
+  border-radius: 10px;
+  background: #fff;
+  white-space: nowrap;
+}
+
+.storage-profile-test-result {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.storage-profile-test-dot {
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.storage-profile-test-result.is-success {
+  border-color: rgba(46, 125, 50, 0.22);
+  background: rgba(46, 125, 50, 0.07);
+  color: #286a2b;
+}
+
+.storage-profile-test-result.is-success .storage-profile-test-dot {
+  background: #2e7d32;
+}
+
+.storage-profile-test-result.is-error {
+  border-color: rgba(214, 69, 45, 0.22);
+  background: rgba(214, 69, 45, 0.07);
+  color: #b23b28;
+}
+
+.storage-profile-test-result.is-error .storage-profile-test-dot {
+  background: #d6452d;
+}
+
+.storage-profile-auth-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid rgba(207, 145, 67, 0.24);
+  border-radius: 13px;
+  background: linear-gradient(145deg, rgba(255, 249, 240, 0.94), rgba(255, 253, 249, 0.88));
+}
+
+.storage-profile-auth-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.storage-profile-auth-heading > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.storage-profile-auth-heading strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.storage-profile-auth-heading span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.storage-profile-auth-state {
+  flex: 0 0 auto;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: rgba(93, 86, 75, 0.1);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.storage-profile-auth-state.is-signed-in {
+  background: rgba(46, 125, 50, 0.11);
+  color: #286a2b;
+}
+
+.storage-profile-account-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid rgba(46, 125, 50, 0.16);
+  border-radius: 10px;
+  background: rgba(46, 125, 50, 0.12);
+}
+
+.storage-profile-account-item {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 5px;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.84);
+}
+
+.storage-profile-account-item.is-wide {
+  grid-column: 1 / -1;
+}
+
+.storage-profile-account-item span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.storage-profile-account-item strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.supabase-space-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid rgba(64, 99, 79, 0.17);
+  border-radius: 12px;
+  background: rgba(247, 250, 247, 0.82);
+}
+
+.supabase-space-picker-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.supabase-space-picker-heading > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.supabase-space-picker-heading strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.supabase-space-picker-heading span,
+.supabase-space-message {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.supabase-space-picker-heading .button,
+.supabase-space-item .button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.supabase-space-list {
+  display: flex;
+  max-height: 260px;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+}
+
+.supabase-space-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid rgba(93, 86, 75, 0.14);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.88);
+  transition: border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease;
+}
+
+.supabase-space-item:hover {
+  border-color: rgba(207, 145, 67, 0.34);
+  box-shadow: 0 8px 20px rgba(55, 44, 27, 0.06);
+  transform: translateY(-1px);
+}
+
+.supabase-space-item.is-current {
+  border-color: rgba(46, 125, 50, 0.28);
+  background: linear-gradient(135deg, rgba(239, 249, 239, 0.96), rgba(255, 255, 255, 0.9));
+}
+
+.supabase-space-main {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.supabase-space-title-row,
+.supabase-space-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+
+.supabase-space-title-row > strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.supabase-space-state {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(93, 86, 75, 0.09);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.supabase-space-state.is-current {
+  background: rgba(46, 125, 50, 0.12);
+  color: #286a2b;
+}
+
+.supabase-space-state.is-remote {
+  background: rgba(207, 145, 67, 0.13);
+  color: #8b5b21;
+}
+
+.supabase-space-meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.supabase-space-meta b {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.supabase-space-loading,
+.supabase-space-empty {
+  display: flex;
+  min-height: 54px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px;
+  border: 1px dashed rgba(93, 86, 75, 0.18);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.storage-profile-auth-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.storage-profile-auth-actions .field-hint {
+  flex: 1 1 240px;
+}
+
+.storage-profile-auth-actions.is-signed-in {
+  justify-content: space-between;
+}
+
+.storage-profile-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 14px 26px;
+  border-top: 1px solid rgba(207, 145, 67, 0.16);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 -8px 22px rgba(53, 38, 25, 0.035);
+}
+
+.storage-profile-editor-actions .button,
+.storage-profile-auth-actions .button,
+.endpoint-header-actions .button,
+.endpoint-actions .button {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 9px;
+  padding: 7px 13px;
+  line-height: 1.2;
+}
+
+.storage-profile-editor-actions .button.primary,
+.storage-profile-auth-actions .button.primary,
+.endpoint-header-actions .button.primary {
+  border: 1px solid #e8661d;
+  background: linear-gradient(180deg, #ff8740, #f57025);
+  box-shadow: 0 4px 10px rgba(223, 97, 28, 0.18), inset 0 1px rgba(255, 255, 255, 0.22);
+}
+
+.storage-profile-editor-actions .button.ghost,
+.storage-profile-auth-actions .button.ghost,
+.endpoint-header-actions .button.ghost,
+.endpoint-actions .button.ghost {
+  border-color: #ded3ca;
+  background: rgba(255, 255, 255, 0.8);
+  color: #625a54;
+}
+
+.storage-profile-editor-actions .button:disabled,
+.storage-profile-auth-actions .button:disabled,
+.endpoint-header-actions .button:disabled,
+.endpoint-actions .button:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+  transform: none;
+}
+
+.storage-profile-editor-actions-spacer {
+  flex: 1;
+}
+
+.storage-transfer-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 22px 26px 19px;
+  border-bottom: 1px solid rgba(207, 145, 67, 0.18);
+  background:
+    radial-gradient(circle at 84% -30%, rgba(255, 122, 47, 0.17), transparent 42%),
+    linear-gradient(135deg, #fff9f1, #fffefb);
+}
+
+.storage-transfer-header .dialog-title {
+  font-size: 18px;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+}
+
+.storage-transfer-header .dialog-text {
+  max-width: 640px;
+  margin-top: 6px;
+  line-height: 1.55;
+}
+
+.storage-transfer-steps {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0;
+  margin: 0;
+  padding: 17px 28px 15px;
+  list-style: none;
+  border-bottom: 1px solid rgba(207, 145, 67, 0.14);
+  background: rgba(255, 255, 255, 0.88);
+}
+
+.storage-transfer-steps li {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.storage-transfer-steps li:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  top: 14px;
+  left: calc(50% + 18px);
+  right: calc(-50% + 18px);
+  height: 2px;
+  border-radius: 999px;
+  background: #eee4db;
+}
+
+.storage-transfer-steps li.is-done:not(:last-child)::after {
+  background: linear-gradient(90deg, var(--accent), #f2a36f);
+}
+
+.storage-transfer-steps li span {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: #fff;
+  color: var(--muted);
+  font-size: 12px;
+  box-shadow: 0 0 0 4px #fff;
+}
+
+.storage-transfer-steps li.is-active,
+.storage-transfer-steps li.is-done {
+  color: var(--ink);
+}
+
+.storage-transfer-steps li.is-active span,
+.storage-transfer-steps li.is-done span {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.storage-transfer-steps li.is-active span {
+  box-shadow: 0 0 0 4px #fff, 0 0 0 7px rgba(255, 122, 47, 0.13);
+}
+
+.storage-transfer-body {
+  flex: 1;
+  min-height: 0;
+  padding: 24px 26px 28px;
+  overflow: auto;
+}
+
+.storage-transfer-stage {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  min-height: 280px;
+  animation: storageTransferStageIn 0.2s ease both;
+}
+
+@keyframes storageTransferStageIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.storage-transfer-stage-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.storage-transfer-stage-kicker {
+  color: var(--accent-strong) !important;
+  font-size: 10px !important;
+  font-weight: 750;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.storage-transfer-stage-heading strong {
+  color: var(--ink);
+  font-size: 18px;
+  letter-spacing: -0.015em;
+}
+
+.storage-transfer-stage-heading span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.storage-transfer-route {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 42px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+}
+
+.storage-transfer-recovery {
+  display: grid;
+  gap: 12px;
+  padding: 15px 16px;
+  border: 1px solid rgba(207, 145, 67, 0.3);
+  border-radius: 14px;
+  background: #fff8ec;
+}
+
+.storage-transfer-recovery-list {
+  display: grid;
+  gap: 10px;
+}
+
+.storage-transfer-recovery-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.storage-transfer-recovery-heading > div { display: grid; gap: 3px; }
+.storage-transfer-recovery-heading span { color: #a26018; font-size: 11px; font-weight: 700; letter-spacing: .08em; }
+.storage-transfer-recovery-heading strong { color: var(--ink); font-size: 14px; }
+.storage-transfer-recovery-heading small { color: var(--muted); }
+
+.storage-transfer-recovery-detail {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(207, 145, 67, 0.2);
+}
+
+.storage-transfer-recovery-detail > div:not(.storage-transfer-recovery-actions) {
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.75);
+}
+
+.storage-transfer-recovery-detail span { color: var(--muted); font-size: 11px; }
+.storage-transfer-recovery-detail strong { font-size: 13px; overflow-wrap: anywhere; }
+.storage-transfer-recovery-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 8px; }
+
+.storage-transfer-picker {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+  padding: 17px 18px 18px;
+  border: 1px solid #e3d9d0;
+  border-radius: 14px;
+  background: linear-gradient(145deg, #fff, #fffcf8);
+  box-shadow: 0 7px 20px rgba(53, 38, 25, 0.045);
+}
+
+.storage-transfer-picker-order {
+  position: absolute;
+  top: 14px;
+  right: 15px;
+  color: rgba(93, 82, 73, 0.28);
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.storage-transfer-picker-label {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.storage-transfer-picker small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.storage-transfer-picker select {
+  width: 100%;
+  min-height: 42px;
+  margin-top: 4px;
+  padding: 9px 34px 9px 12px;
+  border: 1px solid #dcd1c7;
+  border-radius: 10px;
+  outline: none;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.storage-transfer-picker select:focus {
+  border-color: rgba(255, 122, 47, 0.72);
+  box-shadow: 0 0 0 3px rgba(255, 122, 47, 0.12);
+}
+
+.storage-transfer-route-arrow {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 122, 47, 0.18);
+  background: #fff7f1;
+  color: var(--accent-strong);
+  font-size: 20px;
+}
+
+.storage-transfer-note,
+.storage-transfer-lock-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid rgba(207, 145, 67, 0.18);
+  border-radius: 11px;
+  background: rgba(255, 247, 237, 0.82);
+  color: #785323;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.storage-transfer-note strong,
+.storage-transfer-lock-note strong {
+  flex: 0 0 auto;
+  color: #754816;
+  white-space: nowrap;
+}
+
+.storage-transfer-note span,
+.storage-transfer-lock-note span {
+  color: #806544;
+}
+
+.storage-transfer-summary-route {
+  display: grid;
+  grid-template-columns: 1fr 42px 1fr;
+  align-items: center;
+  gap: 12px;
+}
+
+.storage-transfer-summary-route > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 15px 16px;
+  border: 1px solid #e3d9d0;
+  border-radius: 13px;
+  background: linear-gradient(145deg, #fff, #fffcf8);
+  box-shadow: 0 6px 16px rgba(53, 38, 25, 0.04);
+}
+
+.storage-transfer-summary-route > div.is-source {
+  border-left: 3px solid #8c9aa5;
+}
+
+.storage-transfer-summary-route > div.is-target {
+  border-left: 3px solid #3ea884;
+}
+
+.storage-transfer-summary-route span,
+.storage-transfer-summary-route small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.storage-transfer-summary-route strong {
+  color: var(--ink);
+  overflow: hidden;
+  font-size: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.storage-transfer-summary-route > b {
+  color: var(--accent-strong);
+  font-size: 21px;
+  text-align: center;
+}
+
+.storage-transfer-stats,
+.storage-transfer-result-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.storage-transfer-stats > div,
+.storage-transfer-result-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid #e6ddd5;
+  border-radius: 12px;
+  background: linear-gradient(145deg, #fff, #faf7f3);
+}
+
+.storage-transfer-stats span,
+.storage-transfer-result-grid span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.storage-transfer-stats small,
+.storage-transfer-result-grid small {
+  overflow: hidden;
+  color: #938980;
+  font-size: 10px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.storage-transfer-stats strong,
+.storage-transfer-result-grid strong {
+  color: var(--ink);
+  font-size: 19px;
+  font-variant-numeric: tabular-nums;
+}
+
+.storage-transfer-stats > div.has-caution {
+  border-color: rgba(202, 137, 37, 0.22);
+  background: #fffbf2;
+}
+
+.storage-transfer-confirm,
+.storage-transfer-complete {
+  align-items: center;
+  text-align: center;
+}
+
+.storage-transfer-confirm-mark,
+.storage-transfer-complete-mark {
+  display: grid;
+  width: 58px;
+  height: 58px;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(46, 125, 50, 0.12);
+  color: #2e7d32;
+  font-size: 28px;
+  font-weight: 700;
+}
+
+.storage-transfer-complete-mark.has-warning {
+  background: rgba(214, 69, 45, 0.11);
+  color: #d6452d;
+}
+
+.storage-transfer-confirm-list {
+  display: grid;
+  width: min(620px, 100%);
+  gap: 8px;
+}
+
+.storage-transfer-confirm-list > div {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 11px 13px;
+  border: 1px solid #e6ddd5;
+  border-radius: 11px;
+  background: #fff;
+  text-align: left;
+}
+
+.storage-transfer-confirm-list > div > span {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 9px;
+  background: #fff3e9;
+  color: var(--accent-strong);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.storage-transfer-confirm-list p {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+}
+
+.storage-transfer-confirm-list strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.storage-transfer-confirm-list small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.storage-import-progress.is-wizard {
+  gap: 14px;
+  padding: 20px;
+  border-color: rgba(255, 122, 47, 0.2);
+  border-radius: 14px;
+  background: linear-gradient(145deg, #fff, #fffaf6);
+  box-shadow: 0 8px 22px rgba(53, 38, 25, 0.05);
+}
+
+.storage-import-progress.is-wizard .storage-import-progress-head > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.storage-import-progress.is-wizard .storage-import-progress-head small {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.storage-import-progress.is-wizard .storage-import-progress-head > strong {
+  font-size: 25px;
+  line-height: 1;
+}
+
+.storage-import-progress.is-wizard .storage-import-progress-track {
+  height: 9px;
+  background: #eee4dc;
+}
+
+.storage-import-progress.is-wizard .storage-import-progress-fill {
+  background: linear-gradient(90deg, var(--accent), #f5a16e);
+  box-shadow: 0 0 12px rgba(255, 122, 47, 0.24);
+}
+
+.storage-transfer-progress-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.storage-transfer-progress-metrics > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 11px;
+  border: 1px solid #ece3dc;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.storage-transfer-progress-metrics span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.storage-transfer-progress-metrics strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.storage-transfer-result-grid {
+  width: min(650px, 100%);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.storage-transfer-result-grid > div.is-success { border-top: 3px solid #3b9a5d; }
+.storage-transfer-result-grid > div.is-skipped { border-top: 3px solid #8c9aa5; }
+.storage-transfer-result-grid > div.is-conflict { border-top: 3px solid #d39733; }
+.storage-transfer-result-grid > div.is-failed { border-top: 3px solid #d45b48; }
+
+.storage-transfer-error {
+  padding: 10px 12px;
+  border: 1px solid rgba(214, 69, 45, 0.2);
+  border-radius: 9px;
+  background: rgba(214, 69, 45, 0.07);
+  color: #b23b28;
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.storage-transfer-failure-details {
+  width: min(650px, 100%);
+  max-height: 250px;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid rgba(214, 69, 45, 0.16);
+  border-radius: 10px;
+  background: rgba(255, 250, 248, 0.82);
+}
+
+.storage-transfer-failure-heading,
+.storage-transfer-failure-details article > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.storage-transfer-failure-heading span,
+.storage-transfer-failure-details > small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.storage-transfer-failure-details article {
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(214, 69, 45, 0.1);
+}
+
+.storage-transfer-failure-details article:last-of-type {
+  border-bottom: 0;
+}
+
+.storage-transfer-failure-details article span {
+  flex: 0 0 auto;
+  color: #b23b28;
+  font-size: 11px;
+}
+
+.storage-transfer-failure-details article code {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.storage-transfer-failure-details article p {
+  margin: 6px 0 0;
+  color: #b23b28;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.storage-transfer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 9px;
+  min-height: 64px;
+  padding: 14px 26px;
+  border-top: 1px solid rgba(207, 145, 67, 0.16);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 -8px 22px rgba(53, 38, 25, 0.035);
+}
+
+.storage-transfer-actions .button {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 7px 15px;
+  border-radius: 9px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.storage-transfer-actions .button.primary {
+  border: 1px solid #e8661d;
+  background: linear-gradient(180deg, #ff8740, #f57025);
+  box-shadow: 0 4px 10px rgba(223, 97, 28, 0.18), inset 0 1px rgba(255, 255, 255, 0.22);
+}
+
+.storage-transfer-actions .button.ghost {
+  border-color: #ded3ca;
+  background: rgba(255, 255, 255, 0.8);
+  color: #625a54;
+}
+
+.storage-transfer-progress-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+@media (max-width: 720px) {
+  .endpoint-header { align-items: flex-start; flex-direction: column; }
+  .endpoint-header-actions { width: 100%; flex-wrap: wrap; justify-content: flex-start; }
+  .endpoint-list { grid-template-columns: 1fr; }
+  .endpoint-card { grid-template-columns: 1fr; }
+  .endpoint-actions { justify-content: flex-start; flex-wrap: wrap; padding-left: 50px; }
+  .storage-transfer-dialog { min-height: 0; max-height: calc(100vh - 20px); }
+  .storage-transfer-steps { padding-inline: 12px; }
+  .storage-transfer-steps li { font-size: 9px; }
+  .storage-transfer-route, .storage-transfer-summary-route { grid-template-columns: 1fr; }
+  .storage-transfer-route-arrow, .storage-transfer-summary-route > b { transform: rotate(90deg); justify-self: center; }
+  .storage-transfer-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .storage-transfer-result-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .storage-transfer-progress-metrics { grid-template-columns: 1fr; }
+  .storage-transfer-actions { flex-wrap: wrap; }
+  .storage-profile-editor-grid { grid-template-columns: 1fr; }
+  .storage-profile-editor-grid label.is-wide { grid-column: auto; }
+  .storage-profile-account-summary { grid-template-columns: 1fr; }
+  .supabase-space-picker-heading,
+  .supabase-space-item { align-items: stretch; flex-direction: column; }
+  .supabase-space-picker-heading .button,
+  .supabase-space-item .button { align-self: flex-start; }
+  .storage-profile-account-item.is-wide { grid-column: auto; }
+  .storage-profile-editor-actions { flex-wrap: wrap; }
+  .storage-profile-editor-actions-spacer { flex: 1 1 100%; order: 1; }
+  .storage-profile-editor-actions .button { order: 2; }
+}
+
+@media (max-width: 460px) {
+  .endpoint-settings { padding: 14px; }
+  .endpoint-header-actions .button { flex: 1 1 auto; }
+  .endpoint-card-header { align-items: flex-start; }
+  .endpoint-badges { flex-wrap: wrap; justify-content: flex-end; }
+  .endpoint-actions { padding-left: 0; }
+  .storage-profile-editor-dialog { width: calc(100vw - 16px); max-height: calc(100vh - 16px); }
+  .storage-profile-editor-header,
+  .storage-profile-editor-body,
+  .storage-profile-editor-actions { padding-inline: 18px; }
+  .storage-profile-auth-heading { align-items: flex-start; }
+  .storage-transfer-dialog { width: calc(100vw - 16px); max-height: calc(100vh - 16px); }
+  .storage-transfer-header,
+  .storage-transfer-body,
+  .storage-transfer-actions { padding-inline: 18px; }
+  .storage-transfer-steps { overflow-x: auto; grid-template-columns: repeat(5, minmax(76px, 1fr)); }
+  .storage-transfer-stats { grid-template-columns: 1fr 1fr; }
+  .storage-transfer-note,
+  .storage-transfer-lock-note { flex-direction: column; gap: 4px; }
+  .storage-transfer-actions .button { flex: 1 1 auto; }
 }
 
 .speed-test-result {
@@ -4116,6 +5395,28 @@ body.is-capturing-system-shortcut {
 
 .message-preview-toolbar .button {
   border-radius: 10px;
+}
+
+.sync-conflict-dialog {
+  width: min(520px, calc(100vw - 32px));
+}
+
+.sync-conflict-summary {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.sync-conflict-hint {
+  margin-top: 12px;
+}
+
+.sync-conflict-dialog .dialog-actions .button {
+  white-space: nowrap;
 }
 
 .bulk-download-modal {

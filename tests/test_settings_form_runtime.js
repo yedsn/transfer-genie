@@ -155,10 +155,17 @@ function testNormalizeStorageImportProgress() {
     status: 'running',
     totalItems: 10,
     appliedItems: 3,
+    skippedItems: 0,
+    conflictItems: 0,
     failedItems: 1,
+    phase: 'running',
+    totalBytes: 0,
+    transferredBytes: 0,
     processedItems: 4,
     percent: 40,
     lastError: '',
+    failedDetails: [],
+    failedDetailCount: 0,
   });
 
   const snakeCase = runtime.normalizeStorageImportProgress({
@@ -168,10 +175,24 @@ function testNormalizeStorageImportProgress() {
     applied_items: 4,
     failed_items: 1,
     last_error: 'one failed',
+    failed_details: [{
+      item_type: 'message',
+      source_key: 'old-name.txt',
+      state: 'error',
+      error: 'UNIQUE constraint failed',
+    }],
+    failed_detail_count: 3,
   });
   assert.equal(snakeCase.processedItems, 5);
   assert.equal(snakeCase.percent, 100);
   assert.equal(snakeCase.lastError, 'one failed');
+  assert.deepEqual(snakeCase.failedDetails, [{
+    itemType: 'message',
+    sourceKey: 'old-name.txt',
+    state: 'error',
+    error: 'UNIQUE constraint failed',
+  }]);
+  assert.equal(snakeCase.failedDetailCount, 3);
 
   assert.equal(runtime.normalizeStorageImportProgress({ status: 'completed' }, 0).percent, 100);
 }
@@ -200,6 +221,25 @@ function testManualBackupDialogState() {
   assert.equal(fallback.name, ' 升级前 ');
   assert.equal(fallback.note, '保留一份');
   assert.equal(fallback.loading, true);
+}
+
+function testStorageProfileDraftIsIndependentAndUpsertPreservesOthers() {
+  const profiles = [
+    { id: 'webdav-a', provider_kind: 'webdav', name: 'A' },
+    { id: 'supabase-b', provider_kind: 'supabase', name: 'B' },
+  ];
+  const draft = runtime.createStorageProfileDraft('webdav', profiles[0], 123);
+  draft.name = 'A edited';
+  assert.equal(profiles[0].name, 'A');
+  const saved = runtime.upsertStorageProfile(profiles, draft);
+  assert.equal(saved[0].name, 'A edited');
+  assert.deepEqual(saved[1], profiles[1]);
+  const added = runtime.upsertStorageProfile(
+    saved,
+    runtime.createStorageProfileDraft('supabase', {}, 456),
+  );
+  assert.deepEqual(added.slice(0, 2), saved);
+  assert.equal(added[2].id, 'supabase-456');
 }
 
 function sectionHtml(html, id) {
@@ -235,18 +275,95 @@ function testShortcutSettingsMarkup() {
   assert.match(html, /supabaseAuthBusy/);
   assert.match(html, /登录中.../);
   assert.match(html, /supabase-auth-message/);
-  assert.match(html, /id="supabase-import-webdav"/);
+  assert.doesNotMatch(html, /<h3 class="settings-group-title">Supabase 存储空间<\/h3>/);
+  assert.match(html, /id="storage-space-transfer"/);
+  const storageSection = sectionHtml(html, 'settings-section-webdav');
+  const transferButtonIndex = storageSection.indexOf('id="storage-space-transfer"');
+  const speedTestIndex = storageSection.indexOf('id="batch-speed-test"');
+  assert.ok(transferButtonIndex >= 0 && speedTestIndex > transferButtonIndex, 'storage transfer is beside batch speed test in the header actions');
+  assert.match(html, /storageTransferWizardOpen/);
+  assert.match(html, /storageTransferWizardStep === 'select'/);
+  assert.match(html, /storageTransferWizardStep === 'overview'/);
+  assert.match(html, /storageTransferWizardStep === 'confirm'/);
+  assert.match(html, /storageTransferWizardStep === 'progress'/);
+  assert.match(html, /storageTransferWizardStep === 'complete'/);
+  assert.match(html, /storage-transfer-stage-kicker/);
+  assert.match(html, /storage-transfer-picker-order/);
+  assert.match(html, /storage-transfer-confirm-list/);
+  assert.match(html, /storage-transfer-progress-metrics/);
+  assert.match(html, /已核验写入/);
+  assert.match(html, /异常详情/);
+  assert.match(html, /failedDetails/);
+  assert.match(html, /下方查看异常原因/);
+  assert.match(html, />完成<\/button>/);
+  assert.match(html, /新增存储空间/);
+  assert.match(html, /storageProfileEditorOpen/);
+  assert.match(html, /storage-profile-editor-modal/);
+  assert.match(html, /endpoint-provider-mark/);
+  assert.match(html, /endpoint-current-state/);
+  assert.match(html, /endpoint-remove-button/);
+  const storageProfileEditorIndex = html.indexOf('storage-profile-editor-modal');
+  const supabaseEmailIndex = html.indexOf('id="supabase-email"');
+  assert.ok(supabaseEmailIndex > storageProfileEditorIndex, 'Supabase account controls are inside the storage profile editor');
+  assert.match(html, /id="supabase-logout"/);
+  assert.match(html, /请先保存这个存储空间，再登录账号/);
+  assert.match(html, /storage-profile-account-summary/);
+  assert.match(html, /账号邮箱/);
+  assert.match(html, /用户 ID/);
+  assert.match(html, /会话有效期/);
+  assert.match(html, /账号中的存储空间/);
+  assert.match(html, /ui.settingsForm.supabaseSpaces/);
+  assert.doesNotMatch(html, /添加并切换/);
+  assert.ok(html.includes("space.current ? '正在使用' : '切换'"));
+  assert.match(html, /loadSupabaseSpaces/);
+  assert.match(html, /useSupabaseSpace/);
+  assert.match(html, /v-if="ui.settingsForm.supabaseAccountStatus\?\.signedIn"/);
+  assert.match(html, /id="test-storage-profile"/);
+  assert.match(html, /testStorageProfileDraftConnection/);
+  assert.match(html, /测试连接只使用弹框里的草稿/);
+  assert.match(html, /cancelStorageProfileEditor/);
+  assert.match(html, /保存此空间/);
   assert.match(html, /storageImportBusy/);
   assert.match(html, /role="progressbar"/);
-  assert.match(html, /WebDAV 刷新间隔（秒）/);
-  assert.match(html, /Supabase 使用 Realtime WebSocket 实时同步/);
+  assert.doesNotMatch(html, /WebDAV 刷新间隔（秒）/);
+  assert.match(html, /WebDAV 仅手动刷新/);
 
   const legacyMain = readFileSync(new URL('../src-ui/src/legacy-main.js', import.meta.url), 'utf8');
-  assert.match(legacyMain, /updateRefreshCountdown\(\);\n  if \(isActiveSupabaseEndpoint\(\)\) \{\n    return;\n  \}\n  refreshTimer = setInterval/);
-  assert.match(legacyMain, /if \(isActiveSupabaseEndpoint\(\)\) \{\n    refreshLabel\.textContent = refreshLabelDefault \|\| '刷新';\n    return;\n  \}/);
+  const styles = readFileSync(new URL('../src-ui/src/styles.css', import.meta.url), 'utf8');
+  assert.match(styles, /\.endpoint-header-actions \.button,[\s\S]*white-space: nowrap/);
+  assert.match(styles, /\.storage-profile-editor-grid input:focus/);
+  assert.match(styles, /\.supabase-space-list/);
+  assert.match(styles, /\.supabase-space-item\.is-current/);
+  assert.match(styles, /\.endpoint-card\.is-active/);
+  assert.doesNotMatch(legacyMain, /refreshTimer = setInterval/);
+  assert.match(legacyMain, /function openStorageProfileEditor/);
+  assert.match(legacyMain, /function cancelStorageProfileEditor/);
+  assert.match(legacyMain, /function saveStorageProfileDraft/);
+  assert.match(legacyMain, /save_storage_profile/);
+  assert.match(legacyMain, /remove_storage_profile/);
+  assert.match(legacyMain, /input:\s*\{\s*profileId: profile\.id, force: true \}/);
+  assert.match(legacyMain, /确认强制移除存储空间/);
+  assert.doesNotMatch(html, /endpoint-remove-button"[^>]*:disabled/);
+  assert.match(legacyMain, /storageProfileOriginalId/);
+  assert.doesNotMatch(legacyMain, /async function saveStorageProfileDraft\(\)[\s\S]*?const updated = await saveSettings\(\{ silent: true \}\)/);
+  assert.match(legacyMain, /function loadSupabaseProfileAccountStatus/);
+  assert.match(legacyMain, /async function loadSupabaseSpaces/);
+  assert.match(legacyMain, /async function useSupabaseSpace/);
+  assert.match(legacyMain, /switch_supabase_space/);
+  assert.doesNotMatch(legacyMain, /add_supabase_space_profile/);
+  assert.match(legacyMain, /storageProfileEditorMode: 'edit'/);
+  assert.match(legacyMain, /存储空间已保存，现在可以登录 Supabase 账号/);
+  assert.match(html, /v-else>[\s\S]*id="supabase-email"/);
+  assert.match(legacyMain, /function testStorageProfileDraftConnection/);
+  assert.match(legacyMain, /test_supabase_draft_connection/);
   assert.match(legacyMain, /listen\('supabase-realtime-synced'/);
   assert.match(legacyMain, /loadMessages\(\{ checkNew: true, scrollToBottom: false \}\)/);
   assert.match(legacyMain, /while \(supabaseRealtimeRefreshQueued && isActiveSupabaseEndpoint\(\)\)/);
+  assert.match(legacyMain, /function showSyncConflictResolutionDialog/);
+  assert.match(legacyMain, /全部使用云端/);
+  assert.match(legacyMain, /全部保留本地/);
+  assert.match(legacyMain, /resolve_all_sync_conflicts/);
+  assert.doesNotMatch(legacyMain, /window\.prompt\([\s\S]*输入 local 保留本机内容/);
 }
 
 testNormalizeTelegramPollInterval();
@@ -259,6 +376,7 @@ testNormalizeSaveFilenameRule();
 await testSupabaseLoginCapturesCredentialsBeforeSavingProfile();
 testNormalizeStorageImportProgress();
 testManualBackupDialogState();
+testStorageProfileDraftIsIndependentAndUpsertPreservesOthers();
 testEndpointSwitchAndPreviewRegressionGuards();
 testShortcutSettingsMarkup();
 

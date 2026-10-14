@@ -916,6 +916,8 @@ pub struct Settings {
 #[derive(Clone, Serialize)]
 pub struct Message {
     pub filename: String,
+    #[serde(default)]
+    pub message_id: Option<String>,
     pub sender: String,
     pub timestamp_ms: i64,
     pub size: i64,

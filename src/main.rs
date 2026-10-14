@@ -22,8 +22,9 @@ use crate::db::{
     PendingMarkedSync,
 };
 use crate::filenames::{
-    build_message_filename, media_preview_relative_path, media_preview_remote_path,
-    message_remote_path, parse_message_filename, thumbnail_remote_path, MessageKind,
+    build_message_filename, encode_component, media_preview_relative_path,
+    media_preview_remote_path, message_remote_path, parse_message_filename, thumbnail_remote_path,
+    MessageKind,
 };
 use crate::history::{HistoryEntry, HistoryLayout};
 use crate::integration_runtime::{
@@ -123,6 +124,7 @@ struct AppState {
     supabase_auth_guard: AsyncMutex<()>,
     sync_status: Mutex<SyncStatus>,
     sync_guard: Arc<AsyncMutex<()>>,
+    storage_transfer_targets: Mutex<HashSet<String>>,
     sync_cancel: Mutex<Option<oneshot::Sender<()>>>,
     sync_loop_signal: watch::Sender<u64>,
     http: Client,
@@ -137,12 +139,20 @@ struct AppState {
     media_playback: media_playback::PlaybackRegistry,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SupabaseSignInInput {
     profile_id: String,
     email: String,
     password: String,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SupabaseDraftConnectionInput {
+    profile_id: Option<String>,
+    api_url: String,
+    anon_key: String,
 }
 
 #[derive(Serialize)]
@@ -153,6 +163,39 @@ struct SupabaseAccountStatus {
     user_id: Option<String>,
     email: Option<String>,
     expires_at: Option<i64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SupabaseSpaceOption {
+    id: String,
+    name: String,
+    message_count: i64,
+    updated_at: Option<String>,
+    local_profile_id: Option<String>,
+    current: bool,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SwitchSupabaseSpaceInput {
+    source_profile_id: String,
+    space_id: String,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveStorageProfileInput {
+    original_profile_id: Option<String>,
+    profile: StorageProfile,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoveStorageProfileInput {
+    profile_id: String,
+    #[serde(default)]
+    force: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -270,6 +313,7 @@ const CHECK_UPDATE_MENU_ID: &str = "check-update";
 const DEFAULT_SEND_HOTKEY: &str = "enter";
 const SEND_HOTKEY_CTRL_ENTER: &str = "ctrl_enter";
 const SYNC_TIMEOUT_SECS: u64 = 45;
+const STORAGE_TRANSFER_PREVIEW_TIMEOUT_SECS: u64 = 45;
 const REFRESH_SYNC_SOURCE: &str = "正在刷新";
 const AUTO_SYNC_SOURCE: &str = "定时同步";
 const REALTIME_SYNC_SOURCE: &str = "实时同步";
@@ -1416,16 +1460,51 @@ fn storage_import_uuid(kind: &str, source_profile_id: &str, source_key: &str) ->
     .to_string()
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StorageImportRequest {
     source_profile_id: String,
     target_profile_id: String,
 }
 
+type StorageTransferRequest = StorageImportRequest;
+
+struct StorageTransferTargetGuard<'a> {
+    targets: &'a Mutex<HashSet<String>>,
+    key: String,
+}
+
+impl Drop for StorageTransferTargetGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut targets) = self.targets.lock() {
+            targets.remove(&self.key);
+        }
+    }
+}
+
+fn lock_storage_transfer_target<'a>(
+    state: &'a AppState,
+    profile_id: &str,
+    owner_scope: &str,
+) -> Result<StorageTransferTargetGuard<'a>, String> {
+    let key = format!("{profile_id}:{owner_scope}");
+    let mut targets = state
+        .storage_transfer_targets
+        .lock()
+        .map_err(|_| "读取数据传输锁失败".to_string())?;
+    if !targets.insert(key.clone()) {
+        return Err("目标存储空间已有数据传输任务正在执行".to_string());
+    }
+    drop(targets);
+    Ok(StorageTransferTargetGuard {
+        targets: &state.storage_transfer_targets,
+        key,
+    })
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct StorageImportPreview {
+struct StorageTransferPreview {
     batch_id: String,
     message_count: usize,
     attachment_count: usize,
@@ -1434,18 +1513,44 @@ struct StorageImportPreview {
     tag_count: usize,
     source_profile_name: String,
     target_profile_name: String,
+    source_provider_kind: String,
+    target_provider_kind: String,
+    skipped_count: i64,
+    conflict_count: i64,
+}
+
+type StorageImportPreview = StorageTransferPreview;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageTransferProgressResult {
+    batch_id: String,
+    source_profile_id: String,
+    target_profile_id: String,
+    status: String,
+    phase: String,
+    total_items: i64,
+    applied_items: i64,
+    skipped_items: i64,
+    conflict_items: i64,
+    failed_items: i64,
+    total_bytes: i64,
+    transferred_bytes: i64,
+    last_error: Option<String>,
+    failed_details: Vec<StorageTransferFailureResult>,
+    failed_detail_count: usize,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct StorageImportProgressResult {
-    batch_id: String,
-    status: String,
-    total_items: i64,
-    applied_items: i64,
-    failed_items: i64,
-    last_error: Option<String>,
+struct StorageTransferFailureResult {
+    item_type: String,
+    source_key: String,
+    state: String,
+    error: String,
 }
+
+type StorageImportProgressResult = StorageTransferProgressResult;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1480,124 +1585,1160 @@ struct ResolveSyncConflictInput {
     resolution: String,
 }
 
-impl From<db::StorageImportProgress> for StorageImportProgressResult {
-    fn from(value: db::StorageImportProgress) -> Self {
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolveAllSyncConflictsInput {
+    resolution: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolveAllSyncConflictsResult {
+    found: usize,
+    resolved: usize,
+    remaining: i64,
+    sync_error: Option<String>,
+    status: SyncStatus,
+}
+
+impl From<db::StorageTransferProgress> for StorageTransferProgressResult {
+    fn from(value: db::StorageTransferProgress) -> Self {
         Self {
             batch_id: value.batch_id,
+            source_profile_id: value.source_profile_id,
+            target_profile_id: value.target_profile_id,
             status: value.status,
+            phase: value.phase,
             total_items: value.total_items,
             applied_items: value.applied_items,
+            skipped_items: value.skipped_items,
+            conflict_items: value.conflict_items,
             failed_items: value.failed_items,
+            total_bytes: value.total_bytes,
+            transferred_bytes: value.transferred_bytes,
             last_error: value.last_error,
+            failed_details: Vec::new(),
+            failed_detail_count: 0,
         }
     }
 }
 
-fn storage_import_context(
+fn storage_transfer_progress_result(
+    db_path: &Path,
+    progress: db::StorageTransferProgress,
+) -> Result<StorageTransferProgressResult, String> {
+    let failures =
+        db::list_storage_transfer_items(db_path, &progress.batch_id, &["error", "conflict"])
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter_map(|item| {
+                item.last_error.map(|error| StorageTransferFailureResult {
+                    item_type: item.item_type,
+                    source_key: item.source_key,
+                    state: item.state,
+                    error,
+                })
+            })
+            .collect::<Vec<_>>();
+    let mut result: StorageTransferProgressResult = progress.into();
+    result.failed_detail_count = failures.len();
+    result.failed_details = failures.into_iter().take(20).collect();
+    Ok(result)
+}
+
+struct StorageTransferContext {
+    source: storage_provider::ProviderConfig,
+    target: storage_provider::ProviderConfig,
+    source_owner_scope: String,
+    target_owner_scope: String,
+    source_session: Option<supabase_auth::SupabaseSession>,
+    target_session: Option<supabase_auth::SupabaseSession>,
+}
+
+async fn storage_transfer_context(
     state: &AppState,
-    input: &StorageImportRequest,
-) -> Result<
-    (
-        WebDavEndpoint,
-        StorageProfile,
-        supabase_auth::SupabaseSession,
-    ),
-    String,
-> {
+    input: &StorageTransferRequest,
+) -> Result<StorageTransferContext, String> {
+    if input.source_profile_id.trim() == input.target_profile_id.trim() {
+        return Err("来源和目标不能是同一个存储空间".to_string());
+    }
     let settings = current_settings(state)?;
-    let source = storage_provider::resolve_webdav_by_id(&settings, &input.source_profile_id)?;
-    let target =
-        match storage_provider::resolve_provider_by_id(&settings, &input.target_profile_id)? {
-            storage_provider::ProviderConfig::Supabase(profile) => profile,
-            storage_provider::ProviderConfig::Webdav(_) => {
-                return Err("导入目标必须是 Supabase 存储空间".into())
-            }
-        };
-    let session = state
-        .supabase_sessions
-        .lock()
-        .map_err(|_| "读取 Supabase 会话失败".to_string())?
-        .get(&target.id)
-        .cloned()
-        .ok_or_else(|| "请先登录目标 Supabase 存储空间".to_string())?;
-    Ok((source, target, session))
+    let source = storage_provider::resolve_provider_by_id(&settings, &input.source_profile_id)?;
+    let target = storage_provider::resolve_provider_by_id(&settings, &input.target_profile_id)?;
+    let source_session = match &source {
+        storage_provider::ProviderConfig::Supabase(profile) => {
+            valid_supabase_session(state, &profile.id, false)
+                .await
+                .map_err(|error| error.message)?
+                .ok_or_else(|| format!("请先登录来源 Supabase 存储空间：{}", profile.name))?
+                .into()
+        }
+        storage_provider::ProviderConfig::Webdav(_) => None,
+    };
+    let target_session = match &target {
+        storage_provider::ProviderConfig::Supabase(profile) => {
+            valid_supabase_session(state, &profile.id, false)
+                .await
+                .map_err(|error| error.message)?
+                .ok_or_else(|| format!("请先登录目标 Supabase 存储空间：{}", profile.name))?
+                .into()
+        }
+        storage_provider::ProviderConfig::Webdav(_) => None,
+    };
+    let source_owner_scope = source_session
+        .as_ref()
+        .map(|session| session.user_id.clone())
+        .unwrap_or_default();
+    let target_owner_scope = target_session
+        .as_ref()
+        .map(|session| session.user_id.clone())
+        .unwrap_or_default();
+    Ok(StorageTransferContext {
+        source,
+        target,
+        source_owner_scope,
+        target_owner_scope,
+        source_session,
+        target_session,
+    })
 }
 
 fn storage_import_batch_id(
     source_profile_id: &str,
     target_profile_id: &str,
-    owner_scope: &str,
+    source_owner_scope: &str,
+    target_owner_scope: &str,
 ) -> String {
+    if source_owner_scope.is_empty() {
+        return storage_import_uuid(
+            "batch",
+            source_profile_id,
+            &format!("{target_profile_id}:{target_owner_scope}"),
+        );
+    }
     storage_import_uuid(
         "batch",
         source_profile_id,
-        &format!("{target_profile_id}:{owner_scope}"),
+        &format!("{source_owner_scope}:{target_profile_id}:{target_owner_scope}"),
     )
 }
 
-fn build_storage_import_items(
+fn storage_transfer_messages_and_tags(
+    state: &AppState,
+    source: &storage_provider::ProviderConfig,
+    owner_scope: &str,
+) -> Result<(Vec<Message>, Vec<MarkedTag>), String> {
+    match source {
+        storage_provider::ProviderConfig::Webdav(endpoint) => Ok((
+            db::list_messages_paged(&state.db_path, &endpoint.id, None, None, false, None)
+                .map_err(|error| error.to_string())?,
+            db::list_marked_tags(&state.db_path, &endpoint.id)
+                .map_err(|error| error.to_string())?,
+        )),
+        storage_provider::ProviderConfig::Supabase(profile) => Ok((
+            db::list_messages_for_scope(
+                &state.db_path,
+                &profile.id,
+                owner_scope,
+                Some(500_000),
+                Some(0),
+                false,
+                None,
+            )
+            .map_err(|error| error.to_string())?,
+            db::list_tags_for_scope(&state.db_path, &profile.id, owner_scope)
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .map(|(tag, _)| tag)
+                .collect(),
+        )),
+    }
+}
+
+async fn refresh_storage_transfer_source(
+    state: &AppState,
+    source: &storage_provider::ProviderConfig,
+) -> Result<(), String> {
+    match source {
+        storage_provider::ProviderConfig::Webdav(endpoint) => {
+            let loaded = crate::history::load_history_for_sync(
+                &state.http,
+                endpoint,
+                &history_cache_dir(state, &endpoint.id),
+            )
+            .await?;
+            db::replace_marked_tags(&state.db_path, &endpoint.id, &loaded.tags)
+                .map_err(|error| error.to_string())?;
+            let remote_filenames = loaded
+                .entries
+                .iter()
+                .map(|entry| entry.filename.clone())
+                .collect::<Vec<_>>();
+            for entry in loaded.entries {
+                let mut message = DbMessage {
+                    endpoint_id: endpoint.id.clone(),
+                    filename: entry.filename.clone(),
+                    sender: entry.sender,
+                    timestamp_ms: entry.timestamp_ms,
+                    size: entry.size,
+                    kind: entry.kind,
+                    original_name: entry.original_name,
+                    etag: None,
+                    mtime: None,
+                    content: entry.transcript_text.clone(),
+                    local_path: None,
+                    remote_path: entry.remote_path,
+                    file_hash: None,
+                    marked: entry.marked,
+                    marked_tag_ids: entry.marked_tag_ids,
+                    marked_pinned: entry.marked_pinned,
+                    marked_due_date: entry.marked_due_date,
+                    format: entry.format,
+                    transcript_source: entry.transcript_source,
+                    source_audio_mime_type: entry.source_audio_mime_type,
+                    transcript_raw_text: entry.transcript_raw_text,
+                };
+                if message.kind == "text" && message.content.is_none() {
+                    let remote_path = resolved_remote_path(
+                        message.remote_path.as_deref(),
+                        &message.filename,
+                        Some(message.timestamp_ms),
+                    );
+                    if let Some(bytes) =
+                        webdav::download_optional_file(&state.http, endpoint, &remote_path).await?
+                    {
+                        message.content = Some(String::from_utf8_lossy(&bytes).to_string());
+                        message.size = bytes.len() as i64;
+                    }
+                }
+                db::upsert_message(&state.db_path, &message).map_err(|error| error.to_string())?;
+            }
+            db::prune_messages(&state.db_path, &endpoint.id, &remote_filenames)
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        }
+        storage_provider::ProviderConfig::Supabase(profile) => {
+            let session = valid_supabase_session(state, &profile.id, false)
+                .await
+                .map_err(|error| error.message)?
+                .ok_or_else(|| format!("请先登录 Supabase 存储空间：{}", profile.name))?;
+            pull_supabase_changes(state, profile, &session).await?;
+            Ok(())
+        }
+    }
+}
+
+fn build_storage_transfer_items_for_plan(
     source_profile_id: &str,
+    source_owner_scope: &str,
+    target_profile_id: &str,
+    target_owner_scope: &str,
+    plan_token: &str,
     messages: &[Message],
     tags: &[MarkedTag],
 ) -> Vec<db::StorageImportItem> {
+    let source_identity = if source_owner_scope.is_empty() {
+        source_profile_id.to_string()
+    } else {
+        format!("{source_profile_id}:{source_owner_scope}")
+    };
+    let target_identity = if target_owner_scope.is_empty() {
+        target_profile_id.to_string()
+    } else {
+        format!("{target_profile_id}:{target_owner_scope}")
+    };
     let mut items = Vec::with_capacity(messages.len() + tags.len());
     for tag in tags {
+        let entity_id = storage_import_uuid("tag", &source_identity, &tag.id);
+        let source_revision = storage_transfer_tag_hash(tag);
         items.push(db::StorageImportItem {
             item_type: "tag".into(),
             source_key: tag.id.clone(),
-            entity_id: format!("import:{source_profile_id}:{}", tag.id),
+            entity_id,
             attachment_id: None,
-            message_operation_id: storage_import_uuid("tag-operation", source_profile_id, &tag.id),
+            message_operation_id: storage_import_uuid(
+                "tag-operation",
+                &source_identity,
+                &format!(
+                    "{target_identity}:{plan_token}:{}:{source_revision}",
+                    tag.id
+                ),
+            ),
             attachment_operation_id: None,
             state: "pending".into(),
+            source_revision: Some(source_revision),
+            source_hash: None,
+            total_bytes: 0,
+            transferred_bytes: 0,
+            last_error: None,
         });
     }
     for message in messages {
         let is_attachment = message.kind == "file"
             || message.transcript_source.as_deref() == Some("speech-to-text");
+        let source_revision = storage_transfer_message_hash(message);
         items.push(db::StorageImportItem {
             item_type: "message".into(),
             source_key: message.filename.clone(),
-            entity_id: storage_import_uuid("message", source_profile_id, &message.filename),
+            entity_id: storage_import_uuid("message", &source_identity, &message.filename),
             attachment_id: is_attachment
-                .then(|| storage_import_uuid("attachment", source_profile_id, &message.filename)),
+                .then(|| storage_import_uuid("attachment", &source_identity, &message.filename)),
             message_operation_id: storage_import_uuid(
                 "message-operation",
-                source_profile_id,
-                &message.filename,
+                &source_identity,
+                &format!(
+                    "{target_identity}:{plan_token}:{}:{source_revision}",
+                    message.filename
+                ),
             ),
             attachment_operation_id: is_attachment.then(|| {
-                storage_import_uuid("attachment-operation", source_profile_id, &message.filename)
+                storage_import_uuid(
+                    "attachment-operation",
+                    &source_identity,
+                    &format!(
+                        "{target_identity}:{plan_token}:{}:{source_revision}",
+                        message.filename
+                    ),
+                )
             }),
             state: "pending".into(),
+            source_revision: Some(source_revision),
+            source_hash: if is_attachment {
+                message.file_hash.clone()
+            } else {
+                message
+                    .content
+                    .as_ref()
+                    .map(|content| format!("{:x}", Sha256::digest(content.as_bytes())))
+            },
+            total_bytes: if is_attachment {
+                message.size.max(0)
+            } else {
+                0
+            },
+            transferred_bytes: 0,
+            last_error: None,
         });
     }
     items
 }
 
-#[tauri::command]
-fn preview_storage_import(
-    state: State<'_, AppState>,
-    input: StorageImportRequest,
-) -> Result<StorageImportPreview, String> {
-    let (source, target, session) = storage_import_context(&state, &input)?;
-    let messages = db::list_messages_paged(&state.db_path, &source.id, None, None, false, None)
+#[cfg(test)]
+fn build_storage_transfer_items(
+    source_profile_id: &str,
+    source_owner_scope: &str,
+    target_profile_id: &str,
+    messages: &[Message],
+    tags: &[MarkedTag],
+) -> Vec<db::StorageImportItem> {
+    build_storage_transfer_items_for_plan(
+        source_profile_id,
+        source_owner_scope,
+        target_profile_id,
+        "",
+        "test-plan",
+        messages,
+        tags,
+    )
+}
+
+fn storage_transfer_tag_hash(tag: &MarkedTag) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::json!({"id":tag.id,"name":tag.name})
+                .to_string()
+                .as_bytes()
+        )
+    )
+}
+
+fn storage_transfer_message_hash(message: &Message) -> String {
+    let payload = serde_json::json!({
+        "filename": message.filename,
+        "sender": message.sender,
+        "timestampMs": message.timestamp_ms,
+        "size": message.size,
+        "kind": message.kind,
+        "originalName": message.original_name,
+        "content": message.content,
+        "fileHash": message.file_hash,
+        "marked": message.marked,
+        "markedTagIds": message.marked_tag_ids,
+        "markedPinned": message.marked_pinned,
+        "markedDueDate": message.marked_due_date,
+        "format": message.format,
+        "transcriptSource": message.transcript_source,
+        "sourceAudioMimeType": message.source_audio_mime_type,
+        "transcriptRawText": message.transcript_raw_text,
+    });
+    format!("{:x}", Sha256::digest(payload.to_string().as_bytes()))
+}
+
+fn storage_transfer_source_matches(item: &db::StorageTransferItem, message: &Message) -> bool {
+    item.source_revision
+        .as_deref()
+        .map(|revision| revision == storage_transfer_message_hash(message))
+        .unwrap_or(true)
+}
+
+fn storage_transfer_target_filename(message: &Message, entity_id: &str) -> String {
+    let nonce = entity_id
+        .replace('-', "")
+        .chars()
+        .take(8)
+        .collect::<String>();
+    format!(
+        "{}__{}__{}__{}",
+        message.timestamp_ms,
+        encode_component(&message.sender),
+        nonce,
+        encode_component(&message.original_name)
+    )
+}
+
+fn storage_transfer_message_matches(existing: &DbMessage, source: &Message) -> bool {
+    storage_transfer_message_matches_with_tags(existing, source, &source.marked_tag_ids)
+}
+
+fn storage_transfer_message_matches_with_tags(
+    existing: &DbMessage,
+    source: &Message,
+    expected_tag_ids: &[String],
+) -> bool {
+    existing.sender == source.sender
+        && existing.timestamp_ms == source.timestamp_ms
+        && existing.size == source.size
+        && existing.kind == source.kind
+        && existing.original_name == source.original_name
+        && existing.content == source.content
+        && source
+            .file_hash
+            .as_ref()
+            .map(|hash| existing.file_hash.as_ref() == Some(hash))
+            .unwrap_or(true)
+        && existing.marked == source.marked
+        && storage_transfer_tag_ids_match(&existing.marked_tag_ids, expected_tag_ids)
+        && existing.marked_pinned == source.marked_pinned
+        && existing.marked_due_date == source.marked_due_date
+        && existing.format == source.format
+        && existing.transcript_source == source.transcript_source
+}
+
+fn storage_transfer_tag_ids_match(left: &[String], right: &[String]) -> bool {
+    let mut left = left.to_vec();
+    let mut right = right.to_vec();
+    left.sort();
+    left.dedup();
+    right.sort();
+    right.dedup();
+    left == right
+}
+
+fn normalize_storage_transfer_tag_name(name: &str) -> String {
+    name.trim().to_lowercase()
+}
+
+fn storage_transfer_target_tags(
+    state: &AppState,
+    context: &StorageTransferContext,
+) -> Result<Vec<(MarkedTag, i64)>, String> {
+    match &context.target {
+        storage_provider::ProviderConfig::Webdav(target) => {
+            db::list_marked_tags(&state.db_path, &target.id)
+                .map(|tags| tags.into_iter().map(|tag| (tag, 0)).collect())
+                .map_err(|error| error.to_string())
+        }
+        storage_provider::ProviderConfig::Supabase(target) => {
+            db::list_tags_for_scope(&state.db_path, &target.id, &context.target_owner_scope)
+                .map(|tags| {
+                    tags.into_iter()
+                        .filter(|(_, remote_revision)| *remote_revision > 0)
+                        .collect()
+                })
+                .map_err(|error| error.to_string())
+        }
+    }
+}
+
+fn storage_transfer_matching_target_tag<'a>(
+    target_tags: &'a [(MarkedTag, i64)],
+    source_tag: &MarkedTag,
+    fallback_id: &str,
+) -> Option<&'a (MarkedTag, i64)> {
+    let normalized_name = normalize_storage_transfer_tag_name(&source_tag.name);
+    target_tags
+        .iter()
+        .filter(|(tag, _)| normalize_storage_transfer_tag_name(&tag.name) == normalized_name)
+        .max_by_key(|(_, revision)| *revision)
+        .or_else(|| target_tags.iter().find(|(tag, _)| tag.id == fallback_id))
+}
+
+fn storage_transfer_tag_mapping(items: &[db::StorageTransferItem]) -> HashMap<String, String> {
+    items
+        .iter()
+        .filter(|item| item.item_type == "tag")
+        .map(|item| (item.source_key.clone(), item.entity_id.clone()))
+        .collect()
+}
+
+fn map_storage_transfer_tag_ids(
+    mapping: &HashMap<String, String>,
+    tag_ids: &[String],
+) -> Vec<String> {
+    let mut mapped = tag_ids
+        .iter()
+        .filter_map(|tag_id| mapping.get(tag_id).cloned())
+        .collect::<Vec<_>>();
+    mapped.sort();
+    mapped.dedup();
+    mapped
+}
+
+fn storage_transfer_tag_mapping_for_batch(
+    state: &AppState,
+    batch_id: &str,
+) -> Result<HashMap<String, String>, String> {
+    let items = db::list_storage_transfer_items(
+        &state.db_path,
+        batch_id,
+        &[
+            "pending", "error", "staged", "applied", "skipped", "conflict",
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(storage_transfer_tag_mapping(&items))
+}
+
+fn storage_transfer_target_message(
+    state: &AppState,
+    target: &storage_provider::ProviderConfig,
+    target_owner_scope: &str,
+    source: &Message,
+    entity_id: &str,
+) -> Result<Option<DbMessage>, String> {
+    let filename = storage_transfer_target_filename(source, entity_id);
+    match target {
+        storage_provider::ProviderConfig::Webdav(endpoint) => {
+            db::get_message(&state.db_path, &endpoint.id, &filename)
+        }
+        storage_provider::ProviderConfig::Supabase(profile) => {
+            db::get_message_for_scope(&state.db_path, &profile.id, target_owner_scope, &filename)
+        }
+    }
+    .map_err(|error| error.to_string())
+}
+
+fn prepare_storage_transfer_items(
+    state: &AppState,
+    context: &StorageTransferContext,
+    plan_token: &str,
+    messages: &[Message],
+    tags: &[MarkedTag],
+) -> Result<Vec<db::StorageImportItem>, String> {
+    let mut items = build_storage_transfer_items_for_plan(
+        context.source.profile_id(),
+        &context.source_owner_scope,
+        context.target.profile_id(),
+        &context.target_owner_scope,
+        plan_token,
+        messages,
+        tags,
+    );
+    let target_tags = storage_transfer_target_tags(state, context)?;
+    for item in &mut items {
+        if item.item_type == "tag" {
+            let source_tag = tags
+                .iter()
+                .find(|tag| tag.id == item.source_key)
+                .ok_or_else(|| format!("来源标签已不存在: {}", item.source_key))?;
+            let normalized_name = normalize_storage_transfer_tag_name(&source_tag.name);
+            let target_tag =
+                storage_transfer_matching_target_tag(&target_tags, source_tag, &item.entity_id);
+            if let Some((target_tag, _)) = target_tag {
+                item.entity_id = target_tag.id.clone();
+                item.state =
+                    if normalize_storage_transfer_tag_name(&target_tag.name) == normalized_name {
+                        "skipped".into()
+                    } else {
+                        "pending".into()
+                    };
+            }
+            continue;
+        }
+    }
+    let tag_mapping = storage_transfer_tag_mapping(&items);
+    for item in &mut items {
+        if item.item_type == "tag" {
+            continue;
+        }
+        let source_message = messages
+            .iter()
+            .find(|message| message.filename == item.source_key)
+            .ok_or_else(|| format!("来源消息已不存在: {}", item.source_key))?;
+        let expected_tag_ids =
+            map_storage_transfer_tag_ids(&tag_mapping, &source_message.marked_tag_ids);
+        item.state = match storage_transfer_target_message(
+            state,
+            &context.target,
+            &context.target_owner_scope,
+            source_message,
+            &item.entity_id,
+        )? {
+            Some(existing)
+                if storage_transfer_message_matches_with_tags(
+                    &existing,
+                    source_message,
+                    &expected_tag_ids,
+                ) =>
+            {
+                "skipped".into()
+            }
+            Some(_) => "pending".into(),
+            None => "pending".into(),
+        };
+    }
+    Ok(items)
+}
+
+async fn cache_storage_transfer_attachment(
+    state: &AppState,
+    source: &storage_provider::ProviderConfig,
+    source_session: Option<&supabase_auth::SupabaseSession>,
+    batch_id: &str,
+    item: &db::StorageTransferItem,
+    message: &Message,
+) -> Result<(PathBuf, i64, String), String> {
+    let cache_dir = state
+        .files_base_dir
+        .join("storage-transfers")
+        .join(batch_id);
+    fs::create_dir_all(&cache_dir).map_err(|error| format!("创建数据传输缓存目录失败: {error}"))?;
+    let cache_path = cache_dir.join(format!("{}.part", item.entity_id));
+    if cache_path.is_file() {
+        let cached_size = fs::metadata(&cache_path)
+            .map_err(|error| format!("读取数据传输缓存状态失败: {error}"))?
+            .len() as i64;
+        if item.total_bytes > 0 && cached_size != item.total_bytes {
+            fs::remove_file(&cache_path)
+                .map_err(|error| format!("清理不完整的数据传输缓存失败: {error}"))?;
+        } else {
+            let mut file = fs::File::open(&cache_path)
+                .map_err(|error| format!("读取数据传输缓存失败: {error}"))?;
+            let mut hasher = Sha256::new();
+            let mut total = 0i64;
+            let mut buffer = vec![0u8; 512 * 1024];
+            loop {
+                let read = file
+                    .read(&mut buffer)
+                    .map_err(|error| format!("读取数据传输缓存失败: {error}"))?;
+                if read == 0 {
+                    break;
+                }
+                total += read as i64;
+                hasher.update(&buffer[..read]);
+            }
+            db::update_storage_transfer_item_progress(
+                &state.db_path,
+                batch_id,
+                &item.item_type,
+                &item.source_key,
+                total,
+                now_ms(),
+            )
+            .map_err(|error| error.to_string())?;
+            let hash = format!("{:x}", hasher.finalize());
+            db::update_storage_transfer_item_fingerprint(
+                &state.db_path,
+                batch_id,
+                &item.item_type,
+                &item.source_key,
+                item.source_revision.as_deref(),
+                Some(&hash),
+                total,
+                now_ms(),
+            )
+            .map_err(|error| error.to_string())?;
+            return Ok((cache_path, total, hash));
+        }
+    }
+    let remote_path = message
+        .remote_path
+        .as_deref()
+        .ok_or_else(|| "来源附件缺少远端路径".to_string())?;
+    let mut stream = match source {
+        storage_provider::ProviderConfig::Webdav(endpoint) => {
+            webdav::download_file_stream(&state.http, endpoint, remote_path)
+                .await?
+                .stream
+        }
+        storage_provider::ProviderConfig::Supabase(profile) => {
+            let config = profile
+                .supabase
+                .as_ref()
+                .ok_or_else(|| "来源 Supabase 配置不完整".to_string())?;
+            let session =
+                source_session.ok_or_else(|| "来源 Supabase 存储空间尚未登录".to_string())?;
+            supabase_sync::download_storage_object_stream(&state.http, config, session, remote_path)
+                .await?
+                .stream
+        }
+    };
+    let mut file =
+        fs::File::create(&cache_path).map_err(|error| format!("创建数据传输缓存失败: {error}"))?;
+    let mut hasher = Sha256::new();
+    let mut total = 0i64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("读取来源附件失败: {error}"))?;
+        file.write_all(&chunk)
+            .map_err(|error| format!("写入数据传输缓存失败: {error}"))?;
+        hasher.update(&chunk);
+        total += chunk.len() as i64;
+        db::update_storage_transfer_item_progress(
+            &state.db_path,
+            batch_id,
+            &item.item_type,
+            &item.source_key,
+            total,
+            now_ms(),
+        )
         .map_err(|error| error.to_string())?;
-    let tags =
-        db::list_marked_tags(&state.db_path, &source.id).map_err(|error| error.to_string())?;
-    Ok(StorageImportPreview {
-        batch_id: storage_import_batch_id(&source.id, &target.id, &session.user_id),
+    }
+    let hash = format!("{:x}", hasher.finalize());
+    db::update_storage_transfer_item_fingerprint(
+        &state.db_path,
+        batch_id,
+        &item.item_type,
+        &item.source_key,
+        item.source_revision.as_deref(),
+        Some(&hash),
+        total,
+        now_ms(),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok((cache_path, total, hash))
+}
+
+async fn verify_storage_transfer_webdav_object(
+    state: &AppState,
+    target: &WebDavEndpoint,
+    remote_path: &str,
+    expected_size: i64,
+    expected_hash: &str,
+) -> Result<(), String> {
+    let mut response = webdav::download_file_stream(&state.http, target, remote_path).await?;
+    let mut size = 0i64;
+    let mut hasher = Sha256::new();
+    while let Some(chunk) = response.stream.next().await {
+        let chunk = chunk.map_err(|error| format!("读取 WebDAV 核验数据失败: {error}"))?;
+        size += chunk.len() as i64;
+        hasher.update(&chunk);
+    }
+    if size != expected_size {
+        return Err(format!("WebDAV 文件大小核验失败: {size}/{expected_size}"));
+    }
+    if format!("{:x}", hasher.finalize()) != expected_hash {
+        return Err("WebDAV 文件摘要核验失败".to_string());
+    }
+    Ok(())
+}
+
+async fn verify_storage_transfer_webdav_target(
+    state: &AppState,
+    context: &StorageTransferContext,
+    batch_id: &str,
+    source_messages: &HashMap<String, Message>,
+    source_tags: &HashMap<String, MarkedTag>,
+) -> Result<(), String> {
+    let storage_provider::ProviderConfig::Webdav(target) = &context.target else {
+        return Err("目标存储空间不是 WebDAV".to_string());
+    };
+    let remote = crate::history::load_history_with_layout(&state.http, target).await?;
+    let remote_messages = remote
+        .entries
+        .into_iter()
+        .map(|entry| (entry.filename.clone(), entry))
+        .collect::<HashMap<_, _>>();
+    let remote_tags = remote
+        .tags
+        .into_iter()
+        .map(|tag| (tag.id.clone(), tag))
+        .collect::<HashMap<_, _>>();
+    let items = db::list_storage_transfer_items(&state.db_path, batch_id, &["applied", "skipped"])
+        .map_err(|error| format!("读取待核验项目失败: {error}"))?;
+
+    for item in items {
+        let verification = async {
+            if item.item_type == "tag" {
+                let source = source_tags
+                    .get(&item.source_key)
+                    .ok_or_else(|| format!("来源标签已不存在: {}", item.source_key))?;
+                let target_tag = remote_tags
+                    .get(&item.entity_id)
+                    .ok_or_else(|| format!("WebDAV 目标标签不存在: {}", item.entity_id))?;
+                if normalize_storage_transfer_tag_name(&target_tag.name)
+                    != normalize_storage_transfer_tag_name(&source.name)
+                {
+                    return Err(format!("WebDAV 目标标签内容不一致: {}", item.entity_id));
+                }
+                return Ok(());
+            }
+
+            let source = source_messages
+                .get(&item.source_key)
+                .ok_or_else(|| format!("来源消息已不存在: {}", item.source_key))?;
+            let target_filename = storage_transfer_target_filename(source, &item.entity_id);
+            let target_entry = remote_messages
+                .get(&target_filename)
+                .ok_or_else(|| format!("WebDAV 目标 history 缺少消息: {target_filename}"))?;
+            let expected_tag_ids = map_storage_transfer_tag_ids(
+                &storage_transfer_tag_mapping_for_batch(state, batch_id)?,
+                &source.marked_tag_ids,
+            );
+            if target_entry.sender != source.sender
+                || target_entry.timestamp_ms != source.timestamp_ms
+                || target_entry.kind != source.kind
+                || target_entry.original_name != source.original_name
+                || target_entry.marked != source.marked
+                || target_entry.marked_tag_ids != expected_tag_ids
+                || target_entry.marked_pinned != source.marked_pinned
+                || target_entry.marked_due_date != source.marked_due_date
+                || target_entry.format != source.format
+                || target_entry.transcript_source != source.transcript_source
+                || target_entry.source_audio_mime_type != source.source_audio_mime_type
+                || target_entry.transcript_text
+                    != source
+                        .transcript_source
+                        .as_ref()
+                        .and_then(|_| source.content.clone())
+                || target_entry.transcript_raw_text != source.transcript_raw_text
+            {
+                return Err(format!("WebDAV 目标 history 内容不一致: {target_filename}"));
+            }
+
+            let (expected_size, expected_hash) = if item.attachment_id.is_some() {
+                match item.source_hash.as_deref() {
+                    Some(hash) => (item.total_bytes, hash.to_string()),
+                    None => {
+                        let (_, size, hash) = cache_storage_transfer_attachment(
+                            state,
+                            &context.source,
+                            context.source_session.as_ref(),
+                            batch_id,
+                            &item,
+                            source,
+                        )
+                        .await?;
+                        (size, hash)
+                    }
+                }
+            } else {
+                let bytes = source.content.clone().unwrap_or_default().into_bytes();
+                (bytes.len() as i64, format!("{:x}", Sha256::digest(&bytes)))
+            };
+            if target_entry.size != expected_size {
+                return Err(format!(
+                    "WebDAV 目标 history 文件大小不一致: {target_filename}（{}/{expected_size}）",
+                    target_entry.size
+                ));
+            }
+            let remote_path = target_entry
+                .remote_path
+                .as_deref()
+                .ok_or_else(|| format!("WebDAV 目标文件路径缺失: {target_filename}"))?;
+            verify_storage_transfer_webdav_object(
+                state,
+                target,
+                remote_path,
+                expected_size,
+                &expected_hash,
+            )
+            .await
+        }
+        .await;
+
+        if let Err(error) = verification {
+            db::mark_storage_transfer_item_state(
+                &state.db_path,
+                batch_id,
+                &item.item_type,
+                &item.source_key,
+                "error",
+                Some(&error),
+                now_ms(),
+            )
+            .map_err(|db_error| format!("记录目标核验失败状态失败: {db_error}"))?;
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+async fn write_storage_transfer_tag_to_webdav(
+    state: &AppState,
+    target: &WebDavEndpoint,
+    tag: &MarkedTag,
+) -> Result<(), String> {
+    let mut tags =
+        db::list_marked_tags(&state.db_path, &target.id).map_err(|error| error.to_string())?;
+    if let Some(existing) = tags.iter_mut().find(|existing| existing.id == tag.id) {
+        if normalize_storage_transfer_tag_name(&existing.name)
+            == normalize_storage_transfer_tag_name(&tag.name)
+        {
+            return Ok(());
+        }
+        existing.name = tag.name.clone();
+    } else if tags.iter().any(|existing| {
+        normalize_storage_transfer_tag_name(&existing.name)
+            == normalize_storage_transfer_tag_name(&tag.name)
+    }) {
+        return Ok(());
+    } else {
+        tags.push(tag.clone());
+    }
+    tags.sort_by(|left, right| left.name.cmp(&right.name));
+    crate::history::save_marked_tags(&state.http, target, &tags).await?;
+    db::replace_marked_tags(&state.db_path, &target.id, &tags).map_err(|error| error.to_string())
+}
+
+async fn write_storage_transfer_message_to_webdav(
+    state: &AppState,
+    source: &storage_provider::ProviderConfig,
+    source_session: Option<&supabase_auth::SupabaseSession>,
+    target: &WebDavEndpoint,
+    batch_id: &str,
+    item: &db::StorageTransferItem,
+    source_message: &Message,
+) -> Result<&'static str, String> {
+    let filename = storage_transfer_target_filename(source_message, &item.entity_id);
+    let tag_mapping = storage_transfer_tag_mapping_for_batch(state, batch_id)?;
+    let expected_tag_ids =
+        map_storage_transfer_tag_ids(&tag_mapping, &source_message.marked_tag_ids);
+    if let Some(existing) =
+        db::get_message(&state.db_path, &target.id, &filename).map_err(|error| error.to_string())?
+    {
+        if storage_transfer_message_matches_with_tags(&existing, source_message, &expected_tag_ids)
+        {
+            return Ok("skipped");
+        }
+    }
+    let remote_path = message_remote_path(&filename, source_message.timestamp_ms);
+    let (size, hash) =
+        if source_message.kind == "text" && source_message.transcript_source.is_none() {
+            let bytes = source_message
+                .content
+                .clone()
+                .unwrap_or_default()
+                .into_bytes();
+            webdav::upload_file_ensuring_parent(&state.http, target, &remote_path, bytes.clone())
+                .await?;
+            (bytes.len() as i64, format!("{:x}", Sha256::digest(&bytes)))
+        } else {
+            let (cache_path, size, hash) = cache_storage_transfer_attachment(
+                state,
+                source,
+                source_session,
+                batch_id,
+                item,
+                source_message,
+            )
+            .await?;
+            webdav::ensure_parent_directories(&state.http, target, &remote_path).await?;
+            webdav::upload_file_path_with_progress(
+                &state.http,
+                target,
+                &remote_path,
+                &cache_path,
+                |_sent, _total| {},
+            )
+            .await?;
+            (size, hash)
+        };
+    let message = DbMessage {
+        endpoint_id: target.id.clone(),
+        filename: filename.clone(),
+        sender: source_message.sender.clone(),
+        timestamp_ms: source_message.timestamp_ms,
+        size,
+        kind: source_message.kind.clone(),
+        original_name: source_message.original_name.clone(),
+        etag: None,
+        mtime: None,
+        content: source_message.content.clone(),
+        local_path: None,
+        remote_path: Some(remote_path),
+        file_hash: Some(hash),
+        marked: source_message.marked,
+        marked_tag_ids: expected_tag_ids,
+        marked_pinned: source_message.marked_pinned,
+        marked_due_date: source_message.marked_due_date.clone(),
+        format: source_message.format.clone(),
+        transcript_source: source_message.transcript_source.clone(),
+        source_audio_mime_type: source_message.source_audio_mime_type.clone(),
+        transcript_raw_text: source_message.transcript_raw_text.clone(),
+    };
+    crate::history::upsert_history_entries(&state.http, target, vec![message_to_history(&message)])
+        .await?;
+    verify_storage_transfer_webdav_object(
+        state,
+        target,
+        message.remote_path.as_deref().unwrap_or_default(),
+        message.size,
+        message.file_hash.as_deref().unwrap_or_default(),
+    )
+    .await?;
+    db::upsert_message(&state.db_path, &message).map_err(|error| error.to_string())?;
+    Ok("applied")
+}
+
+fn remap_storage_transfer_tag_ids(
+    source_profile_id: &str,
+    source_owner_scope: &str,
+    tag_ids: &[String],
+) -> Vec<String> {
+    let source_identity = if source_owner_scope.is_empty() {
+        source_profile_id.to_string()
+    } else {
+        format!("{source_profile_id}:{source_owner_scope}")
+    };
+    tag_ids
+        .iter()
+        .map(|tag_id| storage_import_uuid("tag", &source_identity, tag_id))
+        .collect()
+}
+
+#[tauri::command]
+async fn preview_storage_transfer(
+    state: State<'_, AppState>,
+    input: StorageTransferRequest,
+) -> Result<StorageTransferPreview, String> {
+    preview_storage_transfer_with_timeout(state.inner(), input).await
+}
+
+async fn preview_storage_transfer_with_timeout(
+    state: &AppState,
+    input: StorageTransferRequest,
+) -> Result<StorageTransferPreview, String> {
+    tokio::time::timeout(
+        Duration::from_secs(STORAGE_TRANSFER_PREVIEW_TIMEOUT_SECS),
+        preview_storage_transfer_inner(state, input),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "检查超时（超过 {} 秒），请检查来源空间连接、登录状态或附件数量后重试",
+            STORAGE_TRANSFER_PREVIEW_TIMEOUT_SECS
+        )
+    })?
+}
+
+async fn preview_storage_transfer_inner(
+    state: &AppState,
+    input: StorageTransferRequest,
+) -> Result<StorageTransferPreview, String> {
+    let context = storage_transfer_context(state, &input).await?;
+    refresh_storage_transfer_source(state, &context.source).await?;
+    refresh_storage_transfer_source(state, &context.target).await?;
+    let (messages, tags) =
+        storage_transfer_messages_and_tags(state, &context.source, &context.source_owner_scope)?;
+    let batch_id = storage_import_batch_id(
+        context.source.profile_id(),
+        context.target.profile_id(),
+        &context.source_owner_scope,
+        &context.target_owner_scope,
+    );
+    let plan_token = uuid::Uuid::new_v4().to_string();
+    let items = prepare_storage_transfer_items(state, &context, &plan_token, &messages, &tags)?;
+    db::create_or_resume_storage_transfer(
+        &state.db_path,
+        &db::NewStorageTransferBatch {
+            batch_id: &batch_id,
+            source_profile_id: context.source.profile_id(),
+            target_profile_id: context.target.profile_id(),
+            source_provider_kind: context.source.provider_kind(),
+            target_provider_kind: context.target.provider_kind(),
+            source_owner_scope: &context.source_owner_scope,
+            target_owner_scope: &context.target_owner_scope,
+            items: &items,
+            now_ms: now_ms(),
+        },
+    )
+    .map_err(|error| format!("保存数据传输计划失败: {error}"))?;
+    let progress = db::get_storage_transfer_progress(&state.db_path, &batch_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "数据传输计划不存在".to_string())?;
+    Ok(StorageTransferPreview {
+        batch_id,
         message_count: messages.len(),
         attachment_count: messages
             .iter()
             .filter(|message| message.kind == "file" || message.transcript_source.is_some())
             .count(),
-        total_bytes: messages.iter().map(|message| message.size.max(0)).sum(),
+        total_bytes: progress.total_bytes,
         marked_count: messages.iter().filter(|message| message.marked).count(),
         tag_count: tags.len(),
-        source_profile_name: source.name,
-        target_profile_name: target.name,
+        source_profile_name: context.source.profile_name().to_string(),
+        target_profile_name: context.target.profile_name().to_string(),
+        source_provider_kind: context.source.provider_kind().to_string(),
+        target_provider_kind: context.target.provider_kind().to_string(),
+        skipped_count: progress.skipped_items,
+        conflict_count: progress.conflict_items,
     })
+}
+
+#[tauri::command]
+async fn preview_storage_import(
+    state: State<'_, AppState>,
+    input: StorageImportRequest,
+) -> Result<StorageImportPreview, String> {
+    preview_storage_transfer_with_timeout(state.inner(), input).await
+}
+
+#[tauri::command]
+fn get_storage_transfer_status(
+    state: State<'_, AppState>,
+    batch_id: String,
+) -> Result<Option<StorageTransferProgressResult>, String> {
+    db::get_storage_transfer_progress(&state.db_path, &batch_id)
+        .map_err(|error| error.to_string())?
+        .map(|value| storage_transfer_progress_result(&state.db_path, value))
+        .transpose()
+}
+
+#[tauri::command]
+fn get_latest_storage_transfer_status(
+    state: State<'_, AppState>,
+) -> Result<Option<StorageTransferProgressResult>, String> {
+    db::get_latest_resumable_storage_transfer_progress(&state.db_path)
+        .map_err(|error| error.to_string())?
+        .map(|value| storage_transfer_progress_result(&state.db_path, value))
+        .transpose()
+}
+
+#[tauri::command]
+fn list_resumable_storage_transfers(
+    state: State<'_, AppState>,
+) -> Result<Vec<StorageTransferProgressResult>, String> {
+    db::list_resumable_storage_transfer_progress(&state.db_path)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|value| storage_transfer_progress_result(&state.db_path, value))
+        .collect()
+}
+
+#[tauri::command]
+fn cancel_storage_transfer(state: State<'_, AppState>, batch_id: String) -> Result<bool, String> {
+    let cancelled = db::cancel_storage_transfer(&state.db_path, &batch_id, now_ms())
+        .map_err(|error| error.to_string())?;
+    if cancelled {
+        let _ = fs::remove_dir_all(
+            state
+                .files_base_dir
+                .join("storage-transfers")
+                .join(&batch_id),
+        );
+    }
+    Ok(cancelled)
 }
 
 #[tauri::command]
@@ -1605,9 +2746,23 @@ fn get_storage_import_status(
     state: State<'_, AppState>,
     batch_id: String,
 ) -> Result<Option<StorageImportProgressResult>, String> {
-    db::get_storage_import_progress(&state.db_path, &batch_id)
-        .map(|value| value.map(Into::into))
-        .map_err(|error| error.to_string())
+    get_storage_transfer_status(state, batch_id)
+}
+
+#[tauri::command]
+async fn start_storage_transfer(
+    state: State<'_, AppState>,
+    input: StorageTransferRequest,
+) -> Result<StorageTransferProgressResult, String> {
+    run_storage_transfer(state.inner(), input).await
+}
+
+#[tauri::command]
+async fn resume_storage_transfer(
+    state: State<'_, AppState>,
+    input: StorageTransferRequest,
+) -> Result<StorageTransferProgressResult, String> {
+    run_storage_transfer(state.inner(), input).await
 }
 
 #[tauri::command]
@@ -1615,7 +2770,7 @@ async fn start_storage_import(
     state: State<'_, AppState>,
     input: StorageImportRequest,
 ) -> Result<StorageImportProgressResult, String> {
-    run_storage_import(state.inner(), input).await
+    run_storage_transfer(state.inner(), input).await
 }
 
 #[tauri::command]
@@ -1623,33 +2778,71 @@ async fn resume_storage_import(
     state: State<'_, AppState>,
     input: StorageImportRequest,
 ) -> Result<StorageImportProgressResult, String> {
-    run_storage_import(state.inner(), input).await
+    run_storage_transfer(state.inner(), input).await
 }
 
-async fn run_storage_import(
+async fn run_storage_transfer(
     state: &AppState,
-    input: StorageImportRequest,
-) -> Result<StorageImportProgressResult, String> {
-    let (source, target, session) = storage_import_context(state, &input)?;
-    let messages = db::list_messages_paged(&state.db_path, &source.id, None, None, false, None)
-        .map_err(|error| error.to_string())?;
-    let tags =
-        db::list_marked_tags(&state.db_path, &source.id).map_err(|error| error.to_string())?;
-    let items = build_storage_import_items(&source.id, &messages, &tags);
-    let batch_id = storage_import_batch_id(&source.id, &target.id, &session.user_id);
-    db::create_or_resume_storage_import(
-        &state.db_path,
-        &db::NewStorageImportBatch {
-            batch_id: &batch_id,
-            source_profile_id: &source.id,
-            target_profile_id: &target.id,
-            target_owner_scope: &session.user_id,
-            items: &items,
-            now_ms: now_ms(),
-        },
-    )
-    .map_err(|error| format!("保存导入批次失败: {error}"))?;
+    input: StorageTransferRequest,
+) -> Result<StorageTransferProgressResult, String> {
+    let context = storage_transfer_context(state, &input).await?;
+    let _target_guard = lock_storage_transfer_target(
+        state,
+        context.target.profile_id(),
+        &context.target_owner_scope,
+    )?;
+    refresh_storage_transfer_source(state, &context.source).await?;
+    let (messages, tags) =
+        storage_transfer_messages_and_tags(state, &context.source, &context.source_owner_scope)?;
+    let batch_id = storage_import_batch_id(
+        context.source.profile_id(),
+        context.target.profile_id(),
+        &context.source_owner_scope,
+        &context.target_owner_scope,
+    );
+    if db::get_storage_transfer_progress(&state.db_path, &batch_id)
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        let plan_token = uuid::Uuid::new_v4().to_string();
+        refresh_storage_transfer_source(state, &context.target).await?;
+        let items = prepare_storage_transfer_items(state, &context, &plan_token, &messages, &tags)?;
+        db::create_or_resume_storage_transfer(
+            &state.db_path,
+            &db::NewStorageTransferBatch {
+                batch_id: &batch_id,
+                source_profile_id: context.source.profile_id(),
+                target_profile_id: context.target.profile_id(),
+                source_provider_kind: context.source.provider_kind(),
+                target_provider_kind: context.target.provider_kind(),
+                source_owner_scope: &context.source_owner_scope,
+                target_owner_scope: &context.target_owner_scope,
+                items: &items,
+                now_ms: now_ms(),
+            },
+        )
+        .map_err(|error| format!("保存数据传输计划失败: {error}"))?;
+    }
+    if !db::mark_storage_transfer_running(&state.db_path, &batch_id, now_ms())
+        .map_err(|error| format!("启动数据传输失败: {error}"))?
+    {
+        return Err("数据传输计划不存在或已取消".to_string());
+    }
 
+    let result = run_storage_transfer_batch(state, &context, &batch_id, messages, tags).await;
+    if let Err(error) = &result {
+        let _ = db::mark_storage_transfer_interrupted(&state.db_path, &batch_id, error, now_ms());
+    }
+    result
+}
+
+async fn run_storage_transfer_batch(
+    state: &AppState,
+    context: &StorageTransferContext,
+    batch_id: &str,
+    messages: Vec<Message>,
+    tags: Vec<MarkedTag>,
+) -> Result<StorageTransferProgressResult, String> {
     let source_messages = messages
         .into_iter()
         .map(|message| (message.filename.clone(), message))
@@ -1658,31 +2851,268 @@ async fn run_storage_import(
         .into_iter()
         .map(|tag| (tag.id.clone(), tag))
         .collect::<HashMap<_, _>>();
-    let pending = db::list_storage_import_items(&state.db_path, &batch_id, &["pending", "error"])
+    let pending = db::list_storage_transfer_items(&state.db_path, &batch_id, &["pending", "error"])
         .map_err(|error| error.to_string())?;
     for pending_item in pending {
+        if db::storage_transfer_is_cancelled(&state.db_path, batch_id)
+            .map_err(|error| error.to_string())?
+        {
+            return Err("数据传输已取消".to_string());
+        }
         let result = if pending_item.item_type == "tag" {
-            let source_tag = source_tags
+            transfer_storage_tag(
+                state,
+                context,
+                batch_id,
+                &pending_item,
+                source_tags
+                    .get(&pending_item.source_key)
+                    .ok_or_else(|| "来源标签已不存在".to_string())?,
+            )
+            .await
+        } else {
+            let source_message = source_messages
                 .get(&pending_item.source_key)
-                .ok_or_else(|| "来源标签已不存在".to_string())?;
-            let target_tag = MarkedTag {
-                id: pending_item.entity_id.clone(),
-                name: source_tag.name.clone(),
+                .ok_or_else(|| "来源消息已不存在".to_string())?;
+            if !storage_transfer_source_matches(&pending_item, source_message) {
+                Err("来源数据在预览后已发生变化，已记录冲突".to_string())
+            } else {
+                transfer_storage_message(state, context, batch_id, &pending_item, source_message)
+                    .await
+            }
+        };
+        if let Err(error) = result {
+            let item_state = if error.contains("冲突") {
+                "conflict"
+            } else {
+                "error"
             };
+            db::mark_storage_transfer_item_state(
+                &state.db_path,
+                batch_id,
+                &pending_item.item_type,
+                &pending_item.source_key,
+                item_state,
+                Some(&error),
+                now_ms(),
+            )
+            .map_err(|db_error| db_error.to_string())?;
+        }
+    }
+
+    if db::storage_transfer_is_cancelled(&state.db_path, batch_id)
+        .map_err(|error| error.to_string())?
+    {
+        return Err("数据传输已取消".to_string());
+    }
+
+    if let (storage_provider::ProviderConfig::Supabase(target), Some(session)) =
+        (&context.target, context.target_session.as_ref())
+    {
+        let _sync_guard = state.sync_guard.lock().await;
+        push_supabase_outbox(state, target, session, true, Some(batch_id))
+            .await
+            .map_err(|error| format!("上传数据到目标 Supabase 失败: {error}"))?;
+        if db::storage_transfer_is_cancelled(&state.db_path, batch_id)
+            .map_err(|error| error.to_string())?
+        {
+            return Err("数据传输已取消".to_string());
+        }
+        let remaining = db::count_pending_import_outbox(&state.db_path, batch_id)
+            .map_err(|error| format!("检查目标上传状态失败: {error}"))?;
+        if remaining > 0 {
+            return Err(format!("目标 Supabase 仍有 {remaining} 项数据等待上传"));
+        }
+        let conflicts = db::count_import_conflicts(&state.db_path, batch_id)
+            .map_err(|error| format!("检查目标冲突失败: {error}"))?;
+        if conflicts > 0 {
+            return Err(format!("目标 Supabase 产生 {conflicts} 项数据冲突"));
+        }
+        let _ = pull_supabase_changes(state, target, session).await?;
+        verify_storage_transfer_supabase_target(
+            state,
+            target,
+            session,
+            batch_id,
+            &source_messages,
+            &source_tags,
+        )
+        .await
+        .map_err(|error| format!("核验目标 Supabase 数据失败: {error}"))?;
+        let _ = refresh_supabase_status(state, None);
+    }
+    if matches!(&context.target, storage_provider::ProviderConfig::Webdav(_)) {
+        if db::storage_transfer_is_cancelled(&state.db_path, batch_id)
+            .map_err(|error| error.to_string())?
+        {
+            return Err("数据传输已取消".to_string());
+        }
+        verify_storage_transfer_webdav_target(
+            state,
+            context,
+            batch_id,
+            &source_messages,
+            &source_tags,
+        )
+        .await
+        .map_err(|error| format!("核验目标 WebDAV 数据失败: {error}"))?;
+    }
+    let _ = db::mark_storage_transfer_completed(&state.db_path, batch_id, now_ms())
+        .map_err(|error| format!("完成数据传输任务失败: {error}"))?;
+    let progress = db::get_storage_transfer_progress(&state.db_path, batch_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "数据传输批次不存在".to_string())?;
+    let progress = storage_transfer_progress_result(&state.db_path, progress)?;
+    if progress.status == "completed" {
+        let _ = fs::remove_dir_all(
+            state
+                .files_base_dir
+                .join("storage-transfers")
+                .join(batch_id),
+        );
+    }
+    Ok(progress)
+}
+
+async fn transfer_storage_tag(
+    state: &AppState,
+    context: &StorageTransferContext,
+    batch_id: &str,
+    item: &db::StorageTransferItem,
+    source_tag: &MarkedTag,
+) -> Result<(), String> {
+    let mut target_tags = storage_transfer_target_tags(state, context)?;
+    let mut remote_matching_tag = false;
+    if let (storage_provider::ProviderConfig::Supabase(target), Some(session)) =
+        (&context.target, context.target_session.as_ref())
+    {
+        let config = target
+            .supabase
+            .as_ref()
+            .ok_or_else(|| "Supabase 存储空间配置不完整".to_string())?;
+        if let Some(snapshot) =
+            supabase_sync::fetch_tag_by_name(&state.http, config, session, &source_tag.name).await?
+        {
+            if let (Some(id), Some(name), Some(revision)) = (
+                snapshot["id"].as_str(),
+                snapshot["name"].as_str(),
+                snapshot["revision"].as_i64(),
+            ) {
+                remote_matching_tag = true;
+                target_tags.push((
+                    MarkedTag {
+                        id: id.to_string(),
+                        name: name.to_string(),
+                    },
+                    revision,
+                ));
+            }
+        }
+    }
+    let normalized_name = normalize_storage_transfer_tag_name(&source_tag.name);
+    if let Some((existing, _)) =
+        storage_transfer_matching_target_tag(&target_tags, source_tag, &item.entity_id).filter(
+            |(tag, revision)| {
+                normalize_storage_transfer_tag_name(&tag.name) == normalized_name
+                    && (!matches!(
+                        &context.target,
+                        storage_provider::ProviderConfig::Supabase(_)
+                    ) || remote_matching_tag
+                        || *revision > 0)
+            },
+        )
+    {
+        db::supersede_storage_transfer_item_operations(
+            &state.db_path,
+            batch_id,
+            &item.item_type,
+            &item.source_key,
+            now_ms(),
+        )
+        .map_err(|error| error.to_string())?;
+        if let storage_provider::ProviderConfig::Supabase(target) = &context.target {
+            let mapped_tag_id = remap_storage_transfer_tag_ids(
+                context.source.profile_id(),
+                &context.source_owner_scope,
+                std::slice::from_ref(&source_tag.id),
+            )
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+            if mapped_tag_id != existing.id {
+                db::delete_unconfirmed_tag(
+                    &state.db_path,
+                    &target.id,
+                    &context.target_owner_scope,
+                    &mapped_tag_id,
+                )
+                .map_err(|error| error.to_string())?;
+            }
+        }
+        if existing.id != item.entity_id {
+            db::update_storage_transfer_item_entity_id(
+                &state.db_path,
+                batch_id,
+                &item.item_type,
+                &item.source_key,
+                &existing.id,
+                now_ms(),
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        return db::mark_storage_transfer_item_state(
+            &state.db_path,
+            batch_id,
+            &item.item_type,
+            &item.source_key,
+            "skipped",
+            None,
+            now_ms(),
+        )
+        .map_err(|error| error.to_string());
+    }
+    let target_tag = MarkedTag {
+        id: item.entity_id.clone(),
+        name: source_tag.name.clone(),
+    };
+    match &context.target {
+        storage_provider::ProviderConfig::Webdav(target) => {
+            write_storage_transfer_tag_to_webdav(state, target, &target_tag).await?;
+            db::mark_storage_transfer_item_state(
+                &state.db_path,
+                batch_id,
+                &item.item_type,
+                &item.source_key,
+                "applied",
+                None,
+                now_ms(),
+            )
+            .map_err(|error| error.to_string())
+        }
+        storage_provider::ProviderConfig::Supabase(target) => {
+            let session = context
+                .target_session
+                .as_ref()
+                .ok_or_else(|| "目标 Supabase 存储空间尚未登录".to_string())?;
+            let base_revision = target_tags
+                .iter()
+                .find(|(tag, _)| tag.id == target_tag.id)
+                .map(|(_, revision)| *revision)
+                .unwrap_or_default();
             let operation = outbox_operation_with_id(
-                &pending_item.message_operation_id,
+                &item.message_operation_id,
                 &target.id,
                 &session.user_id,
                 "tag",
                 &target_tag.id,
                 "upsert",
-                0,
+                base_revision,
                 serde_json::json!({"name":target_tag.name}),
             )?;
             db::apply_imported_tag(
                 &state.db_path,
-                &batch_id,
-                &pending_item.source_key,
+                batch_id,
+                &item.source_key,
                 &target.id,
                 &session.user_id,
                 &target_tag,
@@ -1690,64 +3120,65 @@ async fn run_storage_import(
                 now_ms(),
             )
             .map_err(|error| error.to_string())
-        } else {
-            import_storage_message(
-                state,
-                &source,
-                &target,
-                &session,
-                &batch_id,
-                &pending_item,
-                source_messages
-                    .get(&pending_item.source_key)
-                    .ok_or_else(|| "来源消息已不存在".to_string())?,
-            )
-            .await
-        };
-        if let Err(error) = result {
-            db::mark_storage_import_item_error(
-                &state.db_path,
-                &batch_id,
-                &pending_item.item_type,
-                &pending_item.source_key,
-                &error,
-                now_ms(),
-            )
-            .map_err(|db_error| db_error.to_string())?;
         }
     }
-    let staged = db::get_storage_import_progress(&state.db_path, &batch_id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "导入批次不存在".to_string())?;
-    if staged.failed_items > 0 {
-        return Ok(staged.into());
-    }
-
-    let _sync_guard = state.sync_guard.lock().await;
-    push_supabase_outbox(state, &target, &session, true, Some(&batch_id))
-        .await
-        .map_err(|error| format!("上传导入数据到 Supabase 失败: {error}"))?;
-    let remaining = db::count_pending_import_outbox(&state.db_path, &batch_id)
-        .map_err(|error| format!("检查导入上传状态失败: {error}"))?;
-    if remaining > 0 {
-        return Err(format!("Supabase 仍有 {remaining} 项导入数据等待上传"));
-    }
-    let conflicts = db::count_import_conflicts(&state.db_path, &batch_id)
-        .map_err(|error| format!("检查导入冲突失败: {error}"))?;
-    if conflicts > 0 {
-        return Err(format!("Supabase 导入产生 {conflicts} 项数据冲突"));
-    }
-    let _ = pull_supabase_changes(state, &target, &session).await?;
-    let _ = refresh_supabase_status(state, None);
-    db::get_storage_import_progress(&state.db_path, &batch_id)
-        .map_err(|error| error.to_string())?
-        .map(Into::into)
-        .ok_or_else(|| "导入批次不存在".to_string())
 }
 
-async fn import_storage_message(
+async fn transfer_storage_message(
     state: &AppState,
-    source: &WebDavEndpoint,
+    context: &StorageTransferContext,
+    batch_id: &str,
+    item: &db::StorageTransferItem,
+    source_message: &Message,
+) -> Result<(), String> {
+    match &context.target {
+        storage_provider::ProviderConfig::Webdav(target) => {
+            let result = write_storage_transfer_message_to_webdav(
+                state,
+                &context.source,
+                context.source_session.as_ref(),
+                target,
+                batch_id,
+                item,
+                source_message,
+            )
+            .await?;
+            db::mark_storage_transfer_item_state(
+                &state.db_path,
+                batch_id,
+                &item.item_type,
+                &item.source_key,
+                result,
+                None,
+                now_ms(),
+            )
+            .map_err(|error| error.to_string())
+        }
+        storage_provider::ProviderConfig::Supabase(target) => {
+            let session = context
+                .target_session
+                .as_ref()
+                .ok_or_else(|| "目标 Supabase 存储空间尚未登录".to_string())?;
+            import_storage_message_to_supabase(
+                state,
+                &context.source,
+                context.source_session.as_ref(),
+                target,
+                session,
+                batch_id,
+                item,
+                source_message,
+            )
+            .await
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn import_storage_message_to_supabase(
+    state: &AppState,
+    source: &storage_provider::ProviderConfig,
+    source_session: Option<&supabase_auth::SupabaseSession>,
     target: &StorageProfile,
     session: &supabase_auth::SupabaseSession,
     batch_id: &str,
@@ -1756,7 +3187,7 @@ async fn import_storage_message(
 ) -> Result<(), String> {
     let mut message = DbMessage {
         endpoint_id: target.id.clone(),
-        filename: source_message.filename.clone(),
+        filename: storage_transfer_target_filename(source_message, &item.entity_id),
         sender: source_message.sender.clone(),
         timestamp_ms: source_message.timestamp_ms,
         size: source_message.size,
@@ -1769,11 +3200,10 @@ async fn import_storage_message(
         remote_path: None,
         file_hash: source_message.file_hash.clone(),
         marked: source_message.marked,
-        marked_tag_ids: source_message
-            .marked_tag_ids
-            .iter()
-            .map(|tag_id| format!("import:{}:{tag_id}", source.id))
-            .collect(),
+        marked_tag_ids: map_storage_transfer_tag_ids(
+            &storage_transfer_tag_mapping_for_batch(state, batch_id)?,
+            &source_message.marked_tag_ids,
+        ),
         marked_pinned: source_message.marked_pinned,
         marked_due_date: source_message.marked_due_date.clone(),
         format: source_message.format.clone(),
@@ -1781,23 +3211,75 @@ async fn import_storage_message(
         source_audio_mime_type: source_message.source_audio_mime_type.clone(),
         transcript_raw_text: source_message.transcript_raw_text.clone(),
     };
+    let mut message_base_revision = 0;
+    let existing_by_id = db::get_message_by_id_for_scope(
+        &state.db_path,
+        &target.id,
+        &session.user_id,
+        &item.entity_id,
+    )
+    .map_err(|error| error.to_string())?;
+    let existing = if existing_by_id.is_some() {
+        existing_by_id
+    } else {
+        db::get_message_for_scope(
+            &state.db_path,
+            &target.id,
+            &session.user_id,
+            &message.filename,
+        )
+        .map_err(|error| error.to_string())?
+        .map(|message| {
+            let revision = db::get_message_sync_identity(
+                &state.db_path,
+                &target.id,
+                &session.user_id,
+                &message.filename,
+            )
+            .map_err(|error| error.to_string())?
+            .map(|(_, revision)| revision)
+            .unwrap_or_default();
+            Ok::<_, String>((message, revision))
+        })
+        .transpose()?
+    };
+    if let Some((existing, revision)) = existing {
+        if storage_transfer_message_matches_with_tags(
+            &existing,
+            source_message,
+            &message.marked_tag_ids,
+        ) {
+            return db::mark_storage_transfer_item_state(
+                &state.db_path,
+                batch_id,
+                &item.item_type,
+                &item.source_key,
+                "skipped",
+                None,
+                now_ms(),
+            )
+            .map_err(|error| error.to_string());
+        }
+        message_base_revision = revision;
+    }
     let mut attachment_data = None;
     if let Some(attachment_id) = item.attachment_id.as_deref() {
-        let remote_path = source_message
-            .remote_path
-            .as_deref()
-            .ok_or_else(|| "来源附件缺少 WebDAV 路径".to_string())?;
-        let bytes = webdav::download_file(&state.http, source, remote_path).await?;
+        let (cache_path, size, sha256) = cache_storage_transfer_attachment(
+            state,
+            source,
+            source_session,
+            batch_id,
+            item,
+            source_message,
+        )
+        .await?;
         let local_dir = endpoint_files_dir(state, &target.id)
             .join(&session.user_id)
             .join("attachments")
             .join(attachment_id);
         fs::create_dir_all(&local_dir).map_err(|error| format!("创建导入附件目录失败: {error}"))?;
         let local_path = local_dir.join(&message.original_name);
-        fs::write(&local_path, &bytes).map_err(|error| format!("保存导入附件失败: {error}"))?;
-        let mut hasher = Sha256::new();
-        hasher.update(&bytes);
-        let sha256 = format!("{:x}", hasher.finalize());
+        fs::copy(&cache_path, &local_path).map_err(|error| format!("保存导入附件失败: {error}"))?;
         let object_path = supabase_attachment_object_path(
             &session.user_id,
             target
@@ -1808,7 +3290,7 @@ async fn import_storage_message(
             attachment_id,
             &message.original_name,
         );
-        message.size = bytes.len() as i64;
+        message.size = size;
         message.local_path = Some(local_path.to_string_lossy().to_string());
         message.remote_path = Some(object_path.clone());
         message.file_hash = Some(sha256);
@@ -1821,7 +3303,7 @@ async fn import_storage_message(
         "message",
         &item.entity_id,
         "upsert",
-        0,
+        message_base_revision,
         supabase_message_payload(&message),
     )?;
     let attachment = if let Some((attachment_id, object_path)) = attachment_data.as_ref() {
@@ -1832,6 +3314,15 @@ async fn import_storage_message(
         let payload = serde_json::json!({"messageId":item.entity_id,"originalName":message.original_name,
             "objectPath":object_path,"previewObjectPath":null,"mimeType":"application/octet-stream",
             "size":message.size,"sha256":message.file_hash,"uploadStatus":"uploaded"});
+        let attachment_base_revision = db::get_attachment_sync_identity(
+            &state.db_path,
+            &target.id,
+            &session.user_id,
+            attachment_id,
+        )
+        .map_err(|error| error.to_string())?
+        .map(|(_, revision)| revision)
+        .unwrap_or_default();
         Some((
             attachment_id.clone(),
             object_path.clone(),
@@ -1842,7 +3333,7 @@ async fn import_storage_message(
                 "attachment",
                 attachment_id,
                 "upsert",
-                0,
+                attachment_base_revision,
                 payload,
             )?,
         ))
@@ -1868,6 +3359,194 @@ async fn import_storage_message(
         now_ms(),
     )
     .map_err(|error| error.to_string())
+}
+
+fn storage_transfer_remote_field_matches(
+    snapshot: &serde_json::Value,
+    field: &str,
+    expected: &serde_json::Value,
+) -> bool {
+    snapshot.get(field).unwrap_or(&serde_json::Value::Null) == expected
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn verify_storage_transfer_supabase_target(
+    state: &AppState,
+    target: &StorageProfile,
+    session: &supabase_auth::SupabaseSession,
+    batch_id: &str,
+    source_messages: &HashMap<String, Message>,
+    source_tags: &HashMap<String, MarkedTag>,
+) -> Result<(), String> {
+    let config = target
+        .supabase
+        .as_ref()
+        .ok_or_else(|| "Supabase 存储空间配置不完整".to_string())?;
+    let items = db::list_storage_transfer_items(&state.db_path, batch_id, &["applied", "skipped"])
+        .map_err(|error| format!("读取待核验项目失败: {error}"))?;
+    let expected_count = items.len();
+    let mut verified_count = 0usize;
+
+    for item in items {
+        let verification = async {
+            if item.item_type == "tag" {
+                let source = source_tags
+                    .get(&item.source_key)
+                    .ok_or_else(|| format!("来源标签已不存在: {}", item.source_key))?;
+                let snapshot = supabase_sync::fetch_entity_snapshot(
+                    &state.http,
+                    config,
+                    session,
+                    "tag",
+                    &item.entity_id,
+                )
+                .await?
+                .ok_or_else(|| format!("远端标签不存在: {}", item.entity_id))?;
+                if !snapshot["deleted_at"].is_null()
+                    || normalize_storage_transfer_tag_name(
+                        snapshot["name"].as_str().unwrap_or_default(),
+                    ) != normalize_storage_transfer_tag_name(&source.name)
+                {
+                    return Err(format!("远端标签内容不一致: {}", item.entity_id));
+                }
+                return Ok(());
+            }
+
+            let source = source_messages
+                .get(&item.source_key)
+                .ok_or_else(|| format!("来源消息已不存在: {}", item.source_key))?;
+            let mapped_tag_ids = map_storage_transfer_tag_ids(
+                &storage_transfer_tag_mapping_for_batch(state, batch_id)?,
+                &source.marked_tag_ids,
+            );
+            let target_filename = storage_transfer_target_filename(source, &item.entity_id);
+            let expected_size = if item.attachment_id.is_some() {
+                item.total_bytes
+            } else {
+                source.size
+            };
+            let expected_file_hash = if item.attachment_id.is_some() {
+                item.source_hash.as_ref()
+            } else {
+                source.file_hash.as_ref()
+            };
+            let message_snapshot = supabase_sync::fetch_entity_snapshot(
+                &state.http,
+                config,
+                session,
+                "message",
+                &item.entity_id,
+            )
+            .await?
+            .ok_or_else(|| format!("远端消息不存在: {}", item.entity_id))?;
+            let expected_fields = [
+                ("sender", serde_json::json!(source.sender)),
+                ("timestamp_ms", serde_json::json!(source.timestamp_ms)),
+                ("size", serde_json::json!(expected_size)),
+                ("kind", serde_json::json!(source.kind)),
+                ("original_name", serde_json::json!(source.original_name)),
+                ("content", serde_json::json!(source.content)),
+                ("format", serde_json::json!(source.format)),
+                ("file_hash", serde_json::json!(expected_file_hash)),
+                ("legacy_filename", serde_json::json!(target_filename)),
+                ("marked", serde_json::json!(source.marked)),
+                ("marked_tag_ids", serde_json::json!(mapped_tag_ids)),
+                ("marked_pinned", serde_json::json!(source.marked_pinned)),
+                ("marked_due_date", serde_json::json!(source.marked_due_date)),
+                (
+                    "transcript_source",
+                    serde_json::json!(source.transcript_source),
+                ),
+                (
+                    "source_audio_mime_type",
+                    serde_json::json!(source.source_audio_mime_type),
+                ),
+                (
+                    "transcript_raw_text",
+                    serde_json::json!(source.transcript_raw_text),
+                ),
+            ];
+            if !message_snapshot["deleted_at"].is_null()
+                || expected_fields.iter().any(|(field, expected)| {
+                    !storage_transfer_remote_field_matches(&message_snapshot, field, expected)
+                })
+            {
+                return Err(format!("远端消息内容不一致: {}", item.entity_id));
+            }
+
+            if let Some(attachment_id) = item.attachment_id.as_deref() {
+                let attachment_snapshot = supabase_sync::fetch_entity_snapshot(
+                    &state.http,
+                    config,
+                    session,
+                    "attachment",
+                    attachment_id,
+                )
+                .await?
+                .ok_or_else(|| format!("远端附件记录不存在: {attachment_id}"))?;
+                let expected_hash = item
+                    .source_hash
+                    .as_deref()
+                    .ok_or_else(|| format!("附件摘要缺失: {attachment_id}"))?;
+                let object_path = attachment_snapshot["object_path"]
+                    .as_str()
+                    .ok_or_else(|| format!("远端附件 Storage 路径缺失: {attachment_id}"))?;
+                if !attachment_snapshot["deleted_at"].is_null()
+                    || attachment_snapshot["message_id"].as_str() != Some(item.entity_id.as_str())
+                    || attachment_snapshot["size"].as_i64() != Some(item.total_bytes)
+                    || attachment_snapshot["sha256"].as_str() != Some(expected_hash)
+                {
+                    return Err(format!("远端附件记录不一致: {attachment_id}"));
+                }
+                let mut download = supabase_sync::download_storage_object_stream(
+                    &state.http,
+                    config,
+                    session,
+                    object_path,
+                )
+                .await?;
+                let mut size = 0i64;
+                let mut hasher = Sha256::new();
+                while let Some(chunk) = download.stream.next().await {
+                    let chunk =
+                        chunk.map_err(|error| format!("读取远端附件校验数据失败: {error}"))?;
+                    size += chunk.len() as i64;
+                    hasher.update(&chunk);
+                }
+                let actual_hash = format!("{:x}", hasher.finalize());
+                if size != item.total_bytes || actual_hash != expected_hash {
+                    return Err(format!(
+                        "远端附件文件不一致: {attachment_id}（大小 {size}/{}, 摘要 {}）",
+                        item.total_bytes, actual_hash
+                    ));
+                }
+            }
+            Ok(())
+        }
+        .await;
+
+        if let Err(error) = verification {
+            db::mark_storage_transfer_item_state(
+                &state.db_path,
+                batch_id,
+                &item.item_type,
+                &item.source_key,
+                "error",
+                Some(&error),
+                now_ms(),
+            )
+            .map_err(|db_error| format!("记录目标核验失败状态失败: {db_error}"))?;
+            return Err(error);
+        }
+        verified_count += 1;
+    }
+
+    if verified_count != expected_count {
+        return Err(format!(
+            "远端记录数量不一致: 已核验 {verified_count}/{expected_count}"
+        ));
+    }
+    Ok(())
 }
 
 fn active_supabase_scope(
@@ -2003,6 +3682,97 @@ async fn resolve_sync_conflict(
     refresh_supabase_status(&state, None)
 }
 
+#[tauri::command]
+async fn resolve_all_sync_conflicts(
+    state: State<'_, AppState>,
+    input: ResolveAllSyncConflictsInput,
+) -> Result<ResolveAllSyncConflictsResult, String> {
+    resolve_all_sync_conflicts_impl(&state, input).await
+}
+
+async fn resolve_all_sync_conflicts_impl(
+    state: &AppState,
+    input: ResolveAllSyncConflictsInput,
+) -> Result<ResolveAllSyncConflictsResult, String> {
+    let (profile, session) = active_supabase_scope(state)?;
+    let _guard = state.sync_guard.lock().await;
+    let conflicts = db::list_sync_conflicts(&state.db_path, &profile.id, &session.user_id)
+        .map_err(|error| error.to_string())?;
+    let found = conflicts.len();
+    if found == 0 {
+        let status = refresh_supabase_status(state, None)?;
+        return Ok(ResolveAllSyncConflictsResult {
+            found: 0,
+            resolved: 0,
+            remaining: status.conflict_count,
+            sync_error: None,
+            status,
+        });
+    }
+    let conflict_ids = conflicts
+        .iter()
+        .map(|conflict| conflict.id)
+        .collect::<Vec<_>>();
+    let mut sync_error = None;
+    let resolved = match input.resolution.as_str() {
+        "remote" => db::resolve_all_sync_conflicts_use_remote(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            now_ms(),
+        )
+        .map_err(|error| format!("批量采用云端内容失败: {error}"))?,
+        "local" => {
+            let mut latest = HashMap::new();
+            for conflict in conflicts {
+                latest.insert(
+                    (conflict.entity_type.clone(), conflict.entity_id.clone()),
+                    conflict,
+                );
+            }
+            let operations = latest
+                .into_values()
+                .map(|conflict| {
+                    let payload: serde_json::Value =
+                        serde_json::from_str(&conflict.local_payload_json)
+                            .map_err(|error| format!("冲突本机内容无效: {error}"))?;
+                    outbox_operation(
+                        &profile.id,
+                        &session.user_id,
+                        &conflict.entity_type,
+                        &conflict.entity_id,
+                        "upsert",
+                        conflict.remote_revision.unwrap_or(0),
+                        payload,
+                    )
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let resolved = db::resolve_all_sync_conflicts_keep_local(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                &conflict_ids,
+                &operations,
+                now_ms(),
+            )
+            .map_err(|error| format!("批量保留本机内容失败: {error}"))?;
+            if let Err(error) = sync_supabase_profile(state, &profile, &session, true).await {
+                sync_error = Some(error);
+            }
+            resolved
+        }
+        _ => return Err("冲突解决方式无效".into()),
+    };
+    let status = refresh_supabase_status(state, None)?;
+    Ok(ResolveAllSyncConflictsResult {
+        found,
+        resolved,
+        remaining: status.conflict_count,
+        sync_error,
+        status,
+    })
+}
+
 async fn push_supabase_outbox(
     state: &AppState,
     profile: &StorageProfile,
@@ -2097,14 +3867,12 @@ async fn push_supabase_outbox(
                     operation.payload_json = payload_json;
                     operation.payload_hash = payload_hash;
                 }
-                let bytes =
-                    fs::read(&local_path).map_err(|error| format!("读取本地附件失败: {error}"))?;
-                supabase_sync::upload_storage_object(
+                supabase_sync::upload_storage_object_path(
                     &state.http,
                     config,
                     session,
                     &object_path,
-                    bytes,
+                    Path::new(&local_path),
                     "application/octet-stream",
                     sha256.as_deref(),
                 )
@@ -2198,6 +3966,80 @@ async fn push_supabase_outbox(
                 return Err(error.to_string());
             }
             Err(error) => {
+                if operation.entity_type == "attachment"
+                    && operation.action == "upsert"
+                    && error.contains("MESSAGE_NOT_FOUND")
+                {
+                    let payload: serde_json::Value = serde_json::from_str(&operation.payload_json)
+                        .map_err(|parse_error| format!("解析附件关联消息失败: {parse_error}"))?;
+                    let message_id = payload["messageId"]
+                        .as_str()
+                        .ok_or_else(|| "附件关联消息 ID 缺失".to_string())?;
+                    let (message, _) = db::get_message_by_id_for_scope(
+                        &state.db_path,
+                        &profile.id,
+                        &session.user_id,
+                        message_id,
+                    )
+                    .map_err(|db_error| format!("读取待恢复消息失败: {db_error}"))?
+                    .ok_or_else(|| "附件关联消息的本地记录不存在".to_string())?;
+                    let message_operation = outbox_operation(
+                        &profile.id,
+                        &session.user_id,
+                        "message",
+                        message_id,
+                        "upsert",
+                        0,
+                        supabase_message_payload(&message),
+                    )?;
+                    if db::repair_missing_attachment_message(
+                        &state.db_path,
+                        &operation.operation_id,
+                        &worker_id,
+                        &message_operation,
+                        now_ms(),
+                    )
+                    .map_err(|db_error| format!("恢复附件关联消息失败: {db_error}"))?
+                    {
+                        continue;
+                    }
+                }
+                if operation.entity_type == "tag"
+                    && operation.action == "upsert"
+                    && error.contains("tags_active_name_idx")
+                {
+                    let payload: serde_json::Value = serde_json::from_str(&operation.payload_json)
+                        .map_err(|parse_error| format!("解析重复标签信息失败: {parse_error}"))?;
+                    let tag_name = payload["name"]
+                        .as_str()
+                        .ok_or_else(|| "重复标签名称缺失".to_string())?;
+                    if let Some(snapshot) =
+                        supabase_sync::fetch_tag_by_name(&state.http, config, session, tag_name)
+                            .await?
+                    {
+                        if let (Some(id), Some(name), Some(revision)) = (
+                            snapshot["id"].as_str(),
+                            snapshot["name"].as_str(),
+                            snapshot["revision"].as_i64(),
+                        ) {
+                            db::reconcile_duplicate_tag_operation(
+                                &state.db_path,
+                                &operation,
+                                &MarkedTag {
+                                    id: id.to_string(),
+                                    name: name.to_string(),
+                                },
+                                revision,
+                                &worker_id,
+                                now_ms(),
+                            )
+                            .map_err(|db_error| {
+                                format!("合并 Supabase 同名标签失败: {db_error}")
+                            })?;
+                            continue;
+                        }
+                    }
+                }
                 let retry_at = now_ms() + db::outbox_retry_delay_ms(operation.attempt_count);
                 db::release_outbox_operation(
                     &state.db_path,
@@ -2281,6 +4123,33 @@ async fn pull_supabase_changes(
         }
     }
     Ok(applied)
+}
+
+async fn refresh_supabase_recent_message_page(
+    state: &AppState,
+    profile: &StorageProfile,
+    session: &supabase_auth::SupabaseSession,
+    limit: usize,
+) -> Result<usize, String> {
+    let config = profile
+        .supabase
+        .as_ref()
+        .ok_or_else(|| "Supabase 存储空间配置不完整".to_string())?;
+    let page = supabase_sync::fetch_message_page(&state.http, config, session, None, limit).await?;
+    let count = page.messages.len();
+    db::apply_supabase_message_page(
+        &state.db_path,
+        &profile.id,
+        &session.user_id,
+        &page.messages,
+        &page.tags,
+        &page.attachments,
+        page.has_more,
+        false,
+        now_ms(),
+    )
+    .map_err(|error| format!("刷新 Supabase 最近消息失败: {error}"))?;
+    Ok(count)
 }
 
 async fn sync_supabase_profile(
@@ -2418,6 +4287,128 @@ async fn supabase_current_user(
 }
 
 #[tauri::command]
+async fn list_supabase_spaces(
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<Vec<SupabaseSpaceOption>, String> {
+    list_supabase_spaces_impl(&state, &profile_id).await
+}
+
+async fn list_supabase_spaces_impl(
+    state: &AppState,
+    profile_id: &str,
+) -> Result<Vec<SupabaseSpaceOption>, String> {
+    let settings = current_settings(&state)?;
+    let profile = match storage_provider::resolve_provider_by_id(&settings, profile_id)? {
+        storage_provider::ProviderConfig::Supabase(profile) => profile,
+        storage_provider::ProviderConfig::Webdav(_) => {
+            return Err("该存储空间不是 Supabase".to_string())
+        }
+    };
+    let config = profile
+        .supabase
+        .as_ref()
+        .ok_or_else(|| "Supabase 存储空间配置不完整".to_string())?;
+    let session = verified_supabase_session(state, profile_id)
+        .await
+        .map_err(|error| error.message)?
+        .ok_or_else(|| "请先登录当前 Supabase 账号".to_string())?;
+    let spaces = supabase_sync::list_spaces(&state.http, config, &session).await?;
+    Ok(spaces
+        .into_iter()
+        .map(|space| {
+            let local_profile_id = settings.storage_profiles.iter().find_map(|candidate| {
+                let candidate_config = candidate.supabase.as_ref()?;
+                (candidate.provider_kind == StorageProviderKind::Supabase
+                    && candidate_config.api_url.trim_end_matches('/')
+                        == config.api_url.trim_end_matches('/')
+                    && candidate_config.space_id == space.id)
+                    .then(|| candidate.id.clone())
+            });
+            let current =
+                local_profile_id.as_deref() == settings.active_storage_profile_id.as_deref();
+            SupabaseSpaceOption {
+                current,
+                id: space.id,
+                name: space.name,
+                message_count: space.message_count,
+                updated_at: space.updated_at,
+                local_profile_id,
+            }
+        })
+        .collect())
+}
+
+#[tauri::command]
+async fn switch_supabase_space(
+    state: State<'_, AppState>,
+    input: SwitchSupabaseSpaceInput,
+) -> Result<Settings, String> {
+    switch_supabase_space_impl(&state, input).await
+}
+
+async fn switch_supabase_space_impl(
+    state: &AppState,
+    input: SwitchSupabaseSpaceInput,
+) -> Result<Settings, String> {
+    let mut settings = current_settings(&state)?;
+    let source =
+        match storage_provider::resolve_provider_by_id(&settings, &input.source_profile_id)? {
+            storage_provider::ProviderConfig::Supabase(profile) => profile,
+            storage_provider::ProviderConfig::Webdav(_) => {
+                return Err("当前存储空间不是 Supabase".to_string())
+            }
+        };
+    let source_config = source
+        .supabase
+        .as_ref()
+        .ok_or_else(|| "Supabase 存储空间配置不完整".to_string())?;
+    let session = verified_supabase_session(&state, &source.id)
+        .await
+        .map_err(|error| error.message)?
+        .ok_or_else(|| "请先登录当前 Supabase 账号".to_string())?;
+    let spaces = supabase_sync::list_spaces(&state.http, source_config, &session).await?;
+    let remote = spaces
+        .into_iter()
+        .find(|space| space.id == input.space_id)
+        .ok_or_else(|| "所选 Supabase 空间不存在或当前账号无权访问".to_string())?;
+    if source_config.space_id == remote.id {
+        return Ok(settings);
+    }
+    if db::has_pending_profile_work(&state.db_path, &source.id)
+        .map_err(|error| format!("检查存储空间未完成任务失败: {error}"))?
+    {
+        return Err(
+            "当前存储空间仍有待上传、同步冲突或未完成的数据传输，请先处理后再切换".to_string(),
+        );
+    }
+
+    cancel_active_sync(state)?;
+    db::reset_profile_local_state_for_destination_change(&state.db_path, &source.id)
+        .map_err(|error| format!("重置原存储空间本地缓存失败: {error}"))?;
+    let profile = settings
+        .storage_profiles
+        .iter_mut()
+        .find(|profile| profile.id == source.id)
+        .ok_or_else(|| "Supabase 存储空间不存在".to_string())?;
+    profile
+        .supabase
+        .as_mut()
+        .ok_or_else(|| "Supabase 存储空间配置不完整".to_string())?
+        .space_id = remote.id;
+    settings.active_storage_profile_id = Some(source.id.clone());
+    settings.active_webdav_id = None;
+    let settings = normalize_settings(settings, &state.default_download_dir)?;
+    write_settings_audited(&state.settings_path, &settings)?;
+    *state
+        .settings
+        .lock()
+        .map_err(|_| "写入设置失败".to_string())? = settings.clone();
+    signal_sync_loop_reset(state);
+    Ok(settings)
+}
+
+#[tauri::command]
 async fn supabase_logout(
     state: State<'_, AppState>,
     profile_id: String,
@@ -2482,6 +4473,32 @@ async fn test_supabase_connection(
         access_token.as_deref(),
     )
     .await)
+}
+
+#[tauri::command]
+async fn test_supabase_draft_connection(
+    state: State<'_, AppState>,
+    input: SupabaseDraftConnectionInput,
+) -> Result<supabase_connection::SupabaseConnectionCheck, String> {
+    let api_url = input.api_url.trim().trim_end_matches('/');
+    let anon_key = input.anon_key.trim();
+    if api_url.is_empty() || anon_key.is_empty() {
+        return Err("请填写 Supabase API URL 和公开 Key".to_string());
+    }
+    let access_token = input
+        .profile_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|profile_id| !profile_id.is_empty())
+        .and_then(|profile_id| {
+            state
+                .supabase_sessions
+                .lock()
+                .ok()?
+                .get(profile_id)
+                .map(|session| session.access_token.clone())
+        });
+    Ok(supabase_connection::check(&state.http, api_url, anon_key, access_token.as_deref()).await)
 }
 
 #[tauri::command]
@@ -3057,6 +5074,49 @@ async fn save_settings(
 ) -> Result<Settings, String> {
     let previous = current_settings(&state)?;
     let normalized = normalize_settings(settings, &state.default_download_dir)?;
+    for old_profile in &previous.storage_profiles {
+        let Some(new_profile) = normalized
+            .storage_profiles
+            .iter()
+            .find(|profile| profile.id == old_profile.id)
+        else {
+            continue;
+        };
+        let destination_changed = match old_profile.provider_kind {
+            StorageProviderKind::Webdav => {
+                old_profile.webdav.as_ref().map(|value| value.url.trim())
+                    != new_profile.webdav.as_ref().map(|value| value.url.trim())
+            }
+            StorageProviderKind::Supabase => {
+                let old = old_profile.supabase.as_ref();
+                let new = new_profile.supabase.as_ref();
+                old.map(|value| {
+                    (
+                        value.api_url.trim(),
+                        value.anon_key.trim(),
+                        value.space_id.trim(),
+                    )
+                }) != new.map(|value| {
+                    (
+                        value.api_url.trim(),
+                        value.anon_key.trim(),
+                        value.space_id.trim(),
+                    )
+                })
+            }
+        };
+        if destination_changed
+            && (db::has_profile_business_data(&state.db_path, &old_profile.id)
+                .map_err(|error| error.to_string())?
+                || db::has_pending_profile_work(&state.db_path, &old_profile.id)
+                    .map_err(|error| error.to_string())?)
+        {
+            return Err(format!(
+                "存储空间“{}”已有数据或未完成任务，不能直接修改远端地址，请新建存储空间",
+                old_profile.name
+            ));
+        }
+    }
 
     #[cfg(desktop)]
     update_hotkey_registrations(&app, &state, &normalized)?;
@@ -3093,6 +5153,199 @@ async fn save_settings(
     let _ = persist_integration_module_statuses(&state);
 
     Ok(normalized)
+}
+
+fn storage_profile_destination_changed(old: &StorageProfile, new: &StorageProfile) -> bool {
+    if old.provider_kind != new.provider_kind {
+        return true;
+    }
+    match old.provider_kind {
+        StorageProviderKind::Webdav => {
+            old.webdav.as_ref().map(|value| value.url.trim())
+                != new.webdav.as_ref().map(|value| value.url.trim())
+        }
+        StorageProviderKind::Supabase => {
+            let old = old.supabase.as_ref();
+            let new = new.supabase.as_ref();
+            old.map(|value| {
+                (
+                    value.api_url.trim().trim_end_matches('/'),
+                    value.anon_key.trim(),
+                    value.space_id.trim(),
+                )
+            }) != new.map(|value| {
+                (
+                    value.api_url.trim().trim_end_matches('/'),
+                    value.anon_key.trim(),
+                    value.space_id.trim(),
+                )
+            })
+        }
+    }
+}
+
+fn same_supabase_destination(left: &StorageProfile, right: &StorageProfile) -> bool {
+    if left.provider_kind != StorageProviderKind::Supabase
+        || right.provider_kind != StorageProviderKind::Supabase
+    {
+        return false;
+    }
+    let (Some(left), Some(right)) = (left.supabase.as_ref(), right.supabase.as_ref()) else {
+        return false;
+    };
+    !left.space_id.trim().is_empty()
+        && left.api_url.trim().trim_end_matches('/') == right.api_url.trim().trim_end_matches('/')
+        && left.space_id.trim() == right.space_id.trim()
+}
+
+fn save_storage_profile_impl(
+    state: &AppState,
+    input: SaveStorageProfileInput,
+) -> Result<Settings, String> {
+    let mut settings = current_settings(state)?;
+    let original_profile_id = input
+        .original_profile_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let mut profile = input.profile;
+
+    if let Some(original_profile_id) = original_profile_id {
+        let index = settings
+            .storage_profiles
+            .iter()
+            .position(|candidate| candidate.id == original_profile_id)
+            .ok_or_else(|| {
+                "正在编辑的存储空间已不存在，已停止保存；请关闭弹框后重新打开".to_string()
+            })?;
+        let previous = settings.storage_profiles[index].clone();
+        profile.id = original_profile_id.to_string();
+        if profile.provider_kind != previous.provider_kind {
+            return Err("编辑存储空间时不能改变存储类型，请新建存储空间".to_string());
+        }
+        if storage_profile_destination_changed(&previous, &profile) {
+            if settings
+                .storage_profiles
+                .iter()
+                .enumerate()
+                .any(|(candidate_index, candidate)| {
+                    candidate_index != index && same_supabase_destination(candidate, &profile)
+                })
+            {
+                return Err("该 Supabase Space 已经添加，请直接切换到已有存储空间".to_string());
+            }
+            if db::has_profile_business_data(&state.db_path, original_profile_id)
+                .map_err(|error| error.to_string())?
+                || db::has_pending_profile_work(&state.db_path, original_profile_id)
+                    .map_err(|error| error.to_string())?
+            {
+                return Err(format!(
+                    "存储空间“{}”已有数据或未完成任务，不能直接修改远端地址，请新建存储空间",
+                    previous.name
+                ));
+            }
+        }
+        settings.storage_profiles[index] = profile;
+    } else {
+        if settings
+            .storage_profiles
+            .iter()
+            .any(|candidate| candidate.id == profile.id)
+        {
+            return Err("存储空间 ID 已存在，请重新打开新增弹框".to_string());
+        }
+        if settings
+            .storage_profiles
+            .iter()
+            .any(|candidate| same_supabase_destination(candidate, &profile))
+        {
+            return Err("该 Supabase Space 已经添加，请直接切换到已有存储空间".to_string());
+        }
+        settings.storage_profiles.push(profile);
+    }
+
+    settings.webdav_endpoints = settings
+        .storage_profiles
+        .iter()
+        .filter_map(StorageProfile::to_webdav)
+        .collect();
+    let normalized = normalize_settings(settings, &state.default_download_dir)?;
+    write_settings_audited(&state.settings_path, &normalized)?;
+    *state
+        .settings
+        .lock()
+        .map_err(|_| "写入设置失败".to_string())? = normalized.clone();
+    signal_sync_loop_reset(state);
+    Ok(normalized)
+}
+
+#[tauri::command]
+fn save_storage_profile(
+    state: State<'_, AppState>,
+    input: SaveStorageProfileInput,
+) -> Result<Settings, String> {
+    save_storage_profile_impl(&state, input)
+}
+
+#[tauri::command]
+fn remove_storage_profile(
+    state: State<'_, AppState>,
+    input: RemoveStorageProfileInput,
+) -> Result<Settings, String> {
+    remove_storage_profile_impl(&state, &input.profile_id, input.force)
+}
+
+fn remove_storage_profile_impl(
+    state: &AppState,
+    profile_id: &str,
+    force: bool,
+) -> Result<Settings, String> {
+    let profile_id = profile_id.trim();
+    if profile_id.is_empty() {
+        return Err("未指定要移除的存储空间".to_string());
+    }
+    let mut settings = current_settings(&state)?;
+    let is_active = settings.active_storage_profile_id.as_deref() == Some(profile_id)
+        || settings.active_webdav_id.as_deref() == Some(profile_id);
+    if is_active && !force {
+        return Err("当前正在使用的存储空间不能移除，请先切换到其他空间".to_string());
+    }
+    if is_active {
+        cancel_active_sync(state)?;
+        settings.active_storage_profile_id = None;
+        settings.active_webdav_id = None;
+    }
+    let has_pending_work = db::has_pending_profile_work(&state.db_path, profile_id)
+        .map_err(|error| format!("检查存储空间未完成任务失败: {error}"))?;
+    if has_pending_work && !force {
+        return Err("该存储空间仍有待上传、冲突或未完成的数据传输任务".to_string());
+    }
+    let removed = settings
+        .storage_profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)
+        .cloned()
+        .ok_or_else(|| "存储空间不存在".to_string())?;
+    if has_pending_work {
+        db::abandon_profile_work(&state.db_path, profile_id, now_ms())
+            .map_err(|error| format!("放弃存储空间未完成任务失败: {error}"))?;
+    }
+    settings
+        .storage_profiles
+        .retain(|profile| profile.id != profile_id);
+    settings
+        .webdav_endpoints
+        .retain(|endpoint| endpoint.id != profile_id);
+    if removed.provider_kind == StorageProviderKind::Supabase {
+        remove_supabase_session(&state, profile_id).map_err(|error| error.message)?;
+    }
+    write_settings_audited(&state.settings_path, &settings)?;
+    *state
+        .settings
+        .lock()
+        .map_err(|_| "写入设置失败".to_string())? = settings.clone();
+    signal_sync_loop_reset(&state);
+    Ok(settings)
 }
 
 #[tauri::command]
@@ -5773,6 +8026,7 @@ fn bulk_download_status_counts(resources: &[BulkDownloadResource]) -> BulkDownlo
 fn query_bulk_download_resources(
     state: &AppState,
     endpoint_id: &str,
+    owner_scope: &str,
     input: &BulkDownloadQueryInput,
 ) -> Result<
     (
@@ -5785,6 +8039,7 @@ fn query_bulk_download_resources(
     let rows = db::list_bulk_download_candidates(
         &state.db_path,
         endpoint_id,
+        owner_scope,
         input.search_query.as_deref(),
     )
     .map_err(|err| format!("读取批量下载资料失败: {err}"))?;
@@ -5830,6 +8085,23 @@ fn query_bulk_download_resources(
     Ok((filtered, category_counts, extensions))
 }
 
+fn active_bulk_download_scope(state: &AppState) -> Result<(String, String), String> {
+    let settings = current_settings(state)?;
+    match storage_provider::resolve_active_provider(&settings)? {
+        storage_provider::ProviderConfig::Webdav(endpoint) => Ok((endpoint.id, String::new())),
+        storage_provider::ProviderConfig::Supabase(profile) => {
+            let session = state
+                .supabase_sessions
+                .lock()
+                .map_err(|_| "读取 Supabase 会话失败".to_string())?
+                .get(&profile.id)
+                .cloned()
+                .ok_or_else(|| "请先登录当前 Supabase 存储空间".to_string())?;
+            Ok((profile.id, session.user_id))
+        }
+    }
+}
+
 #[tauri::command]
 fn list_bulk_download_resources(
     state: State<'_, AppState>,
@@ -5842,12 +8114,11 @@ fn list_bulk_download_resources_for_state(
     state: &AppState,
     input: BulkDownloadQueryInput,
 ) -> Result<BulkDownloadResourcesResult, String> {
-    let settings = current_settings(state)?;
-    let endpoint = resolve_active_endpoint(&settings)?;
+    let (profile_id, owner_scope) = active_bulk_download_scope(state)?;
     let page = input.page.unwrap_or(1).max(1);
     let page_size = input.page_size.unwrap_or(60).clamp(10, 200);
     let (resources, category_counts, extensions) =
-        query_bulk_download_resources(&state, &endpoint.id, &input)?;
+        query_bulk_download_resources(state, &profile_id, &owner_scope, &input)?;
     let total = resources.len() as i64;
     let total_size = resources.iter().map(|resource| resource.size).sum();
     let status_counts = bulk_download_status_counts(&resources);
@@ -5876,9 +8147,9 @@ fn resolve_bulk_download_selection_for_state(
     state: &AppState,
     input: BulkDownloadQueryInput,
 ) -> Result<BulkDownloadSelectionResult, String> {
-    let settings = current_settings(state)?;
-    let endpoint = resolve_active_endpoint(&settings)?;
-    let (resources, _, _) = query_bulk_download_resources(state, &endpoint.id, &input)?;
+    let (profile_id, owner_scope) = active_bulk_download_scope(state)?;
+    let (resources, _, _) =
+        query_bulk_download_resources(state, &profile_id, &owner_scope, &input)?;
     let total = resources.len() as i64;
     let total_size = resources.iter().map(|resource| resource.size).sum();
     let status_counts = bulk_download_status_counts(&resources);
@@ -5902,11 +8173,14 @@ fn prepare_bulk_download_resources_for_state(
     state: &AppState,
     input: PrepareBulkDownloadInput,
 ) -> Result<BulkDownloadSelectionResult, String> {
-    let settings = current_settings(state)?;
-    let endpoint = resolve_active_endpoint(&settings)?;
+    let (profile_id, owner_scope) = active_bulk_download_scope(state)?;
     let wanted: HashSet<_> = input.keys.into_iter().collect();
-    let (resources, _, _) =
-        query_bulk_download_resources(state, &endpoint.id, &BulkDownloadQueryInput::default())?;
+    let (resources, _, _) = query_bulk_download_resources(
+        state,
+        &profile_id,
+        &owner_scope,
+        &BulkDownloadQueryInput::default(),
+    )?;
     let resources: Vec<_> = resources
         .into_iter()
         .filter(|resource| wanted.contains(&resource.key))
@@ -5930,15 +8204,74 @@ fn prepare_bulk_download_resources(
     prepare_bulk_download_resources_for_state(&state, input)
 }
 
+async fn hydrate_supabase_message_history(
+    state: &AppState,
+    profile: &StorageProfile,
+    session: &supabase_auth::SupabaseSession,
+    load_older: bool,
+    limit: usize,
+) -> Result<(), String> {
+    let config = profile
+        .supabase
+        .as_ref()
+        .ok_or_else(|| "Supabase 存储空间配置不完整".to_string())?;
+    let mut cursor = db::get_supabase_history_cursor(&state.db_path, &profile.id, &session.user_id)
+        .map_err(|error| format!("读取 Supabase 历史游标失败: {error}"))?;
+
+    if !cursor.initialized {
+        let page =
+            supabase_sync::fetch_message_page(&state.http, config, session, None, limit).await?;
+        db::apply_supabase_message_page(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            &page.messages,
+            &page.tags,
+            &page.attachments,
+            page.has_more,
+            true,
+            now_ms(),
+        )
+        .map_err(|error| format!("保存 Supabase 最近消息失败: {error}"))?;
+        cursor = db::get_supabase_history_cursor(&state.db_path, &profile.id, &session.user_id)
+            .map_err(|error| format!("读取 Supabase 历史游标失败: {error}"))?;
+    } else if !load_older {
+        refresh_supabase_recent_message_page(state, profile, session, limit).await?;
+    }
+
+    if load_older && cursor.has_more_before {
+        let before = cursor
+            .oldest_timestamp_ms
+            .zip(cursor.oldest_message_id.as_deref())
+            .ok_or_else(|| "Supabase 历史游标不完整，请重新打开当前存储空间".to_string())?;
+        let page =
+            supabase_sync::fetch_message_page(&state.http, config, session, Some(before), limit)
+                .await?;
+        db::apply_supabase_message_page(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            &page.messages,
+            &page.tags,
+            &page.attachments,
+            page.has_more,
+            true,
+            now_ms(),
+        )
+        .map_err(|error| format!("保存 Supabase 更早消息失败: {error}"))?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
-fn list_messages_window(
+async fn list_messages_window(
     state: State<'_, AppState>,
     input: Option<ListMessagesWindowInput>,
 ) -> Result<MessagesWindowResult, String> {
     let settings = current_settings(&state)?;
     let provider = storage_provider::resolve_active_provider(&settings)?;
-    let (profile_id, owner_scope) = match &provider {
-        storage_provider::ProviderConfig::Webdav(endpoint) => (endpoint.id.clone(), None),
+    let (profile_id, owner_scope, supabase_context) = match &provider {
+        storage_provider::ProviderConfig::Webdav(endpoint) => (endpoint.id.clone(), None, None),
         storage_provider::ProviderConfig::Supabase(profile) => {
             let session = state
                 .supabase_sessions
@@ -5947,12 +8280,58 @@ fn list_messages_window(
                 .get(&profile.id)
                 .cloned()
                 .ok_or_else(|| "请先登录当前 Supabase 存储空间".to_string())?;
-            (profile.id.clone(), Some(session.user_id))
+            (
+                profile.id.clone(),
+                Some(session.user_id.clone()),
+                Some((profile.clone(), session)),
+            )
         }
     };
     let input = input.unwrap_or_default();
     let marked_filter = input.only_marked.unwrap_or(false);
     let limit = input.limit.unwrap_or(50).clamp(1, 200);
+    let load_older = input.before_timestamp_ms.is_some() && input.before_filename.is_some();
+    let load_latest =
+        !load_older && input.after_timestamp_ms.is_none() && input.after_filename.is_none();
+
+    if let Some((profile, session)) = supabase_context.as_ref() {
+        let local_count = db::count_messages_for_scope(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            marked_filter,
+        )
+        .map_err(|error| error.to_string())?;
+        let local_before_count = match (input.before_timestamp_ms, input.before_filename.as_deref())
+        {
+            (Some(timestamp_ms), Some(boundary)) => db::count_messages_before_for_scope(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                timestamp_ms,
+                boundary,
+                marked_filter,
+            )
+            .map_err(|error| error.to_string())?,
+            _ => 0,
+        };
+        let should_load_remote_older = load_older && local_before_count < limit;
+        if load_latest || should_load_remote_older {
+            if let Err(error) = hydrate_supabase_message_history(
+                &state,
+                profile,
+                session,
+                should_load_remote_older,
+                limit as usize,
+            )
+            .await
+            {
+                if local_count == 0 || (load_older && local_before_count == 0) {
+                    return Err(error);
+                }
+            }
+        }
+    }
 
     let total = if let Some(owner_scope) = owner_scope.as_deref() {
         db::count_messages_for_scope(&state.db_path, &profile_id, owner_scope, marked_filter)
@@ -6035,7 +8414,7 @@ fn list_messages_window(
             .map_err(|err| err.to_string())?
     };
 
-    let has_more_before = if let Some(first) = messages.first() {
+    let local_has_more_before = if let Some(first) = messages.first() {
         if let Some(owner_scope) = owner_scope.as_deref() {
             db::count_messages_before_for_scope(
                 &state.db_path,
@@ -6059,11 +8438,18 @@ fn list_messages_window(
     } else {
         false
     };
+    let remote_has_more_before = if let Some((profile, session)) = supabase_context.as_ref() {
+        db::get_supabase_history_cursor(&state.db_path, &profile.id, &session.user_id)
+            .map_err(|error| error.to_string())?
+            .has_more_before
+    } else {
+        false
+    };
 
     Ok(MessagesWindowResult {
         messages,
         total,
-        has_more_before,
+        has_more_before: local_has_more_before || remote_has_more_before,
         marked_count,
     })
 }
@@ -7516,9 +9902,28 @@ async fn download_message_file_impl(
             fs::copy(cached, &final_path)
                 .map_err(|error| format!("复制已缓存附件失败: {error}"))?;
         } else {
+            let message_id = db::get_message_sync_identity(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                filename,
+            )
+            .map_err(|error| format!("读取附件标识失败: {error}"))?
+            .map(|(message_id, _)| message_id);
+            let attachment_object_path = match message_id.as_deref() {
+                Some(message_id) => db::get_attachment_object_path_for_message(
+                    &state.db_path,
+                    &profile.id,
+                    &session.user_id,
+                    message_id,
+                )
+                .map_err(|error| format!("读取附件云端路径失败: {error}"))?,
+                None => None,
+            };
             let object_path = message
                 .remote_path
                 .as_deref()
+                .or(attachment_object_path.as_deref())
                 .ok_or_else(|| "附件尚未上传，当前仅保存在原设备".to_string())?;
             let config = profile
                 .supabase
@@ -8636,9 +11041,24 @@ async fn fetch_image_preview(
         {
             return Ok(path.to_string_lossy().to_string());
         }
+        let message_id =
+            db::get_message_sync_identity(&state.db_path, &profile.id, &session.user_id, &filename)
+                .map_err(|error| format!("读取附件标识失败: {error}"))?
+                .map(|(message_id, _)| message_id);
+        let attachment_object_path = match message_id.as_deref() {
+            Some(message_id) => db::get_attachment_object_path_for_message(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                message_id,
+            )
+            .map_err(|error| format!("读取附件云端路径失败: {error}"))?,
+            None => None,
+        };
         let object_path = message
             .remote_path
             .as_deref()
+            .or(attachment_object_path.as_deref())
             .ok_or_else(|| "附件未缓存，且尚未上传云端".to_string())?;
         let config = profile
             .supabase
@@ -9026,6 +11446,21 @@ fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
 pub struct SpeedTestResult {
     upload_speed_mbps: f64,
     download_speed_mbps: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebDavConnectionCheck {
+    reachable: bool,
+}
+
+#[tauri::command]
+async fn test_webdav_connection(
+    state: State<'_, AppState>,
+    endpoint: WebDavEndpoint,
+) -> Result<WebDavConnectionCheck, String> {
+    webdav::list_entries(&state.http, &endpoint, None, false).await?;
+    Ok(WebDavConnectionCheck { reachable: true })
 }
 
 #[tauri::command]
@@ -15201,6 +17636,8 @@ fn main() {
             db::init_db(&db_path, migration_endpoint_id)?;
             db::recover_all_outbox_claims(&db_path, now_ms())
                 .map_err(|err| format!("恢复未确认同步任务失败: {err}"))?;
+            db::recover_storage_transfer_runs(&db_path, now_ms())
+                .map_err(|err| format!("恢复数据传输任务失败: {err}"))?;
             fs::create_dir_all(&files_base_dir)
                 .map_err(|err| format!("创建文件目录失败: {err}"))?;
 
@@ -15216,6 +17653,7 @@ fn main() {
                 supabase_auth_guard: AsyncMutex::new(()),
                 sync_status: Mutex::new(SyncStatus::idle()),
                 sync_guard: Arc::new(AsyncMutex::new(())),
+                storage_transfer_targets: Mutex::new(HashSet::new()),
                 sync_cancel: Mutex::new(None),
                 sync_loop_signal,
                 http: Client::builder()
@@ -15553,8 +17991,18 @@ fn main() {
             supabase_sign_in,
             supabase_refresh_session,
             supabase_current_user,
+            list_supabase_spaces,
+            switch_supabase_space,
             supabase_logout,
             test_supabase_connection,
+            test_supabase_draft_connection,
+            preview_storage_transfer,
+            start_storage_transfer,
+            resume_storage_transfer,
+            cancel_storage_transfer,
+            get_storage_transfer_status,
+            get_latest_storage_transfer_status,
+            list_resumable_storage_transfers,
             preview_storage_import,
             start_storage_import,
             resume_storage_import,
@@ -15563,6 +18011,7 @@ fn main() {
             retry_pending_operation,
             list_sync_conflicts,
             resolve_sync_conflict,
+            resolve_all_sync_conflicts,
             get_telegram_bridge_status,
             list_integration_modules,
             get_auto_backup_status,
@@ -15578,6 +18027,8 @@ fn main() {
             restart_app,
             discover_telegram_chats,
             save_settings,
+            save_storage_profile,
+            remove_storage_profile,
             paste_dictation_text,
             copy_dictation_text,
             show_system_dictation_window,
@@ -15648,6 +18099,7 @@ fn main() {
             rename_marked_tag,
             toggle_marked_message_pin,
             test_webdav_speed,
+            test_webdav_connection,
             backup_webdav,
             restore_webdav,
             resolve_webdav_conflict
@@ -15703,9 +18155,11 @@ mod tests {
     struct TestDavState {
         files: Arc<Mutex<TestHashMap<String, Vec<u8>>>>,
         get_counts: Arc<Mutex<TestHashMap<String, usize>>>,
+        put_counts: Arc<Mutex<TestHashMap<String, usize>>>,
         delete_counts: Arc<Mutex<TestHashMap<String, usize>>>,
         slow_gets: Arc<Mutex<HashSet<String>>>,
         failed_gets: Arc<Mutex<HashSet<String>>>,
+        failed_puts: Arc<Mutex<HashSet<String>>>,
         active_slow_streams: Arc<AtomicUsize>,
     }
 
@@ -15730,6 +18184,15 @@ mod tests {
         fn delete_count(&self, path: &str) -> usize {
             *self
                 .delete_counts
+                .lock()
+                .unwrap()
+                .get(&decode_test_dav_path(path))
+                .unwrap_or(&0)
+        }
+
+        fn put_count(&self, path: &str) -> usize {
+            *self
+                .put_counts
                 .lock()
                 .unwrap()
                 .get(&decode_test_dav_path(path))
@@ -15872,6 +18335,15 @@ mod tests {
         AxumPath(path): AxumPath<String>,
         body: Bytes,
     ) -> HttpStatusCode {
+        *state
+            .put_counts
+            .lock()
+            .unwrap()
+            .entry(path.clone())
+            .or_default() += 1;
+        if state.failed_puts.lock().unwrap().contains(&path) {
+            return HttpStatusCode::INTERNAL_SERVER_ERROR;
+        }
         state.files.lock().unwrap().insert(path, body.to_vec());
         HttpStatusCode::CREATED
     }
@@ -15948,6 +18420,296 @@ mod tests {
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         format!("http://{address}")
+    }
+
+    #[derive(Clone, Default)]
+    struct TestSupabaseState {
+        snapshots: Arc<Mutex<TestHashMap<String, serde_json::Value>>>,
+        objects: Arc<Mutex<TestHashMap<String, Vec<u8>>>>,
+    }
+
+    struct TestSupabaseServer {
+        base_url: String,
+        state: TestSupabaseState,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for TestSupabaseServer {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    fn test_json_response(
+        status: HttpStatusCode,
+        value: &serde_json::Value,
+        content_range: Option<String>,
+    ) -> AxumResponse {
+        let mut builder = AxumResponse::builder()
+            .status(status)
+            .header("content-type", "application/json");
+        if let Some(content_range) = content_range {
+            builder = builder.header("content-range", content_range);
+        }
+        builder
+            .body(Body::from(value.to_string()))
+            .expect("build test Supabase response")
+    }
+
+    async fn test_supabase_snapshot(
+        TestAxumState(state): TestAxumState<TestSupabaseState>,
+        AxumPath(table): AxumPath<String>,
+        Query(query): Query<TestHashMap<String, String>>,
+    ) -> AxumResponse {
+        if table == "spaces" {
+            let mut rows = state
+                .snapshots
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(key, _)| key.starts_with("spaces/"))
+                .map(|(_, snapshot)| snapshot.clone())
+                .collect::<Vec<_>>();
+            rows.sort_by(|left, right| {
+                right["updated_at"]
+                    .as_str()
+                    .cmp(&left["updated_at"].as_str())
+                    .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
+            });
+            return test_json_response(HttpStatusCode::OK, &serde_json::json!(rows), None);
+        }
+        if table == "messages" && !query.contains_key("id") {
+            let space_id = query
+                .get("space_id")
+                .and_then(|value| value.strip_prefix("eq."))
+                .unwrap_or_default();
+            let rows = state
+                .snapshots
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(key, snapshot)| {
+                    key.starts_with("messages/")
+                        && snapshot["space_id"].as_str() == Some(space_id)
+                        && snapshot["deleted_at"].is_null()
+                })
+                .map(|(_, snapshot)| snapshot.clone())
+                .collect::<Vec<_>>();
+            let total = rows.len();
+            let body = rows.into_iter().take(1).collect::<Vec<_>>();
+            let content_range = if total == 0 {
+                "*/0".to_string()
+            } else {
+                format!("0-0/{total}")
+            };
+            return test_json_response(
+                HttpStatusCode::OK,
+                &serde_json::json!(body),
+                Some(content_range),
+            );
+        }
+        if table == "tags" {
+            if let Some(name) = query
+                .get("name")
+                .and_then(|value| value.strip_prefix("ilike."))
+            {
+                let rows: Vec<serde_json::Value> = state
+                    .snapshots
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(key, snapshot)| {
+                        key.starts_with("tags/")
+                            && snapshot["name"]
+                                .as_str()
+                                .is_some_and(|value| value.eq_ignore_ascii_case(name))
+                            && snapshot["deleted_at"].is_null()
+                    })
+                    .map(|(_, snapshot)| snapshot.clone())
+                    .collect();
+                return test_json_response(HttpStatusCode::OK, &serde_json::json!(rows), None);
+            }
+        }
+        let id = query
+            .get("id")
+            .and_then(|value| value.strip_prefix("eq."))
+            .unwrap_or_default();
+        let rows = state
+            .snapshots
+            .lock()
+            .unwrap()
+            .get(&format!("{table}/{id}"))
+            .cloned()
+            .into_iter()
+            .collect::<Vec<_>>();
+        test_json_response(HttpStatusCode::OK, &serde_json::json!(rows), None)
+    }
+
+    async fn test_supabase_current_user(
+        headers: HeaderMap,
+    ) -> (HttpStatusCode, Json<serde_json::Value>) {
+        if headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            == Some("Bearer access-token")
+        {
+            return (
+                HttpStatusCode::OK,
+                Json(serde_json::json!({
+                    "id":"user-a","email":"user@example.invalid"
+                })),
+            );
+        }
+        (
+            HttpStatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"message":"session revoked"})),
+        )
+    }
+
+    async fn test_supabase_rpc(
+        TestAxumState(state): TestAxumState<TestSupabaseState>,
+        AxumPath(rpc): AxumPath<String>,
+        Json(body): Json<serde_json::Value>,
+    ) -> AxumResponse {
+        if rpc == "pull_changes" {
+            return test_json_response(HttpStatusCode::OK, &serde_json::json!([]), None);
+        }
+        if rpc == "space_upsert" {
+            return test_json_response(
+                HttpStatusCode::OK,
+                &serde_json::json!({"status":"applied"}),
+                None,
+            );
+        }
+        let (table, id_field, snapshot) = match rpc.as_str() {
+            "tag_apply" => (
+                "tags",
+                "p_tag_id",
+                serde_json::json!({
+                    "id":body["p_tag_id"],
+                    "name":body["p_name"],
+                    "revision":1,
+                    "deleted_at":null
+                }),
+            ),
+            "message_apply" => {
+                let payload = &body["p_payload"];
+                (
+                    "messages",
+                    "p_message_id",
+                    serde_json::json!({
+                        "id":body["p_message_id"],"sender":payload["sender"],
+                        "timestamp_ms":payload["timestampMs"],"size":payload["size"],
+                        "kind":payload["kind"],"original_name":payload["originalName"],
+                        "content":payload["content"],"format":payload["format"],
+                        "file_hash":payload["fileHash"],"legacy_filename":payload["legacyFilename"],
+                        "transcript_source":payload["transcriptSource"],
+                        "source_audio_mime_type":payload["sourceAudioMimeType"],
+                        "transcript_raw_text":payload["transcriptRawText"],
+                        "marked":payload["marked"],"marked_tag_ids":payload["markedTagIds"],
+                        "marked_pinned":payload["markedPinned"],
+                        "marked_due_date":payload["markedDueDate"],"deleted_at":null
+                    }),
+                )
+            }
+            "attachment_apply" => {
+                let payload = &body["p_payload"];
+                let message_id = payload["messageId"].as_str().unwrap_or_default();
+                if !state
+                    .snapshots
+                    .lock()
+                    .unwrap()
+                    .contains_key(&format!("messages/{message_id}"))
+                {
+                    return test_json_response(
+                        HttpStatusCode::CONFLICT,
+                        &serde_json::json!({"message":"MESSAGE_NOT_FOUND"}),
+                        None,
+                    );
+                }
+                (
+                    "attachments",
+                    "p_attachment_id",
+                    serde_json::json!({
+                        "id":body["p_attachment_id"],"message_id":payload["messageId"],
+                        "original_name":payload["originalName"],"object_path":payload["objectPath"],
+                        "preview_object_path":payload["previewObjectPath"],
+                        "mime_type":payload["mimeType"],"size":payload["size"],
+                        "sha256":payload["sha256"],"deleted_at":null
+                    }),
+                )
+            }
+            _ => {
+                return test_json_response(
+                    HttpStatusCode::OK,
+                    &serde_json::json!({"status":"missing"}),
+                    None,
+                )
+            }
+        };
+        let id = body[id_field].as_str().unwrap_or_default();
+        state
+            .snapshots
+            .lock()
+            .unwrap()
+            .insert(format!("{table}/{id}"), snapshot);
+        test_json_response(
+            HttpStatusCode::OK,
+            &serde_json::json!({
+                "status":"applied","revision":1,"changeSeq":1
+            }),
+            None,
+        )
+    }
+
+    async fn test_supabase_storage_get(
+        TestAxumState(state): TestAxumState<TestSupabaseState>,
+        AxumPath(path): AxumPath<String>,
+    ) -> AxumResponse {
+        match state.objects.lock().unwrap().get(&path).cloned() {
+            Some(bytes) => AxumResponse::builder()
+                .status(HttpStatusCode::OK)
+                .body(Body::from(bytes))
+                .unwrap(),
+            None => AxumResponse::builder()
+                .status(HttpStatusCode::NOT_FOUND)
+                .body(Body::empty())
+                .unwrap(),
+        }
+    }
+
+    async fn test_supabase_storage_put(
+        TestAxumState(state): TestAxumState<TestSupabaseState>,
+        AxumPath(path): AxumPath<String>,
+        body: Bytes,
+    ) -> HttpStatusCode {
+        state.objects.lock().unwrap().insert(path, body.to_vec());
+        HttpStatusCode::OK
+    }
+
+    async fn spawn_test_supabase() -> TestSupabaseServer {
+        let state = TestSupabaseState::default();
+        let app = TestRouter::new()
+            .route("/auth/v1/user", get(test_supabase_current_user))
+            .route("/rest/v1/:table", get(test_supabase_snapshot))
+            .route("/rest/v1/rpc/:rpc", post(test_supabase_rpc))
+            .route(
+                "/storage/v1/object/authenticated/transfer-genie-files/*path",
+                get(test_supabase_storage_get),
+            )
+            .route(
+                "/storage/v1/object/transfer-genie-files/*path",
+                post(test_supabase_storage_put),
+            )
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        TestSupabaseServer {
+            base_url: format!("http://{address}"),
+            state,
+            task,
+        }
     }
 
     async fn test_local_http_file_upload(
@@ -16183,6 +18945,299 @@ mod tests {
         let _ = fs::remove_dir_all(temp_dir);
     }
 
+    #[tokio::test]
+    async fn supabase_account_spaces_switch_in_place_without_adding_profiles() {
+        let _credential_guard = credential_store::credential_test_guard();
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-supabase-spaces-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let mut settings = test_supabase_settings_with_url(server.base_url.clone());
+        let source_profile_id = format!("supabase-source-{}", uuid::Uuid::new_v4());
+        let source_space_id = "00000000-0000-4000-8000-000000000001".to_string();
+        let remote_space_id = "00000000-0000-4000-8000-000000000002".to_string();
+        settings.storage_profiles[0].id = source_profile_id.clone();
+        settings.storage_profiles[0]
+            .supabase
+            .as_mut()
+            .unwrap()
+            .space_id = source_space_id.clone();
+        settings.active_storage_profile_id = Some(source_profile_id.clone());
+        let state = test_app_state(&temp_dir, settings);
+        db::init_db(&state.db_path, Some(&source_profile_id)).unwrap();
+        let session = supabase_auth::SupabaseSession {
+            access_token: "access-token".into(),
+            refresh_token: "refresh-token".into(),
+            user_id: "user-a".into(),
+            email: "user@example.invalid".into(),
+            expires_at: i64::MAX,
+        };
+        credential_store::save_session(&source_profile_id, &session).unwrap();
+        state
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .insert(source_profile_id.clone(), session.clone());
+        for (id, name, updated_at) in [
+            (&source_space_id, "当前空间", "2026-10-13T10:00:00Z"),
+            (&remote_space_id, "历史空间", "2026-10-12T10:00:00Z"),
+        ] {
+            server.state.snapshots.lock().unwrap().insert(
+                format!("spaces/{id}"),
+                serde_json::json!({
+                    "id":id,"name":name,"updated_at":updated_at
+                }),
+            );
+        }
+        server.state.snapshots.lock().unwrap().insert(
+            "messages/current-message".into(),
+            serde_json::json!({
+                "id":"current-message","space_id":source_space_id,"deleted_at":null
+            }),
+        );
+        for index in 0..3 {
+            server.state.snapshots.lock().unwrap().insert(
+                format!("messages/history-message-{index}"),
+                serde_json::json!({
+                    "id":format!("history-message-{index}"),
+                    "space_id":remote_space_id,
+                    "deleted_at":null
+                }),
+            );
+        }
+
+        let listed = list_supabase_spaces_impl(&state, &source_profile_id)
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 2);
+        let current = listed
+            .iter()
+            .find(|space| space.id == source_space_id)
+            .unwrap();
+        assert!(current.current);
+        assert_eq!(
+            current.local_profile_id.as_deref(),
+            Some(source_profile_id.as_str())
+        );
+        assert_eq!(current.message_count, 1);
+        let remote = listed
+            .iter()
+            .find(|space| space.id == remote_space_id)
+            .unwrap();
+        assert!(!remote.current);
+        assert!(remote.local_profile_id.is_none());
+        assert_eq!(remote.message_count, 3);
+
+        let cached_message = test_db_message(&source_profile_id, "cached.bin", "cached.bin", 1, 10);
+        db::upsert_message(&state.db_path, &cached_message).unwrap();
+
+        let switched = switch_supabase_space_impl(
+            &state,
+            SwitchSupabaseSpaceInput {
+                source_profile_id: source_profile_id.clone(),
+                space_id: remote_space_id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(switched.storage_profiles.len(), 1);
+        let switched_profile = &switched.storage_profiles[0];
+        assert_eq!(switched_profile.id, source_profile_id);
+        assert_eq!(switched_profile.name, "Supabase");
+        assert_eq!(
+            switched_profile.supabase.as_ref().unwrap().space_id,
+            remote_space_id
+        );
+        assert_eq!(
+            switched.active_storage_profile_id.as_deref(),
+            Some(source_profile_id.as_str())
+        );
+        assert!(!db::has_profile_business_data(&state.db_path, &source_profile_id).unwrap());
+        assert_eq!(
+            state
+                .supabase_sessions
+                .lock()
+                .unwrap()
+                .get(&source_profile_id)
+                .map(|value| value.user_id.as_str()),
+            Some("user-a")
+        );
+
+        let unchanged = switch_supabase_space_impl(
+            &state,
+            SwitchSupabaseSpaceInput {
+                source_profile_id: source_profile_id.clone(),
+                space_id: remote_space_id,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(unchanged.storage_profiles.len(), 1);
+        assert_eq!(
+            unchanged.active_storage_profile_id,
+            switched.active_storage_profile_id
+        );
+
+        let conn = rusqlite::Connection::open(&state.db_path).unwrap();
+        conn.execute(
+            "INSERT INTO sync_outbox (operation_id,endpoint_id,owner_scope,entity_type,entity_id,
+             action,base_revision,payload_json,payload_hash,state,attempt_count,next_attempt_at_ms,
+             created_at_ms,updated_at_ms)
+             VALUES('pending-switch',?1,'user-a','message','message','upsert',0,'{}','hash',
+             'pending',0,0,1,1)",
+            rusqlite::params![source_profile_id],
+        )
+        .unwrap();
+        drop(conn);
+        let blocked = match switch_supabase_space_impl(
+            &state,
+            SwitchSupabaseSpaceInput {
+                source_profile_id: source_profile_id.clone(),
+                space_id: source_space_id,
+            },
+        )
+        .await
+        {
+            Ok(_) => panic!("switching with pending work should be blocked"),
+            Err(error) => error,
+        };
+        assert!(blocked.contains("待上传"));
+        assert_eq!(
+            current_settings(&state).unwrap().storage_profiles[0]
+                .supabase
+                .as_ref()
+                .unwrap()
+                .space_id,
+            "00000000-0000-4000-8000-000000000002"
+        );
+
+        credential_store::delete_session(&source_profile_id).unwrap();
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn storage_profile_edit_updates_in_place_and_rejects_duplicate_supabase_destination() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-profile-edit-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let settings = test_supabase_settings();
+        let original = settings.storage_profiles[0].clone();
+        let state = test_app_state(&temp_dir, settings);
+
+        let mut renamed = original.clone();
+        renamed.id = "unexpected-new-profile-id".into();
+        renamed.name = "Renamed Supabase".into();
+        let updated = save_storage_profile_impl(
+            &state,
+            SaveStorageProfileInput {
+                original_profile_id: Some(original.id.clone()),
+                profile: renamed,
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.storage_profiles.len(), 1);
+        assert_eq!(updated.storage_profiles[0].id, original.id);
+        assert_eq!(updated.storage_profiles[0].name, "Renamed Supabase");
+
+        let duplicate = StorageProfile {
+            id: "supabase-duplicate".into(),
+            name: "Duplicate".into(),
+            ..updated.storage_profiles[0].clone()
+        };
+        let error = match save_storage_profile_impl(
+            &state,
+            SaveStorageProfileInput {
+                original_profile_id: None,
+                profile: duplicate,
+            },
+        ) {
+            Ok(_) => panic!("duplicate Supabase destination should be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.contains("已经添加"));
+        assert_eq!(current_settings(&state).unwrap().storage_profiles.len(), 1);
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn storage_profile_force_remove_cancels_work_and_keeps_cached_data() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-profile-remove-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let mut settings = test_settings();
+        let profile = StorageProfile::from_webdav(&settings.webdav_endpoints[0]);
+        let profile_id = profile.id.clone();
+        settings.storage_profiles = vec![profile];
+        settings.active_storage_profile_id = None;
+        settings.active_webdav_id = None;
+        let state = test_app_state(&temp_dir, settings);
+        db::init_db(&state.db_path, Some(&profile_id)).unwrap();
+        db::upsert_message(
+            &state.db_path,
+            &test_db_message(&profile_id, "cached.bin", "cached.bin", 1, 10),
+        )
+        .unwrap();
+        let conn = rusqlite::Connection::open(&state.db_path).unwrap();
+        conn.execute(
+            "INSERT INTO storage_import_batches (batch_id,source_profile_id,target_profile_id,
+             target_owner_scope,status,total_items,applied_items,failed_items,created_at_ms,updated_at_ms)
+             VALUES('batch',?1,'target','owner','interrupted',1,0,0,1,1)",
+            rusqlite::params![profile_id],
+        )
+        .unwrap();
+        drop(conn);
+
+        let blocked = match remove_storage_profile_impl(&state, &profile_id, false) {
+            Ok(_) => panic!("removing a profile with pending work should be blocked"),
+            Err(error) => error,
+        };
+        assert!(blocked.contains("未完成"));
+
+        let updated = remove_storage_profile_impl(&state, &profile_id, true).unwrap();
+        assert!(updated.storage_profiles.is_empty());
+        assert!(!db::has_pending_profile_work(&state.db_path, &profile_id).unwrap());
+        assert!(db::has_profile_business_data(&state.db_path, &profile_id).unwrap());
+        assert!(db::storage_transfer_is_cancelled(&state.db_path, "batch").unwrap());
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn storage_profile_force_remove_clears_active_selection() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-active-profile-remove-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let mut settings = test_settings();
+        let profile = StorageProfile::from_webdav(&settings.webdav_endpoints[0]);
+        let profile_id = profile.id.clone();
+        settings.storage_profiles = vec![profile];
+        settings.active_storage_profile_id = Some(profile_id.clone());
+        let state = test_app_state(&temp_dir, settings);
+        db::init_db(&state.db_path, Some(&profile_id)).unwrap();
+
+        let blocked = match remove_storage_profile_impl(&state, &profile_id, false) {
+            Ok(_) => panic!("removing the active profile should be blocked"),
+            Err(error) => error,
+        };
+        assert!(blocked.contains("正在使用"));
+
+        let updated = remove_storage_profile_impl(&state, &profile_id, true).unwrap();
+        assert!(updated.storage_profiles.is_empty());
+        assert!(updated.active_storage_profile_id.is_none());
+        assert!(updated.active_webdav_id.is_none());
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
     fn test_app_state(temp_dir: &Path, settings: Settings) -> AppState {
         let settings_path = temp_dir.join("settings.json");
         let db_path = temp_dir.join("messages.sqlite");
@@ -16200,6 +19255,7 @@ mod tests {
             supabase_auth_guard: AsyncMutex::new(()),
             sync_status: Mutex::new(SyncStatus::idle()),
             sync_guard: Arc::new(AsyncMutex::new(())),
+            storage_transfer_targets: Mutex::new(HashSet::new()),
             sync_cancel: Mutex::new(None),
             sync_loop_signal,
             http: Client::builder().build().expect("create http client"),
@@ -16322,6 +19378,7 @@ mod tests {
         let messages = vec![
             Message {
                 filename: "old-unmarked.txt".to_string(),
+                message_id: None,
                 sender: "tester".to_string(),
                 timestamp_ms: 10,
                 size: 1,
@@ -16343,6 +19400,7 @@ mod tests {
             },
             Message {
                 filename: "old-marked.txt".to_string(),
+                message_id: None,
                 sender: "tester".to_string(),
                 timestamp_ms: 10,
                 size: 1,
@@ -16364,6 +19422,7 @@ mod tests {
             },
             Message {
                 filename: "new-unmarked.txt".to_string(),
+                message_id: None,
                 sender: "tester".to_string(),
                 timestamp_ms: 100,
                 size: 1,
@@ -16527,10 +19586,14 @@ mod tests {
                 .unwrap();
         assert_eq!(source.source, "previewCache");
         assert_eq!(db::count_download_history(&state.db_path).unwrap(), 0);
-        let resources =
-            query_bulk_download_resources(&state, "endpoint-1", &BulkDownloadQueryInput::default())
-                .unwrap()
-                .0;
+        let resources = query_bulk_download_resources(
+            &state,
+            "endpoint-1",
+            "",
+            &BulkDownloadQueryInput::default(),
+        )
+        .unwrap()
+        .0;
         assert_eq!(resources.len(), 1);
         assert_eq!(resources[0].status, "notDownloaded");
         let stored = db::get_message(&state.db_path, "endpoint-1", &message.filename)
@@ -17820,6 +20883,1996 @@ mod tests {
     }
 
     #[test]
+    fn normalize_settings_preserves_multiple_supabase_profiles_without_loss() {
+        let mut settings = test_settings();
+        settings.storage_profiles = vec![
+            StorageProfile {
+                id: "supabase-primary".to_string(),
+                name: "Primary Cloud".to_string(),
+                provider_kind: StorageProviderKind::Supabase,
+                enabled: true,
+                webdav: None,
+                supabase: Some(crate::types::SupabaseStorageConfig {
+                    api_url: "https://primary.example.com/".to_string(),
+                    anon_key: "primary-key".to_string(),
+                    space_id: "11111111-1111-4111-8111-111111111111".to_string(),
+                }),
+            },
+            StorageProfile {
+                id: "supabase-secondary".to_string(),
+                name: "Secondary Cloud".to_string(),
+                provider_kind: StorageProviderKind::Supabase,
+                enabled: true,
+                webdav: None,
+                supabase: Some(crate::types::SupabaseStorageConfig {
+                    api_url: "https://secondary.example.com/".to_string(),
+                    anon_key: "secondary-key".to_string(),
+                    space_id: "22222222-2222-4222-8222-222222222222".to_string(),
+                }),
+            },
+        ];
+        settings.active_storage_profile_id = Some("supabase-secondary".to_string());
+        let download_dir = std::env::temp_dir().join("transfer-genie-multiple-supabase");
+
+        let normalized = normalize_settings(settings, &download_dir).expect("normalize settings");
+
+        assert_eq!(normalized.storage_profiles.len(), 3);
+        assert_eq!(
+            normalized.active_storage_profile_id.as_deref(),
+            Some("supabase-secondary")
+        );
+        for (id, api_url, anon_key, space_id) in [
+            (
+                "supabase-primary",
+                "https://primary.example.com",
+                "primary-key",
+                "11111111-1111-4111-8111-111111111111",
+            ),
+            (
+                "supabase-secondary",
+                "https://secondary.example.com",
+                "secondary-key",
+                "22222222-2222-4222-8222-222222222222",
+            ),
+        ] {
+            let config = normalized
+                .storage_profiles
+                .iter()
+                .find(|profile| profile.id == id)
+                .and_then(|profile| profile.supabase.as_ref())
+                .expect("supabase profile preserved");
+            assert_eq!(config.api_url, api_url);
+            assert_eq!(config.anon_key, anon_key);
+            assert_eq!(config.space_id, space_id);
+        }
+        assert!(normalized
+            .storage_profiles
+            .iter()
+            .any(|profile| profile.id == "endpoint-1"));
+    }
+
+    #[test]
+    fn storage_transfer_stable_ids_are_idempotent_and_target_operations_are_isolated() {
+        let message = Message {
+            filename: "source-file.txt".into(),
+            message_id: None,
+            sender: "sender".into(),
+            timestamp_ms: 100,
+            size: 12,
+            kind: "text".into(),
+            original_name: "source-file.txt".into(),
+            content: Some("hello".into()),
+            local_path: None,
+            remote_path: Some("files/source-file.txt".into()),
+            file_hash: Some("hash".into()),
+            download_exists: false,
+            marked: false,
+            marked_tag_ids: Vec::new(),
+            marked_pinned: false,
+            marked_due_date: None,
+            format: String::new(),
+            transcript_source: None,
+            source_audio_mime_type: None,
+            transcript_raw_text: None,
+        };
+        let first = build_storage_transfer_items(
+            "source",
+            "owner-a",
+            "target-a",
+            std::slice::from_ref(&message),
+            &[],
+        );
+        let retried = build_storage_transfer_items(
+            "source",
+            "owner-a",
+            "target-a",
+            std::slice::from_ref(&message),
+            &[],
+        );
+        let other_target = build_storage_transfer_items(
+            "source",
+            "owner-a",
+            "target-b",
+            std::slice::from_ref(&message),
+            &[],
+        );
+        assert_eq!(first[0].entity_id, retried[0].entity_id);
+        assert_eq!(
+            first[0].message_operation_id,
+            retried[0].message_operation_id
+        );
+        assert_eq!(first[0].entity_id, other_target[0].entity_id);
+        assert_ne!(
+            first[0].message_operation_id,
+            other_target[0].message_operation_id
+        );
+    }
+
+    #[test]
+    fn storage_transfer_target_lock_blocks_same_scope_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "transfer-genie-transfer-lock-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = test_app_state(&dir, test_settings());
+        let first = lock_storage_transfer_target(&state, "target-a", "owner-a").unwrap();
+        assert!(lock_storage_transfer_target(&state, "target-a", "owner-a").is_err());
+        let other_owner = lock_storage_transfer_target(&state, "target-a", "owner-b").unwrap();
+        let other_target = lock_storage_transfer_target(&state, "target-b", "owner-a").unwrap();
+        drop(first);
+        assert!(lock_storage_transfer_target(&state, "target-a", "owner-a").is_ok());
+        drop(other_owner);
+        drop(other_target);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn storage_transfer_provider_snapshots_share_message_and_tag_semantics() {
+        let dir = std::env::temp_dir().join(format!(
+            "transfer-genie-provider-snapshot-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let state = test_app_state(&dir, test_settings());
+        db::init_db(&state.db_path, None).unwrap();
+        let mut webdav_message = test_db_message("webdav", "same.txt", "same.txt", 100, 5);
+        webdav_message.kind = "text".into();
+        webdav_message.content = Some("hello".into());
+        webdav_message.remote_path = Some("messages/same.txt".into());
+        webdav_message.marked = true;
+        webdav_message.marked_tag_ids = vec!["tag-a".into()];
+        db::upsert_message(&state.db_path, &webdav_message).unwrap();
+        db::replace_marked_tags(
+            &state.db_path,
+            "webdav",
+            &[MarkedTag {
+                id: "tag-a".into(),
+                name: "重要".into(),
+            }],
+        )
+        .unwrap();
+        db::apply_pulled_changes(
+            &state.db_path,
+            "supabase",
+            "user-a",
+            &[
+                db::PulledChange {
+                    change_seq: 1,
+                    entity_type: "message".into(),
+                    entity_id: "message-a".into(),
+                    change_type: "upsert".into(),
+                    revision: 1,
+                    snapshot: Some(serde_json::json!({
+                        "legacy_filename":"same.txt","sender":"tester","timestamp_ms":100,
+                        "size":5,"kind":"text","original_name":"same.txt","content":"hello",
+                        "format":"text","file_hash":null,"marked":true,"marked_tag_ids":["tag-a"],
+                        "marked_pinned":false,"marked_due_date":null,"transcript_source":null,
+                        "source_audio_mime_type":null,"transcript_raw_text":null,"deleted_at":null
+                    })),
+                },
+                db::PulledChange {
+                    change_seq: 2,
+                    entity_type: "tag".into(),
+                    entity_id: "tag-a".into(),
+                    change_type: "upsert".into(),
+                    revision: 1,
+                    snapshot: Some(serde_json::json!({"name":"重要","deleted_at":null})),
+                },
+            ],
+            2,
+            100,
+        )
+        .unwrap();
+        let webdav = storage_provider::ProviderConfig::Webdav(WebDavEndpoint {
+            id: "webdav".into(),
+            name: "WebDAV".into(),
+            url: "https://example.com".into(),
+            username: String::new(),
+            password: String::new(),
+            enabled: true,
+        });
+        let supabase = storage_provider::ProviderConfig::Supabase(StorageProfile {
+            id: "supabase".into(),
+            name: "Supabase".into(),
+            provider_kind: StorageProviderKind::Supabase,
+            enabled: true,
+            webdav: None,
+            supabase: Some(crate::types::SupabaseStorageConfig {
+                api_url: "https://example.com".into(),
+                anon_key: "anon".into(),
+                space_id: "11111111-1111-4111-8111-111111111111".into(),
+            }),
+        });
+        let (webdav_messages, webdav_tags) =
+            storage_transfer_messages_and_tags(&state, &webdav, "").unwrap();
+        let (supabase_messages, supabase_tags) =
+            storage_transfer_messages_and_tags(&state, &supabase, "user-a").unwrap();
+        assert_eq!(webdav_messages.len(), 1);
+        assert_eq!(supabase_messages.len(), 1);
+        assert_eq!(
+            storage_transfer_message_hash(&webdav_messages[0]),
+            storage_transfer_message_hash(&supabase_messages[0])
+        );
+        let webdav_tag_values = webdav_tags
+            .iter()
+            .map(|tag| (tag.id.as_str(), tag.name.as_str()))
+            .collect::<Vec<_>>();
+        let supabase_tag_values = supabase_tags
+            .iter()
+            .map(|tag| (tag.id.as_str(), tag.name.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(webdav_tag_values, supabase_tag_values);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn building_storage_transfer_plan_does_not_change_active_profile() {
+        let dir = std::env::temp_dir().join(format!(
+            "transfer-genie-active-profile-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let mut settings = test_settings();
+        settings.active_storage_profile_id = Some("active-profile".into());
+        let state = test_app_state(&dir, settings);
+        db::init_db(&state.db_path, None).unwrap();
+        let message = Message {
+            filename: "source.txt".into(),
+            message_id: None,
+            sender: "tester".into(),
+            timestamp_ms: 1,
+            size: 5,
+            kind: "text".into(),
+            original_name: "source.txt".into(),
+            content: Some("hello".into()),
+            local_path: None,
+            remote_path: None,
+            file_hash: None,
+            download_exists: false,
+            marked: false,
+            marked_tag_ids: Vec::new(),
+            marked_pinned: false,
+            marked_due_date: None,
+            format: "text".into(),
+            transcript_source: None,
+            source_audio_mime_type: None,
+            transcript_raw_text: None,
+        };
+        let items = build_storage_transfer_items("source", "", "target", &[message], &[]);
+        db::create_or_resume_storage_transfer(
+            &state.db_path,
+            &db::NewStorageTransferBatch {
+                batch_id: "batch",
+                source_profile_id: "source",
+                target_profile_id: "target",
+                source_provider_kind: "webdav",
+                target_provider_kind: "supabase",
+                source_owner_scope: "",
+                target_owner_scope: "user-a",
+                items: &items,
+                now_ms: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            current_settings(&state)
+                .unwrap()
+                .active_storage_profile_id
+                .as_deref(),
+            Some("active-profile")
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn storage_transfer_detects_source_changes_and_target_differences() {
+        let source = Message {
+            filename: "source.txt".into(),
+            message_id: None,
+            sender: "tester".into(),
+            timestamp_ms: 100,
+            size: 5,
+            kind: "text".into(),
+            original_name: "source.txt".into(),
+            content: Some("hello".into()),
+            local_path: None,
+            remote_path: Some("messages/source.txt".into()),
+            file_hash: None,
+            download_exists: false,
+            marked: true,
+            marked_tag_ids: vec!["tag-a".into()],
+            marked_pinned: false,
+            marked_due_date: None,
+            format: "text".into(),
+            transcript_source: None,
+            source_audio_mime_type: None,
+            transcript_raw_text: None,
+        };
+        let item = build_storage_transfer_items(
+            "source",
+            "",
+            "target",
+            std::slice::from_ref(&source),
+            &[],
+        )
+        .remove(0);
+        assert!(storage_transfer_source_matches(&item, &source));
+        let mut changed_source = source.clone();
+        changed_source.content = Some("changed after preview".into());
+        assert!(!storage_transfer_source_matches(&item, &changed_source));
+
+        let matching_target = DbMessage {
+            endpoint_id: "target".into(),
+            filename: storage_transfer_target_filename(&source, &item.entity_id),
+            sender: source.sender.clone(),
+            timestamp_ms: source.timestamp_ms,
+            size: source.size,
+            kind: source.kind.clone(),
+            original_name: source.original_name.clone(),
+            etag: None,
+            mtime: None,
+            content: source.content.clone(),
+            local_path: None,
+            remote_path: Some("messages/target.txt".into()),
+            file_hash: None,
+            marked: source.marked,
+            marked_tag_ids: source.marked_tag_ids.clone(),
+            marked_pinned: source.marked_pinned,
+            marked_due_date: source.marked_due_date.clone(),
+            format: source.format.clone(),
+            transcript_source: source.transcript_source.clone(),
+            source_audio_mime_type: source.source_audio_mime_type.clone(),
+            transcript_raw_text: source.transcript_raw_text.clone(),
+        };
+        assert!(storage_transfer_message_matches(&matching_target, &source));
+        let mut conflicting_target = matching_target;
+        conflicting_target.content = Some("target changed independently".into());
+        assert!(!storage_transfer_message_matches(
+            &conflicting_target,
+            &source
+        ));
+    }
+
+    #[test]
+    fn storage_transfer_preview_recognizes_message_with_remapped_tags_as_skipped() {
+        let dir = std::env::temp_dir().join(format!(
+            "transfer-genie-transfer-remapped-tags-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let state = test_app_state(&dir, test_settings());
+        db::init_db(&state.db_path, None).unwrap();
+        let source = storage_provider::ProviderConfig::Webdav(WebDavEndpoint {
+            id: "source".into(),
+            name: "Source".into(),
+            url: "https://source.invalid".into(),
+            username: String::new(),
+            password: String::new(),
+            enabled: true,
+        });
+        let target = storage_provider::ProviderConfig::Webdav(WebDavEndpoint {
+            id: "target".into(),
+            name: "Target".into(),
+            url: "https://target.invalid".into(),
+            username: String::new(),
+            password: String::new(),
+            enabled: true,
+        });
+        let context = StorageTransferContext {
+            source,
+            target,
+            source_owner_scope: String::new(),
+            target_owner_scope: String::new(),
+            source_session: None,
+            target_session: None,
+        };
+        let source_message = Message {
+            filename: "source.txt".into(),
+            message_id: None,
+            sender: "tester".into(),
+            timestamp_ms: 100,
+            size: 5,
+            kind: "text".into(),
+            original_name: "source.txt".into(),
+            content: Some("hello".into()),
+            local_path: None,
+            remote_path: Some("messages/source.txt".into()),
+            file_hash: None,
+            download_exists: false,
+            marked: true,
+            marked_tag_ids: vec!["tag-a".into()],
+            marked_pinned: false,
+            marked_due_date: None,
+            format: "text".into(),
+            transcript_source: None,
+            source_audio_mime_type: None,
+            transcript_raw_text: None,
+        };
+        let source_tag = MarkedTag {
+            id: "tag-a".into(),
+            name: "Important".into(),
+        };
+        let planned = build_storage_transfer_items_for_plan(
+            "source",
+            "",
+            "target",
+            "",
+            "first-plan",
+            std::slice::from_ref(&source_message),
+            std::slice::from_ref(&source_tag),
+        );
+        let message_item = planned
+            .iter()
+            .find(|item| item.item_type == "message")
+            .unwrap();
+        let target_message = DbMessage {
+            endpoint_id: "target".into(),
+            filename: storage_transfer_target_filename(&source_message, &message_item.entity_id),
+            sender: source_message.sender.clone(),
+            timestamp_ms: source_message.timestamp_ms,
+            size: source_message.size,
+            kind: source_message.kind.clone(),
+            original_name: source_message.original_name.clone(),
+            etag: None,
+            mtime: None,
+            content: source_message.content.clone(),
+            local_path: None,
+            remote_path: Some("messages/target.txt".into()),
+            file_hash: None,
+            marked: true,
+            marked_tag_ids: vec!["target-existing-tag".into()],
+            marked_pinned: false,
+            marked_due_date: None,
+            format: "text".into(),
+            transcript_source: None,
+            source_audio_mime_type: None,
+            transcript_raw_text: None,
+        };
+        db::replace_marked_tags(
+            &state.db_path,
+            "target",
+            &[MarkedTag {
+                id: "target-existing-tag".into(),
+                name: "important".into(),
+            }],
+        )
+        .unwrap();
+        db::upsert_message(&state.db_path, &target_message).unwrap();
+        let items = prepare_storage_transfer_items(
+            &state,
+            &context,
+            "second-plan",
+            std::slice::from_ref(&source_message),
+            std::slice::from_ref(&source_tag),
+        )
+        .unwrap();
+        assert_eq!(items.len(), 2);
+        let tag_item = items.iter().find(|item| item.item_type == "tag").unwrap();
+        assert_eq!(tag_item.entity_id, "target-existing-tag");
+        assert_eq!(tag_item.state, "skipped");
+        let message_item = items
+            .iter()
+            .find(|item| item.item_type == "message")
+            .unwrap();
+        assert_eq!(message_item.state, "skipped");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn storage_transfer_supabase_target_verifies_remote_rows_and_storage_digest() {
+        let server = spawn_test_supabase().await;
+        let dir = std::env::temp_dir().join(format!(
+            "transfer-genie-supabase-target-verify-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let state = test_app_state(&dir, test_settings());
+        db::init_db(&state.db_path, None).unwrap();
+        let target = StorageProfile {
+            id: "target-supabase".into(),
+            name: "目标云端".into(),
+            provider_kind: StorageProviderKind::Supabase,
+            enabled: true,
+            webdav: None,
+            supabase: Some(crate::types::SupabaseStorageConfig {
+                api_url: server.base_url.clone(),
+                anon_key: "anon".into(),
+                space_id: "11111111-1111-4111-8111-111111111111".into(),
+            }),
+        };
+        let session = supabase_auth::SupabaseSession {
+            access_token: "access".into(),
+            refresh_token: "refresh".into(),
+            user_id: "user-a".into(),
+            email: "user@example.invalid".into(),
+            expires_at: i64::MAX,
+        };
+        let payload = b"verified attachment".to_vec();
+        let payload_hash = format!("{:x}", Sha256::digest(&payload));
+        let source_message = Message {
+            filename: "source.bin".into(),
+            message_id: None,
+            sender: "tester".into(),
+            timestamp_ms: 100,
+            size: payload.len() as i64,
+            kind: "file".into(),
+            original_name: "source.bin".into(),
+            content: None,
+            local_path: None,
+            remote_path: Some("files/source.bin".into()),
+            file_hash: Some(payload_hash.clone()),
+            download_exists: false,
+            marked: true,
+            marked_tag_ids: vec!["tag-a".into()],
+            marked_pinned: true,
+            marked_due_date: Some("2026-10-13".into()),
+            format: "text".into(),
+            transcript_source: None,
+            source_audio_mime_type: None,
+            transcript_raw_text: None,
+        };
+        let source_tag = MarkedTag {
+            id: "tag-a".into(),
+            name: "重要".into(),
+        };
+        let items = build_storage_transfer_items(
+            "source-webdav",
+            "",
+            &target.id,
+            std::slice::from_ref(&source_message),
+            std::slice::from_ref(&source_tag),
+        );
+        db::create_or_resume_storage_transfer(
+            &state.db_path,
+            &db::NewStorageTransferBatch {
+                batch_id: "verify-batch",
+                source_profile_id: "source-webdav",
+                target_profile_id: &target.id,
+                source_provider_kind: "webdav",
+                target_provider_kind: "supabase",
+                source_owner_scope: "",
+                target_owner_scope: &session.user_id,
+                items: &items,
+                now_ms: 1,
+            },
+        )
+        .unwrap();
+        for item in &items {
+            db::mark_storage_transfer_item_state(
+                &state.db_path,
+                "verify-batch",
+                &item.item_type,
+                &item.source_key,
+                "applied",
+                None,
+                2,
+            )
+            .unwrap();
+        }
+        let message_item = items
+            .iter()
+            .find(|item| item.item_type == "message")
+            .unwrap();
+        let tag_item = items.iter().find(|item| item.item_type == "tag").unwrap();
+        let attachment_id = message_item.attachment_id.as_deref().unwrap();
+        let object_path = format!("user-a/space/{attachment_id}/source.bin");
+        let target_filename =
+            storage_transfer_target_filename(&source_message, &message_item.entity_id);
+        let mapped_tag_ids = remap_storage_transfer_tag_ids("source-webdav", "", &["tag-a".into()]);
+        server.state.snapshots.lock().unwrap().insert(
+            format!("tags/{}", tag_item.entity_id),
+            serde_json::json!({"id":tag_item.entity_id,"name":source_tag.name,"deleted_at":null}),
+        );
+        server.state.snapshots.lock().unwrap().insert(
+            format!("messages/{}", message_item.entity_id),
+            serde_json::json!({
+                "id":message_item.entity_id,"sender":source_message.sender,
+                "timestamp_ms":source_message.timestamp_ms,"size":payload.len() as i64,
+                "kind":source_message.kind,"original_name":source_message.original_name,
+                "content":null,"format":source_message.format,"file_hash":payload_hash,
+                "legacy_filename":target_filename,"marked":true,
+                "marked_tag_ids":mapped_tag_ids,"marked_pinned":true,
+                "marked_due_date":"2026-10-13","transcript_source":null,
+                "source_audio_mime_type":null,"transcript_raw_text":null,"deleted_at":null
+            }),
+        );
+        server.state.snapshots.lock().unwrap().insert(
+            format!("attachments/{attachment_id}"),
+            serde_json::json!({
+                "id":attachment_id,"message_id":message_item.entity_id,
+                "object_path":object_path,"size":payload.len() as i64,
+                "sha256":payload_hash,"deleted_at":null
+            }),
+        );
+        server
+            .state
+            .objects
+            .lock()
+            .unwrap()
+            .insert(object_path.clone(), payload.clone());
+        let messages =
+            TestHashMap::from([(source_message.filename.clone(), source_message.clone())]);
+        let tags = TestHashMap::from([(source_tag.id.clone(), source_tag.clone())]);
+
+        verify_storage_transfer_supabase_target(
+            &state,
+            &target,
+            &session,
+            "verify-batch",
+            &messages,
+            &tags,
+        )
+        .await
+        .unwrap();
+
+        server
+            .state
+            .objects
+            .lock()
+            .unwrap()
+            .insert(object_path, b"corrupted".to_vec());
+        let error = verify_storage_transfer_supabase_target(
+            &state,
+            &target,
+            &session,
+            "verify-batch",
+            &messages,
+            &tags,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("远端附件文件不一致"));
+        let failed =
+            db::list_storage_transfer_items(&state.db_path, "verify-batch", &["error"]).unwrap();
+        assert_eq!(failed.len(), 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_attachment_message_not_found_restores_message_before_retry() {
+        let server = spawn_test_supabase().await;
+        let dir = std::env::temp_dir().join(format!(
+            "transfer-genie-supabase-attachment-repair-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let mut settings = test_supabase_settings_with_url(server.base_url.clone());
+        settings.storage_profiles[0].id = "target-supabase".into();
+        settings.storage_profiles[0].name = "目标云端".into();
+        settings.storage_profiles[0]
+            .supabase
+            .as_mut()
+            .unwrap()
+            .space_id = "11111111-1111-4111-8111-111111111111".into();
+        settings.active_storage_profile_id = Some("target-supabase".into());
+        let state = test_app_state(&dir, settings.clone());
+        db::init_db(&state.db_path, Some("target-supabase")).unwrap();
+        let target = settings.storage_profiles[0].clone();
+        let session = supabase_auth::SupabaseSession {
+            access_token: "access-token".into(),
+            refresh_token: "refresh-token".into(),
+            user_id: "user-a".into(),
+            email: "user@example.invalid".into(),
+            expires_at: i64::MAX,
+        };
+        let message_id = "message-id";
+        let attachment_id = "attachment-id";
+        let message_operation_id = "message-operation";
+        let attachment_operation_id = "attachment-operation";
+        let object_path = format!(
+            "{}/{}/{}/source.bin",
+            session.user_id,
+            target.supabase.as_ref().unwrap().space_id,
+            attachment_id
+        );
+        let bytes = b"attachment recovery payload";
+        let sha256 = format!("{:x}", Sha256::digest(bytes));
+        let local_path = dir.join("source.bin");
+        fs::write(&local_path, bytes).unwrap();
+        let item = db::StorageTransferItem {
+            item_type: "message".into(),
+            source_key: "source.bin".into(),
+            entity_id: message_id.into(),
+            attachment_id: Some(attachment_id.into()),
+            message_operation_id: message_operation_id.into(),
+            attachment_operation_id: Some(attachment_operation_id.into()),
+            state: "pending".into(),
+            source_revision: None,
+            source_hash: Some(sha256.clone()),
+            total_bytes: bytes.len() as i64,
+            transferred_bytes: 0,
+            last_error: None,
+        };
+        db::create_or_resume_storage_transfer(
+            &state.db_path,
+            &db::NewStorageTransferBatch {
+                batch_id: "attachment-repair",
+                source_profile_id: "source-webdav",
+                target_profile_id: &target.id,
+                source_provider_kind: "webdav",
+                target_provider_kind: "supabase",
+                source_owner_scope: "",
+                target_owner_scope: &session.user_id,
+                items: std::slice::from_ref(&item),
+                now_ms: 1,
+            },
+        )
+        .unwrap();
+        db::mark_storage_transfer_running(&state.db_path, "attachment-repair", 2).unwrap();
+        let mut message = test_db_message(
+            &target.id,
+            "source.bin",
+            "source.bin",
+            100,
+            bytes.len() as i64,
+        );
+        message.local_path = Some(local_path.to_string_lossy().to_string());
+        message.remote_path = Some(object_path.clone());
+        message.file_hash = Some(sha256.clone());
+        let message_operation = outbox_operation_with_id(
+            message_operation_id,
+            &target.id,
+            &session.user_id,
+            "message",
+            message_id,
+            "upsert",
+            0,
+            supabase_message_payload(&message),
+        )
+        .unwrap();
+        let attachment_operation = outbox_operation_with_id(
+            attachment_operation_id,
+            &target.id,
+            &session.user_id,
+            "attachment",
+            attachment_id,
+            "upsert",
+            0,
+            serde_json::json!({
+                "messageId":message_id,"originalName":message.original_name,
+                "objectPath":object_path,"previewObjectPath":null,
+                "mimeType":"application/octet-stream","size":message.size,
+                "sha256":sha256,"uploadStatus":"uploaded"
+            }),
+        )
+        .unwrap();
+        db::apply_imported_message(
+            &state.db_path,
+            "attachment-repair",
+            &item.source_key,
+            &message,
+            &message_operation,
+            Some((
+                attachment_id,
+                &object_path,
+                Some("application/octet-stream"),
+                &attachment_operation,
+            )),
+            3,
+        )
+        .unwrap();
+
+        let claimed_message = db::claim_storage_import_outbox_operations(
+            &state.db_path,
+            &target.id,
+            &session.user_id,
+            "attachment-repair",
+            "setup-worker",
+            4,
+            30_000,
+            1,
+        )
+        .unwrap();
+        assert_eq!(claimed_message[0].operation_id, message_operation_id);
+        db::apply_outbox_success(&state.db_path, &claimed_message[0], "setup-worker", 1, 5)
+            .unwrap();
+        assert!(!server
+            .state
+            .snapshots
+            .lock()
+            .unwrap()
+            .contains_key(&format!("messages/{message_id}")));
+
+        let pushed =
+            push_supabase_outbox(&state, &target, &session, true, Some("attachment-repair"))
+                .await
+                .unwrap();
+
+        assert_eq!(pushed, 2);
+        assert_eq!(
+            db::count_pending_import_outbox(&state.db_path, "attachment-repair").unwrap(),
+            0
+        );
+        let repaired_items =
+            db::list_storage_transfer_items(&state.db_path, "attachment-repair", &["applied"])
+                .unwrap();
+        assert_eq!(repaired_items.len(), 1);
+        assert_ne!(repaired_items[0].message_operation_id, message_operation_id);
+        assert_eq!(
+            repaired_items[0].attachment_operation_id.as_deref(),
+            Some(attachment_operation_id)
+        );
+        assert_eq!(
+            db::get_outbox_operation(&state.db_path, attachment_operation_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            "acknowledged"
+        );
+        let snapshots = server.state.snapshots.lock().unwrap();
+        assert!(snapshots.contains_key(&format!("messages/{message_id}")));
+        assert_eq!(
+            snapshots[&format!("attachments/{attachment_id}")]["message_id"],
+            message_id
+        );
+        drop(snapshots);
+        assert_eq!(
+            server
+                .state
+                .objects
+                .lock()
+                .unwrap()
+                .get(&object_path)
+                .cloned(),
+            Some(bytes.to_vec())
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn batch_keep_local_conflicts_pushes_all_entities_in_one_command() {
+        let server = spawn_test_supabase().await;
+        let dir = std::env::temp_dir().join(format!(
+            "transfer-genie-supabase-batch-conflicts-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let mut settings = test_supabase_settings_with_url(server.base_url.clone());
+        settings.storage_profiles[0].id = "supabase-1".into();
+        settings.active_storage_profile_id = Some("supabase-1".into());
+        let state = test_app_state(&dir, settings);
+        db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+        install_test_supabase_session(&state);
+
+        for index in 0..2 {
+            let message_id = format!("batch-message-{index}");
+            let mut message = test_db_message(
+                "supabase-1",
+                &format!("batch-message-{index}.txt"),
+                &format!("batch-message-{index}.txt"),
+                100 + index,
+                10,
+            );
+            message.content = Some(format!("local-{index}"));
+            let operation = outbox_operation_with_id(
+                &format!("batch-operation-{index}"),
+                "supabase-1",
+                "user-a",
+                "message",
+                &message_id,
+                "upsert",
+                1,
+                supabase_message_payload(&message),
+            )
+            .unwrap();
+            db::save_message_and_enqueue(&state.db_path, &message, &operation).unwrap();
+            let claimed = db::claim_outbox_operations(
+                &state.db_path,
+                "supabase-1",
+                "user-a",
+                &format!("setup-worker-{index}"),
+                200 + index,
+                30_000,
+                1,
+                true,
+            )
+            .unwrap();
+            db::record_outbox_conflict(
+                &state.db_path,
+                &claimed[0],
+                &format!("setup-worker-{index}"),
+                Some(2),
+                Some(
+                    &serde_json::json!({
+                        "id":message_id,"sender":"remote","timestamp_ms":50,
+                        "size":8,"kind":"text","original_name":format!("batch-message-{index}.txt"),
+                        "legacy_filename":format!("batch-message-{index}.txt"),
+                        "content":format!("remote-{index}"),"format":"text",
+                        "marked":false,"marked_tag_ids":[],"marked_pinned":false,
+                        "deleted_at":null
+                    })
+                    .to_string(),
+                ),
+                210 + index,
+            )
+            .unwrap();
+        }
+
+        let result = resolve_all_sync_conflicts_impl(
+            &state,
+            ResolveAllSyncConflictsInput {
+                resolution: "local".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!((result.found, result.resolved, result.remaining), (2, 2, 0));
+        assert!(result.sync_error.is_none());
+        assert_eq!(result.status.pending_count, 0);
+        assert_eq!(result.status.conflict_count, 0);
+        let snapshots = server.state.snapshots.lock().unwrap();
+        assert_eq!(snapshots["messages/batch-message-0"]["content"], "local-0");
+        assert_eq!(snapshots["messages/batch-message-1"]["content"], "local-1");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn storage_transfer_reuses_remote_supabase_tag_by_name() {
+        let server = spawn_test_supabase().await;
+        server.state.snapshots.lock().unwrap().insert(
+            "tags/remote-tag".into(),
+            serde_json::json!({
+                "id":"remote-tag",
+                "name":"Important",
+                "revision":7,
+                "deleted_at":null
+            }),
+        );
+        let dir = std::env::temp_dir().join(format!(
+            "transfer-genie-supabase-tag-merge-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let state = test_app_state(&dir, test_settings());
+        db::init_db(&state.db_path, None).unwrap();
+        let source = storage_provider::ProviderConfig::Webdav(WebDavEndpoint {
+            id: "source".into(),
+            name: "Source".into(),
+            url: "https://source.invalid".into(),
+            username: String::new(),
+            password: String::new(),
+            enabled: true,
+        });
+        let target = StorageProfile {
+            id: "target".into(),
+            name: "Target".into(),
+            provider_kind: StorageProviderKind::Supabase,
+            enabled: true,
+            webdav: None,
+            supabase: Some(crate::types::SupabaseStorageConfig {
+                api_url: server.base_url.clone(),
+                anon_key: "anon".into(),
+                space_id: "11111111-1111-4111-8111-111111111111".into(),
+            }),
+        };
+        let session = supabase_auth::SupabaseSession {
+            access_token: "access".into(),
+            refresh_token: "refresh".into(),
+            expires_at: i64::MAX,
+            user_id: "user-a".into(),
+            email: "user@example.invalid".into(),
+        };
+        let context = StorageTransferContext {
+            source,
+            target: storage_provider::ProviderConfig::Supabase(target),
+            source_owner_scope: String::new(),
+            target_owner_scope: session.user_id.clone(),
+            source_session: None,
+            target_session: Some(session),
+        };
+        let source_tag = MarkedTag {
+            id: "source-tag".into(),
+            name: "important".into(),
+        };
+        let items = build_storage_transfer_items_for_plan(
+            "source",
+            "",
+            "target",
+            "user-a",
+            "plan",
+            &[],
+            std::slice::from_ref(&source_tag),
+        );
+        db::create_or_resume_storage_transfer(
+            &state.db_path,
+            &db::NewStorageTransferBatch {
+                batch_id: "tag-merge",
+                source_profile_id: "source",
+                target_profile_id: "target",
+                source_provider_kind: "webdav",
+                target_provider_kind: "supabase",
+                source_owner_scope: "",
+                target_owner_scope: "user-a",
+                items: &items,
+                now_ms: 1,
+            },
+        )
+        .unwrap();
+        transfer_storage_tag(&state, &context, "tag-merge", &items[0], &source_tag)
+            .await
+            .unwrap();
+        let skipped =
+            db::list_storage_transfer_items(&state.db_path, "tag-merge", &["skipped"]).unwrap();
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].entity_id, "remote-tag");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn storage_transfer_maps_messages_attachments_tags_and_marks_for_all_provider_pairs() {
+        for (source_kind, target_kind) in [
+            ("webdav", "webdav"),
+            ("webdav", "supabase"),
+            ("supabase", "webdav"),
+            ("supabase", "supabase"),
+        ] {
+            let source_dav = spawn_test_dav().await;
+            let target_dav = spawn_test_dav().await;
+            let source_supabase = spawn_test_supabase().await;
+            let target_supabase = spawn_test_supabase().await;
+            let case_name = format!("{source_kind}-to-{target_kind}");
+            let dir = std::env::temp_dir().join(format!(
+                "transfer-genie-provider-pair-{case_name}-{}",
+                uuid::Uuid::new_v4()
+            ));
+            fs::create_dir_all(&dir).unwrap();
+            let mut settings = test_settings();
+            settings.active_storage_profile_id = Some("active-untouched".into());
+            let state = test_app_state(&dir, settings);
+            db::init_db(&state.db_path, None).unwrap();
+
+            let source_profile_id = format!("source-{source_kind}");
+            let target_profile_id = format!("target-{target_kind}");
+            let source_session =
+                (source_kind == "supabase").then(|| supabase_auth::SupabaseSession {
+                    access_token: "source-access".into(),
+                    refresh_token: "source-refresh".into(),
+                    user_id: "source-user".into(),
+                    email: "source@example.invalid".into(),
+                    expires_at: i64::MAX,
+                });
+            let target_session =
+                (target_kind == "supabase").then(|| supabase_auth::SupabaseSession {
+                    access_token: "target-access".into(),
+                    refresh_token: "target-refresh".into(),
+                    user_id: "target-user".into(),
+                    email: "target@example.invalid".into(),
+                    expires_at: i64::MAX,
+                });
+            let source = if source_kind == "webdav" {
+                storage_provider::ProviderConfig::Webdav(WebDavEndpoint {
+                    id: source_profile_id.clone(),
+                    name: "来源 WebDAV".into(),
+                    url: source_dav.base_url.clone(),
+                    username: String::new(),
+                    password: String::new(),
+                    enabled: true,
+                })
+            } else {
+                storage_provider::ProviderConfig::Supabase(StorageProfile {
+                    id: source_profile_id.clone(),
+                    name: "来源 Supabase".into(),
+                    provider_kind: StorageProviderKind::Supabase,
+                    enabled: true,
+                    webdav: None,
+                    supabase: Some(crate::types::SupabaseStorageConfig {
+                        api_url: source_supabase.base_url.clone(),
+                        anon_key: "anon".into(),
+                        space_id: "source-space".into(),
+                    }),
+                })
+            };
+            let target = if target_kind == "webdav" {
+                storage_provider::ProviderConfig::Webdav(WebDavEndpoint {
+                    id: target_profile_id.clone(),
+                    name: "目标 WebDAV".into(),
+                    url: target_dav.base_url.clone(),
+                    username: String::new(),
+                    password: String::new(),
+                    enabled: true,
+                })
+            } else {
+                storage_provider::ProviderConfig::Supabase(StorageProfile {
+                    id: target_profile_id.clone(),
+                    name: "目标 Supabase".into(),
+                    provider_kind: StorageProviderKind::Supabase,
+                    enabled: true,
+                    webdav: None,
+                    supabase: Some(crate::types::SupabaseStorageConfig {
+                        api_url: target_supabase.base_url.clone(),
+                        anon_key: "anon".into(),
+                        space_id: "target-space".into(),
+                    }),
+                })
+            };
+            let source_owner_scope = source_session
+                .as_ref()
+                .map(|session| session.user_id.clone())
+                .unwrap_or_default();
+            let target_owner_scope = target_session
+                .as_ref()
+                .map(|session| session.user_id.clone())
+                .unwrap_or_default();
+            let context = StorageTransferContext {
+                source: source.clone(),
+                target: target.clone(),
+                source_owner_scope: source_owner_scope.clone(),
+                target_owner_scope: target_owner_scope.clone(),
+                source_session: source_session.clone(),
+                target_session: target_session.clone(),
+            };
+
+            let attachment_bytes = format!("attachment-{case_name}").into_bytes();
+            let attachment_hash = format!("{:x}", Sha256::digest(&attachment_bytes));
+            let source_object_path = "source-user/source-space/source-attachment/source.bin";
+            if source_kind == "webdav" {
+                source_dav
+                    .state
+                    .insert("files/source.bin", attachment_bytes.clone());
+            } else {
+                source_supabase
+                    .state
+                    .objects
+                    .lock()
+                    .unwrap()
+                    .insert(source_object_path.into(), attachment_bytes.clone());
+            }
+            let source_tag = MarkedTag {
+                id: "tag-a".into(),
+                name: "重要".into(),
+            };
+            let messages = vec![
+                Message {
+                    filename: "note.txt".into(),
+                    message_id: None,
+                    sender: "tester".into(),
+                    timestamp_ms: 100,
+                    size: 5,
+                    kind: "text".into(),
+                    original_name: "note.txt".into(),
+                    content: Some("hello".into()),
+                    local_path: None,
+                    remote_path: Some("messages/note.txt".into()),
+                    file_hash: None,
+                    download_exists: false,
+                    marked: true,
+                    marked_tag_ids: vec![source_tag.id.clone()],
+                    marked_pinned: true,
+                    marked_due_date: Some("2026-10-13".into()),
+                    format: "markdown".into(),
+                    transcript_source: None,
+                    source_audio_mime_type: None,
+                    transcript_raw_text: None,
+                },
+                Message {
+                    filename: "source.bin".into(),
+                    message_id: None,
+                    sender: "tester".into(),
+                    timestamp_ms: 200,
+                    size: attachment_bytes.len() as i64,
+                    kind: "file".into(),
+                    original_name: "source.bin".into(),
+                    content: None,
+                    local_path: None,
+                    remote_path: Some(if source_kind == "webdav" {
+                        "files/source.bin".into()
+                    } else {
+                        source_object_path.into()
+                    }),
+                    file_hash: Some(attachment_hash.clone()),
+                    download_exists: false,
+                    marked: true,
+                    marked_tag_ids: vec![source_tag.id.clone()],
+                    marked_pinned: false,
+                    marked_due_date: None,
+                    format: "text".into(),
+                    transcript_source: None,
+                    source_audio_mime_type: None,
+                    transcript_raw_text: None,
+                },
+            ];
+            let items = build_storage_transfer_items(
+                &source_profile_id,
+                &source_owner_scope,
+                &target_profile_id,
+                &messages,
+                std::slice::from_ref(&source_tag),
+            );
+            let batch_id = format!("batch-{case_name}");
+            db::create_or_resume_storage_transfer(
+                &state.db_path,
+                &db::NewStorageTransferBatch {
+                    batch_id: &batch_id,
+                    source_profile_id: &source_profile_id,
+                    target_profile_id: &target_profile_id,
+                    source_provider_kind: source_kind,
+                    target_provider_kind: target_kind,
+                    source_owner_scope: &source_owner_scope,
+                    target_owner_scope: &target_owner_scope,
+                    items: &items,
+                    now_ms: 1,
+                },
+            )
+            .unwrap();
+
+            let tag_item = items.iter().find(|item| item.item_type == "tag").unwrap();
+            transfer_storage_tag(&state, &context, &batch_id, tag_item, &source_tag)
+                .await
+                .unwrap();
+            for message in &messages {
+                let item = items
+                    .iter()
+                    .find(|item| item.item_type == "message" && item.source_key == message.filename)
+                    .unwrap();
+                transfer_storage_message(&state, &context, &batch_id, item, message)
+                    .await
+                    .unwrap();
+            }
+            if target_kind == "supabase" {
+                let target_profile = match &target {
+                    storage_provider::ProviderConfig::Supabase(profile) => profile,
+                    _ => unreachable!(),
+                };
+                let session = target_session.as_ref().unwrap();
+                push_supabase_outbox(&state, target_profile, session, true, Some(&batch_id))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    db::count_pending_import_outbox(&state.db_path, &batch_id).unwrap(),
+                    0,
+                    "{case_name}"
+                );
+                let source_messages = messages
+                    .iter()
+                    .cloned()
+                    .map(|message| (message.filename.clone(), message))
+                    .collect::<TestHashMap<_, _>>();
+                let source_tags = TestHashMap::from([(source_tag.id.clone(), source_tag.clone())]);
+                verify_storage_transfer_supabase_target(
+                    &state,
+                    target_profile,
+                    session,
+                    &batch_id,
+                    &source_messages,
+                    &source_tags,
+                )
+                .await
+                .unwrap();
+            }
+
+            let mapped_tag_id = remap_storage_transfer_tag_ids(
+                &source_profile_id,
+                &source_owner_scope,
+                &[source_tag.id.clone()],
+            )
+            .remove(0);
+            let target_messages = if target_kind == "webdav" {
+                db::list_messages(&state.db_path, &target_profile_id, None).unwrap()
+            } else {
+                db::list_messages_for_scope(
+                    &state.db_path,
+                    &target_profile_id,
+                    &target_owner_scope,
+                    None,
+                    None,
+                    false,
+                    None,
+                )
+                .unwrap()
+            };
+            assert_eq!(target_messages.len(), 2, "{case_name}");
+            let target_text = target_messages
+                .iter()
+                .find(|message| message.kind == "text")
+                .unwrap();
+            assert_eq!(target_text.content.as_deref(), Some("hello"), "{case_name}");
+            assert!(
+                target_text.marked && target_text.marked_pinned,
+                "{case_name}"
+            );
+            assert_eq!(
+                target_text.marked_due_date.as_deref(),
+                Some("2026-10-13"),
+                "{case_name}"
+            );
+            assert_eq!(target_text.marked_tag_ids, vec![mapped_tag_id.clone()]);
+            let target_file = target_messages
+                .iter()
+                .find(|message| message.kind == "file")
+                .unwrap();
+            assert_eq!(
+                target_file.file_hash.as_deref(),
+                Some(attachment_hash.as_str())
+            );
+            assert_eq!(target_file.size, attachment_bytes.len() as i64);
+
+            let target_tags = if target_kind == "webdav" {
+                db::list_marked_tags(&state.db_path, &target_profile_id).unwrap()
+            } else {
+                db::list_tags_for_scope(&state.db_path, &target_profile_id, &target_owner_scope)
+                    .unwrap()
+                    .into_iter()
+                    .map(|(tag, _)| tag)
+                    .collect()
+            };
+            assert_eq!(target_tags.len(), 1, "{case_name}");
+            assert_eq!(target_tags[0].id, mapped_tag_id, "{case_name}");
+            assert_eq!(target_tags[0].name, source_tag.name, "{case_name}");
+            if target_kind == "webdav" {
+                let remote_path = target_file.remote_path.as_deref().unwrap();
+                assert_eq!(
+                    target_dav.state.files.lock().unwrap().get(remote_path),
+                    Some(&attachment_bytes),
+                    "{case_name}"
+                );
+            } else {
+                let item = items
+                    .iter()
+                    .find(|item| item.source_key == "source.bin")
+                    .unwrap();
+                let (local_path, _, _, size, hash) = db::get_attachment_local_path(
+                    &state.db_path,
+                    &target_profile_id,
+                    &target_owner_scope,
+                    item.attachment_id.as_deref().unwrap(),
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(
+                    fs::read(local_path).unwrap(),
+                    attachment_bytes,
+                    "{case_name}"
+                );
+                assert_eq!(size, attachment_bytes.len() as i64);
+                assert_eq!(hash.as_deref(), Some(attachment_hash.as_str()));
+            }
+            if source_kind == "webdav" {
+                assert_eq!(
+                    source_dav
+                        .state
+                        .files
+                        .lock()
+                        .unwrap()
+                        .get("files/source.bin"),
+                    Some(&attachment_bytes),
+                    "{case_name}"
+                );
+            } else {
+                assert_eq!(
+                    source_supabase
+                        .state
+                        .objects
+                        .lock()
+                        .unwrap()
+                        .get(source_object_path),
+                    Some(&attachment_bytes),
+                    "{case_name}"
+                );
+            }
+            assert_eq!(
+                current_settings(&state)
+                    .unwrap()
+                    .active_storage_profile_id
+                    .as_deref(),
+                Some("active-untouched"),
+                "{case_name}"
+            );
+            assert!(state.sync_cancel.lock().unwrap().is_none(), "{case_name}");
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn storage_transfer_large_attachment_cache_is_streamed_and_reused() {
+        let server = spawn_test_dav().await;
+        let payload = (0..(8 * 1024 * 1024))
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        let expected_hash = format!("{:x}", Sha256::digest(&payload));
+        server.state.insert("files/large.bin", payload.clone());
+        let dir = std::env::temp_dir().join(format!(
+            "transfer-genie-large-transfer-cache-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let state = test_app_state(&dir, test_settings_with_url(server.base_url.clone()));
+        db::init_db(&state.db_path, None).unwrap();
+        let source = storage_provider::ProviderConfig::Webdav(WebDavEndpoint {
+            id: "source".into(),
+            name: "Source".into(),
+            url: server.base_url.clone(),
+            username: String::new(),
+            password: String::new(),
+            enabled: true,
+        });
+        let message = Message {
+            filename: "large.bin".into(),
+            message_id: None,
+            sender: "tester".into(),
+            timestamp_ms: 100,
+            size: payload.len() as i64,
+            kind: "file".into(),
+            original_name: "large.bin".into(),
+            content: None,
+            local_path: None,
+            remote_path: Some("files/large.bin".into()),
+            file_hash: None,
+            download_exists: false,
+            marked: false,
+            marked_tag_ids: Vec::new(),
+            marked_pinned: false,
+            marked_due_date: None,
+            format: "text".into(),
+            transcript_source: None,
+            source_audio_mime_type: None,
+            transcript_raw_text: None,
+        };
+        let item = build_storage_transfer_items(
+            "source",
+            "",
+            "target",
+            std::slice::from_ref(&message),
+            &[],
+        )
+        .remove(0);
+        db::create_or_resume_storage_transfer(
+            &state.db_path,
+            &db::NewStorageTransferBatch {
+                batch_id: "large-batch",
+                source_profile_id: "source",
+                target_profile_id: "target",
+                source_provider_kind: "webdav",
+                target_provider_kind: "webdav",
+                source_owner_scope: "",
+                target_owner_scope: "",
+                items: std::slice::from_ref(&item),
+                now_ms: 1,
+            },
+        )
+        .unwrap();
+
+        let (cache_path, size, hash) = cache_storage_transfer_attachment(
+            &state,
+            &source,
+            None,
+            "large-batch",
+            &item,
+            &message,
+        )
+        .await
+        .unwrap();
+        assert_eq!(size, payload.len() as i64);
+        assert_eq!(hash, expected_hash);
+        assert_eq!(
+            fs::metadata(&cache_path).unwrap().len(),
+            payload.len() as u64
+        );
+        assert_eq!(server.state.get_count("files/large.bin"), 1);
+        let stored = db::list_storage_transfer_items(&state.db_path, "large-batch", &["pending"])
+            .unwrap()
+            .remove(0);
+        assert_eq!(stored.transferred_bytes, payload.len() as i64);
+
+        let (_, resumed_size, resumed_hash) = cache_storage_transfer_attachment(
+            &state,
+            &source,
+            None,
+            "large-batch",
+            &item,
+            &message,
+        )
+        .await
+        .unwrap();
+        assert_eq!((resumed_size, resumed_hash), (size, hash));
+        assert_eq!(server.state.get_count("files/large.bin"), 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn storage_transfer_webdav_retry_reuses_stable_file_after_history_failure() {
+        let source_server = spawn_test_dav().await;
+        let target_server = spawn_test_dav().await;
+        source_server
+            .state
+            .insert("files/source.bin", b"stable transfer payload".to_vec());
+        target_server
+            .state
+            .failed_puts
+            .lock()
+            .unwrap()
+            .insert("history/index.json".into());
+        let dir = std::env::temp_dir().join(format!(
+            "transfer-genie-webdav-transfer-retry-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let state = test_app_state(&dir, test_settings_with_url(source_server.base_url.clone()));
+        db::init_db(&state.db_path, None).unwrap();
+        let source = storage_provider::ProviderConfig::Webdav(WebDavEndpoint {
+            id: "source".into(),
+            name: "Source".into(),
+            url: source_server.base_url.clone(),
+            username: String::new(),
+            password: String::new(),
+            enabled: true,
+        });
+        let target = WebDavEndpoint {
+            id: "target".into(),
+            name: "Target".into(),
+            url: target_server.base_url.clone(),
+            username: String::new(),
+            password: String::new(),
+            enabled: true,
+        };
+        let message = Message {
+            filename: "source.bin".into(),
+            message_id: None,
+            sender: "tester".into(),
+            timestamp_ms: 100,
+            size: 23,
+            kind: "file".into(),
+            original_name: "source.bin".into(),
+            content: None,
+            local_path: None,
+            remote_path: Some("files/source.bin".into()),
+            file_hash: None,
+            download_exists: false,
+            marked: false,
+            marked_tag_ids: Vec::new(),
+            marked_pinned: false,
+            marked_due_date: None,
+            format: "text".into(),
+            transcript_source: None,
+            source_audio_mime_type: None,
+            transcript_raw_text: None,
+        };
+        let item = build_storage_transfer_items(
+            "source",
+            "",
+            "target",
+            std::slice::from_ref(&message),
+            &[],
+        )
+        .remove(0);
+        db::create_or_resume_storage_transfer(
+            &state.db_path,
+            &db::NewStorageTransferBatch {
+                batch_id: "retry-batch",
+                source_profile_id: "source",
+                target_profile_id: "target",
+                source_provider_kind: "webdav",
+                target_provider_kind: "webdav",
+                source_owner_scope: "",
+                target_owner_scope: "",
+                items: std::slice::from_ref(&item),
+                now_ms: 1,
+            },
+        )
+        .unwrap();
+        let target_filename = storage_transfer_target_filename(&message, &item.entity_id);
+        let target_remote_path = message_remote_path(&target_filename, message.timestamp_ms);
+        let first = write_storage_transfer_message_to_webdav(
+            &state,
+            &source,
+            None,
+            &target,
+            "retry-batch",
+            &item,
+            &message,
+        )
+        .await;
+        assert!(first.unwrap_err().contains("500"));
+        assert_eq!(
+            target_server
+                .state
+                .files
+                .lock()
+                .unwrap()
+                .get(&target_remote_path),
+            Some(&b"stable transfer payload".to_vec())
+        );
+        assert_eq!(target_server.state.put_count(&target_remote_path), 1);
+        target_server
+            .state
+            .failed_puts
+            .lock()
+            .unwrap()
+            .remove("history/index.json");
+        let retried = write_storage_transfer_message_to_webdav(
+            &state,
+            &source,
+            None,
+            &target,
+            "retry-batch",
+            &item,
+            &message,
+        )
+        .await
+        .unwrap();
+        assert_eq!(retried, "applied");
+        assert_eq!(target_server.state.put_count(&target_remote_path), 2);
+        let target_message_paths = target_server
+            .state
+            .files
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|path| path.starts_with("files/"))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(target_message_paths, vec![target_remote_path]);
+        assert!(db::get_message(&state.db_path, "target", &target_filename)
+            .unwrap()
+            .is_some());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn storage_transfer_webdav_target_verifies_skipped_remote_file_digest() {
+        let source_server = spawn_test_dav().await;
+        let target_server = spawn_test_dav().await;
+        let expected_bytes = b"expected-payload".to_vec();
+        let corrupted_bytes = b"corruptd-payload".to_vec();
+        assert_eq!(expected_bytes.len(), corrupted_bytes.len());
+        let dir = std::env::temp_dir().join(format!(
+            "transfer-genie-webdav-transfer-verify-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let state = test_app_state(&dir, test_settings_with_url(source_server.base_url.clone()));
+        db::init_db(&state.db_path, None).unwrap();
+        let source = storage_provider::ProviderConfig::Webdav(WebDavEndpoint {
+            id: "source".into(),
+            name: "Source".into(),
+            url: source_server.base_url.clone(),
+            username: String::new(),
+            password: String::new(),
+            enabled: true,
+        });
+        let target = WebDavEndpoint {
+            id: "target".into(),
+            name: "Target".into(),
+            url: target_server.base_url.clone(),
+            username: String::new(),
+            password: String::new(),
+            enabled: true,
+        };
+        let message = Message {
+            filename: "source.bin".into(),
+            message_id: None,
+            sender: "tester".into(),
+            timestamp_ms: 100,
+            size: expected_bytes.len() as i64,
+            kind: "file".into(),
+            original_name: "source.bin".into(),
+            content: None,
+            local_path: None,
+            remote_path: Some("files/source.bin".into()),
+            file_hash: Some(format!("{:x}", Sha256::digest(&expected_bytes))),
+            download_exists: false,
+            marked: false,
+            marked_tag_ids: Vec::new(),
+            marked_pinned: false,
+            marked_due_date: None,
+            format: "text".into(),
+            transcript_source: None,
+            source_audio_mime_type: None,
+            transcript_raw_text: None,
+        };
+        let mut item = build_storage_transfer_items(
+            "source",
+            "",
+            "target",
+            std::slice::from_ref(&message),
+            &[],
+        )
+        .remove(0);
+        item.state = "skipped".into();
+        db::create_or_resume_storage_transfer(
+            &state.db_path,
+            &db::NewStorageTransferBatch {
+                batch_id: "verify-webdav-batch",
+                source_profile_id: "source",
+                target_profile_id: "target",
+                source_provider_kind: "webdav",
+                target_provider_kind: "webdav",
+                source_owner_scope: "",
+                target_owner_scope: "",
+                items: std::slice::from_ref(&item),
+                now_ms: 1,
+            },
+        )
+        .unwrap();
+        assert!(
+            db::mark_storage_transfer_running(&state.db_path, "verify-webdav-batch", 2).unwrap()
+        );
+
+        let target_filename = storage_transfer_target_filename(&message, &item.entity_id);
+        let target_remote_path = message_remote_path(&target_filename, message.timestamp_ms);
+        target_server
+            .state
+            .insert(&target_remote_path, corrupted_bytes);
+        crate::history::upsert_history_entries(
+            &state.http,
+            &target,
+            vec![HistoryEntry {
+                filename: target_filename,
+                sender: message.sender.clone(),
+                timestamp_ms: message.timestamp_ms,
+                size: message.size,
+                kind: message.kind.clone(),
+                original_name: message.original_name.clone(),
+                remote_path: Some(target_remote_path),
+                marked: false,
+                marked_tag_ids: Vec::new(),
+                marked_pinned: false,
+                marked_due_date: None,
+                format: message.format.clone(),
+                transcript_source: None,
+                source_audio_mime_type: None,
+                transcript_text: None,
+                transcript_raw_text: None,
+            }],
+        )
+        .await
+        .unwrap();
+        let context = StorageTransferContext {
+            source,
+            target: storage_provider::ProviderConfig::Webdav(target),
+            source_owner_scope: String::new(),
+            target_owner_scope: String::new(),
+            source_session: None,
+            target_session: None,
+        };
+        let error = verify_storage_transfer_webdav_target(
+            &state,
+            &context,
+            "verify-webdav-batch",
+            &HashMap::from([(message.filename.clone(), message)]),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("摘要核验失败"));
+        let failed =
+            db::list_storage_transfer_items(&state.db_path, "verify-webdav-batch", &["error"])
+                .unwrap();
+        assert_eq!(failed.len(), 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn storage_transfer_supabase_source_reports_missing_and_revoked_sessions() {
+        let auth_url = spawn_test_auth().await;
+        let dir = std::env::temp_dir().join(format!(
+            "transfer-genie-transfer-auth-errors-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let mut settings = test_settings_with_url("https://webdav.example.invalid".into());
+        settings.storage_profiles = vec![
+            StorageProfile {
+                id: "source-supabase".into(),
+                name: "来源云端".into(),
+                provider_kind: StorageProviderKind::Supabase,
+                enabled: true,
+                webdav: None,
+                supabase: Some(crate::types::SupabaseStorageConfig {
+                    api_url: auth_url,
+                    anon_key: "anon".into(),
+                    space_id: "11111111-1111-4111-8111-111111111111".into(),
+                }),
+            },
+            StorageProfile {
+                id: "target-webdav".into(),
+                name: "目标网盘".into(),
+                provider_kind: StorageProviderKind::Webdav,
+                enabled: true,
+                webdav: Some(crate::types::WebDavStorageConfig {
+                    url: "https://webdav.example.invalid".into(),
+                    username: String::new(),
+                    password: String::new(),
+                }),
+                supabase: None,
+            },
+        ];
+        let state = test_app_state(&dir, settings);
+        let input = StorageTransferRequest {
+            source_profile_id: "source-supabase".into(),
+            target_profile_id: "target-webdav".into(),
+        };
+        let missing = match storage_transfer_context(&state, &input).await {
+            Ok(_) => panic!("missing Supabase session should block transfer"),
+            Err(error) => error,
+        };
+        assert!(missing.contains("请先登录来源 Supabase 存储空间：来源云端"));
+
+        state.supabase_sessions.lock().unwrap().insert(
+            "source-supabase".into(),
+            supabase_auth::SupabaseSession {
+                access_token: "expired".into(),
+                refresh_token: "revoked-refresh-token".into(),
+                user_id: "user-a".into(),
+                email: "user@example.invalid".into(),
+                expires_at: 1,
+            },
+        );
+        let revoked = match storage_transfer_context(&state, &input).await {
+            Ok(_) => panic!("revoked Supabase session should block transfer"),
+            Err(error) => error,
+        };
+        assert!(revoked.to_ascii_lowercase().contains("refresh token"));
+        assert!(!state
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .contains_key("source-supabase"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn storage_transfer_webdav_source_refresh_captures_manifest_text_file_tags_and_marks() {
+        let server = spawn_test_dav().await;
+        server.state.insert(
+            "history/index.json",
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "shards": [{
+                    "key": "1970-01",
+                    "path": "history/shards/1970-01.json",
+                    "count": 2,
+                    "start_timestamp_ms": 100,
+                    "end_timestamp_ms": 200
+                }]
+            }))
+            .unwrap(),
+        );
+        server.state.insert(
+            "history/shards/1970-01.json",
+            serde_json::to_vec(&serde_json::json!({
+                "entries": [
+                    {
+                        "filename": "note.txt",
+                        "sender": "tester",
+                        "timestamp_ms": 100,
+                        "size": 5,
+                        "kind": "text",
+                        "original_name": "note.txt",
+                        "remote_path": "messages/note.txt",
+                        "marked": true,
+                        "marked_tag_ids": ["tag-a"],
+                        "marked_pinned": true,
+                        "format": "text"
+                    },
+                    {
+                        "filename": "file.bin",
+                        "sender": "tester",
+                        "timestamp_ms": 200,
+                        "size": 4,
+                        "kind": "file",
+                        "original_name": "file.bin",
+                        "remote_path": "files/file.bin",
+                        "marked": false,
+                        "marked_tag_ids": [],
+                        "marked_pinned": false,
+                        "format": "text"
+                    }
+                ]
+            }))
+            .unwrap(),
+        );
+        server.state.insert(
+            "history/tags.json",
+            serde_json::to_vec(&vec![MarkedTag {
+                id: "tag-a".into(),
+                name: "重要".into(),
+            }])
+            .unwrap(),
+        );
+        server.state.insert("messages/note.txt", b"hello".to_vec());
+        server.state.insert("files/file.bin", b"data".to_vec());
+        let dir = std::env::temp_dir().join(format!(
+            "transfer-genie-webdav-source-refresh-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let mut settings = test_settings_with_url(server.base_url.clone());
+        settings.active_storage_profile_id = Some("active-other".into());
+        let state = test_app_state(&dir, settings);
+        db::init_db(&state.db_path, None).unwrap();
+        let source = storage_provider::ProviderConfig::Webdav(WebDavEndpoint {
+            id: "endpoint-1".into(),
+            name: "Source".into(),
+            url: server.base_url.clone(),
+            username: String::new(),
+            password: String::new(),
+            enabled: true,
+        });
+
+        refresh_storage_transfer_source(&state, &source)
+            .await
+            .unwrap();
+        let (messages, tags) = storage_transfer_messages_and_tags(&state, &source, "").unwrap();
+        assert_eq!(messages.len(), 2);
+        let text = messages
+            .iter()
+            .find(|message| message.filename == "note.txt")
+            .unwrap();
+        assert_eq!(text.content.as_deref(), Some("hello"));
+        assert!(text.marked && text.marked_pinned);
+        assert_eq!(text.marked_tag_ids, vec!["tag-a"]);
+        let file = messages
+            .iter()
+            .find(|message| message.filename == "file.bin")
+            .unwrap();
+        assert_eq!(file.remote_path.as_deref(), Some("files/file.bin"));
+        assert_eq!(tags.len(), 1);
+        assert_eq!(
+            (tags[0].id.as_str(), tags[0].name.as_str()),
+            ("tag-a", "重要")
+        );
+        assert_eq!(
+            current_settings(&state)
+                .unwrap()
+                .active_storage_profile_id
+                .as_deref(),
+            Some("active-other")
+        );
+        let item = build_storage_transfer_items(
+            "endpoint-1",
+            "",
+            "target",
+            std::slice::from_ref(file),
+            &[],
+        )
+        .remove(0);
+        db::create_or_resume_storage_transfer(
+            &state.db_path,
+            &db::NewStorageTransferBatch {
+                batch_id: "webdav-preview",
+                source_profile_id: "endpoint-1",
+                target_profile_id: "target",
+                source_provider_kind: "webdav",
+                target_provider_kind: "webdav",
+                source_owner_scope: "",
+                target_owner_scope: "",
+                items: std::slice::from_ref(&item),
+                now_ms: 1,
+            },
+        )
+        .unwrap();
+        let (_, size, hash) =
+            cache_storage_transfer_attachment(&state, &source, None, "webdav-preview", &item, file)
+                .await
+                .unwrap();
+        assert_eq!(size, 4);
+        assert_eq!(hash, format!("{:x}", Sha256::digest(b"data")));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn normalize_settings_assigns_stable_uuid_to_empty_supabase_space() {
         let mut settings = test_settings();
         settings.storage_profiles = vec![StorageProfile {
@@ -17885,6 +22938,588 @@ mod tests {
         assert_eq!(reloaded.webdav_endpoints[0].username, "user");
         assert_eq!(reloaded.webdav_endpoints[0].password, "pass");
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    #[ignore = "requires TRANSFER_GENIE_ACCEPTANCE_APP_DATA_DIR and a real local data copy"]
+    fn acceptance_real_legacy_settings_and_import_batches_upgrade_on_isolated_copy() {
+        let source_dir = std::env::var_os("TRANSFER_GENIE_ACCEPTANCE_APP_DATA_DIR")
+            .map(PathBuf::from)
+            .expect("set TRANSFER_GENIE_ACCEPTANCE_APP_DATA_DIR");
+        let source_settings_path = source_dir.join("settings.json");
+        let source_db_path = source_dir.join("messages.sqlite");
+        assert!(
+            source_settings_path.is_file(),
+            "real settings.json is missing"
+        );
+        assert!(source_db_path.is_file(), "real messages.sqlite is missing");
+
+        let source_value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&source_settings_path).expect("read real settings"))
+                .expect("parse real settings");
+        let source_profile_ids = source_value["storage_profiles"]
+            .as_array()
+            .expect("real settings contain storage_profiles")
+            .iter()
+            .filter_map(|profile| profile["id"].as_str().map(str::to_string))
+            .collect::<Vec<_>>();
+        assert!(
+            !source_profile_ids.is_empty(),
+            "real settings have no profiles"
+        );
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-real-upgrade-acceptance-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).expect("create isolated acceptance directory");
+        let copied_settings_path = temp_dir.join("settings.json");
+        fs::copy(&source_settings_path, &copied_settings_path)
+            .expect("copy real settings into isolated directory");
+        let copied_db_path = temp_dir.join("messages.sqlite");
+        {
+            let source = rusqlite::Connection::open_with_flags(
+                &source_db_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("open real database read-only");
+            source
+                .execute(
+                    "VACUUM INTO ?1",
+                    rusqlite::params![copied_db_path.to_string_lossy().to_string()],
+                )
+                .expect("snapshot real database into isolated directory");
+        }
+
+        let loaded = load_settings(&copied_settings_path, &temp_dir)
+            .expect("load real settings through current migration");
+        let loaded_profile_ids = loaded
+            .storage_profiles
+            .iter()
+            .map(|profile| profile.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(loaded_profile_ids, source_profile_ids);
+        assert_eq!(
+            loaded.active_storage_profile_id.as_deref(),
+            source_value["active_storage_profile_id"].as_str()
+        );
+        write_settings_audited(&copied_settings_path, &loaded)
+            .expect("save migrated real settings copy");
+        let reloaded = load_settings(&copied_settings_path, &temp_dir)
+            .expect("reload migrated real settings copy");
+        assert_eq!(reloaded.storage_profiles, loaded.storage_profiles);
+        assert_eq!(
+            reloaded.active_storage_profile_id,
+            loaded.active_storage_profile_id
+        );
+
+        let batch_ids = {
+            let conn = rusqlite::Connection::open(&copied_db_path)
+                .expect("open isolated database before migration");
+            let mut statement = conn
+                .prepare("SELECT batch_id FROM storage_import_batches ORDER BY created_at_ms")
+                .expect("read legacy import batches");
+            statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .expect("query legacy import batches")
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .expect("collect legacy import batches")
+        };
+        assert!(
+            !batch_ids.is_empty(),
+            "real database has no legacy import batch for upgrade acceptance"
+        );
+        let fallback_endpoint = loaded.active_storage_profile_id.as_deref().or_else(|| {
+            loaded
+                .storage_profiles
+                .first()
+                .map(|profile| profile.id.as_str())
+        });
+        db::init_db(&copied_db_path, fallback_endpoint)
+            .expect("upgrade isolated real database copy");
+        for batch_id in batch_ids {
+            let old_progress = db::get_storage_import_progress(&copied_db_path, &batch_id)
+                .expect("read upgraded batch through legacy API")
+                .expect("legacy batch remains present");
+            let new_progress = db::get_storage_transfer_progress(&copied_db_path, &batch_id)
+                .expect("read upgraded batch through transfer API")
+                .expect("transfer batch remains present");
+            assert_eq!(old_progress, new_progress);
+            let items = db::list_storage_import_items(
+                &copied_db_path,
+                &batch_id,
+                &[
+                    "pending", "staged", "applied", "skipped", "conflict", "error",
+                ],
+            )
+            .expect("read upgraded batch items through legacy API");
+            let resumed = db::create_or_resume_storage_import(
+                &copied_db_path,
+                &db::NewStorageImportBatch {
+                    batch_id: &batch_id,
+                    source_profile_id: &old_progress.source_profile_id,
+                    target_profile_id: &old_progress.target_profile_id,
+                    source_provider_kind: &old_progress.source_provider_kind,
+                    target_provider_kind: &old_progress.target_provider_kind,
+                    source_owner_scope: &old_progress.source_owner_scope,
+                    target_owner_scope: &old_progress.target_owner_scope,
+                    items: &items,
+                    now_ms: now_ms(),
+                },
+            )
+            .expect("resume upgraded batch through legacy API on isolated copy");
+            assert_eq!(resumed.batch_id, batch_id);
+        }
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires explicitly authorized real WebDAV and Supabase acceptance environment"]
+    async fn acceptance_real_four_provider_combinations_are_isolated_and_non_destructive() {
+        let app_data_dir = std::env::var_os("TRANSFER_GENIE_ACCEPTANCE_APP_DATA_DIR")
+            .map(PathBuf::from)
+            .expect("set TRANSFER_GENIE_ACCEPTANCE_APP_DATA_DIR");
+        let run_id = std::env::var("TRANSFER_GENIE_ACCEPTANCE_RUN_ID")
+            .expect("set TRANSFER_GENIE_ACCEPTANCE_RUN_ID");
+        assert!(
+            run_id
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '-'),
+            "acceptance run id contains unsafe path characters"
+        );
+        let requested_webdav_ids = std::env::var("TRANSFER_GENIE_ACCEPTANCE_WEBDAV_PROFILE_IDS")
+            .expect("set two comma-separated WebDAV profile ids")
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(requested_webdav_ids.len(), 2);
+        let space_a = std::env::var("TRANSFER_GENIE_ACCEPTANCE_SUPABASE_SPACE_A")
+            .expect("set first temporary Supabase space id");
+        let space_b = std::env::var("TRANSFER_GENIE_ACCEPTANCE_SUPABASE_SPACE_B")
+            .expect("set second temporary Supabase space id");
+        uuid::Uuid::parse_str(&space_a).expect("first temporary space id is UUID");
+        uuid::Uuid::parse_str(&space_b).expect("second temporary space id is UUID");
+        assert_ne!(space_a, space_b);
+
+        let settings_path = app_data_dir.join("settings.json");
+        let real_settings = load_settings(&settings_path, &app_data_dir)
+            .expect("load real settings for acceptance");
+        let base_webdav = requested_webdav_ids
+            .iter()
+            .map(|profile_id| {
+                storage_provider::resolve_webdav_by_id(&real_settings, profile_id)
+                    .expect("resolve authorized WebDAV profile")
+            })
+            .collect::<Vec<_>>();
+        let original_supabase = real_settings
+            .storage_profiles
+            .iter()
+            .find(|profile| profile.provider_kind == StorageProviderKind::Supabase)
+            .cloned()
+            .expect("real settings contain a Supabase profile");
+        let original_config = original_supabase
+            .supabase
+            .as_ref()
+            .expect("real Supabase profile is configured")
+            .clone();
+        let mut session = credential_store::load_session(&original_supabase.id)
+            .expect("read authorized Supabase session")
+            .expect("authorized Supabase profile is signed in");
+        if session.needs_refresh(now_ms() / 1_000) {
+            session = supabase_auth::refresh(
+                &Client::new(),
+                &original_config.api_url,
+                &original_config.anon_key,
+                &session.refresh_token,
+            )
+            .await
+            .expect("refresh authorized Supabase session");
+            credential_store::save_session(&original_supabase.id, &session)
+                .expect("persist rotated authorized Supabase session");
+        }
+        let (verified_user_id, _) = supabase_auth::current_user(
+            &Client::new(),
+            &original_config.api_url,
+            &original_config.anon_key,
+            &session.access_token,
+        )
+        .await
+        .expect("verify authorized Supabase session");
+        assert_eq!(verified_user_id, session.user_id);
+
+        let webdav_prefix_a = format!("transfer-genie-acceptance-{run_id}-a");
+        let webdav_prefix_b = format!("transfer-genie-acceptance-{run_id}-b");
+        let mut webdav_a = base_webdav[0].clone();
+        let mut webdav_b = base_webdav[1].clone();
+        for (endpoint, prefix, profile_id) in [
+            (&mut webdav_a, &webdav_prefix_a, "acceptance-webdav-a"),
+            (&mut webdav_b, &webdav_prefix_b, "acceptance-webdav-b"),
+        ] {
+            webdav::ensure_directory(&Client::new(), endpoint, prefix)
+                .await
+                .expect("create isolated WebDAV acceptance directory");
+            let mut url =
+                url::Url::parse(endpoint.url.trim_end_matches('/')).expect("parse WebDAV base URL");
+            url.set_path(&format!("{}/{}", url.path().trim_end_matches('/'), prefix));
+            endpoint.id = profile_id.to_string();
+            endpoint.name = profile_id.to_string();
+            endpoint.url = format!("{}/", url.as_str().trim_end_matches('/'));
+        }
+        let supabase_a = StorageProfile {
+            id: "acceptance-supabase-a".into(),
+            name: "Acceptance Supabase A".into(),
+            provider_kind: StorageProviderKind::Supabase,
+            enabled: true,
+            webdav: None,
+            supabase: Some(crate::types::SupabaseStorageConfig {
+                api_url: original_config.api_url.clone(),
+                anon_key: original_config.anon_key.clone(),
+                space_id: space_a.clone(),
+            }),
+        };
+        let supabase_b = StorageProfile {
+            id: "acceptance-supabase-b".into(),
+            name: "Acceptance Supabase B".into(),
+            provider_kind: StorageProviderKind::Supabase,
+            enabled: true,
+            webdav: None,
+            supabase: Some(crate::types::SupabaseStorageConfig {
+                api_url: original_config.api_url.clone(),
+                anon_key: original_config.anon_key.clone(),
+                space_id: space_b.clone(),
+            }),
+        };
+        let mut acceptance_settings = real_settings.clone();
+        acceptance_settings.storage_profiles = vec![
+            StorageProfile::from_webdav(&webdav_a),
+            StorageProfile::from_webdav(&webdav_b),
+            supabase_a.clone(),
+            supabase_b.clone(),
+        ];
+        acceptance_settings.webdav_endpoints = vec![webdav_a.clone(), webdav_b.clone()];
+        acceptance_settings.active_storage_profile_id = Some(supabase_a.id.clone());
+        acceptance_settings.active_webdav_id = None;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-real-transfer-acceptance-{run_id}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).expect("create acceptance local directory");
+        let state = test_app_state(&temp_dir, acceptance_settings);
+        db::init_db(&state.db_path, Some(&webdav_a.id)).expect("initialize acceptance database");
+        state
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .insert(supabase_a.id.clone(), session.clone());
+        state
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .insert(supabase_b.id.clone(), session.clone());
+
+        let source_tag = MarkedTag {
+            id: format!("tag-{run_id}"),
+            name: format!("验收标签-{run_id}"),
+        };
+        crate::history::save_marked_tags(&state.http, &webdav_a, std::slice::from_ref(&source_tag))
+            .await
+            .expect("seed source WebDAV tag");
+        let timestamp_base = now_ms();
+        let small_bytes = format!("small attachment {run_id}").into_bytes();
+        let large_bytes = (0..(5 * 1024 * 1024))
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        let text_filename = build_message_filename("acceptance", "note.txt", timestamp_base);
+        let small_filename = build_message_filename("acceptance", "small.bin", timestamp_base + 1);
+        let large_filename = build_message_filename("acceptance", "large.bin", timestamp_base + 2);
+        let seeded = [
+            (
+                text_filename.clone(),
+                timestamp_base,
+                "text",
+                "note.txt",
+                format!("acceptance text {run_id}").into_bytes(),
+                true,
+                true,
+                Some("2026-10-13".to_string()),
+            ),
+            (
+                small_filename.clone(),
+                timestamp_base + 1,
+                "file",
+                "small.bin",
+                small_bytes.clone(),
+                true,
+                false,
+                None,
+            ),
+            (
+                large_filename.clone(),
+                timestamp_base + 2,
+                "file",
+                "large.bin",
+                large_bytes.clone(),
+                false,
+                false,
+                None,
+            ),
+        ];
+        let mut source_entries = Vec::new();
+        for (filename, timestamp_ms, kind, original_name, bytes, marked, pinned, due_date) in
+            &seeded
+        {
+            let remote_path = message_remote_path(filename, *timestamp_ms);
+            webdav::upload_file_ensuring_parent(
+                &state.http,
+                &webdav_a,
+                &remote_path,
+                bytes.clone(),
+            )
+            .await
+            .expect("seed source WebDAV object");
+            source_entries.push(HistoryEntry {
+                filename: filename.clone(),
+                sender: "acceptance".into(),
+                timestamp_ms: *timestamp_ms,
+                size: bytes.len() as i64,
+                kind: (*kind).into(),
+                original_name: (*original_name).into(),
+                remote_path: Some(remote_path),
+                marked: *marked,
+                marked_tag_ids: marked
+                    .then(|| vec![source_tag.id.clone()])
+                    .unwrap_or_default(),
+                marked_pinned: *pinned,
+                marked_due_date: due_date.clone(),
+                format: if *kind == "text" {
+                    "markdown".into()
+                } else {
+                    "text".into()
+                },
+                transcript_source: None,
+                source_audio_mime_type: None,
+                transcript_text: None,
+                transcript_raw_text: None,
+            });
+        }
+        crate::history::upsert_history_entries(&state.http, &webdav_a, source_entries.clone())
+            .await
+            .expect("seed source WebDAV history");
+
+        refresh_storage_transfer_source(
+            &state,
+            &storage_provider::ProviderConfig::Webdav(webdav_a.clone()),
+        )
+        .await
+        .expect("manual refresh first WebDAV space");
+        refresh_storage_transfer_source(
+            &state,
+            &storage_provider::ProviderConfig::Webdav(webdav_b.clone()),
+        )
+        .await
+        .expect("manual refresh second WebDAV space");
+        let source_before = crate::history::load_history_with_layout(&state.http, &webdav_a)
+            .await
+            .expect("read source before transfers");
+        assert_eq!(source_before.entries.len(), 3);
+
+        let combinations = [
+            (&webdav_a.id, &webdav_b.id),
+            (&webdav_a.id, &supabase_a.id),
+            (&supabase_a.id, &webdav_b.id),
+            (&supabase_a.id, &supabase_b.id),
+        ];
+        let mut first_results = Vec::new();
+        for (source_profile_id, target_profile_id) in combinations {
+            let request = StorageTransferRequest {
+                source_profile_id: source_profile_id.clone(),
+                target_profile_id: target_profile_id.clone(),
+            };
+            let preview = preview_storage_transfer_inner(&state, request.clone())
+                .await
+                .expect("preview real storage-space transfer");
+            assert_eq!(preview.message_count, 3);
+            assert_eq!(preview.attachment_count, 2);
+            assert_eq!(preview.tag_count, 1);
+            assert_eq!(preview.marked_count, 2);
+            let result = run_storage_transfer(&state, request.clone())
+                .await
+                .expect("run real storage-space transfer");
+            assert_eq!(result.status, "completed");
+            assert_eq!(result.failed_items, 0);
+            assert_eq!(result.conflict_items, 0);
+            first_results.push((request, result));
+        }
+
+        let target_webdav_after = crate::history::load_history_with_layout(&state.http, &webdav_b)
+            .await
+            .expect("read target WebDAV after transfers");
+        assert_eq!(target_webdav_after.entries.len(), 6);
+        assert_eq!(target_webdav_after.tags.len(), 2);
+        let source_after = crate::history::load_history_with_layout(&state.http, &webdav_a)
+            .await
+            .expect("read source after transfers");
+        assert_eq!(source_after.entries, source_before.entries);
+        assert_eq!(source_after.tags.len(), source_before.tags.len());
+        for (after, before) in source_after.tags.iter().zip(&source_before.tags) {
+            assert_eq!(after.id, before.id);
+            assert_eq!(after.name, before.name);
+        }
+
+        let source_supabase_count = db::list_messages_for_scope(
+            &state.db_path,
+            &supabase_a.id,
+            &session.user_id,
+            None,
+            None,
+            false,
+            None,
+        )
+        .expect("read first Supabase local mirror")
+        .len();
+        let target_supabase_count = db::list_messages_for_scope(
+            &state.db_path,
+            &supabase_b.id,
+            &session.user_id,
+            None,
+            None,
+            false,
+            None,
+        )
+        .expect("read second Supabase local mirror")
+        .len();
+        assert_eq!(source_supabase_count, 3);
+        assert_eq!(target_supabase_count, 3);
+        assert_eq!(
+            db::count_pending_outbox(&state.db_path, &supabase_a.id, &session.user_id)
+                .expect("count first Supabase queue"),
+            0
+        );
+        assert_eq!(
+            db::count_pending_outbox(&state.db_path, &supabase_b.id, &session.user_id)
+                .expect("count second Supabase queue"),
+            0
+        );
+        for (request, first) in first_results {
+            let repeated = run_storage_transfer(&state, request)
+                .await
+                .expect("repeat real storage-space transfer");
+            assert_eq!(repeated.status, "completed");
+            assert_eq!(repeated.total_items, first.total_items);
+            assert_eq!(repeated.applied_items, first.applied_items);
+        }
+        assert_eq!(
+            crate::history::load_history_with_layout(&state.http, &webdav_b)
+                .await
+                .expect("read WebDAV after repeated transfers")
+                .entries
+                .len(),
+            6
+        );
+        assert_eq!(
+            current_settings(&state)
+                .expect("read active profile after transfers")
+                .active_storage_profile_id
+                .as_deref(),
+            Some(supabase_a.id.as_str())
+        );
+        assert!(state.sync_cancel.lock().unwrap().is_none());
+
+        let realtime_config = supabase_a.supabase.as_ref().unwrap();
+        let mut realtime = supabase_sync::connect_realtime(realtime_config, &session)
+            .await
+            .expect("connect active Supabase Realtime");
+        let realtime_tag = MarkedTag {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: format!("realtime-{run_id}"),
+        };
+        let realtime_operation = outbox_operation(
+            &supabase_a.id,
+            &session.user_id,
+            "tag",
+            &realtime_tag.id,
+            "upsert",
+            0,
+            serde_json::json!({"name":realtime_tag.name}),
+        )
+        .expect("build Realtime acceptance operation");
+        db::save_tag_and_enqueue(
+            &state.db_path,
+            &supabase_a.id,
+            &session.user_id,
+            &realtime_tag,
+            0,
+            None,
+            &realtime_operation,
+        )
+        .expect("queue Realtime acceptance operation");
+        push_supabase_outbox(&state, &supabase_a, &session, true, None)
+            .await
+            .expect("push Realtime acceptance operation");
+        tokio::time::timeout(Duration::from_secs(15), realtime.wait_for_change())
+            .await
+            .expect("Realtime acceptance event timed out")
+            .expect("Realtime acceptance channel failed");
+
+        let mut object_paths = Vec::new();
+        for (profile, source_profile_id, source_owner_scope) in [
+            (&supabase_a, webdav_a.id.as_str(), ""),
+            (
+                &supabase_b,
+                supabase_a.id.as_str(),
+                session.user_id.as_str(),
+            ),
+        ] {
+            let items = build_storage_transfer_items(
+                source_profile_id,
+                source_owner_scope,
+                &profile.id,
+                &storage_transfer_messages_and_tags(
+                    &state,
+                    &storage_provider::resolve_provider_by_id(
+                        &current_settings(&state).unwrap(),
+                        source_profile_id,
+                    )
+                    .unwrap(),
+                    source_owner_scope,
+                )
+                .unwrap()
+                .0,
+                &[],
+            );
+            for item in items {
+                if let Some(attachment_id) = item.attachment_id {
+                    if let Some((_, object_path, _, _, _)) = db::get_attachment_local_path(
+                        &state.db_path,
+                        &profile.id,
+                        &session.user_id,
+                        &attachment_id,
+                    )
+                    .expect("read acceptance attachment path")
+                    {
+                        object_paths.push(object_path);
+                    }
+                }
+            }
+        }
+        supabase_sync::delete_storage_objects(
+            &state.http,
+            supabase_a.supabase.as_ref().unwrap(),
+            &session,
+            &object_paths,
+        )
+        .await
+        .expect("clean acceptance Storage objects");
+        webdav::delete_file(&state.http, &base_webdav[0], &webdav_prefix_a, true)
+            .await
+            .expect("clean first WebDAV acceptance directory");
+        webdav::delete_file(&state.http, &base_webdav[1], &webdav_prefix_b, true)
+            .await
+            .expect("clean second WebDAV acceptance directory");
+        let _ = fs::remove_dir_all(temp_dir);
     }
 
     #[test]
@@ -20176,9 +25811,13 @@ mod tests {
             ..Default::default()
         };
 
-        std::thread::sleep(Duration::from_millis(150));
-
-        crate::telegram_bridge_runtime::refresh_telegram_bridge_manager(&mut manager);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while manager.process.is_some() && std::time::Instant::now() < deadline {
+            crate::telegram_bridge_runtime::refresh_telegram_bridge_manager(&mut manager);
+            if manager.process.is_some() {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
 
         assert!(manager.process.is_none());
         assert!(!runtime_config_path.exists());
@@ -20508,6 +26147,62 @@ mod tests {
         .expect("prepare selection");
         assert_eq!(prepared.total, 2);
         assert_eq!(prepared.total_size, 204);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn bulk_download_commands_use_active_supabase_account_scope() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-bulk-supabase-{}", now_ms()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let state = test_app_state(&temp_dir, test_supabase_settings());
+        install_test_supabase_session(&state);
+        db::init_db(&state.db_path, None).expect("initialize database");
+        db::upsert_message(
+            &state.db_path,
+            &test_db_message("supabase-1", "shared", "user-a.png", 200, 10),
+        )
+        .unwrap();
+        rusqlite::Connection::open(&state.db_path)
+            .unwrap()
+            .execute(
+                "UPDATE messages SET owner_scope='user-a' WHERE endpoint_id='supabase-1' AND filename='shared'",
+                [],
+            )
+            .unwrap();
+        db::upsert_message(
+            &state.db_path,
+            &test_db_message("supabase-1", "shared", "user-b.png", 100, 20),
+        )
+        .unwrap();
+        rusqlite::Connection::open(&state.db_path)
+            .unwrap()
+            .execute(
+                "UPDATE messages SET owner_scope='user-b' WHERE endpoint_id='supabase-1' AND owner_scope='' AND filename='shared'",
+                [],
+            )
+            .unwrap();
+
+        let listed =
+            list_bulk_download_resources_for_state(&state, BulkDownloadQueryInput::default())
+                .expect("list Supabase bulk resources");
+        assert_eq!(listed.total, 1);
+        assert_eq!(listed.resources[0].original_name, "user-a.png");
+        let selected =
+            resolve_bulk_download_selection_for_state(&state, BulkDownloadQueryInput::default())
+                .expect("select Supabase bulk resources");
+        let prepared = prepare_bulk_download_resources_for_state(
+            &state,
+            PrepareBulkDownloadInput {
+                keys: selected
+                    .resources
+                    .iter()
+                    .map(|resource| resource.key.clone())
+                    .collect(),
+            },
+        )
+        .expect("prepare Supabase bulk resources");
+        assert_eq!(prepared.resources, selected.resources);
         let _ = fs::remove_dir_all(temp_dir);
     }
 
