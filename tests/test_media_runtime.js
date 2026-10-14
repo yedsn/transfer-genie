@@ -6,7 +6,18 @@ assert.equal(runtime.extensionOf('C:\\Media Files\\Movie.MP4'), 'mp4');
 assert.equal(runtime.mediaKind('photo.AVIF'), 'image');
 assert.equal(runtime.mediaKind('voice.bin', 'audio/wav'), 'audio');
 assert.equal(runtime.mediaKind('clip.webm'), 'video');
-assert.equal(runtime.mediaKind('archive.zip'), 'file');
+assert.equal(runtime.mediaKind('archive.zip'), 'archive');
+assert.equal(runtime.mediaKind('report.pdf'), 'document');
+assert.equal(runtime.mediaKind('settings.json'), 'code');
+assert.deepEqual(runtime.filePreviewModel('report.pdf'), {
+  kind: 'document', extension: 'pdf', label: '文档', glyph: 'PDF', visual: false, playable: false,
+});
+assert.deepEqual(runtime.filePreviewModel('README', ''), {
+  kind: 'file', extension: '', label: '文件', glyph: 'FILE', visual: false, playable: false,
+});
+assert.equal(runtime.filePreviewModel('voice.bin', 'audio/wav').kind, 'audio');
+assert.equal(runtime.filePreviewModel('sheet.xlsx').kind, 'document');
+assert.equal(runtime.filePreviewModel('source.rs').kind, 'code');
 assert.equal(runtime.canPlay('clip.mp4', '', () => ({ canPlayType: (type) => type === 'video/mp4' ? 'probably' : '' })), true);
 assert.equal(runtime.canPlay('clip.mkv', '', () => ({ canPlayType: () => '' })), null);
 assert.equal(runtime.canPlay('notes.txt', '', () => ({ canPlayType: () => 'probably' })), false);

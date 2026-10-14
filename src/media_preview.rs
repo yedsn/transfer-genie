@@ -11,6 +11,7 @@ pub const FFMPEG_BUNDLE_VERSION: &str = "6.1.1";
 pub const PREVIEW_MAX_EDGE: u32 = 480;
 pub const VIDEO_FRAME_TIMEOUT: Duration = Duration::from_secs(20);
 pub const PREVIEW_GENERATION_CONCURRENCY: usize = 2;
+pub const PREVIEW_DOWNLOAD_CONCURRENCY: usize = 4;
 const FFMPEG_ERROR_LIMIT: u64 = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +43,31 @@ pub fn media_resource_key(endpoint_id: &str, filename: &str, variant: &str) -> S
     hasher.update([0]);
     hasher.update(variant.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+pub fn isolated_preview_cache_path(
+    endpoint_dir: &Path,
+    owner_scope: &str,
+    attachment_id: &str,
+    preview_version: &str,
+) -> PathBuf {
+    isolated_preview_attachment_dir(endpoint_dir, owner_scope, attachment_id)
+        .join(format!("{}.jpg", preview_cache_segment(preview_version)))
+}
+
+pub fn isolated_preview_attachment_dir(
+    endpoint_dir: &Path,
+    owner_scope: &str,
+    attachment_id: &str,
+) -> PathBuf {
+    endpoint_dir
+        .join("attachment-previews")
+        .join(preview_cache_segment(owner_scope))
+        .join(preview_cache_segment(attachment_id))
+}
+
+fn preview_cache_segment(value: &str) -> String {
+    format!("{:x}", Sha256::digest(value.as_bytes()))
 }
 
 pub fn media_playback_cache_path(
@@ -286,6 +312,14 @@ pub fn preview_generation_semaphore() -> Arc<tokio::sync::Semaphore> {
     )
 }
 
+pub fn preview_download_semaphore() -> Arc<tokio::sync::Semaphore> {
+    static SEMAPHORE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    Arc::clone(
+        SEMAPHORE
+            .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(PREVIEW_DOWNLOAD_CONCURRENCY))),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,6 +362,44 @@ mod tests {
             Some("mp4")
         );
         assert!(first.starts_with(root.join("media-preview")));
+    }
+
+    #[test]
+    fn preview_cache_paths_are_stable_and_scope_isolated() {
+        let root = Path::new("profile-a");
+        let first = isolated_preview_cache_path(root, "user-a", "attachment-a", "path-a");
+        let same = isolated_preview_cache_path(root, "user-a", "attachment-a", "path-a");
+        let other_user = isolated_preview_cache_path(root, "user-b", "attachment-a", "path-a");
+        let other_attachment =
+            isolated_preview_cache_path(root, "user-a", "attachment-b", "path-a");
+        assert_eq!(first, same);
+        assert_ne!(first, other_user);
+        assert_ne!(first, other_attachment);
+        assert!(first.starts_with(root.join("attachment-previews")));
+        assert_eq!(
+            first.parent(),
+            Some(isolated_preview_attachment_dir(root, "user-a", "attachment-a").as_path())
+        );
+        assert_eq!(
+            first.extension().and_then(|value| value.to_str()),
+            Some("jpg")
+        );
+        assert!(!first.to_string_lossy().contains("user-a"));
+        assert!(!first.to_string_lossy().contains("attachment-a"));
+    }
+
+    #[test]
+    fn preview_cache_paths_hash_unsafe_segments() {
+        let root = Path::new("profile-a");
+        let path = isolated_preview_cache_path(
+            root,
+            "../other-user",
+            "attachment/../../other",
+            "../preview.jpg",
+        );
+        assert!(path.starts_with(root.join("attachment-previews")));
+        assert_eq!(path.components().count(), root.components().count() + 4);
+        assert!(!path.to_string_lossy().contains(".."));
     }
 
     #[test]
@@ -398,6 +470,25 @@ mod tests {
         drop(first);
         assert!(semaphore.try_acquire().is_ok());
         drop(second);
+    }
+
+    #[tokio::test]
+    async fn preview_download_concurrency_is_bounded() {
+        let semaphore = preview_download_semaphore();
+        let permits = (0..PREVIEW_DOWNLOAD_CONCURRENCY)
+            .map(|_| semaphore.clone().acquire_owned())
+            .collect::<Vec<_>>();
+        let mut held = Vec::new();
+        for permit in permits {
+            held.push(permit.await.unwrap());
+        }
+        assert_eq!(semaphore.available_permits(), 0);
+        let blocked =
+            tokio::time::timeout(Duration::from_millis(30), semaphore.clone().acquire_owned())
+                .await;
+        assert!(blocked.is_err());
+        drop(held.pop());
+        assert!(semaphore.try_acquire().is_ok());
     }
 
     #[cfg(windows)]

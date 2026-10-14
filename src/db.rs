@@ -101,6 +101,28 @@ pub struct DbBulkDownloadResource {
     pub partial_bytes: Option<i64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttachmentSyncRecord {
+    pub attachment_id: String,
+    pub message_id: String,
+    pub original_name: String,
+    pub local_path: Option<String>,
+    pub object_path: Option<String>,
+    pub preview_object_path: Option<String>,
+    pub mime_type: Option<String>,
+    pub size: i64,
+    pub sha256: Option<String>,
+    pub upload_state: String,
+    pub remote_revision: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OrphanAttachmentCandidate {
+    pub attachment_id: String,
+    pub object_path: String,
+    pub preview_object_path: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct NewOutboxOperation {
     pub operation_id: String,
@@ -2698,7 +2720,7 @@ pub fn save_message_with_marked_changes_and_enqueue(
     cleaned_messages: &[(String, Vec<String>, NewOutboxOperation)],
     message_operation: &NewOutboxOperation,
     deleted_tags: &[(MarkedTag, i64, i64, NewOutboxOperation)],
-    attachment: Option<(&str, &str, Option<&str>, &NewOutboxOperation)>,
+    attachment: Option<(&str, &str, Option<&str>, Option<&str>, &NewOutboxOperation)>,
 ) -> rusqlite::Result<()> {
     let mut conn = Connection::open(path)?;
     let tx = conn.transaction()?;
@@ -2792,15 +2814,17 @@ pub fn save_message_with_marked_changes_and_enqueue(
         enqueue_outbox_with_dependency(&tx, operation, dependency.as_deref())?;
         dependency = Some(operation.operation_id.clone());
     }
-    if let Some((attachment_id, object_path, mime_type, operation)) = attachment {
+    if let Some((attachment_id, object_path, preview_object_path, mime_type, operation)) =
+        attachment
+    {
         tx.execute(
             "INSERT INTO attachment_sync (endpoint_id,owner_scope,attachment_id,message_id,original_name,
-             local_path,object_path,mime_type,size,sha256,upload_state,updated_at_ms)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'local',?11)",
+             local_path,object_path,preview_object_path,mime_type,size,sha256,upload_state,updated_at_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'local',?12)",
             params![
                 message.endpoint_id,operation.owner_scope,attachment_id,message_operation.entity_id,
-                message.original_name,message.local_path,object_path,mime_type,message.size,
-                message.file_hash,message_operation.created_at_ms,
+                message.original_name,message.local_path,object_path,preview_object_path,mime_type,
+                message.size,message.file_hash,message_operation.created_at_ms,
             ],
         )?;
         enqueue_outbox_with_dependency(&tx, operation, dependency.as_deref())?;
@@ -2830,6 +2854,94 @@ pub fn get_attachment_local_path(
             },
         )
         .optional()
+}
+
+fn map_attachment_sync_record(row: &Row<'_>) -> rusqlite::Result<AttachmentSyncRecord> {
+    Ok(AttachmentSyncRecord {
+        attachment_id: row.get(0)?,
+        message_id: row.get(1)?,
+        original_name: row.get(2)?,
+        local_path: row.get(3)?,
+        object_path: row.get(4)?,
+        preview_object_path: row.get(5)?,
+        mime_type: row.get(6)?,
+        size: row.get(7)?,
+        sha256: row.get(8)?,
+        upload_state: row.get(9)?,
+        remote_revision: row.get(10)?,
+    })
+}
+
+const ATTACHMENT_SYNC_SELECT: &str = "attachment_id,message_id,original_name,local_path,
+ object_path,preview_object_path,mime_type,size,sha256,upload_state,remote_revision";
+
+pub fn get_attachment_sync_record(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    attachment_id: &str,
+) -> rusqlite::Result<Option<AttachmentSyncRecord>> {
+    Connection::open(path)?
+        .query_row(
+            &format!(
+                "SELECT {ATTACHMENT_SYNC_SELECT} FROM attachment_sync
+                 WHERE endpoint_id=?1 AND owner_scope=?2 AND attachment_id=?3
+                   AND deleted_at_ms IS NULL"
+            ),
+            params![endpoint_id, owner_scope, attachment_id],
+            map_attachment_sync_record,
+        )
+        .optional()
+}
+
+pub fn get_attachment_for_message(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    message_id: &str,
+) -> rusqlite::Result<Option<AttachmentSyncRecord>> {
+    Connection::open(path)?
+        .query_row(
+            &format!(
+                "SELECT {ATTACHMENT_SYNC_SELECT} FROM attachment_sync
+                 WHERE endpoint_id=?1 AND owner_scope=?2 AND message_id=?3
+                   AND deleted_at_ms IS NULL
+                 ORDER BY remote_revision DESC, updated_at_ms DESC LIMIT 1"
+            ),
+            params![endpoint_id, owner_scope, message_id],
+            map_attachment_sync_record,
+        )
+        .optional()
+}
+
+pub fn set_attachment_preview_and_enqueue(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    attachment_id: &str,
+    preview_object_path: &str,
+    operation: &NewOutboxOperation,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    let changed = tx.execute(
+        "UPDATE attachment_sync SET preview_object_path=?4,last_error=NULL,updated_at_ms=?5
+         WHERE endpoint_id=?1 AND owner_scope=?2 AND attachment_id=?3
+           AND deleted_at_ms IS NULL",
+        params![
+            endpoint_id,
+            owner_scope,
+            attachment_id,
+            preview_object_path,
+            now_ms
+        ],
+    )?;
+    if changed == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
+    enqueue_outbox(&tx, operation)?;
+    tx.commit()
 }
 
 pub fn get_attachment_object_path_for_message(
@@ -2896,6 +3008,53 @@ pub fn repair_claimed_attachment_object_path(
     Ok(true)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn repair_claimed_attachment_preview_path(
+    path: &Path,
+    operation_id: &str,
+    lease_owner: &str,
+    endpoint_id: &str,
+    owner_scope: &str,
+    attachment_id: &str,
+    preview_object_path: Option<&str>,
+    payload_json: &str,
+    payload_hash: &str,
+    last_error: Option<&str>,
+    now_ms: i64,
+) -> rusqlite::Result<bool> {
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    let changed = tx.execute(
+        "UPDATE sync_outbox SET payload_json=?3,payload_hash=?4,last_error=?5,updated_at_ms=?6
+         WHERE operation_id=?1 AND state='sending' AND lease_owner=?2",
+        params![
+            operation_id,
+            lease_owner,
+            payload_json,
+            payload_hash,
+            last_error,
+            now_ms
+        ],
+    )?;
+    if changed == 0 {
+        return Ok(false);
+    }
+    tx.execute(
+        "UPDATE attachment_sync SET preview_object_path=?4,last_error=?5,updated_at_ms=?6
+         WHERE endpoint_id=?1 AND owner_scope=?2 AND attachment_id=?3",
+        params![
+            endpoint_id,
+            owner_scope,
+            attachment_id,
+            preview_object_path,
+            last_error,
+            now_ms
+        ],
+    )?;
+    tx.commit()?;
+    Ok(true)
+}
+
 pub fn set_message_local_path_for_scope(
     path: &Path,
     endpoint_id: &str,
@@ -2909,16 +3068,51 @@ pub fn set_message_local_path_for_scope(
     )? > 0)
 }
 
+pub fn clear_uploaded_attachment_local_path(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    attachment_id: &str,
+    now_ms: i64,
+) -> rusqlite::Result<bool> {
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    let message_id = tx
+        .query_row(
+            "SELECT message_id FROM attachment_sync
+             WHERE endpoint_id=?1 AND owner_scope=?2 AND attachment_id=?3
+               AND upload_state='uploaded' AND deleted_at_ms IS NULL",
+            params![endpoint_id, owner_scope, attachment_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(message_id) = message_id else {
+        return Ok(false);
+    };
+    tx.execute(
+        "UPDATE attachment_sync SET local_path=NULL,updated_at_ms=?4
+         WHERE endpoint_id=?1 AND owner_scope=?2 AND attachment_id=?3",
+        params![endpoint_id, owner_scope, attachment_id, now_ms],
+    )?;
+    tx.execute(
+        "UPDATE messages SET local_path=NULL
+         WHERE endpoint_id=?1 AND owner_scope=?2 AND message_id=?3",
+        params![endpoint_id, owner_scope, message_id],
+    )?;
+    tx.commit()?;
+    Ok(true)
+}
+
 pub fn list_orphan_attachment_candidates(
     path: &Path,
     endpoint_id: &str,
     owner_scope: &str,
     cutoff_ms: i64,
     limit: usize,
-) -> rusqlite::Result<Vec<(String, String)>> {
+) -> rusqlite::Result<Vec<OrphanAttachmentCandidate>> {
     let conn = Connection::open(path)?;
     let mut stmt = conn.prepare(
-        "SELECT a.attachment_id,a.object_path FROM attachment_sync a
+        "SELECT a.attachment_id,a.object_path,a.preview_object_path FROM attachment_sync a
          WHERE a.endpoint_id=?1 AND a.owner_scope=?2 AND a.deleted_at_ms IS NOT NULL
            AND a.deleted_at_ms<=?3 AND a.object_path IS NOT NULL AND a.object_path<>''
            AND a.upload_state NOT IN ('local','uploading','pending_metadata')
@@ -2929,7 +3123,13 @@ pub fn list_orphan_attachment_candidates(
     )?;
     let rows = stmt.query_map(
         params![endpoint_id, owner_scope, cutoff_ms, limit as i64],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| {
+            Ok(OrphanAttachmentCandidate {
+                attachment_id: row.get(0)?,
+                object_path: row.get(1)?,
+                preview_object_path: row.get(2)?,
+            })
+        },
     )?;
     let result = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(result)
@@ -3758,7 +3958,7 @@ pub fn apply_imported_message(
     source_key: &str,
     message: &DbMessage,
     message_operation: &NewOutboxOperation,
-    attachment: Option<(&str, &str, Option<&str>, &NewOutboxOperation)>,
+    attachment: Option<(&str, &str, Option<&str>, Option<&str>, &NewOutboxOperation)>,
     now_ms: i64,
 ) -> rusqlite::Result<()> {
     let mut conn = Connection::open(path)?;
@@ -3789,15 +3989,23 @@ pub fn apply_imported_message(
       message.transcript_source,message.source_audio_mime_type,message.transcript_raw_text,message_operation.entity_id,
       message_operation.base_revision,message_operation.owner_scope])?;
     enqueue_outbox(&tx, message_operation)?;
-    if let Some((attachment_id, object_path, mime_type, attachment_operation)) = attachment {
+    if let Some((
+        attachment_id,
+        object_path,
+        preview_object_path,
+        mime_type,
+        attachment_operation,
+    )) = attachment
+    {
         tx.execute("INSERT INTO attachment_sync(endpoint_id,owner_scope,attachment_id,message_id,original_name,local_path,
-        object_path,mime_type,size,sha256,upload_state,updated_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'local',?11)
+        object_path,preview_object_path,mime_type,size,sha256,upload_state,updated_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'local',?12)
         ON CONFLICT(endpoint_id,owner_scope,attachment_id) DO UPDATE SET
         message_id=excluded.message_id,original_name=excluded.original_name,local_path=excluded.local_path,
-        object_path=excluded.object_path,mime_type=excluded.mime_type,size=excluded.size,sha256=excluded.sha256,
+        object_path=excluded.object_path,preview_object_path=excluded.preview_object_path,
+        mime_type=excluded.mime_type,size=excluded.size,sha256=excluded.sha256,
         upload_state='local',deleted_at_ms=NULL,last_error=NULL,updated_at_ms=excluded.updated_at_ms",
         params![message.endpoint_id,message_operation.owner_scope,attachment_id,message_operation.entity_id,message.original_name,
-        message.local_path,object_path,mime_type,message.size,message.file_hash,now_ms])?;
+        message.local_path,object_path,preview_object_path,mime_type,message.size,message.file_hash,now_ms])?;
         enqueue_outbox_with_dependency(
             &tx,
             attachment_operation,
@@ -5643,6 +5851,156 @@ mod tests {
     }
 
     #[test]
+    fn attachment_preview_queries_and_updates_are_scope_isolated() {
+        let path = temp_db_path("attachment-preview-scope");
+        init_db(&path, None).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        for (endpoint, owner, preview) in [
+            ("profile-a", "user-a", None),
+            (
+                "profile-a",
+                "user-b",
+                Some("user-b/space/attachment/preview.jpg"),
+            ),
+            (
+                "profile-b",
+                "user-a",
+                Some("user-a/other/attachment/preview.jpg"),
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO attachment_sync(endpoint_id,owner_scope,attachment_id,message_id,
+                 original_name,local_path,object_path,preview_object_path,mime_type,size,sha256,
+                 upload_state,remote_revision,updated_at_ms)
+                 VALUES(?1,?2,'attachment','message','photo.png','local.png',?3,?4,
+                 'image/png',12,'hash','uploaded',7,1)",
+                params![
+                    endpoint,
+                    owner,
+                    format!("{owner}/space/attachment/photo.png"),
+                    preview
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let historical = get_attachment_sync_record(&path, "profile-a", "user-a", "attachment")
+            .unwrap()
+            .unwrap();
+        assert_eq!(historical.preview_object_path, None);
+        assert_eq!(historical.remote_revision, 7);
+        assert_eq!(historical.local_path.as_deref(), Some("local.png"));
+        let operation = NewOutboxOperation {
+            operation_id: "preview-operation".into(),
+            endpoint_id: "profile-a".into(),
+            owner_scope: "user-a".into(),
+            entity_type: "attachment".into(),
+            entity_id: "attachment".into(),
+            action: "upsert".into(),
+            base_revision: 7,
+            payload_json: "{}".into(),
+            payload_hash: "hash".into(),
+            created_at_ms: 2,
+        };
+        set_attachment_preview_and_enqueue(
+            &path,
+            "profile-a",
+            "user-a",
+            "attachment",
+            "user-a/space/attachment/preview.jpg",
+            &operation,
+            2,
+        )
+        .unwrap();
+        assert_eq!(
+            get_attachment_sync_record(&path, "profile-a", "user-a", "attachment")
+                .unwrap()
+                .unwrap()
+                .preview_object_path
+                .as_deref(),
+            Some("user-a/space/attachment/preview.jpg")
+        );
+        assert_eq!(
+            get_attachment_sync_record(&path, "profile-a", "user-b", "attachment")
+                .unwrap()
+                .unwrap()
+                .preview_object_path
+                .as_deref(),
+            Some("user-b/space/attachment/preview.jpg")
+        );
+        assert_eq!(
+            get_outbox_operation(&path, "preview-operation")
+                .unwrap()
+                .unwrap()
+                .base_revision,
+            7
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pulled_attachment_change_updates_preview_path_for_other_devices() {
+        let path = temp_db_path("attachment-preview-pull");
+        init_db(&path, None).unwrap();
+        let message = remote_message("message-file", "remote-photo.png", 100);
+        apply_supabase_message_page(
+            &path,
+            "profile-a",
+            "user-a",
+            &[message],
+            &[],
+            &[serde_json::json!({
+                "id":"attachment-file","message_id":"message-file",
+                "original_name":"photo.png",
+                "object_path":"user-a/space/attachment-file/photo.png",
+                "preview_object_path":null,"mime_type":"image/png",
+                "size":12,"sha256":"hash","revision":1,"deleted_at":null
+            })],
+            false,
+            true,
+            100,
+        )
+        .unwrap();
+        apply_pulled_changes(
+            &path,
+            "profile-a",
+            "user-a",
+            &[PulledChange {
+                change_seq: 2,
+                entity_type: "attachment".into(),
+                entity_id: "attachment-file".into(),
+                change_type: "upsert".into(),
+                revision: 2,
+                snapshot: Some(serde_json::json!({
+                    "message_id":"message-file","original_name":"photo.png",
+                    "object_path":"user-a/space/attachment-file/photo.png",
+                    "preview_object_path":"user-a/space/attachment-file/preview.jpg",
+                    "mime_type":"image/png","size":12,"sha256":"hash",
+                    "deleted_at":null
+                })),
+            }],
+            2,
+            200,
+        )
+        .unwrap();
+        let attachment =
+            get_attachment_sync_record(&path, "profile-a", "user-a", "attachment-file")
+                .unwrap()
+                .unwrap();
+        assert_eq!(attachment.remote_revision, 2);
+        assert_eq!(
+            attachment.preview_object_path.as_deref(),
+            Some("user-a/space/attachment-file/preview.jpg")
+        );
+        assert_eq!(
+            get_sync_checkpoint(&path, "profile-a", "user-a").unwrap(),
+            2
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn refreshing_recent_supabase_page_does_not_move_oldest_history_cursor() {
         let path = temp_db_path("supabase-history-refresh");
         init_db(&path, None).unwrap();
@@ -7051,7 +7409,11 @@ mod tests {
             list_orphan_attachment_candidates(&path, "profile", "user-a", 20, 50).unwrap();
         assert_eq!(
             candidates,
-            vec![("safe".into(), "user/space/safe/x.bin".into())]
+            vec![OrphanAttachmentCandidate {
+                attachment_id: "safe".into(),
+                object_path: "user/space/safe/x.bin".into(),
+                preview_object_path: None,
+            }]
         );
         let _ = std::fs::remove_file(path);
     }
@@ -7527,6 +7889,7 @@ mod tests {
             Some((
                 "attachment-id",
                 "user-a/space/attachment-id/target.bin",
+                None,
                 Some("application/octet-stream"),
                 &attachment_operation,
             )),
@@ -8542,6 +8905,7 @@ mod tests {
             Some((
                 item.attachment_id.as_deref().unwrap(),
                 message.remote_path.as_deref().unwrap(),
+                None,
                 Some("application/octet-stream"),
                 &attachment_operation,
             )),

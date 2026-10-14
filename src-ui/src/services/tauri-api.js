@@ -86,8 +86,8 @@
     async toggleMessageMarked(filename, marked) {
       return invoke('toggle_message_marked', { filename, marked });
     },
-    async openMessageFile(filename) {
-      return invoke('open_message_file', { filename });
+    async openMessageFile(filename, originalName = '', endpointId = null) {
+      return invoke('open_message_file', { filename, originalName, endpointId });
     },
     async downloadMessageFile(filename, endpointId) {
       return invoke('download_message_file', { filename, endpointId });
@@ -98,8 +98,8 @@
     async getThumbnail(filename) {
       return invoke('get_thumbnail', { filename });
     },
-    async getMessageSourceAudioFile(filename) {
-      return invoke('get_message_source_audio_file', { filename });
+    async getMessageSourceAudioFile(filename, endpointId = null) {
+      return invoke('get_message_source_audio_file', { filename, endpointId });
     },
   };
 

@@ -3745,7 +3745,10 @@ async function getSpeechTaskAudioBlob(task) {
     return null;
   }
   try {
-    const path = await invoke('get_message_source_audio_file', { filename: sourceFilename });
+    const path = await invoke('get_message_source_audio_file', {
+      filename: sourceFilename,
+      endpointId: task?.sourceEndpointId || activeEndpointId || null,
+    });
     const tauriConvert = window.__TAURI__?.tauri?.convertFileSrc || window.__TAURI__?.path?.convertFileSrc || window.__TAURI__?.core?.convertFileSrc;
     const src = tauriConvert ? tauriConvert(path) : path;
     const response = await fetch(src);
@@ -4242,6 +4245,7 @@ async function finishSpeechRecording() {
       ...taskBase,
       audio: null,
       sourceMessageFilename: sendResult?.filename || '',
+      sourceEndpointId: sendResult?.endpointId || activeEndpointId || '',
       sourceAudioMimeType: sendResult?.sourceAudioMimeType || audio.mimeType || 'audio/wav',
     });
     const saveSuccessfulSpeechTask = (sendResult) => {
@@ -4426,6 +4430,37 @@ function tauriAssetUrl(path) {
   return convert ? convert(path) : path;
 }
 
+function normalizeMediaPreviewResult(result, originalName = '') {
+  if (typeof result === 'string') {
+    return { state: result ? 'ready' : 'failed', kind: mediaKindForPath(originalName), path: result || null, error: null };
+  }
+  return {
+    state: result?.state || 'failed',
+    kind: result?.kind || mediaKindForPath(originalName),
+    path: result?.path || null,
+    error: result?.error || null,
+  };
+}
+
+function requestMessagePreview(message) {
+  return invoke('get_media_preview', {
+    input: {
+      endpointId: message.endpoint_id || message.endpointId || activeEndpointId || '',
+      filename: message.filename || '',
+      originalName: message.original_name || message.originalName || '',
+    },
+  }).then((result) => normalizeMediaPreviewResult(result, message.original_name || message.originalName || message.filename));
+}
+
+function createFileTypeBadge(name, mimeType) {
+  const model = mediaRuntime?.filePreviewModel(name, mimeType) || { kind: 'file', glyph: 'FILE', label: '文件' };
+  const badge = document.createElement('span');
+  badge.className = `file-preview-badge is-${model.kind}`;
+  badge.textContent = model.glyph;
+  badge.title = model.label;
+  return badge;
+}
+
 async function resolveMessageMediaSource(message, variant = 'file') {
   if (!invoke) throw new Error('媒体播放服务不可用');
   return invoke('resolve_media_playback_source', {
@@ -4497,6 +4532,7 @@ async function tryOpenMessageFile(message) {
     await invoke('open_message_file', {
       filename: message.filename,
       originalName,
+      endpointId: message.endpoint_id || message.endpointId || activeEndpointId || null,
     });
     return { ok: true };
   } catch (error) {
@@ -9372,21 +9408,47 @@ function renderPreviewContent(message) {
       
       const img = document.createElement('img');
       img.className = 'message-preview-image';
-      
-      if (message.local_path) {
-        img.src = tauriConvert(message.local_path);
-      } else {
-        // Try thumbnail first
-        invoke('get_media_preview', { input: { endpointId: message.endpoint_id || activeEndpointId || '', filename: message.filename, originalName: message.original_name || '' } })
-          .then(path => {
-            if (path && !img.getAttribute('src')) {
-              img.src = tauriConvert(path);
+      img.alt = message.original_name || message.filename || '图片预览';
+      const imageStatus = document.createElement('div');
+      imageStatus.className = 'file-preview-status is-loading';
+      imageStatus.textContent = '正在准备预览…';
+      const imageRetry = document.createElement('button');
+      imageRetry.type = 'button';
+      imageRetry.className = 'button ghost small file-preview-retry';
+      imageRetry.textContent = '重试预览';
+      imageRetry.hidden = true;
+      const showImagePreviewFailure = (messageText) => {
+        imageStatus.className = 'file-preview-status is-failed';
+        imageStatus.textContent = messageText || '暂时无法显示预览';
+        imageRetry.hidden = false;
+      };
+      const loadImagePreview = () => {
+        imageRetry.hidden = true;
+        imageStatus.className = 'file-preview-status is-loading';
+        imageStatus.textContent = '正在准备预览…';
+        return requestMessagePreview(message)
+          .then(result => {
+            if (result.state === 'ready' && result.path) {
+              img.src = tauriConvert(result.path);
+              imageStatus.remove();
+              imageRetry.remove();
+            } else {
+              showImagePreviewFailure(
+                result.error || (result.state === 'offline' ? '当前离线，预览尚未缓存' : '暂时无法显示预览'),
+              );
             }
           })
-          .catch(() => {});
-      }
+          .catch((error) => showImagePreviewFailure(String(error)));
+      };
+      imageRetry.addEventListener('click', loadImagePreview);
+      img.addEventListener('error', () => {
+        img.removeAttribute('src');
+        showImagePreviewFailure('预览文件无法显示，请重试或打开原文件');
+      });
+
+      loadImagePreview();
       
-      imgContainer.appendChild(img);
+      imgContainer.append(img, imageStatus, imageRetry);
       messagePreviewBody.appendChild(imgContainer);
     }
 
@@ -9427,8 +9489,8 @@ function renderPreviewContent(message) {
       cancelButton.dataset.mediaControl = 'true';
       cancelButton.addEventListener('click', () => invoke('cancel_media_playback_cache', { input: { endpointId: message.endpoint_id || activeEndpointId || '', filename: message.filename, originalName: message.original_name || '', variant: 'file' } }).catch(() => {}));
       if (mediaKind === 'video') {
-        invoke('get_media_preview', { input: { endpointId: message.endpoint_id || activeEndpointId || '', filename: message.filename, originalName: message.original_name || '' } })
-          .then((path) => { media.poster = tauriAssetUrl(path); })
+        requestMessagePreview(message)
+          .then((result) => { if (result.state === 'ready' && result.path) media.poster = tauriAssetUrl(result.path); })
           .catch(() => {});
       }
       mediaWrap.append(media, loadButton, cancelButton, status);
@@ -9687,6 +9749,8 @@ function renderMessages(messages, options = {}) {
         const thumbImg = document.createElement('img');
         thumbImg.className = 'message-thumbnail';
         thumbImg.alt = '缩略图';
+        thumbImg.loading = 'lazy';
+        thumbImg.hidden = true;
 
         const fileNameSpan = document.createElement('span');
         fileNameSpan.textContent = viewModel.originalName;
@@ -9696,16 +9760,20 @@ function renderMessages(messages, options = {}) {
         
         const tauriConvert = window.__TAURI__?.tauri?.convertFileSrc || window.__TAURI__?.path?.convertFileSrc || window.__TAURI__?.core?.convertFileSrc;
         
-        invoke('get_media_preview', { input: { endpointId: message.endpoint_id || activeEndpointId || '', filename: message.filename, originalName: message.original_name || '' } })
-          .then(path => {
-            if (path && tauriConvert) {
-              thumbImg.src = tauriConvert(path);
+        const loadThumbnail = () => requestMessagePreview(message)
+          .then(result => {
+            if (result.state === 'ready' && result.path && tauriConvert) {
+              thumbImg.src = tauriConvert(result.path);
+              thumbImg.hidden = false;
             }
           })
           .catch(err => {
             console.warn('Load thumbnail failed', err);
-            thumbImg.style.display = 'none';
           });
+        thumbImg.addEventListener('error', () => {
+          thumbImg.hidden = true;
+        });
+        loadThumbnail();
           
         body.addEventListener('dblclick', () => {
           openMessagePreview(message);
@@ -9732,7 +9800,17 @@ function renderMessages(messages, options = {}) {
         playButton.addEventListener('click', (event) => { event.stopPropagation(); openMessagePreview(message); });
         body.replaceChildren(label, playButton);
       } else {
-        body.textContent = viewModel.bodyText;
+        body.classList.add('is-file-preview-card');
+        const model = mediaRuntime?.filePreviewModel(viewModel.originalName) || { label: '文件' };
+        const badge = createFileTypeBadge(viewModel.originalName);
+        const fileInfo = document.createElement('span');
+        fileInfo.className = 'file-preview-card-info';
+        const fileTitle = document.createElement('strong');
+        fileTitle.textContent = viewModel.originalName;
+        const fileKind = document.createElement('small');
+        fileKind.textContent = model.label;
+        fileInfo.append(fileTitle, fileKind);
+        body.replaceChildren(badge, fileInfo);
       }
       
     }

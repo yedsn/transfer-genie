@@ -5642,6 +5642,12 @@ button.bulk-download-tool-button {
 .bulk-download-check { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); cursor: pointer; }
 .bulk-download-thumb { position: relative; width: 48px; height: 48px; border-radius: 9px; object-fit: cover; background: linear-gradient(145deg, #f2efec, #eae5e1); border: 1px solid rgba(80, 67, 57, .04); display: grid; place-items: center; font-size: 10px; font-weight: 750; letter-spacing: .03em; color: #77706b; overflow: hidden; isolation: isolate; }
 .bulk-download-thumb img { width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
+.bulk-download-thumb.is-image { background: #e9f3ea; color: #356343; }
+.bulk-download-thumb.is-video { background: #eee9f6; color: #59417a; }
+.bulk-download-thumb.is-audio { background: #fff0df; color: #8b541f; }
+.bulk-download-thumb.is-document { background: #e7eff8; color: #345b82; }
+.bulk-download-thumb.is-archive { background: #f6ecd8; color: #755a22; }
+.bulk-download-thumb.is-code { background: #e7f3f0; color: #27645a; }
 .bulk-download-thumb-play {
   position: absolute;
   inset: 50% auto auto 50%;
@@ -6094,6 +6100,52 @@ body.preview-open {
     object-fit: contain;
 }
 
+.message-thumbnail[hidden] { display: none; }
+
+.file-preview-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  min-width: 48px;
+  height: 54px;
+  padding: 0 8px;
+  border-radius: 8px 8px 8px 3px;
+  border: 1px solid rgba(90, 70, 55, .14);
+  background: #f0e8df;
+  color: #675a50;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .04em;
+}
+
+.file-preview-badge.is-image { background: #e9f3ea; color: #356343; }
+.file-preview-badge.is-video { background: #eee9f6; color: #59417a; }
+.file-preview-badge.is-audio { background: #fff0df; color: #8b541f; }
+.file-preview-badge.is-document { background: #e7eff8; color: #345b82; }
+.file-preview-badge.is-archive { background: #f6ecd8; color: #755a22; }
+.file-preview-badge.is-code { background: #e7f3f0; color: #27645a; }
+
+.message-body.is-file-preview-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: min(280px, 72vw);
+}
+
+.message-body.is-file-preview-card::before { display: none; }
+.file-preview-card-info { display: grid; gap: 3px; min-width: 0; }
+.file-preview-card-info strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.file-preview-card-info small { color: var(--muted); }
+.file-preview-status { padding: 18px; color: var(--muted); text-align: center; }
+.file-preview-status.is-failed { color: #9a4d28; }
+.file-preview-retry {
+  margin: 0 auto 16px;
+  white-space: nowrap;
+}
+
+@keyframes preview-shimmer { to { background-position-x: -220%; } }
+
 .message-body.is-audio-message { display: flex; align-items: center; gap: 10px; }
 .message-media-play-button { min-width: 38px; min-height: 30px; border: 1px solid rgba(255,122,47,.3); border-radius: 999px; padding: 5px 10px; background: #fff5ef; color: #d85d18; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
 .message-body.is-image-message { position: relative; }
@@ -6113,12 +6165,42 @@ body.preview-open {
     background: #f0f0f0;
     border-radius: 8px;
     overflow: hidden;
+    min-height: 180px;
+    position: relative;
 }
 
 .message-preview-image {
     max-width: 100%;
     max-height: 70vh;
     object-fit: contain;
+}
+
+.message-preview-image-wrap .file-preview-status {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    background: linear-gradient(110deg, #eee8e2 22%, #faf7f3 40%, #eee8e2 58%);
+    background-size: 220% 100%;
+    animation: preview-shimmer 1.4s linear infinite;
+}
+
+.message-preview-image-wrap .file-preview-status.is-failed {
+    background: #fff7f1;
+    animation: none;
+}
+
+.bulk-download-thumb.is-loading {
+  background: linear-gradient(110deg, #eee8e2 22%, #faf7f3 40%, #eee8e2 58%);
+  background-size: 220% 100%;
+  animation: preview-shimmer 1.4s linear infinite;
+}
+
+.bulk-download-thumb.is-preview-failed {
+  outline: 1px dashed rgba(154, 77, 40, .45);
+  background: #fff7f1;
+  color: #9a4d28;
+  cursor: pointer;
 }
 
 

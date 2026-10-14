@@ -127,13 +127,20 @@ if (api && runtime && modal && openButton) {
       const entry = thumbnailQueue.shift();
       thumbnailActive += 1;
       api.invoke('get_media_preview', { input: { endpointId: entry.endpointId, filename: entry.filename, originalName: entry.originalName } })
-        .then((path) => {
+        .then((rawResult) => {
           if (entry.sequence !== state.querySequence || !entry.target.isConnected) return;
-          if (!path) throw new Error('媒体预览不存在');
+          const result = typeof rawResult === 'string' ? { state: 'ready', path: rawResult } : rawResult;
+          if (result?.state !== 'ready' || !result?.path) {
+            entry.target.classList.remove('is-loading');
+            entry.target.classList.add('is-preview-failed');
+            entry.target.title = result?.error || '预览不可用，点击可重试';
+            throw new Error(result?.error || '媒体预览不存在');
+          }
           const convert = window.__TAURI__?.core?.convertFileSrc || window.__TAURI__?.tauri?.convertFileSrc || window.__TAURI__?.path?.convertFileSrc;
-          const image = document.createElement('img'); image.alt = ''; image.draggable = false; image.src = convert ? convert(path) : path;
+          const image = document.createElement('img'); image.alt = ''; image.draggable = false; image.loading = 'lazy'; image.src = convert ? convert(result.path) : result.path;
           const mediaAction = entry.target.querySelector('.bulk-download-thumb-play');
           entry.target.replaceChildren(image);
+          entry.target.classList.remove('is-loading', 'is-preview-failed');
           if (mediaAction) entry.target.appendChild(mediaAction);
         })
         .catch(() => {})
@@ -157,12 +164,22 @@ if (api && runtime && modal && openButton) {
     const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.className = 'bulk-download-check'; checkbox.checked = selection.has(resource.key);
     checkbox.addEventListener('click', (event) => event.stopPropagation());
     checkbox.addEventListener('change', () => setResourceSelected(resource, checkbox.checked));
-    const thumb = document.createElement('div'); thumb.className = 'bulk-download-thumb'; thumb.textContent = (resource.extension || categoryLabel(resource.category)).toUpperCase();
+    const previewModel = mediaRuntime?.filePreviewModel(resource.originalName, resource.mimeType) || { kind: resource.category || 'file', glyph: (resource.extension || categoryLabel(resource.category)).toUpperCase(), label: categoryLabel(resource.category) };
+    const thumb = document.createElement('div'); thumb.className = `bulk-download-thumb is-${previewModel.kind}`; thumb.textContent = previewModel.glyph; thumb.title = previewModel.label;
     if (resource.category === 'image' || resource.category === 'video') {
+      thumb.classList.add('is-loading');
       thumb.dataset.thumbnailFilename = resource.filename;
       thumb.dataset.endpointId = resource.endpointId || '';
       thumb.dataset.originalName = resource.originalName || '';
     }
+    thumb.addEventListener('click', (event) => {
+      if (!thumb.classList.contains('is-preview-failed')) return;
+      event.stopPropagation();
+      thumb.classList.remove('is-preview-failed');
+      thumb.classList.add('is-loading');
+      thumbnailQueue.push({ target: thumb, filename: resource.filename, endpointId: resource.endpointId || '', originalName: resource.originalName || '', sequence: state.querySequence });
+      runThumbnailQueue();
+    });
     if (resource.category === 'audio' || resource.category === 'video') {
       thumb.classList.add('has-media-action');
       const play = document.createElement('button');

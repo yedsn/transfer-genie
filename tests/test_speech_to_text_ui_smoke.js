@@ -320,7 +320,12 @@ function preloadScript() {
             await new Promise((resolve) => setTimeout(resolve, 10));
             window.__speechSmoke.thumbnailActive -= 1;
             const previewName = String(args?.input?.filename || args?.filename || '');
-            if (window.__speechSmoke.previewPaths[previewName]) return window.__speechSmoke.previewPaths[previewName];
+            if (window.__speechSmoke.previewPaths[previewName]) {
+              const preview = window.__speechSmoke.previewPaths[previewName];
+              return typeof preview === 'string'
+                ? { state: 'ready', kind: previewName.endsWith('.mp4') ? 'video' : 'image', path: preview, error: null }
+                : preview;
+            }
             throw new Error('thumbnail unavailable');
           }
           if (command === 'save_settings') {
@@ -1575,18 +1580,20 @@ async function run() {
       window.__speechSmoke.previewPaths = {
         'image-message.png': 'C:/media/image-preview.jpg',
         'video-message.mp4': 'C:/media/video-preview.jpg',
+        'failed-image.png': { state: 'offline', kind: 'image', path: null, error: '当前离线，预览尚未缓存' },
       };
       window.__speechSmoke.sentMessages = [
         { filename: 'image-message.png', original_name: 'image-message.png', endpoint_id: 'endpoint-1', sender: 'Smoke', timestamp_ms: now, size: 10, kind: 'file', local_path: null, marked: false, marked_tag_ids: [], marked_pinned: false, format: 'text' },
         { filename: 'audio-message.mp3', original_name: 'audio-message.mp3', endpoint_id: 'endpoint-1', sender: 'Smoke', timestamp_ms: now - 1, size: 20, kind: 'file', local_path: null, marked: false, marked_tag_ids: [], marked_pinned: false, format: 'text' },
         { filename: 'video-message.mp4', original_name: 'video-message.mp4', endpoint_id: 'endpoint-1', sender: 'Smoke', timestamp_ms: now - 2, size: 30, kind: 'file', local_path: null, marked: false, marked_tag_ids: [], marked_pinned: false, format: 'text' },
         { filename: 'unsupported-message.mkv', original_name: 'unsupported-message.mkv', endpoint_id: 'endpoint-1', sender: 'Smoke', timestamp_ms: now - 3, size: 40, kind: 'file', local_path: null, marked: false, marked_tag_ids: [], marked_pinned: false, format: 'text' },
+        { filename: 'failed-image.png', original_name: 'failed-image.png', endpoint_id: 'endpoint-1', sender: 'Smoke', timestamp_ms: now - 4, size: 50, kind: 'file', local_path: null, marked: false, marked_tag_ids: [], marked_pinned: false, format: 'text' },
       ];
       document.querySelector('#refresh-btn').click();
       await new Promise((resolve, reject) => {
         const startedAt = Date.now();
         const tick = () => {
-          if (document.querySelectorAll('#message-list .message-card').length >= 4) resolve();
+          if (document.querySelectorAll('#message-list .message-card').length >= 5) resolve();
           else if (Date.now() - startedAt > 2500) reject(new Error('media messages did not render'));
           else setTimeout(tick, 25);
         };
@@ -1599,7 +1606,19 @@ async function run() {
       const audioCard = byName('audio-message.mp3');
       const videoCard = byName('video-message.mp4');
       const unsupportedCard = byName('unsupported-message.mkv');
+      const failedImageCard = byName('failed-image.png');
       const feedImageLoaded = String(imageCard?.querySelector('.message-thumbnail')?.src || '').includes('image-preview.jpg');
+      failedImageCard?.scrollIntoView({ block: 'center' });
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      const failedImageStillVisible = !!failedImageCard
+        && /failed-image\.png/.test(failedImageCard.textContent || '')
+        && !/加载预览|当前离线/.test(failedImageCard.textContent || '')
+        && !failedImageCard.querySelector('.message-thumbnail-placeholder');
+      failedImageCard?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const imageRetryVisible = !document.querySelector('#message-preview .file-preview-retry')?.hidden
+        && /当前离线/.test(document.querySelector('#message-preview .file-preview-status')?.textContent || '');
+      document.querySelector('#message-preview .message-preview-close')?.click();
       const videoHasMarker = !!videoCard?.querySelector('.message-media-play-button');
       const audioHasMarker = !!audioCard?.querySelector('.message-media-play-button');
       const openCallsBefore = window.__speechSmoke.calls.filter((call) => call.command === 'open_message_file').length;
@@ -1690,9 +1709,11 @@ async function run() {
         && window.__speechSmoke.calls.some((call) => call.command === 'delete_messages' && call.args?.filenames?.includes('audio-message.mp3'));
       messageList.style.height = previousListHeight;
       const openCallsAfter = window.__speechSmoke.calls.filter((call) => call.command === 'open_message_file').length;
-      return { feedImageLoaded, videoHasMarker, audioHasMarker, audioPreviewOpened, audioSourceRequested, audioDuplicateSuppressed, audioCancelRequested, messageSwitchStopped, escapeClosedAndStopped, escapePreservedScroll, scrollBeforePreview, scrollAfterEscape, closeButtonStopped, deleteClosedAndStopped, videoPreviewOpened, videoPosterLoaded, videoRetryEnabled, videoRetrySucceeded, videoFallbackActionAvailable, backdropClosedAndStopped, unsupportedHint, unsupportedResolvedOnce, openCallDelta: openCallsAfter - openCallsBefore };
+      return { feedImageLoaded, failedImageStillVisible, imageRetryVisible, videoHasMarker, audioHasMarker, audioPreviewOpened, audioSourceRequested, audioDuplicateSuppressed, audioCancelRequested, messageSwitchStopped, escapeClosedAndStopped, escapePreservedScroll, scrollBeforePreview, scrollAfterEscape, closeButtonStopped, deleteClosedAndStopped, videoPreviewOpened, videoPosterLoaded, videoRetryEnabled, videoRetrySucceeded, videoFallbackActionAvailable, backdropClosedAndStopped, unsupportedHint, unsupportedResolvedOnce, openCallDelta: openCallsAfter - openCallsBefore };
     })()`);
     assert.equal(messageMediaResult.feedImageLoaded, true, 'image messages use the common media preview resolver');
+    assert.equal(messageMediaResult.failedImageStillVisible, true, 'failed feed previews keep the filename without rendering a redundant loading card');
+    assert.equal(messageMediaResult.imageRetryVisible, true, 'image detail exposes an actionable retry when the preview is offline');
     assert.equal(messageMediaResult.videoHasMarker, true, 'video messages expose a play marker');
     assert.equal(messageMediaResult.audioHasMarker, true, 'audio messages expose a play marker');
     assert.equal(messageMediaResult.audioPreviewOpened, true, 'audio opens the fullscreen media preview');

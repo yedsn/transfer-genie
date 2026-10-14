@@ -87,7 +87,7 @@ use tauri_plugin_opener::OpenerExt;
 #[cfg(desktop)]
 use tauri_plugin_updater::UpdaterExt;
 use time::OffsetDateTime;
-use tokio::sync::{oneshot, watch, Mutex as AsyncMutex};
+use tokio::sync::{oneshot, watch, Mutex as AsyncMutex, Notify};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -137,6 +137,13 @@ struct AppState {
     pending_webdav_conflict: Mutex<Option<WebDavConflict>>,
     system_dictation_hidden_main_position: Mutex<Option<PhysicalPosition<i32>>>,
     media_playback: media_playback::PlaybackRegistry,
+    media_preview_jobs: AsyncMutex<HashMap<String, Arc<MediaPreviewJob>>>,
+}
+
+#[derive(Default)]
+struct MediaPreviewJob {
+    result: AsyncMutex<Option<MediaPreviewResult>>,
+    notify: Notify,
 }
 
 #[derive(Clone, Deserialize)]
@@ -1447,6 +1454,240 @@ fn supabase_attachment_object_path(
         "{user_id}/{space_id}/{attachment_id}/{}",
         urlencoding::encode(original_name)
     )
+}
+
+fn supabase_attachment_preview_object_path(
+    user_id: &str,
+    space_id: &str,
+    attachment_id: &str,
+) -> String {
+    format!("{user_id}/{space_id}/{attachment_id}/preview.jpg")
+}
+
+fn attachment_mime_type(name: &str) -> &'static str {
+    match Path::new(name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "avif" => "image/avif",
+        "mp4" | "m4v" => "video/mp4",
+        "mov" => "video/quicktime",
+        "webm" => "video/webm",
+        "mkv" => "video/x-matroska",
+        "avi" => "video/x-msvideo",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "m4a" => "audio/mp4",
+        "ogg" | "oga" | "opus" => "audio/ogg",
+        "flac" => "audio/flac",
+        "pdf" => "application/pdf",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "ppt" => "application/vnd.ms-powerpoint",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "zip" => "application/zip",
+        "json" => "application/json",
+        "txt" | "md" | "csv" | "rs" | "js" | "ts" | "css" | "html" => "text/plain",
+        _ => "application/octet-stream",
+    }
+}
+
+fn supabase_attachment_payload(
+    attachment: &db::AttachmentSyncRecord,
+    preview_object_path: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "messageId": attachment.message_id,
+        "originalName": attachment.original_name,
+        "objectPath": attachment.object_path,
+        "previewObjectPath": preview_object_path,
+        "mimeType": attachment.mime_type.as_deref().unwrap_or("application/octet-stream"),
+        "size": attachment.size,
+        "sha256": attachment.sha256,
+        "uploadStatus": "uploaded"
+    })
+}
+
+async fn generate_preview_file(
+    source_path: PathBuf,
+    original_name: String,
+    preview_path: PathBuf,
+) -> Result<bool, String> {
+    let permit = media_preview::preview_generation_semaphore()
+        .acquire_owned()
+        .await
+        .map_err(|_| "预览生成服务不可用".to_string())?;
+    let generated = tokio::task::spawn_blocking(move || {
+        media_preview::generate_media_preview(&source_path, &original_name, &preview_path)
+    })
+    .await
+    .map_err(|error| format!("预览生成任务失败: {error}"))?;
+    drop(permit);
+    generated
+}
+
+async fn complete_supabase_preview(
+    state: &AppState,
+    profile: &StorageProfile,
+    session: &supabase_auth::SupabaseSession,
+    attachment: &db::AttachmentSyncRecord,
+) -> Result<PathBuf, String> {
+    let config = profile
+        .supabase
+        .as_ref()
+        .ok_or_else(|| "Supabase 配置不完整".to_string())?;
+    let preview_object_path = supabase_attachment_preview_object_path(
+        &session.user_id,
+        &config.space_id,
+        &attachment.attachment_id,
+    );
+    let preview_path = media_preview::isolated_preview_cache_path(
+        &endpoint_files_dir(state, &profile.id),
+        &session.user_id,
+        &attachment.attachment_id,
+        &preview_object_path,
+    );
+    let mut temporary_source = None;
+    if !preview_path.is_file() {
+        let source_path = attachment
+            .local_path
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|path| path.is_file());
+        let source_path = match source_path {
+            Some(path) => path,
+            None => {
+                let object_path = attachment
+                    .object_path
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| "附件尚未上传，无法补全预览".to_string())?;
+                let temp_dir = endpoint_files_dir(state, &profile.id)
+                    .join(&session.user_id)
+                    .join("preview-temp");
+                fs::create_dir_all(&temp_dir)
+                    .map_err(|error| format!("创建预览临时目录失败: {error}"))?;
+                let temp_path = temp_dir.join(format!(
+                    "{}-{}",
+                    attachment.attachment_id,
+                    sanitize_filename(&attachment.original_name)
+                ));
+                let mut response = supabase_sync::download_storage_object_stream(
+                    &state.http,
+                    config,
+                    session,
+                    object_path,
+                )
+                .await?;
+                let temp_file = fs::File::create(&temp_path)
+                    .map_err(|error| format!("创建预览临时原件失败: {error}"))?;
+                let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel(4);
+                let writer = tokio::task::spawn_blocking(move || {
+                    use std::io::Write as _;
+                    let mut file = temp_file;
+                    while let Some(chunk) = chunk_rx.blocking_recv() {
+                        let chunk: bytes::Bytes = chunk;
+                        file.write_all(&chunk)
+                            .map_err(|error| format!("保存预览临时原件失败: {error}"))?;
+                    }
+                    file.flush()
+                        .map_err(|error| format!("保存预览临时原件失败: {error}"))
+                });
+                let mut stream_error = None;
+                while let Some(chunk) = response.stream.next().await {
+                    match chunk {
+                        Ok(chunk) => {
+                            if chunk_tx.send(chunk).await.is_err() {
+                                stream_error = Some("保存预览临时原件任务已停止".to_string());
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            stream_error = Some(format!("读取预览临时原件失败: {error}"));
+                            break;
+                        }
+                    }
+                }
+                drop(chunk_tx);
+                let write_result = writer
+                    .await
+                    .map_err(|error| format!("保存预览临时原件任务失败: {error}"))?;
+                if let Some(error) = stream_error {
+                    let _ = fs::remove_file(&temp_path);
+                    return Err(error);
+                }
+                if let Err(error) = write_result {
+                    let _ = fs::remove_file(&temp_path);
+                    return Err(error);
+                }
+                temporary_source = Some(temp_path.clone());
+                temp_path
+            }
+        };
+        let generated = generate_preview_file(
+            source_path,
+            attachment.original_name.clone(),
+            preview_path.clone(),
+        )
+        .await;
+        if let Some(temp_path) = temporary_source {
+            let _ = fs::remove_file(temp_path);
+        }
+        if !generated? {
+            return Err("当前文件类型不支持视觉预览".to_string());
+        }
+    }
+    supabase_sync::upload_storage_object_path(
+        &state.http,
+        config,
+        session,
+        &preview_object_path,
+        &preview_path,
+        "image/jpeg",
+        None,
+    )
+    .await?;
+    let operation_id = uuid::Uuid::new_v5(
+        &STORAGE_IMPORT_NAMESPACE,
+        format!(
+            "transfer-genie:attachment-preview:{}:{}:{}",
+            profile.id, session.user_id, attachment.attachment_id
+        )
+        .as_bytes(),
+    )
+    .to_string();
+    let operation = outbox_operation_with_id(
+        &operation_id,
+        &profile.id,
+        &session.user_id,
+        "attachment",
+        &attachment.attachment_id,
+        "upsert",
+        attachment.remote_revision,
+        supabase_attachment_payload(attachment, Some(&preview_object_path)),
+    )?;
+    db::set_attachment_preview_and_enqueue(
+        &state.db_path,
+        &profile.id,
+        &session.user_id,
+        &attachment.attachment_id,
+        &preview_object_path,
+        &operation,
+        now_ms(),
+    )
+    .map_err(|error| format!("保存附件预览同步任务失败: {error}"))?;
+    notify_supabase_outbox_pending(state);
+    Ok(preview_path)
 }
 
 const STORAGE_IMPORT_NAMESPACE: uuid::Uuid =
@@ -3290,11 +3531,47 @@ async fn import_storage_message_to_supabase(
             attachment_id,
             &message.original_name,
         );
+        let preview_object_path =
+            media_preview::media_preview_kind(&message.original_name).map(|_| {
+                supabase_attachment_preview_object_path(
+                    &session.user_id,
+                    target
+                        .supabase
+                        .as_ref()
+                        .map(|config| config.space_id.as_str())
+                        .unwrap_or_default(),
+                    attachment_id,
+                )
+            });
+        let preview_object_path = if let Some(preview_object_path) = preview_object_path {
+            let preview_path = media_preview::isolated_preview_cache_path(
+                &endpoint_files_dir(state, &target.id),
+                &session.user_id,
+                attachment_id,
+                &preview_object_path,
+            );
+            match generate_preview_file(
+                local_path.clone(),
+                message.original_name.clone(),
+                preview_path,
+            )
+            .await
+            {
+                Ok(true) => Some(preview_object_path),
+                Ok(false) => None,
+                Err(error) => {
+                    log::warn!("generate transferred attachment preview failed: {error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         message.size = size;
         message.local_path = Some(local_path.to_string_lossy().to_string());
         message.remote_path = Some(object_path.clone());
         message.file_hash = Some(sha256);
-        attachment_data = Some((attachment_id.to_string(), object_path));
+        attachment_data = Some((attachment_id.to_string(), object_path, preview_object_path));
     }
     let message_operation = outbox_operation_with_id(
         &item.message_operation_id,
@@ -3306,13 +3583,15 @@ async fn import_storage_message_to_supabase(
         message_base_revision,
         supabase_message_payload(&message),
     )?;
-    let attachment = if let Some((attachment_id, object_path)) = attachment_data.as_ref() {
+    let attachment = if let Some((attachment_id, object_path, preview_object_path)) =
+        attachment_data.as_ref()
+    {
         let operation_id = item
             .attachment_operation_id
             .as_deref()
             .ok_or_else(|| "导入附件操作 ID 缺失".to_string())?;
         let payload = serde_json::json!({"messageId":item.entity_id,"originalName":message.original_name,
-            "objectPath":object_path,"previewObjectPath":null,"mimeType":"application/octet-stream",
+            "objectPath":object_path,"previewObjectPath":preview_object_path,"mimeType":attachment_mime_type(&message.original_name),
             "size":message.size,"sha256":message.file_hash,"uploadStatus":"uploaded"});
         let attachment_base_revision = db::get_attachment_sync_identity(
             &state.db_path,
@@ -3326,6 +3605,7 @@ async fn import_storage_message_to_supabase(
         Some((
             attachment_id.clone(),
             object_path.clone(),
+            preview_object_path.clone(),
             outbox_operation_with_id(
                 operation_id,
                 &target.id,
@@ -3346,16 +3626,17 @@ async fn import_storage_message_to_supabase(
         &item.source_key,
         &message,
         &message_operation,
-        attachment
-            .as_ref()
-            .map(|(attachment_id, object_path, operation)| {
+        attachment.as_ref().map(
+            |(attachment_id, object_path, preview_object_path, operation)| {
                 (
                     attachment_id.as_str(),
                     object_path.as_str(),
-                    Some("application/octet-stream"),
+                    preview_object_path.as_deref(),
+                    Some(attachment_mime_type(&message.original_name)),
                     operation,
                 )
-            }),
+            },
+        ),
         now_ms(),
     )
     .map_err(|error| error.to_string())
@@ -3836,15 +4117,19 @@ async fn push_supabase_outbox(
         };
         if operation.entity_type == "attachment" && operation.action == "upsert" {
             let upload_result = async {
-                let (local_path, mut object_path, original_name, _size, sha256) =
-                    db::get_attachment_local_path(
-                        &state.db_path,
-                        &profile.id,
-                        &session.user_id,
-                        &operation.entity_id,
-                    )
-                    .map_err(|error| format!("读取本地附件状态失败: {error}"))?
-                    .ok_or_else(|| "附件本地原件不存在".to_string())?;
+                let mut attachment = db::get_attachment_sync_record(
+                    &state.db_path,
+                    &profile.id,
+                    &session.user_id,
+                    &operation.entity_id,
+                )
+                .map_err(|error| format!("读取本地附件状态失败: {error}"))?
+                .ok_or_else(|| "附件本地原件不存在".to_string())?;
+                let local_path = attachment
+                    .local_path
+                    .clone()
+                    .filter(|value| !value.trim().is_empty());
+                let mut object_path = attachment.object_path.clone().unwrap_or_default();
                 let expected_prefix = format!(
                     "{}/{}/{}/",
                     session.user_id, config.space_id, operation.entity_id
@@ -3854,7 +4139,7 @@ async fn push_supabase_outbox(
                         &session.user_id,
                         &config.space_id,
                         &operation.entity_id,
-                        &original_name,
+                        &attachment.original_name,
                     );
                     let mut payload: serde_json::Value =
                         serde_json::from_str(&operation.payload_json)
@@ -3883,17 +4168,126 @@ async fn push_supabase_outbox(
                     }
                     operation.payload_json = payload_json;
                     operation.payload_hash = payload_hash;
+                    attachment.object_path = Some(object_path.clone());
                 }
-                supabase_sync::upload_storage_object_path(
-                    &state.http,
-                    config,
-                    session,
-                    &object_path,
-                    Path::new(&local_path),
-                    "application/octet-stream",
-                    sha256.as_deref(),
-                )
-                .await
+                if attachment.upload_state != "uploaded" {
+                    let local_path = local_path
+                        .as_deref()
+                        .ok_or_else(|| "附件本地原件不存在".to_string())?;
+                    supabase_sync::upload_storage_object_path(
+                        &state.http,
+                        config,
+                        session,
+                        &object_path,
+                        Path::new(local_path),
+                        attachment
+                            .mime_type
+                            .as_deref()
+                            .unwrap_or("application/octet-stream"),
+                        attachment.sha256.as_deref(),
+                    )
+                    .await?;
+                }
+
+                let preview_already_published = attachment.upload_state == "uploaded"
+                    && attachment
+                        .preview_object_path
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty());
+                if !preview_already_published
+                    && media_preview::media_preview_kind(&attachment.original_name).is_some()
+                {
+                    let preview_object_path = supabase_attachment_preview_object_path(
+                        &session.user_id,
+                        &config.space_id,
+                        &operation.entity_id,
+                    );
+                    let preview_path = media_preview::isolated_preview_cache_path(
+                        &endpoint_files_dir(state, &profile.id),
+                        &session.user_id,
+                        &operation.entity_id,
+                        &preview_object_path,
+                    );
+                    let generated = if preview_path.is_file() {
+                        Ok(true)
+                    } else {
+                        generate_preview_file(
+                            PathBuf::from(
+                                local_path
+                                    .as_deref()
+                                    .ok_or_else(|| "附件本地原件不存在".to_string())?,
+                            ),
+                            attachment.original_name.clone(),
+                            preview_path.clone(),
+                        )
+                        .await
+                    };
+                    match generated {
+                        Ok(true) => {
+                            if let Err(error) = supabase_sync::upload_storage_object_path(
+                                &state.http,
+                                config,
+                                session,
+                                &preview_object_path,
+                                &preview_path,
+                                "image/jpeg",
+                                None,
+                            )
+                            .await
+                            {
+                                log::warn!(
+                                    "upload Supabase preview failed for {}: {}",
+                                    operation.entity_id,
+                                    error
+                                );
+                            } else {
+                                let mut payload: serde_json::Value = serde_json::from_str(
+                                    &operation.payload_json,
+                                )
+                                .map_err(|error| format!("修复附件预览同步信息失败: {error}"))?;
+                                payload["previewObjectPath"] =
+                                    serde_json::Value::String(preview_object_path.clone());
+                                let payload_json =
+                                    serde_json::to_string(&payload).map_err(|error| {
+                                        format!("修复附件预览同步信息失败: {error}")
+                                    })?;
+                                let payload_hash =
+                                    format!("{:x}", Sha256::digest(payload_json.as_bytes()));
+                                let repaired = db::repair_claimed_attachment_preview_path(
+                                    &state.db_path,
+                                    &operation.operation_id,
+                                    &worker_id,
+                                    &profile.id,
+                                    &session.user_id,
+                                    &operation.entity_id,
+                                    Some(&preview_object_path),
+                                    &payload_json,
+                                    &payload_hash,
+                                    None,
+                                    now_ms(),
+                                )
+                                .map_err(|error| {
+                                    format!("修复附件预览 Storage 路径失败: {error}")
+                                })?;
+                                if !repaired {
+                                    return Err(
+                                        "修复附件预览 Storage 路径失败：同步任务已被其他进程接管"
+                                            .to_string(),
+                                    );
+                                }
+                                operation.payload_json = payload_json;
+                                operation.payload_hash = payload_hash;
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(error) => log::warn!(
+                            "generate Supabase preview failed for {}: {}",
+                            operation.entity_id,
+                            error
+                        ),
+                    }
+                }
+                Ok(())
             }
             .await;
             if let Err(error) = upload_result {
@@ -4205,15 +4599,18 @@ async fn cleanup_supabase_orphan_objects(
         .ok_or_else(|| "Supabase 配置不完整".to_string())?;
     let paths = candidates
         .iter()
-        .map(|(_, path)| path.clone())
+        .flat_map(|candidate| {
+            std::iter::once(candidate.object_path.clone())
+                .chain(candidate.preview_object_path.clone())
+        })
         .collect::<Vec<_>>();
     supabase_sync::delete_storage_objects(&state.http, config, session, &paths).await?;
-    for (attachment_id, _) in &candidates {
+    for candidate in &candidates {
         db::mark_attachment_object_cleaned(
             &state.db_path,
             &profile.id,
             &session.user_id,
-            attachment_id,
+            &candidate.attachment_id,
             now_ms(),
         )
         .map_err(|error| error.to_string())?;
@@ -8788,6 +9185,49 @@ fn delete_local_media_cache_for_entry(
     }
 }
 
+fn delete_supabase_attachment_cache(
+    state: &AppState,
+    profile_id: &str,
+    owner_scope: &str,
+    attachment: &db::AttachmentSyncRecord,
+    remove_original: bool,
+) -> Result<(), String> {
+    let endpoint_dir = endpoint_files_dir(state, profile_id);
+    let preview_dir = media_preview::isolated_preview_attachment_dir(
+        &endpoint_dir,
+        owner_scope,
+        &attachment.attachment_id,
+    );
+    if preview_dir.starts_with(&endpoint_dir) && preview_dir.is_dir() {
+        fs::remove_dir_all(&preview_dir)
+            .map_err(|error| format!("删除附件预览缓存失败: {error}"))?;
+    }
+    if !remove_original || attachment.upload_state != "uploaded" {
+        return Ok(());
+    }
+    if let Some(path) = attachment
+        .local_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+    {
+        delete_local_file(&path, &endpoint_dir)?;
+        if let Some(parent) = path.parent() {
+            let _ = fs::remove_dir(parent);
+        }
+    }
+    db::clear_uploaded_attachment_local_path(
+        &state.db_path,
+        profile_id,
+        owner_scope,
+        &attachment.attachment_id,
+        now_ms(),
+    )
+    .map_err(|error| format!("清理附件本地状态失败: {error}"))?;
+    Ok(())
+}
+
 async fn delete_remote_media_previews(
     state: &AppState,
     endpoint: &WebDavEndpoint,
@@ -8992,7 +9432,7 @@ async fn send_file_path_impl(
             0,
             supabase_message_payload(&message),
         )?;
-        let mime_type = "application/octet-stream".to_string();
+        let mime_type = attachment_mime_type(&original_name).to_string();
         let attachment_payload = serde_json::json!({"messageId":message_id,"originalName":original_name,
             "objectPath":object_path,"previewObjectPath":null,"mimeType":mime_type,
             "size":total_bytes,"sha256":file_hash,"uploadStatus":"uploaded"});
@@ -9015,6 +9455,7 @@ async fn send_file_path_impl(
             Some((
                 &attachment_id,
                 &object_path,
+                None,
                 Some(&mime_type),
                 &attachment_operation,
             )),
@@ -9341,6 +9782,7 @@ async fn send_speech_message_impl(
             Some((
                 &attachment_id,
                 &object_path,
+                None,
                 Some(&storage_mime_type),
                 &attachment_operation,
             )),
@@ -9438,6 +9880,96 @@ struct MediaPreviewInput {
     original_name: String,
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct MediaPreviewResult {
+    state: String,
+    kind: String,
+    path: Option<String>,
+    error: Option<String>,
+}
+
+impl MediaPreviewResult {
+    fn ready(kind: &str, path: PathBuf) -> Self {
+        Self {
+            state: "ready".into(),
+            kind: kind.into(),
+            path: Some(path.to_string_lossy().to_string()),
+            error: None,
+        }
+    }
+
+    fn state(kind: &str, state: &str, error: Option<String>) -> Self {
+        Self {
+            state: state.into(),
+            kind: kind.into(),
+            path: None,
+            error,
+        }
+    }
+}
+
+fn media_preview_error_result(kind: &str, error: String) -> MediaPreviewResult {
+    let normalized = error.to_ascii_lowercase();
+    let state = if normalized.contains("network")
+        || normalized.contains("connect")
+        || normalized.contains("timeout")
+        || error.contains("网络")
+        || error.contains("连接")
+        || error.contains("超时")
+    {
+        "offline"
+    } else {
+        "failed"
+    };
+    MediaPreviewResult::state(kind, state, Some(error))
+}
+
+async fn run_media_preview_job<F, Fut>(state: &AppState, key: String, work: F) -> MediaPreviewResult
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = MediaPreviewResult>,
+{
+    let (job, is_owner) = {
+        let mut jobs = state.media_preview_jobs.lock().await;
+        if let Some(job) = jobs.get(&key) {
+            (job.clone(), false)
+        } else {
+            let job = Arc::new(MediaPreviewJob::default());
+            jobs.insert(key.clone(), job.clone());
+            (job, true)
+        }
+    };
+    if is_owner {
+        let result = work().await;
+        *job.result.lock().await = Some(result.clone());
+        job.notify.notify_waiters();
+        let mut jobs = state.media_preview_jobs.lock().await;
+        if jobs
+            .get(&key)
+            .is_some_and(|current| Arc::ptr_eq(current, &job))
+        {
+            jobs.remove(&key);
+        }
+        return result;
+    }
+    loop {
+        let notified = job.notify.notified();
+        if let Some(result) = job.result.lock().await.clone() {
+            return result;
+        }
+        notified.await;
+    }
+}
+
+fn media_preview_kind_name(name: &str) -> &'static str {
+    match media_preview::media_preview_kind(name) {
+        Some(media_preview::MediaPreviewKind::Image) => "image",
+        Some(media_preview::MediaPreviewKind::Video) => "video",
+        None => "file",
+    }
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MediaPlaybackInput {
@@ -9498,28 +10030,34 @@ fn existing_media_playback_source(
     endpoint_dir: &Path,
     cache_path: &Path,
     resource_key: &str,
+    include_webdav_legacy_sources: bool,
 ) -> Result<Option<media_playback::MediaPlaybackResult>, String> {
-    let uploaded_path = endpoint_dir.join(&message.filename);
-    if uploaded_path.is_file() {
-        return Ok(Some(playback_result(
-            &uploaded_path,
-            "uploadLocal",
-            resource_key,
-        )));
-    }
-    if let Some(record) =
-        db::find_download_history_by_key(&state.db_path, &message.endpoint_id, &message.filename)
-            .map_err(|err| format!("读取下载历史失败: {err}"))?
-    {
-        if record.status == "complete" {
-            if let Some(path) = record
-                .saved_path
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .map(PathBuf::from)
-                .filter(|path| path.is_file())
-            {
-                return Ok(Some(playback_result(&path, "formalDownload", resource_key)));
+    if include_webdav_legacy_sources {
+        let uploaded_path = endpoint_dir.join(&message.filename);
+        if uploaded_path.is_file() {
+            return Ok(Some(playback_result(
+                &uploaded_path,
+                "uploadLocal",
+                resource_key,
+            )));
+        }
+        if let Some(record) = db::find_download_history_by_key(
+            &state.db_path,
+            &message.endpoint_id,
+            &message.filename,
+        )
+        .map_err(|err| format!("读取下载历史失败: {err}"))?
+        {
+            if record.status == "complete" {
+                if let Some(path) = record
+                    .saved_path
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(PathBuf::from)
+                    .filter(|path| path.is_file())
+                {
+                    return Ok(Some(playback_result(&path, "formalDownload", resource_key)));
+                }
             }
         }
     }
@@ -9544,6 +10082,15 @@ fn existing_media_playback_source(
 }
 
 type MediaPlaybackProgressSink = Arc<dyn Fn(MediaPlaybackProgress) + Send + Sync>;
+
+enum MediaPlaybackRemoteSource {
+    Webdav(WebDavEndpoint),
+    Supabase {
+        profile: StorageProfile,
+        session: supabase_auth::SupabaseSession,
+        object_path: String,
+    },
+}
 
 fn report_media_playback_progress(
     progress_sink: &MediaPlaybackProgressSink,
@@ -9653,6 +10200,95 @@ async fn cache_remote_media_for_playback(
     result
 }
 
+async fn cache_supabase_media_for_playback(
+    progress_sink: &MediaPlaybackProgressSink,
+    state: &AppState,
+    profile: &StorageProfile,
+    session: &supabase_auth::SupabaseSession,
+    message: &DbMessage,
+    object_path: &str,
+    cache_path: &Path,
+    resource_key: &str,
+    job: &media_playback::PlaybackJob,
+) -> Result<media_playback::MediaPlaybackResult, String> {
+    use std::fs::OpenOptions;
+
+    let config = profile
+        .supabase
+        .as_ref()
+        .ok_or_else(|| "Supabase 存储空间配置不完整".to_string())?;
+    ensure_parent_dir(cache_path)?;
+    let temp_path = cache_path.with_file_name(format!(
+        "{}.part",
+        cache_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("media")
+    ));
+    let _ = fs::remove_file(&temp_path);
+    let mut response =
+        supabase_sync::download_storage_object_stream(&state.http, config, session, object_path)
+            .await?;
+    let total = (message.size > 0).then_some(message.size as u64);
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&temp_path)
+        .map_err(|err| format!("创建媒体预览缓存失败: {err}"))?;
+    let mut received = 0_u64;
+    report_media_playback_progress(
+        progress_sink,
+        &profile.id,
+        &message.filename,
+        resource_key,
+        0,
+        total,
+        "progress",
+        None,
+    );
+    let result = async {
+        loop {
+            let chunk = tokio::select! {
+                _ = job.cancelled() => return Err("媒体缓存已取消".to_string()),
+                chunk = response.stream.next() => chunk,
+            };
+            let Some(chunk) = chunk else {
+                break;
+            };
+            let chunk = chunk.map_err(|err| format!("读取媒体内容失败: {err}"))?;
+            file.write_all(&chunk)
+                .map_err(|err| format!("写入媒体缓存失败: {err}"))?;
+            received += chunk.len() as u64;
+            report_media_playback_progress(
+                progress_sink,
+                &profile.id,
+                &message.filename,
+                resource_key,
+                received,
+                total,
+                "progress",
+                None,
+            );
+        }
+        file.flush()
+            .map_err(|err| format!("完成媒体缓存失败: {err}"))?;
+        if job.is_cancelled() {
+            return Err("媒体缓存已取消".to_string());
+        }
+        if cache_path.exists() {
+            fs::remove_file(cache_path).map_err(|err| format!("替换媒体缓存失败: {err}"))?;
+        }
+        fs::rename(&temp_path, cache_path).map_err(|err| format!("完成媒体缓存失败: {err}"))?;
+        Ok(playback_result(cache_path, "remoteCache", resource_key))
+    }
+    .await;
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
+}
+
 async fn resolve_media_playback_source_impl(
     state: &AppState,
     input: MediaPlaybackInput,
@@ -9660,10 +10296,29 @@ async fn resolve_media_playback_source_impl(
 ) -> Result<media_playback::MediaPlaybackResult, String> {
     let (endpoint_id, filename, variant) = validate_media_playback_input(&input)?;
     let settings = current_settings(&state)?;
-    let endpoint = resolve_endpoint_by_id(&settings, endpoint_id)?;
-    let message = db::get_message(&state.db_path, endpoint_id, filename)
-        .map_err(|err| format!("读取媒体消息失败: {err}"))?
-        .ok_or_else(|| "媒体消息不存在".to_string())?;
+    let provider = storage_provider::resolve_provider_by_id(&settings, endpoint_id)?;
+    let (message, owner_scope) = match &provider {
+        storage_provider::ProviderConfig::Webdav(_) => (
+            db::get_message(&state.db_path, endpoint_id, filename)
+                .map_err(|err| format!("读取媒体消息失败: {err}"))?
+                .ok_or_else(|| "媒体消息不存在".to_string())?,
+            String::new(),
+        ),
+        storage_provider::ProviderConfig::Supabase(profile) => {
+            let session = state
+                .supabase_sessions
+                .lock()
+                .map_err(|_| "读取 Supabase 会话失败".to_string())?
+                .get(&profile.id)
+                .cloned()
+                .ok_or_else(|| "请先登录当前 Supabase 存储空间".to_string())?;
+            let message =
+                db::get_message_for_scope(&state.db_path, &profile.id, &session.user_id, filename)
+                    .map_err(|err| format!("读取媒体消息失败: {err}"))?
+                    .ok_or_else(|| "媒体消息不存在".to_string())?;
+            (message, session.user_id)
+        }
+    };
     if variant == "speech-audio" && message.transcript_source.as_deref() != Some("speech-to-text") {
         return Err("消息没有关联的源音频".to_string());
     }
@@ -9672,35 +10327,107 @@ async fn resolve_media_playback_source_impl(
     } else {
         input.original_name.trim().to_string()
     };
-    let endpoint_dir = endpoint_files_dir(&state, endpoint_id);
+    let endpoint_dir = if owner_scope.is_empty() {
+        endpoint_files_dir(&state, endpoint_id)
+    } else {
+        endpoint_files_dir(&state, endpoint_id).join(&owner_scope)
+    };
+    let cache_scope = if owner_scope.is_empty() {
+        endpoint_id.to_string()
+    } else {
+        format!("{endpoint_id}\0{owner_scope}")
+    };
     let cache_path = media_preview::media_playback_cache_path(
         &endpoint_dir,
-        endpoint_id,
+        &cache_scope,
         filename,
         &original_name,
         variant,
     );
-    let resource_key = media_preview::media_resource_key(endpoint_id, filename, variant);
-    if let Some(result) =
-        existing_media_playback_source(&state, &message, &endpoint_dir, &cache_path, &resource_key)?
-    {
+    let resource_key = media_preview::media_resource_key(&cache_scope, filename, variant);
+    if let Some(result) = existing_media_playback_source(
+        &state,
+        &message,
+        &endpoint_dir,
+        &cache_path,
+        &resource_key,
+        matches!(provider, storage_provider::ProviderConfig::Webdav(_)),
+    )? {
         return Ok(result);
     }
+    let remote_source = match provider {
+        storage_provider::ProviderConfig::Webdav(endpoint) => {
+            MediaPlaybackRemoteSource::Webdav(endpoint)
+        }
+        storage_provider::ProviderConfig::Supabase(profile) => {
+            let session = state
+                .supabase_sessions
+                .lock()
+                .map_err(|_| "读取 Supabase 会话失败".to_string())?
+                .get(&profile.id)
+                .cloned()
+                .ok_or_else(|| "请先登录当前 Supabase 存储空间".to_string())?;
+            let message_id = db::get_message_sync_identity(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                filename,
+            )
+            .map_err(|err| format!("读取附件标识失败: {err}"))?
+            .map(|(id, _)| id)
+            .ok_or_else(|| "附件标识不存在".to_string())?;
+            let object_path = db::get_attachment_object_path_for_message(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                &message_id,
+            )
+            .map_err(|err| format!("读取附件路径失败: {err}"))?
+            .ok_or_else(|| "附件尚未上传，当前仅保存在原设备".to_string())?;
+            MediaPlaybackRemoteSource::Supabase {
+                profile,
+                session,
+                object_path,
+            }
+        }
+    };
 
     let (job, owner) = state.media_playback.acquire(&resource_key).await;
     if !owner {
         return job.wait().await;
     }
-    let result = cache_remote_media_for_playback(
-        &progress_sink,
-        state,
-        &endpoint,
-        &message,
-        &cache_path,
-        &resource_key,
-        &job,
-    )
-    .await;
+    let result = match &remote_source {
+        MediaPlaybackRemoteSource::Webdav(endpoint) => {
+            cache_remote_media_for_playback(
+                &progress_sink,
+                state,
+                endpoint,
+                &message,
+                &cache_path,
+                &resource_key,
+                &job,
+            )
+            .await
+        }
+        MediaPlaybackRemoteSource::Supabase {
+            profile,
+            session,
+            object_path,
+        } => {
+            cache_supabase_media_for_playback(
+                &progress_sink,
+                state,
+                profile,
+                session,
+                &message,
+                object_path,
+                &cache_path,
+                &resource_key,
+                &job,
+            )
+            .await
+        }
+    };
     if let Err(error) = &result {
         report_media_playback_progress(
             &progress_sink,
@@ -9760,7 +10487,21 @@ async fn cancel_media_playback_cache(
     input: MediaPlaybackInput,
 ) -> Result<bool, String> {
     let (endpoint_id, filename, variant) = validate_media_playback_input(&input)?;
-    let resource_key = media_preview::media_resource_key(endpoint_id, filename, variant);
+    let settings = current_settings(&state)?;
+    let cache_scope = match storage_provider::resolve_provider_by_id(&settings, endpoint_id)? {
+        storage_provider::ProviderConfig::Webdav(_) => endpoint_id.to_string(),
+        storage_provider::ProviderConfig::Supabase(profile) => {
+            let owner_scope = state
+                .supabase_sessions
+                .lock()
+                .map_err(|_| "读取 Supabase 会话失败".to_string())?
+                .get(&profile.id)
+                .map(|session| session.user_id.clone())
+                .ok_or_else(|| "请先登录当前 Supabase 存储空间".to_string())?;
+            format!("{endpoint_id}\0{owner_scope}")
+        }
+    };
+    let resource_key = media_preview::media_resource_key(&cache_scope, filename, variant);
     Ok(state.media_playback.cancel(&resource_key).await)
 }
 
@@ -9781,7 +10522,7 @@ fn set_active_media_playback_path(
 async fn get_media_preview_impl(
     state: &AppState,
     input: MediaPreviewInput,
-) -> Result<String, String> {
+) -> Result<MediaPreviewResult, String> {
     let endpoint_id = input.endpoint_id.trim();
     let filename = input.filename.trim();
     if endpoint_id.is_empty()
@@ -9792,63 +10533,193 @@ async fn get_media_preview_impl(
         return Err("媒体预览参数无效".to_string());
     }
     let settings = current_settings(&state)?;
-    let endpoint = resolve_endpoint_by_id(&settings, endpoint_id)?;
-    let message = db::get_message(&state.db_path, endpoint_id, filename)
-        .map_err(|err| format!("读取消息失败: {err}"))?
-        .ok_or_else(|| "媒体消息不存在".to_string())?;
-    let original_name = if input.original_name.trim().is_empty() {
-        message.original_name.clone()
-    } else {
-        input.original_name.trim().to_string()
-    };
-    let endpoint_dir = endpoint_files_dir(&state, endpoint_id);
-    let preview_path = media_preview_local_path(&endpoint_dir, filename, message.timestamp_ms);
-    if preview_path.is_file() {
-        return Ok(preview_path.to_string_lossy().to_string());
-    }
-    let preview_remote_path = media_preview_remote_path(filename, message.timestamp_ms);
-    if let Some(data) =
-        webdav::download_optional_file(&state.http, &endpoint, &preview_remote_path).await?
-    {
-        if let Some(parent) = preview_path.parent() {
-            fs::create_dir_all(parent).map_err(|err| format!("创建预览缓存目录失败: {err}"))?;
-        }
-        fs::write(&preview_path, data).map_err(|err| format!("保存预览缓存失败: {err}"))?;
-        return Ok(preview_path.to_string_lossy().to_string());
-    }
-
-    if media_preview::media_preview_kind(&original_name)
-        == Some(media_preview::MediaPreviewKind::Image)
-    {
-        let legacy_local_path = legacy_thumbnail_local_path(&endpoint_dir, filename);
-        if legacy_local_path.is_file() {
-            return Ok(legacy_local_path.to_string_lossy().to_string());
-        }
-        let legacy_remote_path = resolved_thumbnail_remote_path(
-            message.remote_path.as_deref(),
-            filename,
-            Some(message.timestamp_ms),
-        );
-        if let Some(data) =
-            webdav::download_optional_file(&state.http, &endpoint, &legacy_remote_path).await?
-        {
-            if let Some(parent) = legacy_local_path.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|err| format!("创建旧缩略图缓存目录失败: {err}"))?;
+    match storage_provider::resolve_provider_by_id(&settings, endpoint_id)? {
+        storage_provider::ProviderConfig::Webdav(endpoint) => {
+            let message = db::get_message(&state.db_path, endpoint_id, filename)
+                .map_err(|err| format!("读取消息失败: {err}"))?
+                .ok_or_else(|| "媒体消息不存在".to_string())?;
+            let original_name = if input.original_name.trim().is_empty() {
+                message.original_name.clone()
+            } else {
+                input.original_name.trim().to_string()
+            };
+            let kind = media_preview_kind_name(&original_name);
+            if kind == "file" {
+                return Ok(MediaPreviewResult::state(kind, "unsupported", None));
             }
-            fs::write(&legacy_local_path, data)
-                .map_err(|err| format!("保存旧缩略图缓存失败: {err}"))?;
-            return Ok(legacy_local_path.to_string_lossy().to_string());
+            let endpoint_dir = endpoint_files_dir(state, endpoint_id);
+            let preview_path =
+                media_preview_local_path(&endpoint_dir, filename, message.timestamp_ms);
+            if preview_path.is_file() {
+                return Ok(MediaPreviewResult::ready(kind, preview_path));
+            }
+            let preview_remote_path = media_preview_remote_path(filename, message.timestamp_ms);
+            if let Some(data) =
+                webdav::download_optional_file(&state.http, &endpoint, &preview_remote_path).await?
+            {
+                if let Some(parent) = preview_path.parent() {
+                    fs::create_dir_all(parent)
+                        .map_err(|err| format!("创建预览缓存目录失败: {err}"))?;
+                }
+                fs::write(&preview_path, data).map_err(|err| format!("保存预览缓存失败: {err}"))?;
+                return Ok(MediaPreviewResult::ready(kind, preview_path));
+            }
+            if kind == "image" {
+                let legacy_local_path = legacy_thumbnail_local_path(&endpoint_dir, filename);
+                if legacy_local_path.is_file() {
+                    return Ok(MediaPreviewResult::ready(kind, legacy_local_path));
+                }
+                let legacy_remote_path = resolved_thumbnail_remote_path(
+                    message.remote_path.as_deref(),
+                    filename,
+                    Some(message.timestamp_ms),
+                );
+                if let Some(data) =
+                    webdav::download_optional_file(&state.http, &endpoint, &legacy_remote_path)
+                        .await?
+                {
+                    if let Some(parent) = legacy_local_path.parent() {
+                        fs::create_dir_all(parent)
+                            .map_err(|err| format!("创建旧缩略图缓存目录失败: {err}"))?;
+                    }
+                    fs::write(&legacy_local_path, data)
+                        .map_err(|err| format!("保存旧缩略图缓存失败: {err}"))?;
+                    return Ok(MediaPreviewResult::ready(kind, legacy_local_path));
+                }
+            }
+            Ok(MediaPreviewResult::state(
+                kind,
+                "failed",
+                Some("媒体预览不存在".into()),
+            ))
+        }
+        storage_provider::ProviderConfig::Supabase(profile) => {
+            let session = state
+                .supabase_sessions
+                .lock()
+                .map_err(|_| "读取 Supabase 会话失败".to_string())?
+                .get(&profile.id)
+                .cloned()
+                .ok_or_else(|| "请先登录当前 Supabase 存储空间".to_string())?;
+            let message =
+                db::get_message_for_scope(&state.db_path, &profile.id, &session.user_id, filename)
+                    .map_err(|err| format!("读取消息失败: {err}"))?
+                    .ok_or_else(|| "媒体消息不存在".to_string())?;
+            let original_name = if input.original_name.trim().is_empty() {
+                message.original_name.clone()
+            } else {
+                input.original_name.trim().to_string()
+            };
+            let kind = media_preview_kind_name(&original_name);
+            if kind == "file" {
+                return Ok(MediaPreviewResult::state(kind, "unsupported", None));
+            }
+            let message_id = db::get_message_sync_identity(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                filename,
+            )
+            .map_err(|err| format!("读取附件标识失败: {err}"))?
+            .map(|(id, _)| id)
+            .ok_or_else(|| "附件标识不存在".to_string())?;
+            let attachment = db::get_attachment_for_message(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                &message_id,
+            )
+            .map_err(|err| format!("读取附件预览信息失败: {err}"))?
+            .ok_or_else(|| "附件预览信息不存在".to_string())?;
+            let job_key = format!(
+                "{}\0{}\0{}",
+                profile.id, session.user_id, attachment.attachment_id
+            );
+            let Some(preview_object_path) = attachment
+                .preview_object_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                return Ok(run_media_preview_job(state, job_key, || async {
+                    match complete_supabase_preview(state, &profile, &session, &attachment).await {
+                        Ok(path) => MediaPreviewResult::ready(kind, path),
+                        Err(error) => media_preview_error_result(kind, error),
+                    }
+                })
+                .await);
+            };
+            let cache_path = media_preview::isolated_preview_cache_path(
+                &endpoint_files_dir(state, &profile.id),
+                &session.user_id,
+                &attachment.attachment_id,
+                preview_object_path,
+            );
+            if cache_path.is_file() {
+                return Ok(MediaPreviewResult::ready(kind, cache_path));
+            }
+            let preview_object_path = preview_object_path.to_string();
+            Ok(run_media_preview_job(state, job_key, || async {
+                let Some(config) = profile.supabase.as_ref() else {
+                    return MediaPreviewResult::state(
+                        kind,
+                        "failed",
+                        Some("Supabase 配置不完整".into()),
+                    );
+                };
+                let permit = match media_preview::preview_download_semaphore()
+                    .acquire_owned()
+                    .await
+                {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        return MediaPreviewResult::state(
+                            kind,
+                            "failed",
+                            Some("预览下载服务不可用".into()),
+                        )
+                    }
+                };
+                let bytes = supabase_sync::download_storage_object(
+                    &state.http,
+                    config,
+                    &session,
+                    &preview_object_path,
+                )
+                .await;
+                drop(permit);
+                let bytes = match bytes {
+                    Ok(bytes) => bytes,
+                    Err(error) => return media_preview_error_result(kind, error),
+                };
+                if let Some(parent) = cache_path.parent() {
+                    if let Err(error) = fs::create_dir_all(parent) {
+                        return MediaPreviewResult::state(
+                            kind,
+                            "failed",
+                            Some(format!("创建预览缓存目录失败: {error}")),
+                        );
+                    }
+                }
+                if let Err(error) = fs::write(&cache_path, bytes) {
+                    return MediaPreviewResult::state(
+                        kind,
+                        "failed",
+                        Some(format!("保存预览缓存失败: {error}")),
+                    );
+                }
+                MediaPreviewResult::ready(kind, cache_path)
+            })
+            .await)
         }
     }
-    Err("媒体预览不存在".to_string())
 }
 
 #[tauri::command]
 async fn get_media_preview(
     state: State<'_, AppState>,
     input: MediaPreviewInput,
-) -> Result<String, String> {
+) -> Result<MediaPreviewResult, String> {
     get_media_preview_impl(state.inner(), input).await
 }
 
@@ -10846,15 +11717,43 @@ async fn open_message_file(
     state: State<'_, AppState>,
     filename: String,
     original_name: String,
+    endpoint_id: Option<String>,
 ) -> Result<(), String> {
     if filename.trim().is_empty() {
         return Err("文件名为空".to_string());
     }
     let settings = current_settings(&state)?;
-    let endpoint = resolve_active_endpoint(&settings)?;
+    let endpoint_id = endpoint_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| settings.active_storage_profile_id.clone())
+        .or_else(|| settings.active_webdav_id.clone())
+        .ok_or_else(|| "请先选择存储空间".to_string())?;
+    let provider = storage_provider::resolve_provider_by_id(&settings, &endpoint_id)?;
     let base_dir = resolve_download_dir(&state, &settings);
-    let message = db::get_message(&state.db_path, &endpoint.id, &filename)
-        .map_err(|err| format!("读取消息失败: {err}"))?;
+    let (message, endpoint_dir) = match provider {
+        storage_provider::ProviderConfig::Webdav(endpoint) => (
+            db::get_message(&state.db_path, &endpoint.id, &filename)
+                .map_err(|err| format!("读取消息失败: {err}"))?,
+            endpoint_files_dir(&state, &endpoint.id),
+        ),
+        storage_provider::ProviderConfig::Supabase(profile) => {
+            let session = state
+                .supabase_sessions
+                .lock()
+                .map_err(|_| "读取 Supabase 会话失败".to_string())?
+                .get(&profile.id)
+                .cloned()
+                .ok_or_else(|| "请先登录当前 Supabase 存储空间".to_string())?;
+            (
+                db::get_message_for_scope(&state.db_path, &profile.id, &session.user_id, &filename)
+                    .map_err(|err| format!("读取消息失败: {err}"))?,
+                endpoint_files_dir(&state, &profile.id).join(&session.user_id),
+            )
+        }
+    };
     let download_path = base_dir.join(build_save_filename(
         &settings.save_filename_rule,
         &original_name,
@@ -10886,7 +11785,7 @@ async fn open_message_file(
                 return Ok(());
             }
 
-            let open_dir = endpoint_files_dir(&state, &endpoint.id).join("open");
+            let open_dir = endpoint_dir.join("open");
             fs::create_dir_all(&open_dir).map_err(|err| format!("创建打开目录失败: {err}"))?;
             let safe_prefix = filename.replace('%', "_");
             let safe_name = download_path
@@ -10913,45 +11812,33 @@ async fn open_message_file(
 async fn get_message_source_audio_file(
     state: State<'_, AppState>,
     filename: String,
+    endpoint_id: Option<String>,
 ) -> Result<String, String> {
     if filename.trim().is_empty() {
         return Err("文件名为空".to_string());
     }
     let settings = current_settings(&state)?;
-    let endpoint = resolve_active_endpoint(&settings)?;
-    let message = db::get_message(&state.db_path, &endpoint.id, &filename)
-        .map_err(|err| format!("读取消息失败: {err}"))?
-        .ok_or_else(|| "消息不存在".to_string())?;
-    if message.transcript_source.as_deref() != Some("speech-to-text") {
-        return Err("消息没有关联的源音频".to_string());
-    }
-
-    if let Some(local_path) = message
-        .local_path
+    let endpoint_id = endpoint_id
         .as_deref()
-        .filter(|path| !path.trim().is_empty())
-        .map(PathBuf::from)
-    {
-        if local_path.is_file() {
-            return Ok(local_path.to_string_lossy().to_string());
-        }
-    }
-
-    let cache_dir = endpoint_files_dir(&state, &endpoint.id).join("source-audio");
-    fs::create_dir_all(&cache_dir).map_err(|err| format!("创建音频缓存目录失败: {err}"))?;
-    let cache_path = cache_dir.join(&filename);
-    if cache_path.is_file() {
-        return Ok(cache_path.to_string_lossy().to_string());
-    }
-
-    let remote_path = resolved_remote_path(
-        message.remote_path.as_deref(),
-        &message.filename,
-        Some(message.timestamp_ms),
-    );
-    let bytes = webdav::download_file(&state.http, &endpoint, &remote_path).await?;
-    fs::write(&cache_path, bytes).map_err(|err| format!("保存源音频缓存失败: {err}"))?;
-    Ok(cache_path.to_string_lossy().to_string())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| settings.active_storage_profile_id.clone())
+        .or_else(|| settings.active_webdav_id.clone())
+        .ok_or_else(|| "请先选择存储空间".to_string())?;
+    let sink: MediaPlaybackProgressSink = Arc::new(|_| {});
+    resolve_media_playback_source_impl(
+        state.inner(),
+        MediaPlaybackInput {
+            endpoint_id,
+            filename,
+            original_name: String::new(),
+            variant: "speech-audio".to_string(),
+        },
+        sink,
+    )
+    .await
+    .map(|result| result.path)
 }
 
 #[tauri::command]
@@ -11162,7 +12049,38 @@ async fn delete_messages_impl(
 
     let settings = current_settings(state)?;
     if let Some((profile, session)) = active_supabase_context(state, &settings)? {
+        let attachments = targets
+            .iter()
+            .filter_map(|filename| {
+                let message_id = db::get_message_sync_identity(
+                    &state.db_path,
+                    &profile.id,
+                    &session.user_id,
+                    filename,
+                )
+                .ok()
+                .flatten()
+                .map(|(message_id, _)| message_id)?;
+                db::get_attachment_for_message(
+                    &state.db_path,
+                    &profile.id,
+                    &session.user_id,
+                    &message_id,
+                )
+                .ok()
+                .flatten()
+            })
+            .collect::<Vec<_>>();
         if !delete_remote {
+            for attachment in &attachments {
+                delete_supabase_attachment_cache(
+                    state,
+                    &profile.id,
+                    &session.user_id,
+                    attachment,
+                    true,
+                )?;
+            }
             return Ok(DeleteSummary {
                 deleted: targets.len(),
                 failed: Vec::new(),
@@ -11202,6 +12120,15 @@ async fn delete_messages_impl(
         .map_err(|error| error.to_string())?;
         if deleted > 0 {
             notify_supabase_outbox_pending(state);
+        }
+        for attachment in &attachments {
+            delete_supabase_attachment_cache(
+                state,
+                &profile.id,
+                &session.user_id,
+                attachment,
+                true,
+            )?;
         }
         return Ok(DeleteSummary {
             deleted,
@@ -17687,6 +18614,7 @@ fn main() {
                 pending_webdav_conflict: Mutex::new(None),
                 system_dictation_hidden_main_position: Mutex::new(None),
                 media_playback: media_playback::PlaybackRegistry::default(),
+                media_preview_jobs: AsyncMutex::new(HashMap::new()),
             });
 
             #[cfg(desktop)]
@@ -18161,7 +19089,7 @@ mod tests {
     use axum::extract::{Path as AxumPath, Query, State as TestAxumState};
     use axum::http::{HeaderMap, StatusCode as HttpStatusCode};
     use axum::response::Response as AxumResponse;
-    use axum::routing::{get, post};
+    use axum::routing::{delete, get, post};
     use axum::Router as TestRouter;
     use std::collections::HashMap as TestHashMap;
     use std::fs;
@@ -18444,6 +19372,31 @@ mod tests {
     struct TestSupabaseState {
         snapshots: Arc<Mutex<TestHashMap<String, serde_json::Value>>>,
         objects: Arc<Mutex<TestHashMap<String, Vec<u8>>>>,
+        storage_get_counts: Arc<Mutex<TestHashMap<String, usize>>>,
+        storage_put_counts: Arc<Mutex<TestHashMap<String, usize>>>,
+        storage_delete_counts: Arc<Mutex<TestHashMap<String, usize>>>,
+        failed_storage_puts: Arc<Mutex<HashSet<String>>>,
+        restricted_owner: Arc<Mutex<Option<String>>>,
+    }
+
+    impl TestSupabaseState {
+        fn storage_get_count(&self, path: &str) -> usize {
+            *self
+                .storage_get_counts
+                .lock()
+                .unwrap()
+                .get(path)
+                .unwrap_or(&0)
+        }
+
+        fn storage_put_count(&self, path: &str) -> usize {
+            *self
+                .storage_put_counts
+                .lock()
+                .unwrap()
+                .get(path)
+                .unwrap_or(&0)
+        }
     }
 
     struct TestSupabaseServer {
@@ -18684,6 +19637,24 @@ mod tests {
         TestAxumState(state): TestAxumState<TestSupabaseState>,
         AxumPath(path): AxumPath<String>,
     ) -> AxumResponse {
+        *state
+            .storage_get_counts
+            .lock()
+            .unwrap()
+            .entry(path.clone())
+            .or_default() += 1;
+        if state
+            .restricted_owner
+            .lock()
+            .unwrap()
+            .as_deref()
+            .is_some_and(|owner| !path.starts_with(&format!("{owner}/")))
+        {
+            return AxumResponse::builder()
+                .status(HttpStatusCode::FORBIDDEN)
+                .body(Body::from(r#"{"message":"RLS denied"}"#))
+                .unwrap();
+        }
         match state.objects.lock().unwrap().get(&path).cloned() {
             Some(bytes) => AxumResponse::builder()
                 .status(HttpStatusCode::OK)
@@ -18701,7 +19672,51 @@ mod tests {
         AxumPath(path): AxumPath<String>,
         body: Bytes,
     ) -> HttpStatusCode {
+        *state
+            .storage_put_counts
+            .lock()
+            .unwrap()
+            .entry(path.clone())
+            .or_default() += 1;
+        if state
+            .restricted_owner
+            .lock()
+            .unwrap()
+            .as_deref()
+            .is_some_and(|owner| !path.starts_with(&format!("{owner}/")))
+        {
+            return HttpStatusCode::FORBIDDEN;
+        }
+        if state.failed_storage_puts.lock().unwrap().contains(&path) {
+            return HttpStatusCode::INTERNAL_SERVER_ERROR;
+        }
         state.objects.lock().unwrap().insert(path, body.to_vec());
+        HttpStatusCode::OK
+    }
+
+    async fn test_supabase_storage_delete(
+        TestAxumState(state): TestAxumState<TestSupabaseState>,
+        Json(body): Json<serde_json::Value>,
+    ) -> HttpStatusCode {
+        let paths = body["prefixes"].as_array().cloned().unwrap_or_default();
+        if let Some(owner) = state.restricted_owner.lock().unwrap().clone() {
+            if paths
+                .iter()
+                .filter_map(|value| value.as_str())
+                .any(|path| !path.starts_with(&format!("{owner}/")))
+            {
+                return HttpStatusCode::FORBIDDEN;
+            }
+        }
+        let mut objects = state.objects.lock().unwrap();
+        let mut counts = state.storage_delete_counts.lock().unwrap();
+        for path in paths
+            .into_iter()
+            .filter_map(|value| value.as_str().map(str::to_string))
+        {
+            objects.remove(&path);
+            *counts.entry(path).or_default() += 1;
+        }
         HttpStatusCode::OK
     }
 
@@ -18718,6 +19733,10 @@ mod tests {
             .route(
                 "/storage/v1/object/transfer-genie-files/*path",
                 post(test_supabase_storage_put),
+            )
+            .route(
+                "/storage/v1/object/transfer-genie-files",
+                delete(test_supabase_storage_delete),
             )
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -19286,6 +20305,7 @@ mod tests {
             pending_webdav_conflict: Mutex::new(None),
             system_dictation_hidden_main_position: Mutex::new(None),
             media_playback: media_playback::PlaybackRegistry::default(),
+            media_preview_jobs: AsyncMutex::new(HashMap::new()),
         }
     }
 
@@ -19598,10 +20618,16 @@ mod tests {
         fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
         fs::write(&cache_path, b"preview-only").unwrap();
         let key = media_preview::media_resource_key("endpoint-1", &message.filename, "file");
-        let source =
-            existing_media_playback_source(&state, &message, &endpoint_dir, &cache_path, &key)
-                .unwrap()
-                .unwrap();
+        let source = existing_media_playback_source(
+            &state,
+            &message,
+            &endpoint_dir,
+            &cache_path,
+            &key,
+            true,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(source.source, "previewCache");
         assert_eq!(db::count_download_history(&state.db_path).unwrap(), 0);
         let resources = query_bulk_download_resources(
@@ -19707,21 +20733,21 @@ mod tests {
         let key = media_preview::media_resource_key("endpoint-1", &message.filename, "file");
 
         let upload_result =
-            existing_media_playback_source(&state, &message, &endpoint_dir, &cache, &key)
+            existing_media_playback_source(&state, &message, &endpoint_dir, &cache, &key, true)
                 .unwrap()
                 .unwrap();
         assert_eq!(upload_result.source, "uploadLocal");
 
         fs::remove_file(&uploaded).unwrap();
         let formal_result =
-            existing_media_playback_source(&state, &message, &endpoint_dir, &cache, &key)
+            existing_media_playback_source(&state, &message, &endpoint_dir, &cache, &key, true)
                 .unwrap()
                 .unwrap();
         assert_eq!(formal_result.source, "formalDownload");
 
         fs::remove_file(&formal).unwrap();
         let preview_result =
-            existing_media_playback_source(&state, &message, &endpoint_dir, &cache, &key)
+            existing_media_playback_source(&state, &message, &endpoint_dir, &cache, &key, true)
                 .unwrap()
                 .unwrap();
         assert_eq!(preview_result.source, "previewCache");
@@ -19759,7 +20785,12 @@ mod tests {
         let local = get_media_preview_impl(&state, MediaPreviewInput { ..input })
             .await
             .unwrap();
-        assert_eq!(PathBuf::from(local), preview_path);
+        assert_eq!(local.state, "ready");
+        assert_eq!(local.kind, "image");
+        assert_eq!(
+            local.path.as_deref().map(PathBuf::from),
+            Some(preview_path.clone())
+        );
         assert_eq!(
             server.state.get_count(&media_preview_remote_path(
                 &image.filename,
@@ -19783,7 +20814,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(fs::read(&remote).unwrap(), b"remote-preview");
+        assert_eq!(remote.state, "ready");
+        assert_eq!(
+            fs::read(remote.path.as_deref().unwrap()).unwrap(),
+            b"remote-preview"
+        );
         assert_eq!(server.state.get_count(&preview_remote), 1);
 
         fs::remove_file(&preview_path).unwrap();
@@ -19806,7 +20841,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(fs::read(&legacy).unwrap(), b"legacy-preview");
+        assert_eq!(legacy.state, "ready");
+        assert_eq!(
+            fs::read(legacy.path.as_deref().unwrap()).unwrap(),
+            b"legacy-preview"
+        );
         assert_eq!(server.state.get_count(&legacy_remote), 1);
 
         let missing = test_db_message(
@@ -19817,7 +20856,7 @@ mod tests {
             1,
         );
         db::upsert_message(&state.db_path, &missing).unwrap();
-        let error = get_media_preview_impl(
+        let missing_result = get_media_preview_impl(
             &state,
             MediaPreviewInput {
                 endpoint_id: missing.endpoint_id.clone(),
@@ -19826,8 +20865,9 @@ mod tests {
             },
         )
         .await
-        .unwrap_err();
-        assert_eq!(error, "媒体预览不存在");
+        .unwrap();
+        assert_eq!(missing_result.state, "failed");
+        assert_eq!(missing_result.error.as_deref(), Some("媒体预览不存在"));
 
         let mut second_settings = test_settings_with_url(server.base_url.clone());
         second_settings.webdav_endpoints.push(WebDavEndpoint {
@@ -21684,6 +22724,7 @@ mod tests {
             Some((
                 attachment_id,
                 &object_path,
+                None,
                 Some("application/octet-stream"),
                 &attachment_operation,
             )),
@@ -22300,6 +23341,420 @@ mod tests {
             assert!(state.sync_cancel.lock().unwrap().is_none(), "{case_name}");
             let _ = fs::remove_dir_all(dir);
         }
+    }
+
+    #[tokio::test]
+    async fn storage_transfer_to_supabase_publishes_target_owned_image_preview() {
+        let source_server = spawn_test_dav().await;
+        let target_server = spawn_test_supabase().await;
+        let bytes = png_fixture_bytes();
+        source_server.state.insert("files/photo.png", bytes.clone());
+        let dir = std::env::temp_dir().join(format!(
+            "transfer-genie-transfer-image-preview-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let state = test_app_state(&dir, test_settings());
+        db::init_db(&state.db_path, None).unwrap();
+        let source = storage_provider::ProviderConfig::Webdav(WebDavEndpoint {
+            id: "source-webdav".into(),
+            name: "Source".into(),
+            url: source_server.base_url.clone(),
+            username: String::new(),
+            password: String::new(),
+            enabled: true,
+        });
+        let target = StorageProfile {
+            id: "target-supabase".into(),
+            name: "Target".into(),
+            provider_kind: StorageProviderKind::Supabase,
+            enabled: true,
+            webdav: None,
+            supabase: Some(crate::types::SupabaseStorageConfig {
+                api_url: target_server.base_url.clone(),
+                anon_key: "anon".into(),
+                space_id: "target-space".into(),
+            }),
+        };
+        let session = supabase_auth::SupabaseSession {
+            access_token: "access-token".into(),
+            refresh_token: "refresh-token".into(),
+            user_id: "target-user".into(),
+            email: "target@example.invalid".into(),
+            expires_at: i64::MAX,
+        };
+        let context = StorageTransferContext {
+            source,
+            target: storage_provider::ProviderConfig::Supabase(target.clone()),
+            source_owner_scope: String::new(),
+            target_owner_scope: session.user_id.clone(),
+            source_session: None,
+            target_session: Some(session.clone()),
+        };
+        let message = Message {
+            filename: "photo.png".into(),
+            message_id: None,
+            sender: "tester".into(),
+            timestamp_ms: 100,
+            size: bytes.len() as i64,
+            kind: "file".into(),
+            original_name: "photo.png".into(),
+            content: None,
+            local_path: None,
+            remote_path: Some("files/photo.png".into()),
+            file_hash: Some(format!("{:x}", Sha256::digest(&bytes))),
+            download_exists: false,
+            marked: false,
+            marked_tag_ids: Vec::new(),
+            marked_pinned: false,
+            marked_due_date: None,
+            format: "file".into(),
+            transcript_source: None,
+            source_audio_mime_type: None,
+            transcript_raw_text: None,
+        };
+        let item = build_storage_transfer_items(
+            "source-webdav",
+            "",
+            &target.id,
+            std::slice::from_ref(&message),
+            &[],
+        )
+        .remove(0);
+        db::create_or_resume_storage_transfer(
+            &state.db_path,
+            &db::NewStorageTransferBatch {
+                batch_id: "image-preview-transfer",
+                source_profile_id: "source-webdav",
+                target_profile_id: &target.id,
+                source_provider_kind: "webdav",
+                target_provider_kind: "supabase",
+                source_owner_scope: "",
+                target_owner_scope: &session.user_id,
+                items: std::slice::from_ref(&item),
+                now_ms: 1,
+            },
+        )
+        .unwrap();
+        transfer_storage_message(&state, &context, "image-preview-transfer", &item, &message)
+            .await
+            .unwrap();
+        assert_eq!(
+            push_supabase_outbox(
+                &state,
+                &target,
+                &session,
+                true,
+                Some("image-preview-transfer"),
+            )
+            .await
+            .unwrap(),
+            2
+        );
+        let attachment_id = item.attachment_id.as_deref().unwrap();
+        let preview_path =
+            supabase_attachment_preview_object_path("target-user", "target-space", attachment_id);
+        let object_path = supabase_attachment_object_path(
+            "target-user",
+            "target-space",
+            attachment_id,
+            "photo.png",
+        );
+        let objects = target_server.state.objects.lock().unwrap();
+        assert_eq!(objects.get(&object_path), Some(&bytes));
+        assert_eq!(
+            image::guess_format(objects.get(&preview_path).unwrap()).unwrap(),
+            image::ImageFormat::Jpeg
+        );
+        drop(objects);
+        let snapshot = target_server.state.snapshots.lock().unwrap()
+            [&format!("attachments/{attachment_id}")]
+            .clone();
+        assert_eq!(snapshot["preview_object_path"], preview_path);
+        assert_eq!(snapshot["mime_type"], "image/png");
+        assert!(preview_path.starts_with("target-user/target-space/"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_to_supabase_transfer_republishes_preview_under_target_scope() {
+        let source_server = spawn_test_supabase().await;
+        let target_server = spawn_test_supabase().await;
+        let bytes = png_fixture_bytes();
+        let source_object_path = "source-user/source-space/source-attachment/photo.png";
+        let source_preview_path = "source-user/source-space/source-attachment/preview.jpg";
+        source_server
+            .state
+            .objects
+            .lock()
+            .unwrap()
+            .insert(source_object_path.into(), bytes.clone());
+        source_server
+            .state
+            .objects
+            .lock()
+            .unwrap()
+            .insert(source_preview_path.into(), b"source-preview".to_vec());
+        let dir = std::env::temp_dir().join(format!(
+            "transfer-genie-supabase-transfer-preview-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let state = test_app_state(&dir, test_settings());
+        db::init_db(&state.db_path, None).unwrap();
+        let source_session = supabase_auth::SupabaseSession {
+            access_token: "source-access".into(),
+            refresh_token: "source-refresh".into(),
+            user_id: "source-user".into(),
+            email: "source@example.invalid".into(),
+            expires_at: i64::MAX,
+        };
+        let target_session = supabase_auth::SupabaseSession {
+            access_token: "target-access".into(),
+            refresh_token: "target-refresh".into(),
+            user_id: "target-user".into(),
+            email: "target@example.invalid".into(),
+            expires_at: i64::MAX,
+        };
+        let source_profile = StorageProfile {
+            id: "source".into(),
+            name: "Source".into(),
+            provider_kind: StorageProviderKind::Supabase,
+            enabled: true,
+            webdav: None,
+            supabase: Some(crate::types::SupabaseStorageConfig {
+                api_url: source_server.base_url.clone(),
+                anon_key: "anon".into(),
+                space_id: "source-space".into(),
+            }),
+        };
+        let target_profile = StorageProfile {
+            id: "target".into(),
+            name: "Target".into(),
+            provider_kind: StorageProviderKind::Supabase,
+            enabled: true,
+            webdav: None,
+            supabase: Some(crate::types::SupabaseStorageConfig {
+                api_url: target_server.base_url.clone(),
+                anon_key: "anon".into(),
+                space_id: "target-space".into(),
+            }),
+        };
+        let context = StorageTransferContext {
+            source: storage_provider::ProviderConfig::Supabase(source_profile),
+            target: storage_provider::ProviderConfig::Supabase(target_profile.clone()),
+            source_owner_scope: "source-user".into(),
+            target_owner_scope: "target-user".into(),
+            source_session: Some(source_session),
+            target_session: Some(target_session.clone()),
+        };
+        let message = Message {
+            filename: "photo.png".into(),
+            message_id: Some("source-message".into()),
+            sender: "tester".into(),
+            timestamp_ms: 100,
+            size: bytes.len() as i64,
+            kind: "file".into(),
+            original_name: "photo.png".into(),
+            content: None,
+            local_path: None,
+            remote_path: Some(source_object_path.into()),
+            file_hash: Some(format!("{:x}", Sha256::digest(&bytes))),
+            download_exists: false,
+            marked: false,
+            marked_tag_ids: Vec::new(),
+            marked_pinned: false,
+            marked_due_date: None,
+            format: "file".into(),
+            transcript_source: None,
+            source_audio_mime_type: None,
+            transcript_raw_text: None,
+        };
+        let item = build_storage_transfer_items(
+            "source",
+            "source-user",
+            "target",
+            std::slice::from_ref(&message),
+            &[],
+        )
+        .remove(0);
+        db::create_or_resume_storage_transfer(
+            &state.db_path,
+            &db::NewStorageTransferBatch {
+                batch_id: "supabase-preview-transfer",
+                source_profile_id: "source",
+                target_profile_id: "target",
+                source_provider_kind: "supabase",
+                target_provider_kind: "supabase",
+                source_owner_scope: "source-user",
+                target_owner_scope: "target-user",
+                items: std::slice::from_ref(&item),
+                now_ms: 1,
+            },
+        )
+        .unwrap();
+        transfer_storage_message(
+            &state,
+            &context,
+            "supabase-preview-transfer",
+            &item,
+            &message,
+        )
+        .await
+        .unwrap();
+        push_supabase_outbox(
+            &state,
+            &target_profile,
+            &target_session,
+            true,
+            Some("supabase-preview-transfer"),
+        )
+        .await
+        .unwrap();
+        let attachment_id = item.attachment_id.as_deref().unwrap();
+        let target_preview_path =
+            supabase_attachment_preview_object_path("target-user", "target-space", attachment_id);
+        assert!(target_server
+            .state
+            .objects
+            .lock()
+            .unwrap()
+            .contains_key(&target_preview_path));
+        assert_ne!(target_preview_path, source_preview_path);
+        assert_eq!(
+            target_server.state.snapshots.lock().unwrap()[&format!("attachments/{attachment_id}")]
+                ["preview_object_path"],
+            target_preview_path
+        );
+        assert_eq!(source_server.state.storage_get_count(source_object_path), 1);
+        assert_eq!(
+            source_server.state.storage_get_count(source_preview_path),
+            0
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn storage_transfer_preview_failure_keeps_attachment_recoverable() {
+        let source_server = spawn_test_dav().await;
+        source_server
+            .state
+            .insert("files/broken.png", b"not-an-image".to_vec());
+        let dir = std::env::temp_dir().join(format!(
+            "transfer-genie-transfer-preview-failure-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let state = test_app_state(&dir, test_settings());
+        db::init_db(&state.db_path, None).unwrap();
+        let source = storage_provider::ProviderConfig::Webdav(WebDavEndpoint {
+            id: "source".into(),
+            name: "Source".into(),
+            url: source_server.base_url.clone(),
+            username: String::new(),
+            password: String::new(),
+            enabled: true,
+        });
+        let target = StorageProfile {
+            id: "target".into(),
+            name: "Target".into(),
+            provider_kind: StorageProviderKind::Supabase,
+            enabled: true,
+            webdav: None,
+            supabase: Some(crate::types::SupabaseStorageConfig {
+                api_url: "https://example.invalid".into(),
+                anon_key: "anon".into(),
+                space_id: "space".into(),
+            }),
+        };
+        let session = supabase_auth::SupabaseSession {
+            access_token: "access".into(),
+            refresh_token: "refresh".into(),
+            user_id: "user-a".into(),
+            email: "user@example.invalid".into(),
+            expires_at: i64::MAX,
+        };
+        let context = StorageTransferContext {
+            source,
+            target: storage_provider::ProviderConfig::Supabase(target.clone()),
+            source_owner_scope: String::new(),
+            target_owner_scope: session.user_id.clone(),
+            source_session: None,
+            target_session: Some(session.clone()),
+        };
+        let message = Message {
+            filename: "broken.png".into(),
+            message_id: None,
+            sender: "tester".into(),
+            timestamp_ms: 100,
+            size: 12,
+            kind: "file".into(),
+            original_name: "broken.png".into(),
+            content: None,
+            local_path: None,
+            remote_path: Some("files/broken.png".into()),
+            file_hash: Some(format!("{:x}", Sha256::digest(b"not-an-image"))),
+            download_exists: false,
+            marked: false,
+            marked_tag_ids: Vec::new(),
+            marked_pinned: false,
+            marked_due_date: None,
+            format: "file".into(),
+            transcript_source: None,
+            source_audio_mime_type: None,
+            transcript_raw_text: None,
+        };
+        let item = build_storage_transfer_items(
+            "source",
+            "",
+            "target",
+            std::slice::from_ref(&message),
+            &[],
+        )
+        .remove(0);
+        db::create_or_resume_storage_transfer(
+            &state.db_path,
+            &db::NewStorageTransferBatch {
+                batch_id: "preview-failure",
+                source_profile_id: "source",
+                target_profile_id: "target",
+                source_provider_kind: "webdav",
+                target_provider_kind: "supabase",
+                source_owner_scope: "",
+                target_owner_scope: "user-a",
+                items: std::slice::from_ref(&item),
+                now_ms: 1,
+            },
+        )
+        .unwrap();
+        transfer_storage_message(&state, &context, "preview-failure", &item, &message)
+            .await
+            .unwrap();
+        let attachment = db::get_attachment_sync_record(
+            &state.db_path,
+            "target",
+            "user-a",
+            item.attachment_id.as_deref().unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(attachment
+            .local_path
+            .as_deref()
+            .is_some_and(|path| Path::new(path).is_file()));
+        assert_eq!(attachment.preview_object_path, None);
+        let operation = db::get_outbox_operation(
+            &state.db_path,
+            item.attachment_operation_id.as_deref().unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&operation.payload_json).unwrap()
+                ["previewObjectPath"]
+                .is_null()
+        );
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -24021,6 +25476,1115 @@ mod tests {
             fs::read(message.local_path.unwrap()).unwrap(),
             b"cached-image"
         );
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    fn seed_supabase_preview_message(
+        state: &AppState,
+        filename: &str,
+        original_name: &str,
+        attachment_id: &str,
+        object_path: &str,
+        preview_object_path: Option<&str>,
+        local_path: Option<&Path>,
+    ) {
+        let message_id = format!("message-{attachment_id}");
+        db::apply_supabase_message_page(
+            &state.db_path,
+            "supabase-1",
+            "user-a",
+            &[serde_json::json!({
+                "id":message_id,"sender":"remote","timestamp_ms":100,
+                "size":12,"kind":"file","original_name":original_name,
+                "legacy_filename":filename,"content":null,"format":"file",
+                "file_hash":"hash","marked":false,"marked_tag_ids":[],
+                "marked_pinned":false,"revision":3,"deleted_at":null
+            })],
+            &[],
+            &[serde_json::json!({
+                "id":attachment_id,"message_id":message_id,
+                "original_name":original_name,"object_path":object_path,
+                "preview_object_path":preview_object_path,
+                "mime_type":attachment_mime_type(original_name),"size":12,
+                "sha256":"hash","revision":4,"deleted_at":null
+            })],
+            false,
+            true,
+            200,
+        )
+        .unwrap();
+        if let Some(local_path) = local_path {
+            let conn = rusqlite::Connection::open(&state.db_path).unwrap();
+            conn.execute(
+                "UPDATE attachment_sync SET local_path=?4
+                 WHERE endpoint_id=?1 AND owner_scope=?2 AND attachment_id=?3",
+                rusqlite::params![
+                    "supabase-1",
+                    "user-a",
+                    attachment_id,
+                    local_path.to_string_lossy()
+                ],
+            )
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn supabase_media_playback_downloads_private_storage_and_reuses_account_cache() {
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-supabase-media-playback-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(
+            &temp_dir,
+            test_supabase_settings_with_url(server.base_url.clone()),
+        );
+        db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+        install_test_supabase_session(&state);
+
+        let filename = "remote-video.mp4";
+        let attachment_id = "attachment-media-playback";
+        let object_path =
+            format!("user-a/00000000-0000-4000-8000-000000000001/{attachment_id}/video.mp4");
+        let bytes = b"remote-video".to_vec();
+        seed_supabase_preview_message(
+            &state,
+            filename,
+            "video.mp4",
+            attachment_id,
+            &object_path,
+            None,
+            None,
+        );
+        server
+            .state
+            .objects
+            .lock()
+            .unwrap()
+            .insert(object_path.clone(), bytes.clone());
+
+        let input = MediaPlaybackInput {
+            endpoint_id: "supabase-1".into(),
+            filename: filename.into(),
+            original_name: "video.mp4".into(),
+            variant: "file".into(),
+        };
+        let (sink, progress) = collect_progress();
+        let first = resolve_media_playback_source_impl(&state, input.clone(), sink)
+            .await
+            .expect("Supabase media should resolve without using the WebDAV-only path");
+        let first_path = PathBuf::from(&first.path);
+
+        assert_eq!(first.source, "remoteCache");
+        assert_eq!(fs::read(&first_path).unwrap(), bytes);
+        assert!(first_path.starts_with(endpoint_files_dir(&state, "supabase-1").join("user-a")));
+        assert_eq!(server.state.storage_get_count(&object_path), 1);
+        assert_eq!(db::count_download_history(&state.db_path).unwrap(), 0);
+        assert!(progress
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| event.status == "complete"));
+
+        let second = resolve_media_playback_source_impl(&state, input, Arc::new(|_| {}))
+            .await
+            .unwrap();
+        assert_eq!(second.path, first.path);
+        assert_eq!(second.source, "previewCache");
+        assert_eq!(server.state.storage_get_count(&object_path), 1);
+        assert_eq!(db::count_download_history(&state.db_path).unwrap(), 0);
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_speech_source_audio_uses_the_same_provider_aware_playback_path() {
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-supabase-speech-playback-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(
+            &temp_dir,
+            test_supabase_settings_with_url(server.base_url.clone()),
+        );
+        db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+        install_test_supabase_session(&state);
+
+        let filename = "speech-message";
+        let attachment_id = "attachment-speech-playback";
+        let object_path =
+            format!("user-a/00000000-0000-4000-8000-000000000001/{attachment_id}/speech.wav");
+        seed_supabase_preview_message(
+            &state,
+            filename,
+            "speech.wav",
+            attachment_id,
+            &object_path,
+            None,
+            None,
+        );
+        rusqlite::Connection::open(&state.db_path)
+            .unwrap()
+            .execute(
+                "UPDATE messages SET transcript_source='speech-to-text', source_audio_mime_type='audio/wav'
+                 WHERE endpoint_id=?1 AND owner_scope=?2 AND filename=?3",
+                rusqlite::params!["supabase-1", "user-a", filename],
+            )
+            .unwrap();
+        server
+            .state
+            .objects
+            .lock()
+            .unwrap()
+            .insert(object_path.clone(), b"speech-audio".to_vec());
+
+        let result = resolve_media_playback_source_impl(
+            &state,
+            MediaPlaybackInput {
+                endpoint_id: "supabase-1".into(),
+                filename: filename.into(),
+                original_name: "speech.wav".into(),
+                variant: "speech-audio".into(),
+            },
+            Arc::new(|_| {}),
+        )
+        .await
+        .expect("Supabase source audio should not use the WebDAV-only resolver");
+
+        assert_eq!(result.source, "remoteCache");
+        assert_eq!(fs::read(result.path).unwrap(), b"speech-audio");
+        assert_eq!(server.state.storage_get_count(&object_path), 1);
+        assert_eq!(db::count_download_history(&state.db_path).unwrap(), 0);
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_image_upload_publishes_original_preview_and_metadata() {
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-supabase-image-preview-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(
+            &temp_dir,
+            test_supabase_settings_with_url(server.base_url.clone()),
+        );
+        db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+        install_test_supabase_session(&state);
+        let bytes = png_fixture_bytes();
+        let source = temp_dir.join("photo.png");
+        fs::write(&source, &bytes).unwrap();
+        let sent = send_file_path_impl(&state, None, &source, "photo.png".into(), None, None)
+            .await
+            .unwrap();
+        let message_id =
+            db::get_message_sync_identity(&state.db_path, "supabase-1", "user-a", &sent.filename)
+                .unwrap()
+                .unwrap()
+                .0;
+        let attachment =
+            db::get_attachment_for_message(&state.db_path, "supabase-1", "user-a", &message_id)
+                .unwrap()
+                .unwrap();
+        let object_path = attachment.object_path.clone().unwrap();
+        let preview_path = supabase_attachment_preview_object_path(
+            "user-a",
+            "00000000-0000-4000-8000-000000000001",
+            &attachment.attachment_id,
+        );
+
+        let profile = current_settings(&state).unwrap().storage_profiles[0].clone();
+        let session = state
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .get("supabase-1")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            push_supabase_outbox(&state, &profile, &session, true, None)
+                .await
+                .unwrap(),
+            2
+        );
+        let objects = server.state.objects.lock().unwrap();
+        assert_eq!(objects.get(&object_path), Some(&bytes));
+        let preview = objects.get(&preview_path).unwrap();
+        assert_eq!(
+            image::guess_format(preview).unwrap(),
+            image::ImageFormat::Jpeg
+        );
+        drop(objects);
+        let snapshot = server
+            .state
+            .snapshots
+            .lock()
+            .unwrap()
+            .get(&format!("attachments/{}", attachment.attachment_id))
+            .cloned()
+            .unwrap();
+        assert_eq!(snapshot["preview_object_path"], preview_path);
+        assert_eq!(snapshot["mime_type"], "image/png");
+        assert_eq!(
+            db::get_attachment_sync_record(
+                &state.db_path,
+                "supabase-1",
+                "user-a",
+                &attachment.attachment_id,
+            )
+            .unwrap()
+            .unwrap()
+            .preview_object_path
+            .as_deref(),
+            Some(preview_path.as_str())
+        );
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_video_upload_publishes_generated_poster_metadata() {
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-supabase-video-preview-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(
+            &temp_dir,
+            test_supabase_settings_with_url(server.base_url.clone()),
+        );
+        db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+        install_test_supabase_session(&state);
+        let source = temp_dir.join("clip.mp4");
+        let video_bytes = b"controlled-video-fixture".to_vec();
+        fs::write(&source, &video_bytes).unwrap();
+        let sent = send_file_path_impl(&state, None, &source, "clip.mp4".into(), None, None)
+            .await
+            .unwrap();
+        let message_id =
+            db::get_message_sync_identity(&state.db_path, "supabase-1", "user-a", &sent.filename)
+                .unwrap()
+                .unwrap()
+                .0;
+        let attachment =
+            db::get_attachment_for_message(&state.db_path, "supabase-1", "user-a", &message_id)
+                .unwrap()
+                .unwrap();
+        let preview_object_path = supabase_attachment_preview_object_path(
+            "user-a",
+            "00000000-0000-4000-8000-000000000001",
+            &attachment.attachment_id,
+        );
+        let local_preview = media_preview::isolated_preview_cache_path(
+            &endpoint_files_dir(&state, "supabase-1"),
+            "user-a",
+            &attachment.attachment_id,
+            &preview_object_path,
+        );
+        if let Some(parent) = local_preview.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let poster = image::DynamicImage::ImageRgb8(image::ImageBuffer::from_pixel(
+            48,
+            27,
+            image::Rgb([210_u8, 90, 30]),
+        ));
+        poster
+            .save_with_format(&local_preview, image::ImageFormat::Jpeg)
+            .unwrap();
+        let profile = current_settings(&state).unwrap().storage_profiles[0].clone();
+        let session = state
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .get("supabase-1")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            push_supabase_outbox(&state, &profile, &session, true, None)
+                .await
+                .unwrap(),
+            2
+        );
+        let preview_bytes = server
+            .state
+            .objects
+            .lock()
+            .unwrap()
+            .get(&preview_object_path)
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            image::guess_format(&preview_bytes).unwrap(),
+            image::ImageFormat::Jpeg
+        );
+        let snapshot = server.state.snapshots.lock().unwrap()
+            [&format!("attachments/{}", attachment.attachment_id)]
+            .clone();
+        assert_eq!(snapshot["preview_object_path"], preview_object_path);
+        assert_eq!(snapshot["mime_type"], "video/mp4");
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_preview_download_is_single_flight_and_does_not_fetch_original() {
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-supabase-preview-download-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(
+            &temp_dir,
+            test_supabase_settings_with_url(server.base_url.clone()),
+        );
+        db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+        install_test_supabase_session(&state);
+        let attachment_id = "attachment-preview-download";
+        let object_path =
+            format!("user-a/00000000-0000-4000-8000-000000000001/{attachment_id}/photo.png");
+        let preview_path =
+            format!("user-a/00000000-0000-4000-8000-000000000001/{attachment_id}/preview.jpg");
+        seed_supabase_preview_message(
+            &state,
+            "remote-photo.png",
+            "photo.png",
+            attachment_id,
+            &object_path,
+            Some(&preview_path),
+            None,
+        );
+        server
+            .state
+            .objects
+            .lock()
+            .unwrap()
+            .insert(preview_path.clone(), b"jpeg-preview".to_vec());
+        server
+            .state
+            .objects
+            .lock()
+            .unwrap()
+            .insert(object_path.clone(), b"large-original".to_vec());
+        let input = || MediaPreviewInput {
+            endpoint_id: "supabase-1".into(),
+            filename: "remote-photo.png".into(),
+            original_name: "photo.png".into(),
+        };
+        let (first, second) = tokio::join!(
+            get_media_preview_impl(&state, input()),
+            get_media_preview_impl(&state, input())
+        );
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_eq!(first.state, "ready");
+        assert_eq!(first.path, second.path);
+        assert_eq!(server.state.storage_get_count(&preview_path), 1);
+        assert_eq!(server.state.storage_get_count(&object_path), 0);
+        assert_eq!(fs::read(first.path.unwrap()).unwrap(), b"jpeg-preview");
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_cached_preview_is_available_when_remote_is_offline() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-supabase-preview-offline-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(&temp_dir, test_supabase_settings());
+        db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+        install_test_supabase_session(&state);
+        let attachment_id = "attachment-offline-cache";
+        let object_path =
+            format!("user-a/00000000-0000-4000-8000-000000000001/{attachment_id}/photo.png");
+        let preview_path =
+            format!("user-a/00000000-0000-4000-8000-000000000001/{attachment_id}/preview.jpg");
+        seed_supabase_preview_message(
+            &state,
+            "offline-photo.png",
+            "photo.png",
+            attachment_id,
+            &object_path,
+            Some(&preview_path),
+            None,
+        );
+        let cache_path = media_preview::isolated_preview_cache_path(
+            &endpoint_files_dir(&state, "supabase-1"),
+            "user-a",
+            attachment_id,
+            &preview_path,
+        );
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(&cache_path, b"offline-preview").unwrap();
+        let result = get_media_preview_impl(
+            &state,
+            MediaPreviewInput {
+                endpoint_id: "supabase-1".into(),
+                filename: "offline-photo.png".into(),
+                original_name: "photo.png".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.state, "ready");
+        assert_eq!(fs::read(result.path.unwrap()).unwrap(), b"offline-preview");
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn historical_supabase_preview_prefers_local_original_without_remote_download() {
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-supabase-preview-local-source-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(
+            &temp_dir,
+            test_supabase_settings_with_url(server.base_url.clone()),
+        );
+        db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+        install_test_supabase_session(&state);
+        let attachment_id = "attachment-local-source";
+        let object_path =
+            format!("user-a/00000000-0000-4000-8000-000000000001/{attachment_id}/photo.png");
+        let preview_path =
+            format!("user-a/00000000-0000-4000-8000-000000000001/{attachment_id}/preview.jpg");
+        let local_original = temp_dir.join("local-photo.png");
+        fs::write(&local_original, png_fixture_bytes()).unwrap();
+        seed_supabase_preview_message(
+            &state,
+            "local-source-photo.png",
+            "photo.png",
+            attachment_id,
+            &object_path,
+            None,
+            Some(&local_original),
+        );
+        let result = get_media_preview_impl(
+            &state,
+            MediaPreviewInput {
+                endpoint_id: "supabase-1".into(),
+                filename: "local-source-photo.png".into(),
+                original_name: "photo.png".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.state, "ready");
+        assert_eq!(server.state.storage_get_count(&object_path), 0);
+        assert_eq!(server.state.storage_put_count(&preview_path), 1);
+        assert!(local_original.is_file());
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn historical_preview_failure_cleans_temporary_original() {
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-supabase-preview-temp-failure-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(
+            &temp_dir,
+            test_supabase_settings_with_url(server.base_url.clone()),
+        );
+        db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+        install_test_supabase_session(&state);
+        let attachment_id = "attachment-temp-failure";
+        let object_path =
+            format!("user-a/00000000-0000-4000-8000-000000000001/{attachment_id}/broken.png");
+        seed_supabase_preview_message(
+            &state,
+            "broken-history.png",
+            "broken.png",
+            attachment_id,
+            &object_path,
+            None,
+            None,
+        );
+        server
+            .state
+            .objects
+            .lock()
+            .unwrap()
+            .insert(object_path.clone(), b"not-an-image".to_vec());
+        let result = get_media_preview_impl(
+            &state,
+            MediaPreviewInput {
+                endpoint_id: "supabase-1".into(),
+                filename: "broken-history.png".into(),
+                original_name: "broken.png".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.state, "failed");
+        assert_eq!(db::count_download_history(&state.db_path).unwrap(), 0);
+        let temp_root = endpoint_files_dir(&state, "supabase-1")
+            .join("user-a")
+            .join("preview-temp");
+        assert!(!temp_root.exists() || fs::read_dir(&temp_root).unwrap().next().is_none());
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn private_storage_preview_paths_reject_cross_user_access() {
+        let server = spawn_test_supabase().await;
+        *server.state.restricted_owner.lock().unwrap() = Some("user-a".into());
+        let config = crate::types::SupabaseStorageConfig {
+            api_url: server.base_url.clone(),
+            anon_key: "anon".into(),
+            space_id: "space-a".into(),
+        };
+        let session = supabase_auth::SupabaseSession {
+            access_token: "access-token".into(),
+            refresh_token: "refresh-token".into(),
+            user_id: "user-a".into(),
+            email: "user@example.invalid".into(),
+            expires_at: i64::MAX,
+        };
+        let local = std::env::temp_dir().join(format!(
+            "transfer-genie-rls-preview-{}.jpg",
+            uuid::Uuid::new_v4()
+        ));
+        fs::write(&local, b"preview").unwrap();
+        supabase_sync::upload_storage_object_path(
+            &Client::new(),
+            &config,
+            &session,
+            "user-a/space-a/attachment/preview.jpg",
+            &local,
+            "image/jpeg",
+            None,
+        )
+        .await
+        .unwrap();
+        let error = supabase_sync::upload_storage_object_path(
+            &Client::new(),
+            &config,
+            &session,
+            "user-b/space-a/attachment/preview.jpg",
+            &local,
+            "image/jpeg",
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("403 Forbidden"));
+        let error = supabase_sync::download_storage_object(
+            &Client::new(),
+            &config,
+            &session,
+            "user-b/space-a/attachment/preview.jpg",
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("403 Forbidden"));
+        let _ = fs::remove_file(local);
+    }
+
+    #[tokio::test]
+    async fn historical_supabase_preview_streams_remote_original_without_formal_download() {
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-supabase-preview-history-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(
+            &temp_dir,
+            test_supabase_settings_with_url(server.base_url.clone()),
+        );
+        db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+        install_test_supabase_session(&state);
+        let attachment_id = "attachment-history";
+        let object_path =
+            format!("user-a/00000000-0000-4000-8000-000000000001/{attachment_id}/history.png");
+        let preview_path =
+            format!("user-a/00000000-0000-4000-8000-000000000001/{attachment_id}/preview.jpg");
+        seed_supabase_preview_message(
+            &state,
+            "history-photo.png",
+            "history.png",
+            attachment_id,
+            &object_path,
+            None,
+            None,
+        );
+        let original = png_fixture_bytes();
+        server
+            .state
+            .objects
+            .lock()
+            .unwrap()
+            .insert(object_path.clone(), original);
+        server.state.snapshots.lock().unwrap().insert(
+            format!("messages/message-{attachment_id}"),
+            serde_json::json!({"id":format!("message-{attachment_id}")}),
+        );
+
+        let result = get_media_preview_impl(
+            &state,
+            MediaPreviewInput {
+                endpoint_id: "supabase-1".into(),
+                filename: "history-photo.png".into(),
+                original_name: "history.png".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.state, "ready");
+        assert_eq!(server.state.storage_get_count(&object_path), 1);
+        assert_eq!(server.state.storage_put_count(&preview_path), 1);
+        assert_eq!(db::count_download_history(&state.db_path).unwrap(), 0);
+        let temp_root = endpoint_files_dir(&state, "supabase-1")
+            .join("user-a")
+            .join("preview-temp");
+        assert!(
+            !temp_root.exists() || fs::read_dir(&temp_root).unwrap().next().is_none(),
+            "temporary original should be removed"
+        );
+        let profile = current_settings(&state).unwrap().storage_profiles[0].clone();
+        let session = state
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .get("supabase-1")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            push_supabase_outbox(&state, &profile, &session, true, None)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(server.state.storage_put_count(&object_path), 0);
+        assert_eq!(
+            server.state.snapshots.lock().unwrap()[&format!("attachments/{attachment_id}")]
+                ["preview_object_path"],
+            preview_path
+        );
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn concurrent_devices_complete_historical_preview_at_the_same_stable_path() {
+        let server = spawn_test_supabase().await;
+        let attachment_id = "attachment-concurrent-devices";
+        let object_path =
+            format!("user-a/00000000-0000-4000-8000-000000000001/{attachment_id}/photo.png");
+        let preview_path =
+            format!("user-a/00000000-0000-4000-8000-000000000001/{attachment_id}/preview.jpg");
+        let original = png_fixture_bytes();
+        server
+            .state
+            .objects
+            .lock()
+            .unwrap()
+            .insert(object_path.clone(), original);
+        server.state.snapshots.lock().unwrap().insert(
+            format!("messages/message-{attachment_id}"),
+            serde_json::json!({"id":format!("message-{attachment_id}")}),
+        );
+        let dir_a = std::env::temp_dir().join(format!(
+            "transfer-genie-preview-device-a-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let dir_b = std::env::temp_dir().join(format!(
+            "transfer-genie-preview-device-b-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir_a).unwrap();
+        fs::create_dir_all(&dir_b).unwrap();
+        let state_a = test_app_state(
+            &dir_a,
+            test_supabase_settings_with_url(server.base_url.clone()),
+        );
+        let state_b = test_app_state(
+            &dir_b,
+            test_supabase_settings_with_url(server.base_url.clone()),
+        );
+        for state in [&state_a, &state_b] {
+            db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+            install_test_supabase_session(state);
+            seed_supabase_preview_message(
+                state,
+                "concurrent-photo.png",
+                "photo.png",
+                attachment_id,
+                &object_path,
+                None,
+                None,
+            );
+        }
+        let input = || MediaPreviewInput {
+            endpoint_id: "supabase-1".into(),
+            filename: "concurrent-photo.png".into(),
+            original_name: "photo.png".into(),
+        };
+        let (result_a, result_b) = tokio::join!(
+            get_media_preview_impl(&state_a, input()),
+            get_media_preview_impl(&state_b, input())
+        );
+        assert_eq!(result_a.unwrap().state, "ready");
+        assert_eq!(result_b.unwrap().state, "ready");
+        assert_eq!(server.state.storage_put_count(&preview_path), 2);
+        assert_eq!(
+            server
+                .state
+                .objects
+                .lock()
+                .unwrap()
+                .keys()
+                .filter(|path| path.as_str() == preview_path)
+                .count(),
+            1
+        );
+        for state in [&state_a, &state_b] {
+            assert_eq!(
+                db::get_attachment_sync_record(
+                    &state.db_path,
+                    "supabase-1",
+                    "user-a",
+                    attachment_id,
+                )
+                .unwrap()
+                .unwrap()
+                .preview_object_path
+                .as_deref(),
+                Some(preview_path.as_str())
+            );
+        }
+        let _ = fs::remove_dir_all(dir_a);
+        let _ = fs::remove_dir_all(dir_b);
+    }
+
+    #[tokio::test]
+    async fn supabase_preview_failure_keeps_original_and_retries_independently() {
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-supabase-preview-retry-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(
+            &temp_dir,
+            test_supabase_settings_with_url(server.base_url.clone()),
+        );
+        db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+        install_test_supabase_session(&state);
+        let bytes = png_fixture_bytes();
+        let source = temp_dir.join("retry.png");
+        fs::write(&source, &bytes).unwrap();
+        let sent = send_file_path_impl(&state, None, &source, "retry.png".into(), None, None)
+            .await
+            .unwrap();
+        let message_id =
+            db::get_message_sync_identity(&state.db_path, "supabase-1", "user-a", &sent.filename)
+                .unwrap()
+                .unwrap()
+                .0;
+        let attachment =
+            db::get_attachment_for_message(&state.db_path, "supabase-1", "user-a", &message_id)
+                .unwrap()
+                .unwrap();
+        let object_path = attachment.object_path.clone().unwrap();
+        let preview_path = supabase_attachment_preview_object_path(
+            "user-a",
+            "00000000-0000-4000-8000-000000000001",
+            &attachment.attachment_id,
+        );
+        server
+            .state
+            .failed_storage_puts
+            .lock()
+            .unwrap()
+            .insert(preview_path.clone());
+        let profile = current_settings(&state).unwrap().storage_profiles[0].clone();
+        let session = state
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .get("supabase-1")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            push_supabase_outbox(&state, &profile, &session, true, None)
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            server.state.objects.lock().unwrap().get(&object_path),
+            Some(&bytes)
+        );
+        assert!(!server
+            .state
+            .objects
+            .lock()
+            .unwrap()
+            .contains_key(&preview_path));
+        assert!(server.state.snapshots.lock().unwrap()
+            [&format!("attachments/{}", attachment.attachment_id)]["preview_object_path"]
+            .is_null());
+
+        server
+            .state
+            .failed_storage_puts
+            .lock()
+            .unwrap()
+            .remove(&preview_path);
+        let preview = get_media_preview_impl(
+            &state,
+            MediaPreviewInput {
+                endpoint_id: "supabase-1".into(),
+                filename: sent.filename.clone(),
+                original_name: "retry.png".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(preview.state, "ready");
+        assert_eq!(
+            push_supabase_outbox(&state, &profile, &session, true, None)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(server.state.storage_put_count(&object_path), 1);
+        assert_eq!(server.state.storage_put_count(&preview_path), 2);
+        assert_eq!(
+            server.state.snapshots.lock().unwrap()
+                [&format!("attachments/{}", attachment.attachment_id)]["preview_object_path"],
+            preview_path
+        );
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_attachment_cleanup_removes_only_selected_original_and_preview() {
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-supabase-preview-cleanup-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(
+            &temp_dir,
+            test_supabase_settings_with_url(server.base_url.clone()),
+        );
+        db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+        install_test_supabase_session(&state);
+        let attachment_id = "attachment-cleanup";
+        let object_path =
+            format!("user-a/00000000-0000-4000-8000-000000000001/{attachment_id}/photo.png");
+        let preview_path =
+            format!("user-a/00000000-0000-4000-8000-000000000001/{attachment_id}/preview.jpg");
+        seed_supabase_preview_message(
+            &state,
+            "cleanup.png",
+            "photo.png",
+            attachment_id,
+            &object_path,
+            Some(&preview_path),
+            None,
+        );
+        let other_path = "user-a/other/attachment/keep.jpg".to_string();
+        {
+            let mut objects = server.state.objects.lock().unwrap();
+            objects.insert(object_path.clone(), b"original".to_vec());
+            objects.insert(preview_path.clone(), b"preview".to_vec());
+            objects.insert(other_path.clone(), b"keep".to_vec());
+        }
+        rusqlite::Connection::open(&state.db_path)
+            .unwrap()
+            .execute(
+                "UPDATE attachment_sync SET deleted_at_ms=?4
+                 WHERE endpoint_id=?1 AND owner_scope=?2 AND attachment_id=?3",
+                rusqlite::params![
+                    "supabase-1",
+                    "user-a",
+                    attachment_id,
+                    now_ms() - 25 * 60 * 60 * 1000
+                ],
+            )
+            .unwrap();
+        let profile = current_settings(&state).unwrap().storage_profiles[0].clone();
+        let session = state
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .get("supabase-1")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            cleanup_supabase_orphan_objects(&state, &profile, &session)
+                .await
+                .unwrap(),
+            1
+        );
+        let objects = server.state.objects.lock().unwrap();
+        assert!(!objects.contains_key(&object_path));
+        assert!(!objects.contains_key(&preview_path));
+        assert_eq!(objects.get(&other_path), Some(&b"keep".to_vec()));
+        drop(objects);
+        let stored =
+            db::get_attachment_sync_record(&state.db_path, "supabase-1", "user-a", attachment_id)
+                .unwrap();
+        assert!(stored.is_none());
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_local_delete_clears_uploaded_original_and_selected_preview_cache() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-supabase-local-delete-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(&temp_dir, test_supabase_settings());
+        db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+        install_test_supabase_session(&state);
+        let attachment_id = "attachment-local-delete";
+        let object_path =
+            format!("user-a/00000000-0000-4000-8000-000000000001/{attachment_id}/photo.png");
+        let preview_path =
+            format!("user-a/00000000-0000-4000-8000-000000000001/{attachment_id}/preview.jpg");
+        let local_original = endpoint_files_dir(&state, "supabase-1")
+            .join("user-a")
+            .join("attachments")
+            .join(attachment_id)
+            .join("photo.png");
+        fs::create_dir_all(local_original.parent().unwrap()).unwrap();
+        fs::write(&local_original, png_fixture_bytes()).unwrap();
+        seed_supabase_preview_message(
+            &state,
+            "local-delete.png",
+            "photo.png",
+            attachment_id,
+            &object_path,
+            Some(&preview_path),
+            Some(&local_original),
+        );
+        let local_preview = media_preview::isolated_preview_cache_path(
+            &endpoint_files_dir(&state, "supabase-1"),
+            "user-a",
+            attachment_id,
+            &preview_path,
+        );
+        fs::create_dir_all(local_preview.parent().unwrap()).unwrap();
+        fs::write(&local_preview, b"preview").unwrap();
+        let result = delete_messages_impl(&state, vec!["local-delete.png".into()], false)
+            .await
+            .unwrap();
+        assert_eq!(result.deleted, 1);
+        assert!(!local_original.exists());
+        assert!(!local_preview.exists());
+        let attachment =
+            db::get_attachment_sync_record(&state.db_path, "supabase-1", "user-a", attachment_id)
+                .unwrap()
+                .unwrap();
+        assert_eq!(attachment.local_path, None);
+        assert_eq!(
+            attachment.preview_object_path.as_deref(),
+            Some(preview_path.as_str())
+        );
+        let message =
+            db::get_message_for_scope(&state.db_path, "supabase-1", "user-a", "local-delete.png")
+                .unwrap()
+                .unwrap();
+        assert_eq!(message.local_path, None);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn media_preview_result_serializes_all_states() {
+        for state in ["ready", "loading", "unsupported", "offline", "failed"] {
+            let result = if state == "ready" {
+                MediaPreviewResult::ready("image", PathBuf::from("preview.jpg"))
+            } else {
+                MediaPreviewResult::state("image", state, Some(format!("{state} detail")))
+            };
+            let value = serde_json::to_value(result).unwrap();
+            assert_eq!(value["state"], state);
+            assert_eq!(value["kind"], "image");
+            if state == "ready" {
+                assert!(value["path"].as_str().unwrap().ends_with("preview.jpg"));
+                assert!(value["error"].is_null());
+            } else {
+                assert!(value["path"].is_null());
+                assert_eq!(value["error"], format!("{state} detail"));
+            }
+        }
+        assert_eq!(
+            media_preview_error_result("image", "Supabase 网络错误: offline".into()).state,
+            "offline"
+        );
+        assert_eq!(
+            media_preview_error_result("image", "图片解码失败".into()).state,
+            "failed"
+        );
+    }
+
+    #[test]
+    fn supabase_local_preview_cleanup_is_attachment_and_account_scoped() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-preview-cache-cleanup-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(&temp_dir, test_supabase_settings());
+        db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+        let endpoint_dir = endpoint_files_dir(&state, "supabase-1");
+        let selected = media_preview::isolated_preview_cache_path(
+            &endpoint_dir,
+            "user-a",
+            "attachment-a",
+            "v1",
+        );
+        let other_attachment = media_preview::isolated_preview_cache_path(
+            &endpoint_dir,
+            "user-a",
+            "attachment-b",
+            "v1",
+        );
+        let other_account = media_preview::isolated_preview_cache_path(
+            &endpoint_dir,
+            "user-b",
+            "attachment-a",
+            "v1",
+        );
+        for path in [&selected, &other_attachment, &other_account] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"preview").unwrap();
+        }
+        let attachment = db::AttachmentSyncRecord {
+            attachment_id: "attachment-a".into(),
+            message_id: "message-a".into(),
+            original_name: "photo.png".into(),
+            local_path: None,
+            object_path: Some("user-a/space/attachment-a/photo.png".into()),
+            preview_object_path: Some("user-a/space/attachment-a/preview.jpg".into()),
+            mime_type: Some("image/png".into()),
+            size: 10,
+            sha256: None,
+            upload_state: "uploaded".into(),
+            remote_revision: 1,
+        };
+        delete_supabase_attachment_cache(&state, "supabase-1", "user-a", &attachment, false)
+            .unwrap();
+        assert!(!selected.exists());
+        assert!(other_attachment.exists());
+        assert!(other_account.exists());
         let _ = fs::remove_dir_all(temp_dir);
     }
 
