@@ -3628,6 +3628,16 @@ async fn retry_pending_operation(
 }
 
 #[tauri::command]
+async fn retry_all_pending_operations(state: State<'_, AppState>) -> Result<SyncStatus, String> {
+    let (profile, session) = active_supabase_scope(&state)?;
+    let _guard = state.sync_guard.lock().await;
+    db::retry_all_pending_operations(&state.db_path, &profile.id, &session.user_id, now_ms())
+        .map_err(|error| error.to_string())?;
+    let _ = sync_supabase_profile(&state, &profile, &session, true).await?;
+    refresh_supabase_status(&state, None)
+}
+
+#[tauri::command]
 async fn resolve_sync_conflict(
     state: State<'_, AppState>,
     input: ResolveSyncConflictInput,
@@ -3782,6 +3792,13 @@ async fn push_supabase_outbox(
 ) -> Result<usize, String> {
     db::recover_all_outbox_claims(&state.db_path, now_ms())
         .map_err(|error| format!("恢复 Supabase 同步任务失败: {error}"))?;
+    db::repair_stale_attachment_dependencies(
+        &state.db_path,
+        &profile.id,
+        &session.user_id,
+        now_ms(),
+    )
+    .map_err(|error| format!("修复附件同步依赖失败: {error}"))?;
     let config = profile
         .supabase
         .as_ref()
@@ -18009,6 +18026,7 @@ fn main() {
             get_storage_import_status,
             list_pending_operations,
             retry_pending_operation,
+            retry_all_pending_operations,
             list_sync_conflicts,
             resolve_sync_conflict,
             resolve_all_sync_conflicts,

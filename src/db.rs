@@ -1835,6 +1835,136 @@ pub fn retry_pending_operation(
     )? > 0)
 }
 
+pub fn retry_all_pending_operations(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    now_ms: i64,
+) -> rusqlite::Result<usize> {
+    Connection::open(path)?.execute(
+        "UPDATE sync_outbox SET state='pending',next_attempt_at_ms=0,last_error=NULL,
+         lease_owner=NULL,lease_started_at_ms=NULL,lease_expires_at_ms=NULL,updated_at_ms=?3
+         WHERE endpoint_id=?1 AND owner_scope=?2
+           AND state NOT IN ('acknowledged','superseded','conflict')",
+        params![endpoint_id, owner_scope, now_ms],
+    )
+}
+
+fn repair_stale_attachment_dependencies_in_tx(
+    tx: &Connection,
+    endpoint_id: &str,
+    owner_scope: &str,
+    now_ms: i64,
+) -> rusqlite::Result<usize> {
+    let affected_batches = {
+        let mut statement = tx.prepare(
+            "SELECT DISTINCT item.batch_id FROM storage_import_items item
+             JOIN sync_outbox attachment_op
+               ON attachment_op.operation_id=item.attachment_operation_id
+             JOIN sync_outbox dependency
+               ON dependency.operation_id=attachment_op.depends_on_operation_id
+             WHERE attachment_op.endpoint_id=?1 AND attachment_op.owner_scope=?2
+               AND attachment_op.entity_type='attachment' AND attachment_op.state='pending'
+               AND dependency.state='superseded'",
+        )?;
+        let values = statement
+            .query_map(params![endpoint_id, owner_scope], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        values
+    };
+    let cancelled = tx.execute(
+        "UPDATE sync_outbox AS attachment_op SET
+           state='superseded',depends_on_operation_id=NULL,next_attempt_at_ms=0,
+           last_error='关联消息已采用云端删除状态，附件同步已取消',
+           lease_owner=NULL,lease_started_at_ms=NULL,lease_expires_at_ms=NULL,updated_at_ms=?3
+         WHERE attachment_op.endpoint_id=?1 AND attachment_op.owner_scope=?2
+           AND attachment_op.entity_type='attachment' AND attachment_op.action='upsert'
+           AND attachment_op.state='pending'
+           AND EXISTS (
+             SELECT 1 FROM attachment_sync attachment
+             JOIN messages message
+               ON message.endpoint_id=attachment.endpoint_id
+              AND message.owner_scope=attachment.owner_scope
+              AND message.message_id=attachment.message_id
+             WHERE attachment.endpoint_id=attachment_op.endpoint_id
+               AND attachment.owner_scope=attachment_op.owner_scope
+               AND attachment.attachment_id=attachment_op.entity_id
+               AND message.deleted_at_ms IS NOT NULL
+           )",
+        params![endpoint_id, owner_scope, now_ms],
+    )?;
+    tx.execute(
+        "UPDATE attachment_sync SET deleted_at_ms=coalesce(deleted_at_ms,?3),
+           last_error=NULL,updated_at_ms=?3
+         WHERE endpoint_id=?1 AND owner_scope=?2
+           AND EXISTS (
+             SELECT 1 FROM messages message
+             WHERE message.endpoint_id=attachment_sync.endpoint_id
+               AND message.owner_scope=attachment_sync.owner_scope
+               AND message.message_id=attachment_sync.message_id
+               AND message.deleted_at_ms IS NOT NULL
+           )",
+        params![endpoint_id, owner_scope, now_ms],
+    )?;
+    let released = tx.execute(
+        "UPDATE sync_outbox AS attachment_op SET
+           depends_on_operation_id=NULL,next_attempt_at_ms=0,last_error=NULL,updated_at_ms=?3
+         WHERE attachment_op.endpoint_id=?1 AND attachment_op.owner_scope=?2
+           AND attachment_op.entity_type='attachment' AND attachment_op.action='upsert'
+           AND attachment_op.state='pending' AND attachment_op.depends_on_operation_id IS NOT NULL
+           AND EXISTS (
+             SELECT 1 FROM sync_outbox dependency
+             WHERE dependency.operation_id=attachment_op.depends_on_operation_id
+               AND dependency.state='superseded'
+           )
+           AND EXISTS (
+             SELECT 1 FROM attachment_sync attachment
+             JOIN messages message
+               ON message.endpoint_id=attachment.endpoint_id
+              AND message.owner_scope=attachment.owner_scope
+              AND message.message_id=attachment.message_id
+             WHERE attachment.endpoint_id=attachment_op.endpoint_id
+               AND attachment.owner_scope=attachment_op.owner_scope
+               AND attachment.attachment_id=attachment_op.entity_id
+               AND message.deleted_at_ms IS NULL AND message.remote_revision>0
+           )",
+        params![endpoint_id, owner_scope, now_ms],
+    )?;
+    tx.execute(
+        "UPDATE storage_import_items SET state='skipped',last_error=NULL,updated_at_ms=?3
+         WHERE batch_id IN (
+           SELECT batch_id FROM storage_import_batches
+           WHERE target_profile_id=?1 AND target_owner_scope=?2
+         ) AND attachment_operation_id IN (
+           SELECT operation_id FROM sync_outbox
+           WHERE endpoint_id=?1 AND owner_scope=?2 AND entity_type='attachment'
+             AND state='superseded'
+             AND last_error='关联消息已采用云端删除状态，附件同步已取消'
+         )",
+        params![endpoint_id, owner_scope, now_ms],
+    )?;
+    for batch_id in affected_batches {
+        refresh_import_progress(tx, &batch_id, now_ms)?;
+    }
+    Ok(cancelled + released)
+}
+
+pub fn repair_stale_attachment_dependencies(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    now_ms: i64,
+) -> rusqlite::Result<usize> {
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    let repaired =
+        repair_stale_attachment_dependencies_in_tx(&tx, endpoint_id, owner_scope, now_ms)?;
+    tx.commit()?;
+    Ok(repaired)
+}
+
 pub fn list_sync_conflicts(
     path: &Path,
     endpoint_id: &str,
@@ -2343,6 +2473,7 @@ fn apply_pulled_message(
            )",
         params![endpoint_id, owner_scope, change.entity_id],
     )?;
+    repair_stale_attachment_dependencies_in_tx(tx, endpoint_id, owner_scope, now_ms)?;
     Ok(())
 }
 
@@ -7456,6 +7587,88 @@ mod tests {
         )
         .unwrap();
         assert_eq!(retried_attachment[0].operation_id, "attachment-operation");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn stale_attachment_dependencies_follow_the_resolved_remote_message() {
+        let path = temp_db_path("stale-attachment-dependencies");
+        init_db(&path, None).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        for (suffix, deleted_at_ms) in [("active", None), ("deleted", Some(50))] {
+            conn.execute(
+                "INSERT INTO messages(endpoint_id,filename,sender,timestamp_ms,size,kind,original_name,
+                 message_id,remote_revision,deleted_at_ms,sync_state,owner_scope)
+                 VALUES('profile',?1,'sender',1,1,'file',?1,?2,2,?3,'synced','user-a')",
+                params![format!("{suffix}.bin"), format!("message-{suffix}"), deleted_at_ms],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO attachment_sync(endpoint_id,owner_scope,attachment_id,message_id,
+                 original_name,object_path,size,upload_state,updated_at_ms)
+                 VALUES('profile','user-a',?1,?2,?3,?4,1,'pending_metadata',1)",
+                params![
+                    format!("attachment-{suffix}"),
+                    format!("message-{suffix}"),
+                    format!("{suffix}.bin"),
+                    format!("user/space/attachment-{suffix}/{suffix}.bin")
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sync_outbox(operation_id,endpoint_id,owner_scope,entity_type,entity_id,
+                 action,payload_json,payload_hash,state,last_error,created_at_ms,updated_at_ms)
+                 VALUES(?1,'profile','user-a','message',?2,'upsert','{}','message-hash',
+                 'superseded','revision conflict',1,1)",
+                params![format!("message-operation-{suffix}"), format!("message-{suffix}")],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sync_outbox(operation_id,endpoint_id,owner_scope,entity_type,entity_id,
+                 action,payload_json,payload_hash,depends_on_operation_id,state,last_error,created_at_ms,updated_at_ms)
+                 VALUES(?1,'profile','user-a','attachment',?2,'upsert',?3,'attachment-hash',?4,
+                 'pending','关联消息缺失，正在先恢复消息',2,2)",
+                params![
+                    format!("attachment-operation-{suffix}"),
+                    format!("attachment-{suffix}"),
+                    format!(r#"{{"messageId":"message-{suffix}"}}"#),
+                    format!("message-operation-{suffix}")
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        assert_eq!(
+            repair_stale_attachment_dependencies(&path, "profile", "user-a", 100).unwrap(),
+            2
+        );
+        let active = get_outbox_operation(&path, "attachment-operation-active")
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.state, "pending");
+        assert_eq!(active.depends_on_operation_id, None);
+        assert_eq!(active.last_error, None);
+        let deleted = get_outbox_operation(&path, "attachment-operation-deleted")
+            .unwrap()
+            .unwrap();
+        assert_eq!(deleted.state, "superseded");
+        let conn = Connection::open(&path).unwrap();
+        let deleted_at_ms: Option<i64> = conn
+            .query_row(
+                "SELECT deleted_at_ms FROM attachment_sync
+                 WHERE endpoint_id='profile' AND owner_scope='user-a'
+                   AND attachment_id='attachment-deleted'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(deleted_at_ms, Some(100));
+        drop(conn);
+        let claimed =
+            claim_outbox_operations(&path, "profile", "user-a", "worker", 101, 30_000, 1, true)
+                .unwrap();
+        assert_eq!(claimed[0].operation_id, "attachment-operation-active");
         let _ = std::fs::remove_file(path);
     }
 

@@ -363,6 +363,9 @@ function testShortcutSettingsMarkup() {
   assert.match(legacyMain, /全部使用云端/);
   assert.match(legacyMain, /全部保留本地/);
   assert.match(legacyMain, /resolve_all_sync_conflicts/);
+  assert.match(legacyMain, /retry_all_pending_operations/);
+  assert.match(legacyMain, /是否立即重试全部待同步项目/);
+  assert.doesNotMatch(legacyMain, /是否立即重试第一项/);
   assert.doesNotMatch(legacyMain, /window\.prompt\([\s\S]*输入 local 保留本机内容/);
 }
 

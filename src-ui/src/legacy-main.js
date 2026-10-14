@@ -1885,17 +1885,17 @@ async function openSupabaseSyncIssues() {
       return;
     }
     if (pending.length) {
-      const item = pending[0];
       const details = pending.slice(0, 10).map((entry) =>
         `${entry.entityType}/${entry.action} · ${entry.state}${entry.lastError ? ` · ${entry.lastError}` : ''}`,
       ).join('\n');
       const confirmed = await showConfirmationDialog({
         title: `待同步 ${pending.length} 项`,
-        message: `${details}${pending.length > 10 ? '\n…' : ''}\n\n是否立即重试第一项？`,
-        confirmLabel: '立即重试',
+        message: `${details}${pending.length > 10 ? '\n…' : ''}\n\n是否立即重试全部待同步项目？`,
+        confirmLabel: '重试全部',
       });
       if (confirmed) {
-        await invoke('retry_pending_operation', { operationId: item.operationId });
+        setStatus(`正在重试 ${pending.length} 项待同步内容...`);
+        await invoke('retry_all_pending_operations');
         await loadSyncStatus();
       }
       return;

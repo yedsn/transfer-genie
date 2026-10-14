@@ -27,6 +27,7 @@
 - `supabase_history_page_links_attachment_object_path_to_message`：切换到传输目标 Supabase 后，历史消息关联的附件 Storage 路径会回填到消息；旧缓存缺少路径时下载仍可从附件索引恢复。
 - `imported_attachment_waits_for_message_and_repairs_missing_remote_message`：附件操作显式等待消息确认；模拟远端消息缺失后可自动补建消息操作，再以原附件 operation ID 和 Storage 路径继续。
 - `supabase_attachment_message_not_found_restores_message_before_retry`：测试 RPC 真实返回 409 `MESSAGE_NOT_FOUND` 后，同一次同步先补写关联消息，再确认原附件元数据；待处理数归零，Storage 对象内容与路径不变。
+- `stale_attachment_dependencies_follow_the_resolved_remote_message`：旧附件恢复依赖指向已结算消息冲突时，有效云端消息解除依赖继续上传，云端已删除消息则取消附件任务且不留下永久 pending。
 - `batch_conflict_resolution_keeps_profile_and_account_scope_isolated`：当前账号的多条冲突一次采用云端版本，其他账号的冲突保持未解决。
 - `batch_use_remote_merges_message_with_legacy_filename_by_message_id`：批量采用云端版本时，相同稳定消息 ID 即使本地与云端兼容文件名不同也合并为一条，保留设备缓存且不触发 SQLite 唯一约束。
 - `batch_keep_local_creates_one_retry_per_entity_and_resolves_duplicates`：同一实体存在重复冲突时一次全部标记完成，并只创建一条基于最新远端 revision 的本地重试操作。
