@@ -173,6 +173,11 @@ if (api && runtime && modal && openButton) {
       thumb.dataset.originalName = resource.originalName || '';
     }
     thumb.addEventListener('click', (event) => {
+      if (resource.category === 'image' && !thumb.classList.contains('is-preview-failed')) {
+        event.stopPropagation();
+        openImagePreview(resource, thumb.querySelector('img')?.src || '');
+        return;
+      }
       if (!thumb.classList.contains('is-preview-failed')) return;
       event.stopPropagation();
       thumb.classList.remove('is-preview-failed');
@@ -221,6 +226,50 @@ if (api && runtime && modal && openButton) {
     mediaSession?.stopOwner('bulk-video');
     mediaOverlay?.remove();
     mediaOverlay = null;
+  }
+
+  async function openImagePreview(resource, thumbnailSrc = '') {
+    closeMediaOverlay();
+    mediaOverlay = document.createElement('div');
+    mediaOverlay.className = 'bulk-media-overlay is-image';
+    mediaOverlay.dataset.mediaControl = 'true';
+    const panel = document.createElement('div');
+    panel.className = 'bulk-media-panel is-image';
+    const title = document.createElement('div');
+    title.className = 'bulk-media-title';
+    title.textContent = resource.originalName;
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'bulk-media-close';
+    close.textContent = '×';
+    close.dataset.mediaControl = 'true';
+    close.setAttribute('aria-label', '关闭图片预览');
+    close.addEventListener('click', closeMediaOverlay);
+    const stage = document.createElement('div');
+    stage.className = 'bulk-media-image-stage';
+    const image = document.createElement('img');
+    image.className = 'bulk-media-image';
+    image.alt = resource.originalName || '图片预览';
+    image.draggable = false;
+    if (thumbnailSrc) image.src = thumbnailSrc;
+    const status = document.createElement('div');
+    status.className = 'bulk-media-status';
+    status.textContent = '正在加载原图…';
+    stage.appendChild(image);
+    panel.append(title, close, stage, status);
+    mediaOverlay.appendChild(panel);
+    modal.appendChild(mediaOverlay);
+    mediaOverlay.addEventListener('click', (event) => { if (event.target === mediaOverlay) closeMediaOverlay(); });
+    try {
+      const result = await api.invoke('resolve_media_playback_source', { input: { endpointId: resource.endpointId, filename: resource.filename, originalName: resource.originalName, variant: resource.isSpeechAudio ? 'speech-audio' : 'file' } });
+      if (!mediaOverlay?.contains(image)) return;
+      image.src = convertMediaPath(result.path);
+      status.textContent = '';
+    } catch (error) {
+      if (!mediaOverlay?.contains(image)) return;
+      status.textContent = thumbnailSrc ? '已显示缩略图，原图暂时无法加载' : `图片预览失败：${error}`;
+      status.classList.add('is-error');
+    }
   }
 
   function createAudioPlayer(media, resource, onClose) {
@@ -272,7 +321,7 @@ if (api && runtime && modal && openButton) {
     close.title = '收起播放器';
     close.textContent = '×';
 
-    let playing = true;
+    let playing = false;
     const duration = () => (Number.isFinite(media.duration) && media.duration > 0 ? media.duration : 0);
     const updateToggle = (nextPlaying) => {
       playing = nextPlaying;
@@ -322,7 +371,7 @@ if (api && runtime && modal && openButton) {
       element.addEventListener('click', (event) => event.stopPropagation());
     });
 
-    updateToggle(true);
+    updateToggle(false);
     updateProgress();
     timeline.append(title, progress);
     player.append(toggle, timeline, time, close, media);
@@ -357,7 +406,7 @@ if (api && runtime && modal && openButton) {
         item.classList.add('has-active-audio');
         item.appendChild(createAudioPlayer(media, resource, () => mediaSession?.stopOwner(owner)));
       }
-      mediaSession?.activate({ owner, element: media, path: result.path, cleanup: () => {
+      mediaSession?.activate({ owner, element: media, path: result.path, persistOnEnded: resource.category === 'audio', cleanup: () => {
         button.disabled = false;
         button.classList.remove('is-loading');
         button.querySelector('span').textContent = '▶';
@@ -523,7 +572,15 @@ if (api && runtime && modal && openButton) {
   content.addEventListener('pointerup', () => finishMarquee(true));
   content.addEventListener('pointercancel', () => finishMarquee(false));
   window.addEventListener('blur', stopPointerInteractions);
-  document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && modal.classList.contains('is-active')) { event.preventDefault(); closeModal(); } }, true);
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape' || !modal.classList.contains('is-active')) return;
+    event.preventDefault();
+    if (mediaOverlay) {
+      closeMediaOverlay();
+      return;
+    }
+    closeModal();
+  }, true);
   updateSelectionSummary();
   window.transferGenieBulkDownloadDialogReady = true;
 }

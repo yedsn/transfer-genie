@@ -35,4 +35,19 @@ assert.equal(session.stopOwner('feed'), false);
 assert.equal(session.stopOwner('preview'), true);
 assert.equal(session.current(), null);
 
+let persistentEnded;
+const persistent = {
+  pause: () => events.push('pause-persistent'),
+  removeAttribute: () => events.push('clear-persistent'),
+  load: () => {},
+  addEventListener: (name, listener) => { if (name === 'ended') persistentEnded = listener; },
+  removeEventListener: () => {},
+};
+session.activate({ owner: 'persistent-audio', element: persistent, path: 'persistent.mp3', persistOnEnded: true });
+persistentEnded();
+assert.equal(session.current().owner, 'persistent-audio');
+assert.equal(events.includes('clear-persistent'), false);
+assert.equal(session.stopOwner('persistent-audio'), true);
+assert.equal(session.current(), null);
+
 console.log('media runtime tests passed');

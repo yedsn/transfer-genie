@@ -96,7 +96,9 @@
       if (current?.element !== entry.element) stop('switch');
       current = { ...entry };
       notifyPath(entry.path || null);
-      const ended = () => { if (current?.element === entry.element) stop('ended'); };
+      const ended = () => {
+        if (current?.element === entry.element && entry.persistOnEnded !== true) stop('ended');
+      };
       entry.element.addEventListener?.('ended', ended, { once: true });
       const previousCleanup = current.cleanup;
       current.cleanup = (reason) => {

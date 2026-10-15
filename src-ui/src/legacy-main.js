@@ -1306,6 +1306,8 @@ const selectedDownloadTasks = new Set();
 const selectedUploadTasks = new Set();
 const expandedTextMessages = new Set();
 let currentPreviewMessage = null;
+let messageMediaOverlay = null;
+const inlineAudioLoads = new WeakMap();
 const MESSAGE_BODY_COLLAPSE_HEIGHT = 260;
 const MARKED_MESSAGE_BODY_COLLAPSE_HEIGHT = 130;
 const MESSAGE_BODY_PREVIEW_MAX_CHARS = 2000;
@@ -3509,57 +3511,77 @@ async function playMessageSourceAudio(message) {
 function createSpeechSourceAudioControls(message, owner = `speech-${message.filename}`) {
   const wrap = document.createElement('div');
   wrap.className = 'speech-source-audio-player';
-
-  const audio = document.createElement('audio');
-  audio.className = 'speech-source-audio-controls';
-  audio.controls = true;
-  audio.preload = 'metadata';
-  audio.setAttribute('aria-label', '源音频');
-  audio.hidden = true;
-  const status = document.createElement('span');
-  status.className = 'speech-source-audio-status';
-  status.dataset.mediaEndpointId = message.endpoint_id || activeEndpointId || '';
-  status.dataset.mediaFilename = message.filename || '';
   const playButton = document.createElement('button');
   playButton.type = 'button';
   playButton.className = 'button ghost small';
-  playButton.textContent = '播放源音频';
+  playButton.textContent = '▶ 播放原音频';
   playButton.dataset.mediaControl = 'true';
-  const cancelButton = document.createElement('button');
-  cancelButton.type = 'button';
-  cancelButton.className = 'button ghost small';
-  cancelButton.textContent = '取消加载';
-  cancelButton.dataset.mediaControl = 'true';
-
-  let loadPromise = null;
-  const loadAudioSource = async () => {
-    if (audio.src) return audio.src;
-    if (!loadPromise) {
-      loadPromise = getMessageSourceAudioSrc(message).then((src) => {
-        if (src) audio.src = src;
-        return src;
-      });
-    }
-    return loadPromise;
-  };
-
+  wrap.appendChild(playButton);
+  let loadGeneration = 0;
   playButton.addEventListener('click', async () => {
+    const generation = ++loadGeneration;
     playButton.disabled = true;
-    status.textContent = '正在准备源音频…';
-    try {
-      await loadAudioSource();
-      audio.hidden = false;
-      mediaSession?.activate({ owner, element: audio });
-      await audio.play();
-      playButton.hidden = true;
-      status.textContent = '';
-    } catch (error) {
+    playButton.hidden = true;
+    wrap.classList.add('is-active');
+    const loading = document.createElement('div');
+    loading.className = 'speech-source-audio-loading';
+    loading.dataset.mediaControl = 'true';
+    const loadingText = document.createElement('span');
+    loadingText.textContent = '正在加载原音频…';
+    const cancelButton = document.createElement('button');
+    cancelButton.type = 'button';
+    cancelButton.className = 'button ghost small';
+    cancelButton.textContent = '取消加载';
+    cancelButton.dataset.mediaControl = 'true';
+    loading.append(loadingText, cancelButton);
+    wrap.appendChild(loading);
+    const restoreButton = () => {
+      loading.remove();
+      wrap.querySelector('.message-inline-audio-player')?.remove();
+      wrap.classList.remove('is-active');
+      playButton.hidden = false;
       playButton.disabled = false;
-      status.textContent = String(error?.message || error);
+    };
+    cancelButton.addEventListener('click', (event) => {
+      event.stopPropagation();
+      if (generation !== loadGeneration) return;
+      loadGeneration += 1;
+      restoreButton();
+      invoke('cancel_media_playback_cache', {
+        input: {
+          endpointId: message.endpoint_id || activeEndpointId || '',
+          filename: message.filename,
+          originalName: message.original_name || '',
+          variant: 'speech-audio',
+        },
+      }).catch(() => {});
+    });
+    try {
+      const result = await resolveMessageMediaSource(message, 'speech-audio');
+      if (generation !== loadGeneration || !wrap.isConnected) return;
+      loading.remove();
+      const audio = createMediaElement('audio', { className: 'speech-source-audio-controls message-inline-audio-element' });
+      audio.src = tauriAssetUrl(result.path);
+      const player = createMessageInlineAudioPlayer(audio, {
+        ...message,
+        original_name: message.original_name || '原音频',
+      }, () => mediaSession?.stopOwner(owner));
+      wrap.appendChild(player);
+      mediaSession?.activate({
+        owner,
+        element: audio,
+        path: result.path,
+        persistOnEnded: true,
+        cleanup: restoreButton,
+      });
+      await audio.play();
+    } catch (error) {
+      if (generation !== loadGeneration) return;
+      mediaSession?.stopOwner(owner);
+      restoreButton();
+      showToast(`播放原音频失败：${error?.message || error}`, 'error');
     }
   });
-  cancelButton.addEventListener('click', () => invoke('cancel_media_playback_cache', { input: { endpointId: message.endpoint_id || activeEndpointId || '', filename: message.filename, originalName: message.original_name || '', variant: 'speech-audio' } }).catch(() => {}));
-  wrap.append(audio, playButton, cancelButton, status);
   return wrap;
 }
 
@@ -4484,20 +4506,284 @@ function createMediaElement(kind, options = {}) {
   return element;
 }
 
-async function loadAndPlayMediaElement(element, message, owner, variant = 'file') {
-  const name = message?.original_name || message?.originalName || message?.filename || '';
-  const support = mediaRuntime?.canPlay(name, message?.source_audio_mime_type);
-  if (support === false) throw new Error('当前格式不支持应用内播放，请下载后使用系统程序打开');
-  const result = await resolveMessageMediaSource(message, variant);
-  element.src = tauriAssetUrl(result.path);
-  mediaSession?.activate({ owner, element, path: result.path });
+async function loadAndPlayMediaElement(element, message, owner, variant = 'file', options = {}) {
+  const result = await loadMediaElementSource(element, message, owner, variant, options);
+  if (!result) return null;
   try {
     await element.play();
   } catch (error) {
     mediaSession?.stopOwner(owner);
     throw new Error('当前格式不支持应用内播放，请下载后使用系统程序打开');
   }
+  if (typeof options.isCurrent === 'function' && !options.isCurrent()) {
+    mediaSession?.stopOwner(owner);
+    return null;
+  }
   return result;
+}
+
+async function loadMediaElementSource(element, message, owner, variant = 'file', options = {}) {
+  const name = message?.original_name || message?.originalName || message?.filename || '';
+  const support = mediaRuntime?.canPlay(name, message?.source_audio_mime_type);
+  if (support === false) throw new Error('当前格式不支持应用内播放，请下载后使用系统程序打开');
+  const result = await resolveMessageMediaSource(message, variant);
+  if (typeof options.isCurrent === 'function' && !options.isCurrent()) return null;
+  element.src = tauriAssetUrl(result.path);
+  mediaSession?.activate({ owner, element, path: result.path });
+  element.load?.();
+  return result;
+}
+
+function closeMessageMediaOverlay() {
+  mediaSession?.stopOwner('message-list-video');
+  messageMediaOverlay?.remove();
+  messageMediaOverlay = null;
+}
+
+function createMessageMediaOverlay(message, kind) {
+  closeMessageMediaOverlay();
+  const overlay = document.createElement('div');
+  overlay.className = `message-media-overlay is-${kind}`;
+  overlay.dataset.mediaControl = 'true';
+  const panel = document.createElement('div');
+  panel.className = 'message-media-panel';
+  panel.setAttribute('role', 'dialog');
+  panel.setAttribute('aria-modal', 'true');
+  const title = document.createElement('div');
+  title.className = 'message-media-overlay-title';
+  title.textContent = message.original_name || message.originalName || message.filename || (kind === 'image' ? '图片预览' : '视频预览');
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'message-media-overlay-close';
+  close.textContent = '×';
+  close.setAttribute('aria-label', '关闭预览');
+  close.addEventListener('click', closeMessageMediaOverlay);
+  const stage = document.createElement('div');
+  stage.className = 'message-media-overlay-stage';
+  const status = document.createElement('div');
+  status.className = 'message-media-overlay-status';
+  status.textContent = kind === 'image' ? '正在加载原图…' : '正在准备视频…';
+  panel.append(title, close, stage, status);
+  overlay.appendChild(panel);
+  overlay.addEventListener('click', (event) => {
+    if (event.target === overlay) closeMessageMediaOverlay();
+  });
+  document.body.appendChild(overlay);
+  messageMediaOverlay = overlay;
+  return { overlay, stage, status };
+}
+
+async function openMessageImagePreview(message, previewSrc = '') {
+  if (!message) return;
+  const { overlay, stage, status } = createMessageMediaOverlay(message, 'image');
+  const image = document.createElement('img');
+  image.className = 'message-media-overlay-image';
+  image.alt = message.original_name || message.originalName || message.filename || '图片预览';
+  if (previewSrc) image.src = previewSrc;
+  stage.appendChild(image);
+  try {
+    const result = await resolveMessageMediaSource(message);
+    if (messageMediaOverlay !== overlay) return;
+    image.src = tauriAssetUrl(result.path);
+    status.textContent = '';
+  } catch (error) {
+    if (messageMediaOverlay !== overlay) return;
+    if (previewSrc) {
+      status.textContent = '已显示缩略图，原图暂时无法加载';
+    } else {
+      status.textContent = `图片预览失败：${error?.message || error}`;
+      status.classList.add('is-error');
+    }
+  }
+}
+
+async function openMessageVideoPlayer(message, posterSrc = '') {
+  if (!message) return;
+  const { overlay, stage, status } = createMessageMediaOverlay(message, 'video');
+  const video = createMediaElement('video', { className: 'message-media-overlay-video' });
+  video.playsInline = true;
+  if (posterSrc) video.poster = posterSrc;
+  requestMessagePreview(message)
+    .then((result) => {
+      if (messageMediaOverlay === overlay && result.state === 'ready' && result.path) {
+        video.poster = tauriAssetUrl(result.path);
+      }
+    })
+    .catch(() => {});
+  stage.appendChild(video);
+  try {
+    await loadAndPlayMediaElement(video, message, 'message-list-video');
+    if (messageMediaOverlay !== overlay) return;
+    status.textContent = '';
+  } catch (error) {
+    if (messageMediaOverlay !== overlay) return;
+    status.textContent = `视频预览失败：${error?.message || error}`;
+    status.classList.add('is-error');
+  }
+}
+
+function formatInlineMediaTime(value) {
+  const seconds = Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+function createMessageInlineAudioPlayer(media, message, onClose) {
+  const player = document.createElement('div');
+  player.className = 'bulk-audio-player message-inline-audio-player';
+  player.dataset.mediaControl = 'true';
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'bulk-audio-toggle';
+  toggle.dataset.mediaControl = 'true';
+  const toggleIcon = document.createElement('span');
+  toggleIcon.className = 'bulk-audio-toggle-icon';
+  toggle.appendChild(toggleIcon);
+  const timeline = document.createElement('div');
+  timeline.className = 'bulk-audio-timeline';
+  const title = document.createElement('div');
+  title.className = 'bulk-audio-title';
+  title.textContent = message.original_name || message.filename || '音频';
+  const progress = document.createElement('input');
+  progress.type = 'range';
+  progress.className = 'bulk-audio-progress';
+  progress.dataset.mediaControl = 'true';
+  progress.min = '0';
+  progress.max = '0';
+  progress.step = '0.1';
+  progress.value = '0';
+  progress.disabled = true;
+  progress.setAttribute('aria-label', '播放进度');
+  progress.style.setProperty('--audio-progress', '0%');
+  const time = document.createElement('span');
+  time.className = 'bulk-audio-time';
+  time.textContent = '0:00 / 0:00';
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'bulk-audio-close';
+  close.dataset.mediaControl = 'true';
+  close.textContent = '×';
+  close.setAttribute('aria-label', '收起播放器');
+  media.hidden = true;
+  media.dataset.mediaControl = 'true';
+  const update = () => {
+    const duration = Number.isFinite(media.duration) && media.duration > 0 ? media.duration : 0;
+    const current = Number.isFinite(media.currentTime) ? media.currentTime : 0;
+    progress.max = String(duration);
+    progress.value = String(Math.min(current, duration || current));
+    progress.disabled = duration <= 0;
+    progress.style.setProperty('--audio-progress', duration > 0 ? `${Math.min(100, (current / duration) * 100)}%` : '0%');
+    time.textContent = `${formatInlineMediaTime(current)} / ${formatInlineMediaTime(duration)}`;
+  };
+  let playing = false;
+  const updatePlaying = (nextPlaying) => {
+    playing = nextPlaying;
+    player.classList.toggle('is-playing', playing);
+    toggleIcon.textContent = playing ? 'Ⅱ' : '▶';
+    toggle.setAttribute('aria-label', playing ? '暂停' : '播放');
+  };
+  toggle.addEventListener('click', () => {
+    if (!playing) media.play().catch(() => {});
+    else media.pause();
+  });
+  progress.addEventListener('input', () => {
+    media.currentTime = Number(progress.value) || 0;
+    update();
+  });
+  close.addEventListener('click', onClose);
+  media.addEventListener('loadedmetadata', update);
+  media.addEventListener('durationchange', update);
+  media.addEventListener('timeupdate', update);
+  media.addEventListener('play', () => updatePlaying(true));
+  media.addEventListener('pause', () => updatePlaying(false));
+  media.addEventListener('ended', () => updatePlaying(false));
+  [player, toggle, progress, close].forEach((element) => {
+    element.addEventListener('pointerdown', (event) => event.stopPropagation());
+    element.addEventListener('click', (event) => event.stopPropagation());
+  });
+  updatePlaying(false);
+  timeline.append(title, progress);
+  player.append(toggle, timeline, time, close, media);
+  return player;
+}
+
+async function playMessageAudioInline(message, body, button) {
+  if (inlineAudioLoads.has(body)) return;
+  const owner = `message-audio-${message.endpoint_id || activeEndpointId || ''}-${message.filename || ''}`;
+  mediaSession?.stop('switch');
+  const loadState = { cancelled: false };
+  inlineAudioLoads.set(body, loadState);
+  button.disabled = true;
+  button.classList.add('is-loading');
+  button.textContent = '…';
+  const idleButtonText = button.dataset.idleText || '▶ 播放';
+  body.classList.add('has-active-audio');
+  const loading = document.createElement('div');
+  loading.className = 'message-inline-audio-loading';
+  loading.dataset.mediaControl = 'true';
+  const loadingText = document.createElement('span');
+  loadingText.textContent = '正在加载音频…';
+  const cancelButton = document.createElement('button');
+  cancelButton.type = 'button';
+  cancelButton.className = 'button ghost small message-inline-audio-cancel';
+  cancelButton.textContent = '取消加载';
+  cancelButton.dataset.mediaControl = 'true';
+  loading.append(loadingText, cancelButton);
+  body.appendChild(loading);
+
+  const resetLoadingState = () => {
+    if (inlineAudioLoads.get(body) === loadState) inlineAudioLoads.delete(body);
+    loading.remove();
+    body.classList.remove('has-active-audio');
+    button.disabled = false;
+    button.classList.remove('is-loading');
+    button.textContent = idleButtonText;
+  };
+  cancelButton.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (loadState.cancelled) return;
+    loadState.cancelled = true;
+    resetLoadingState();
+    invoke('cancel_media_playback_cache', {
+      input: {
+        endpointId: message.endpoint_id || activeEndpointId || '',
+        filename: message.filename,
+        originalName: message.original_name || '',
+        variant: 'file',
+      },
+    }).catch(() => {});
+  });
+  loading.addEventListener('pointerdown', (event) => event.stopPropagation());
+  loading.addEventListener('click', (event) => event.stopPropagation());
+
+  const media = createMediaElement('audio', { className: 'message-inline-audio-element' });
+  try {
+    const result = await resolveMessageMediaSource(message);
+    if (loadState.cancelled || inlineAudioLoads.get(body) !== loadState || !body.isConnected) return;
+    loading.remove();
+    media.src = tauriAssetUrl(result.path);
+    const player = createMessageInlineAudioPlayer(media, message, () => mediaSession?.stopOwner(owner));
+    body.appendChild(player);
+    mediaSession?.activate({
+      owner,
+      element: media,
+      path: result.path,
+      persistOnEnded: true,
+      cleanup: () => {
+        player.remove();
+        body.classList.remove('has-active-audio');
+        button.disabled = false;
+        button.classList.remove('is-loading');
+        button.textContent = idleButtonText;
+      },
+    });
+    await media.play();
+    if (inlineAudioLoads.get(body) === loadState) inlineAudioLoads.delete(body);
+  } catch (error) {
+    if (loadState.cancelled || inlineAudioLoads.get(body) !== loadState) return;
+    mediaSession?.stopOwner(owner);
+    resetLoadingState();
+    showToast(`音频播放失败：${error?.message || error}`, 'error');
+  }
 }
 
 function isValidGlobalHotkey(value) {
@@ -9456,38 +9742,74 @@ function renderPreviewContent(message) {
       const mediaWrap = document.createElement('div');
       mediaWrap.className = `message-preview-media-wrap is-${mediaKind}`;
       const media = createMediaElement(mediaKind, { className: `message-preview-${mediaKind}` });
-      media.hidden = true;
+      media.hidden = mediaKind !== 'video';
       if (mediaKind === 'video') media.playsInline = true;
       const status = document.createElement('div');
       status.className = 'message-preview-media-status';
       status.dataset.mediaEndpointId = message.endpoint_id || activeEndpointId || '';
       status.dataset.mediaFilename = message.filename || '';
-      status.textContent = '媒体仅在需要时加载，不会计入正式下载';
+      status.textContent = mediaKind === 'video' ? '正在准备视频…' : '媒体仅在需要时加载，不会计入正式下载';
       const loadButton = document.createElement('button');
       loadButton.type = 'button';
       loadButton.className = 'button primary small message-preview-media-load';
       loadButton.textContent = mediaKind === 'video' ? '播放视频' : '播放音频';
+      loadButton.hidden = mediaKind === 'video';
       loadButton.dataset.mediaControl = 'true';
-      loadButton.addEventListener('click', async () => {
-        loadButton.disabled = true;
-        status.textContent = '正在准备媒体…';
-        try {
-          media.hidden = false;
-          await loadAndPlayMediaElement(media, message, 'message-preview');
-          status.textContent = '';
-          loadButton.hidden = true;
-        } catch (error) {
-          media.hidden = true;
-          loadButton.disabled = false;
-          status.textContent = String(error?.message || error);
-        }
-      });
       const cancelButton = document.createElement('button');
       cancelButton.type = 'button';
       cancelButton.className = 'button ghost small message-preview-media-cancel';
       cancelButton.textContent = '取消加载';
       cancelButton.dataset.mediaControl = 'true';
-      cancelButton.addEventListener('click', () => invoke('cancel_media_playback_cache', { input: { endpointId: message.endpoint_id || activeEndpointId || '', filename: message.filename, originalName: message.original_name || '', variant: 'file' } }).catch(() => {}));
+      cancelButton.hidden = true;
+      let loadGeneration = 0;
+      const loadMedia = async ({ autoplay = true } = {}) => {
+        if (loadButton.disabled) return;
+        const generation = ++loadGeneration;
+        const isCurrent = () => generation === loadGeneration
+          && currentPreviewMessage === message
+          && messagePreview?.classList.contains('is-active')
+          && mediaWrap.isConnected;
+        loadButton.disabled = true;
+        cancelButton.hidden = false;
+        status.textContent = '正在准备媒体…';
+        try {
+          media.hidden = false;
+          const result = autoplay
+            ? await loadAndPlayMediaElement(media, message, 'message-preview', 'file', { isCurrent })
+            : await loadMediaElementSource(media, message, 'message-preview', 'file', { isCurrent });
+          if (!result || !isCurrent()) return;
+          status.textContent = '';
+          loadButton.hidden = true;
+          cancelButton.hidden = true;
+        } catch (error) {
+          if (!isCurrent()) return;
+          media.hidden = true;
+          loadButton.disabled = false;
+          if (mediaKind === 'video') {
+            loadButton.textContent = '重试加载视频';
+            loadButton.hidden = false;
+          }
+          status.textContent = String(error?.message || error);
+          cancelButton.hidden = true;
+        }
+      };
+      loadButton.addEventListener('click', () => loadMedia({ autoplay: true }));
+      cancelButton.addEventListener('click', () => {
+        loadGeneration += 1;
+        mediaSession?.stopOwner('message-preview');
+        try {
+          media.pause?.();
+          media.removeAttribute('src');
+          media.load?.();
+        } catch (_) {}
+        media.hidden = true;
+        loadButton.disabled = false;
+        loadButton.hidden = false;
+        loadButton.textContent = mediaKind === 'video' ? '重新加载视频' : '播放音频';
+        cancelButton.hidden = true;
+        status.textContent = '已取消加载';
+        invoke('cancel_media_playback_cache', { input: { endpointId: message.endpoint_id || activeEndpointId || '', filename: message.filename, originalName: message.original_name || '', variant: 'file' } }).catch(() => {});
+      });
       if (mediaKind === 'video') {
         requestMessagePreview(message)
           .then((result) => { if (result.state === 'ready' && result.path) media.poster = tauriAssetUrl(result.path); })
@@ -9495,6 +9817,9 @@ function renderPreviewContent(message) {
       }
       mediaWrap.append(media, loadButton, cancelButton, status);
       messagePreviewBody.appendChild(mediaWrap);
+      if (mediaKind === 'video') {
+        void loadMedia({ autoplay: false });
+      }
     }
 
     const title = document.createElement('div');
@@ -9688,7 +10013,6 @@ function renderMessages(messages, options = {}) {
     item.className = 'message-card';
     const selfName = (currentSettingsFormState.senderName || '').trim();
     const isSelf = message.sender === '我' || (selfName && message.sender === selfName);
-    let fileBodyClickTimer = null;
     item.classList.toggle('is-file', viewModel.isFile);
     item.classList.toggle('is-text', viewModel.isText);
     item.classList.toggle('is-self', viewModel.isSelf);
@@ -9755,7 +10079,11 @@ function renderMessages(messages, options = {}) {
         const fileNameSpan = document.createElement('span');
         fileNameSpan.textContent = viewModel.originalName;
 
-        body.appendChild(thumbImg);
+        const thumbnailWrap = document.createElement('span');
+        thumbnailWrap.className = `message-thumbnail-wrap is-${mediaKind}`;
+        thumbnailWrap.dataset.fallbackLabel = mediaKind === 'video' ? 'VIDEO' : 'IMAGE';
+        thumbnailWrap.appendChild(thumbImg);
+        body.appendChild(thumbnailWrap);
         body.appendChild(fileNameSpan);
         
         const tauriConvert = window.__TAURI__?.tauri?.convertFileSrc || window.__TAURI__?.path?.convertFileSrc || window.__TAURI__?.core?.convertFileSrc;
@@ -9765,6 +10093,7 @@ function renderMessages(messages, options = {}) {
             if (result.state === 'ready' && result.path && tauriConvert) {
               thumbImg.src = tauriConvert(result.path);
               thumbImg.hidden = false;
+              thumbnailWrap.classList.add('has-thumbnail');
             }
           })
           .catch(err => {
@@ -9772,33 +10101,65 @@ function renderMessages(messages, options = {}) {
           });
         thumbImg.addEventListener('error', () => {
           thumbImg.hidden = true;
+          thumbnailWrap.classList.remove('has-thumbnail');
         });
+        if (viewModel.isImage) {
+          thumbImg.classList.add('is-clickable-preview');
+          thumbImg.title = '单击预览图片';
+          let imagePreviewClickTimer = null;
+          thumbImg.addEventListener('click', (event) => {
+            event.stopPropagation();
+            if (event.detail > 1) return;
+            imagePreviewClickTimer = setTimeout(() => {
+              openMessageImagePreview(message, thumbImg.src);
+              imagePreviewClickTimer = null;
+            }, 180);
+          });
+          thumbImg.addEventListener('dblclick', (event) => {
+            event.stopPropagation();
+            if (imagePreviewClickTimer) {
+              clearTimeout(imagePreviewClickTimer);
+              imagePreviewClickTimer = null;
+            }
+            openMessagePreview(message);
+          });
+        }
         loadThumbnail();
-          
-        body.addEventListener('dblclick', () => {
-          openMessagePreview(message);
-        });
         if (mediaKind === 'video') {
+          body.classList.add('is-video-message');
           const playButton = document.createElement('button');
           playButton.type = 'button';
           playButton.className = 'message-media-play-button';
           playButton.textContent = '▶';
           playButton.title = '播放视频';
           playButton.dataset.mediaControl = 'true';
-          playButton.addEventListener('click', (event) => { event.stopPropagation(); openMessagePreview(message); });
-          body.appendChild(playButton);
+          playButton.addEventListener('click', (event) => {
+            event.stopPropagation();
+            openMessageVideoPlayer(message, thumbImg.hidden ? '' : thumbImg.src);
+          });
+          thumbnailWrap.appendChild(playButton);
         }
       } else if (mediaKind === 'audio') {
         body.classList.add('is-audio-message');
         const label = document.createElement('span');
         label.textContent = viewModel.originalName;
+        const thumbnailWrap = document.createElement('span');
+        thumbnailWrap.className = 'message-thumbnail-wrap is-audio';
+        thumbnailWrap.dataset.fallbackLabel = 'AUDIO';
         const playButton = document.createElement('button');
         playButton.type = 'button';
         playButton.className = 'message-media-play-button';
-        playButton.textContent = '▶ 播放';
+        playButton.textContent = '▶';
+        playButton.dataset.idleText = '▶';
+        playButton.title = '播放音频';
+        playButton.setAttribute('aria-label', '播放音频');
         playButton.dataset.mediaControl = 'true';
-        playButton.addEventListener('click', (event) => { event.stopPropagation(); openMessagePreview(message); });
-        body.replaceChildren(label, playButton);
+        playButton.addEventListener('click', (event) => {
+          event.stopPropagation();
+          playMessageAudioInline(message, body, playButton);
+        });
+        thumbnailWrap.appendChild(playButton);
+        body.replaceChildren(thumbnailWrap, label);
       } else {
         body.classList.add('is-file-preview-card');
         const model = mediaRuntime?.filePreviewModel(viewModel.originalName) || { label: '文件' };
@@ -9839,16 +10200,7 @@ function renderMessages(messages, options = {}) {
         }
         return;
       }
-      if (!viewModel.isFile || message.uploading) {
-        return;
-      }
-      if (fileBodyClickTimer) {
-        clearTimeout(fileBodyClickTimer);
-      }
-      fileBodyClickTimer = setTimeout(() => {
-        openMessageFile(message);
-        fileBodyClickTimer = null;
-      }, 180);
+      // 普通单击只保留选择和显式媒体控件行为；消息详情统一由双击进入。
     });
 
     const meta = document.createElement('div');
@@ -10159,10 +10511,6 @@ function renderMessages(messages, options = {}) {
         )
       ) {
         return;
-      }
-      if (fileBodyClickTimer) {
-        clearTimeout(fileBodyClickTimer);
-        fileBodyClickTimer = null;
       }
       openMessagePreview(message);
     });
@@ -15598,6 +15946,10 @@ if (messagePreview) {
 }
 
 document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && messageMediaOverlay) {
+    closeMessageMediaOverlay();
+    return;
+  }
   if (event.key === 'Escape' && markMessageModal?.classList.contains('is-active')) {
     closeMarkMessageModal();
     return;
