@@ -3537,7 +3537,7 @@ function createSpeechSourceAudioControls(message, owner = `speech-${message.file
     wrap.appendChild(loading);
     const restoreButton = () => {
       loading.remove();
-      wrap.querySelector('.message-inline-audio-player')?.remove();
+      wrap.querySelector('.speech-inline-audio-player')?.remove();
       wrap.classList.remove('is-active');
       playButton.hidden = false;
       playButton.disabled = false;
@@ -3562,10 +3562,7 @@ function createSpeechSourceAudioControls(message, owner = `speech-${message.file
       loading.remove();
       const audio = createMediaElement('audio', { className: 'speech-source-audio-controls message-inline-audio-element' });
       audio.src = tauriAssetUrl(result.path);
-      const player = createMessageInlineAudioPlayer(audio, {
-        ...message,
-        original_name: message.original_name || '原音频',
-      }, () => mediaSession?.stopOwner(owner));
+      const player = createSpeechInlineAudioPlayer(audio, () => mediaSession?.stopOwner(owner));
       wrap.appendChild(player);
       mediaSession?.activate({
         owner,
@@ -4622,13 +4619,13 @@ async function openMessageVideoPlayer(message, posterSrc = '') {
   }
 }
 
-function createMessageInlineAudioPlayer(media, _message, onClose) {
+function createSpeechInlineAudioPlayer(media, onClose) {
   const player = document.createElement('div');
-  player.className = 'message-inline-audio-player';
+  player.className = 'speech-inline-audio-player';
   player.dataset.mediaControl = 'true';
   const close = document.createElement('button');
   close.type = 'button';
-  close.className = 'message-inline-audio-close';
+  close.className = 'speech-inline-audio-close';
   close.dataset.mediaControl = 'true';
   close.textContent = '×';
   close.setAttribute('aria-label', '收起播放器');
@@ -4644,6 +4641,90 @@ function createMessageInlineAudioPlayer(media, _message, onClose) {
     element.addEventListener('click', (event) => event.stopPropagation());
   });
   player.append(media, close);
+  return player;
+}
+
+function formatInlineMediaTime(value) {
+  const seconds = Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+function createMessageInlineAudioPlayer(media, message, onClose) {
+  const player = document.createElement('div');
+  player.className = 'bulk-audio-player message-inline-audio-player';
+  player.dataset.mediaControl = 'true';
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'bulk-audio-toggle';
+  toggle.dataset.mediaControl = 'true';
+  const toggleIcon = document.createElement('span');
+  toggleIcon.className = 'bulk-audio-toggle-icon';
+  toggle.appendChild(toggleIcon);
+  const timeline = document.createElement('div');
+  timeline.className = 'bulk-audio-timeline';
+  const title = document.createElement('div');
+  title.className = 'bulk-audio-title';
+  title.textContent = message.original_name || message.filename || '音频';
+  const progress = document.createElement('input');
+  progress.type = 'range';
+  progress.className = 'bulk-audio-progress';
+  progress.dataset.mediaControl = 'true';
+  progress.min = '0';
+  progress.max = '0';
+  progress.step = '0.1';
+  progress.value = '0';
+  progress.disabled = true;
+  progress.setAttribute('aria-label', '播放进度');
+  progress.style.setProperty('--audio-progress', '0%');
+  const time = document.createElement('span');
+  time.className = 'bulk-audio-time';
+  time.textContent = '0:00 / 0:00';
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'bulk-audio-close';
+  close.dataset.mediaControl = 'true';
+  close.textContent = '×';
+  close.setAttribute('aria-label', '收起播放器');
+  media.hidden = true;
+  media.dataset.mediaControl = 'true';
+  const update = () => {
+    const duration = Number.isFinite(media.duration) && media.duration > 0 ? media.duration : 0;
+    const current = Number.isFinite(media.currentTime) ? media.currentTime : 0;
+    progress.max = String(duration);
+    progress.value = String(Math.min(current, duration || current));
+    progress.disabled = duration <= 0;
+    progress.style.setProperty('--audio-progress', duration > 0 ? `${Math.min(100, (current / duration) * 100)}%` : '0%');
+    time.textContent = `${formatInlineMediaTime(current)} / ${formatInlineMediaTime(duration)}`;
+  };
+  let playing = false;
+  const updatePlaying = (nextPlaying) => {
+    playing = nextPlaying;
+    player.classList.toggle('is-playing', playing);
+    toggleIcon.textContent = playing ? 'Ⅱ' : '▶';
+    toggle.setAttribute('aria-label', playing ? '暂停' : '播放');
+  };
+  toggle.addEventListener('click', () => {
+    if (!playing) media.play().catch(() => {});
+    else media.pause();
+  });
+  progress.addEventListener('input', () => {
+    media.currentTime = Number(progress.value) || 0;
+    update();
+  });
+  close.addEventListener('click', onClose);
+  media.addEventListener('loadedmetadata', update);
+  media.addEventListener('durationchange', update);
+  media.addEventListener('timeupdate', update);
+  media.addEventListener('play', () => updatePlaying(true));
+  media.addEventListener('pause', () => updatePlaying(false));
+  media.addEventListener('ended', () => updatePlaying(false));
+  [player, toggle, progress, close].forEach((element) => {
+    element.addEventListener('pointerdown', (event) => event.stopPropagation());
+    element.addEventListener('click', (event) => event.stopPropagation());
+  });
+  updatePlaying(false);
+  timeline.append(title, progress);
+  player.append(toggle, timeline, time, close, media);
   return player;
 }
 
@@ -10084,9 +10165,6 @@ function renderMessages(messages, options = {}) {
         body.classList.add('is-audio-message');
         const label = document.createElement('span');
         label.textContent = viewModel.originalName;
-        const thumbnailWrap = document.createElement('span');
-        thumbnailWrap.className = 'message-thumbnail-wrap is-audio';
-        thumbnailWrap.dataset.fallbackLabel = 'AUDIO';
         const playButton = document.createElement('button');
         playButton.type = 'button';
         playButton.className = 'message-media-play-button';
@@ -10099,8 +10177,7 @@ function renderMessages(messages, options = {}) {
           event.stopPropagation();
           playMessageAudioInline(message, body, playButton);
         });
-        thumbnailWrap.appendChild(playButton);
-        body.replaceChildren(thumbnailWrap, label);
+        body.replaceChildren(label, playButton);
       } else {
         body.classList.add('is-file-preview-card');
         const model = mediaRuntime?.filePreviewModel(viewModel.originalName) || { label: '文件' };

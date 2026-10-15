@@ -1653,7 +1653,10 @@ async function run() {
       const videoHasMarker = !!videoCard?.querySelector('.message-media-play-button');
       const videoMarkerOnThumbnail = videoCard?.querySelector('.message-media-play-button')?.parentElement?.classList.contains('message-thumbnail-wrap') === true;
       const audioHasMarker = !!audioCard?.querySelector('.message-media-play-button');
-      const audioMarkerOnThumbnail = audioCard?.querySelector('.message-media-play-button')?.parentElement?.classList.contains('message-thumbnail-wrap') === true;
+      const audioPlayMatchesBulkStyle = !audioCard?.querySelector('.message-thumbnail-wrap.is-audio')
+        && audioCard?.querySelector('.message-body.is-audio-message > .message-media-play-button')?.textContent === '▶'
+        && getComputedStyle(audioCard.querySelector('.message-body.is-audio-message'), '::before').content.includes('AUD')
+        && getComputedStyle(audioCard.querySelector('.message-body.is-audio-message > .message-media-play-button')).left === '36px';
       const openCallsBefore = window.__speechSmoke.calls.filter((call) => call.command === 'open_message_file').length;
       const messageList = document.querySelector('#message-list');
       const previousListHeight = messageList.style.height;
@@ -1685,10 +1688,10 @@ async function run() {
       const audioInlineOpened = !!audioCard.querySelector('.message-inline-audio-player')
         && !document.querySelector('#message-preview')?.classList.contains('is-active')
         && window.__speechSmoke.mediaPlayCount > audioPlayBefore
-        && !!audioCard.querySelector('.message-inline-audio-player audio[controls]');
+        && audioCard.querySelector('.bulk-audio-toggle')?.getAttribute('aria-label') === '暂停';
       audioCard.querySelector('.message-inline-audio-element')?.dispatchEvent(new Event('ended'));
       const messageAudioPersistsAfterEnded = !!audioCard.querySelector('.message-inline-audio-player');
-      audioCard.querySelector('.message-inline-audio-close')?.click();
+      audioCard.querySelector('.bulk-audio-close')?.click();
       window.__speechSmoke.mediaResolveDelayMs = 80;
       const inlineCancelBefore = window.__speechSmoke.calls.filter((call) => call.command === 'cancel_media_playback_cache' && call.args?.input?.filename === 'audio-message.mp3').length;
       audioCard.querySelector('.message-media-play-button').click();
@@ -1785,7 +1788,7 @@ async function run() {
         && window.__speechSmoke.calls.some((call) => call.command === 'delete_messages' && call.args?.filenames?.includes('audio-message.mp3'));
       messageList.style.height = previousListHeight;
       const openCallsAfter = window.__speechSmoke.calls.filter((call) => call.command === 'open_message_file').length;
-      return { feedImageLoaded, failedImageStillVisible, imageRetryVisible, videoHasMarker, videoMarkerOnThumbnail, audioHasMarker, audioMarkerOnThumbnail, ordinarySingleClickIsInert, imageThumbnailOpenedOverlay, doubleClickOpenedDetails, audioInlineOpened, messageAudioPersistsAfterEnded, inlineAudioLoadingVisible, inlineAudioCancelledImmediately, inlineAudioStayedCancelled, inlineAudioCancelRequested, inlineAudioRetrySucceeded, audioSourceRequested, audioDuplicateSuppressed, audioCancelRequested, detailAudioCancelledImmediately, detailAudioStayedCancelled, detailAudioRetrySucceeded, messageSwitchStopped, videoOverlayOpened, videoOverlayEscapeClosed, videoDetailAutoLoaded, detailEscapeClosedAndStopped, escapePreservedScroll, scrollBeforePreview, scrollAfterEscape, deleteClosedAndStopped, videoPosterLoaded, videoRetryEnabled, videoRetrySucceeded, videoFallbackActionAvailable, unsupportedHint, unsupportedResolvedOnce, openCallDelta: openCallsAfter - openCallsBefore };
+      return { feedImageLoaded, failedImageStillVisible, imageRetryVisible, videoHasMarker, videoMarkerOnThumbnail, audioHasMarker, audioPlayMatchesBulkStyle, ordinarySingleClickIsInert, imageThumbnailOpenedOverlay, doubleClickOpenedDetails, audioInlineOpened, messageAudioPersistsAfterEnded, inlineAudioLoadingVisible, inlineAudioCancelledImmediately, inlineAudioStayedCancelled, inlineAudioCancelRequested, inlineAudioRetrySucceeded, audioSourceRequested, audioDuplicateSuppressed, audioCancelRequested, detailAudioCancelledImmediately, detailAudioStayedCancelled, detailAudioRetrySucceeded, messageSwitchStopped, videoOverlayOpened, videoOverlayEscapeClosed, videoDetailAutoLoaded, detailEscapeClosedAndStopped, escapePreservedScroll, scrollBeforePreview, scrollAfterEscape, deleteClosedAndStopped, videoPosterLoaded, videoRetryEnabled, videoRetrySucceeded, videoFallbackActionAvailable, unsupportedHint, unsupportedResolvedOnce, openCallDelta: openCallsAfter - openCallsBefore };
     })()`);
     assert.equal(messageMediaResult.feedImageLoaded, true, 'image messages use the common media preview resolver');
     assert.equal(messageMediaResult.failedImageStillVisible, true, 'failed feed previews keep the filename without rendering a redundant loading card');
@@ -1793,7 +1796,7 @@ async function run() {
       assert.equal(messageMediaResult.videoHasMarker, true, 'video messages expose a play marker');
       assert.equal(messageMediaResult.videoMarkerOnThumbnail, true, 'video play marker is contained by the thumbnail surface');
       assert.equal(messageMediaResult.audioHasMarker, true, 'audio messages expose a play marker');
-      assert.equal(messageMediaResult.audioMarkerOnThumbnail, true, 'audio play marker is contained by the file thumbnail surface');
+      assert.equal(messageMediaResult.audioPlayMatchesBulkStyle, true, 'audio file thumbnail and play action match the bulk download visual treatment');
       assert.equal(messageMediaResult.ordinarySingleClickIsInert, true, 'ordinary single-click does not open, download, or show details');
       assert.equal(messageMediaResult.imageThumbnailOpenedOverlay, true, 'single-clicking an image thumbnail opens the dedicated image preview');
       assert.equal(messageMediaResult.doubleClickOpenedDetails, true, 'double-clicking a message opens its detail dialog');
@@ -3054,10 +3057,10 @@ async function run() {
         };
         tick();
       });
-      const sourceAudioPlayerOpened = !!document.querySelector('.message-card .speech-source-audio-player .message-inline-audio-player')
+      const sourceAudioPlayerOpened = !!document.querySelector('.message-card .speech-source-audio-player .speech-inline-audio-player')
         && !!document.querySelector('.message-card .speech-source-audio-player audio[controls]');
-      document.querySelector('.message-card .speech-source-audio-player .message-inline-audio-close')?.click();
-      const sourceAudioPlayerClosed = !document.querySelector('.message-card .speech-source-audio-player .message-inline-audio-player')
+      document.querySelector('.message-card .speech-source-audio-player .speech-inline-audio-close')?.click();
+      const sourceAudioPlayerClosed = !document.querySelector('.message-card .speech-source-audio-player .speech-inline-audio-player')
         && !document.querySelector('.message-card .speech-source-audio-player > button')?.hidden;
       document.querySelector('.message-card .message-actions .button.primary.small.icon-only')?.click();
       await new Promise((resolve, reject) => {
