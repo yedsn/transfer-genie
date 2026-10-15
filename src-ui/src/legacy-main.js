@@ -1215,6 +1215,12 @@ let currentSettingsFormState = {
   speechToTextPolishTimeoutSecs: DEFAULT_SPEECH_POLISH_TIMEOUT_SECS,
   storageProfiles: [],
   activeStorageProfileId: null,
+  activeProviderKind: '',
+  activeProviderName: '',
+  activeProviderSpaceId: '',
+  activeProviderReady: false,
+  activeProviderAccountStatus: null,
+  activeProviderConnectionStatus: null,
   storageProfileEditorOpen: false,
   storageProfileEditorMode: 'create',
   storageProfileOriginalId: '',
@@ -11100,10 +11106,29 @@ function normalizeTelegramPollInterval(value) {
 }
 
 function getTelegramBridgeFormState() {
+  const activeProfile = (currentSettingsFormState.storageProfiles || []).find(
+    (profile) => profile?.id === currentSettingsFormState.activeStorageProfileId,
+  );
+  const providerState = settingsFormRuntime?.getTelegramBridgeProviderState
+    ? settingsFormRuntime.getTelegramBridgeProviderState({
+        ...currentSettingsFormState,
+        activeProviderKind: activeProfile?.provider_kind || '',
+        activeProviderName: activeProfile?.name || '',
+        activeProviderSpaceId: activeProfile?.supabase?.space_id || '',
+        activeProviderReady: !!getActiveEndpoint(),
+        activeProviderAccountStatus: activeProfile?.provider_kind === 'supabase'
+          ? currentSettingsFormState.supabaseProfileStatuses?.[activeProfile.id] || null
+          : null,
+        activeProviderConnectionStatus: activeProfile?.provider_kind === 'supabase'
+          ? currentSettingsFormState.supabaseConnectionStatuses?.[activeProfile.id] || null
+          : null,
+      })
+    : null;
   if (settingsFormRuntime?.getTelegramBridgeFormState) {
     return settingsFormRuntime.getTelegramBridgeFormState(
       currentSettingsFormState,
       !!getActiveEndpoint(),
+      providerState,
     );
   }
   const botToken = (currentSettingsFormState.telegramBotToken || '').trim();
@@ -11113,6 +11138,9 @@ function getTelegramBridgeFormState() {
     botToken,
     chatId,
     isConfigured: !!botToken && /^-?\d+$/.test(chatId) && hasActiveEndpoint,
+    providerLabel: activeProfile?.provider_kind === 'supabase' ? 'Supabase' : 'WebDAV',
+    spaceName: activeProfile?.name || '未选择存储空间',
+    availabilityReason: hasActiveEndpoint ? '' : '请先选择当前活动存储空间',
   };
 }
 
@@ -11229,7 +11257,7 @@ function syncTelegramProxyControlsState() {
 }
 
 function syncTelegramControlsState() {
-  const { isConfigured } = getTelegramBridgeFormState();
+  const { isConfigured, providerLabel, spaceName, availabilityReason } = getTelegramBridgeFormState();
   const running = telegramBridgeStatusLabel?.dataset.running === 'true';
   const controls = settingsRuntimeStatus?.getTelegramControlState
     ? settingsRuntimeStatus.getTelegramControlState({ isConfigured, running })
@@ -11243,6 +11271,15 @@ function syncTelegramControlsState() {
   if (telegramStopServiceButton) {
     telegramStopServiceButton.disabled = controls ? controls.stopDisabled : !running;
     telegramStopServiceButton.hidden = controls ? controls.stopHidden : !running;
+  }
+  const providerLabelElement = document.getElementById('telegram-active-provider');
+  const spaceNameElement = document.getElementById('telegram-active-space');
+  const availabilityElement = document.getElementById('telegram-availability');
+  if (providerLabelElement) providerLabelElement.textContent = providerLabel || '未选择';
+  if (spaceNameElement) spaceNameElement.textContent = spaceName || '未选择存储空间';
+  if (availabilityElement) {
+    availabilityElement.textContent = availabilityReason || '当前存储空间可用于 Telegram Bridge';
+    availabilityElement.classList.toggle('is-error', !!availabilityReason);
   }
 }
 
@@ -11699,6 +11736,7 @@ function applySettings(settings) {
   ) {
     activeEndpointId = null;
   }
+  const activeProfile = storageProfiles.find((profile) => profile?.id === activeEndpointId) || null;
   const telegram = settings.telegram || {};
   const ai = settings.ai || {};
   const speechToText = settings.speech_to_text || {};
@@ -11832,6 +11870,18 @@ function applySettings(settings) {
     speechToTextPolishTimeoutSecs: normalizeSpeechPolishTimeoutSecs(speechToText.polish_timeout_secs ?? DEFAULT_SPEECH_POLISH_TIMEOUT_SECS),
     storageProfiles,
     activeStorageProfileId: settings.active_storage_profile_id || settings.active_webdav_id || null,
+    activeProviderKind: activeProfile?.provider_kind || '',
+    activeProviderName: activeProfile?.name || '',
+    activeProviderSpaceId: activeProfile?.supabase?.space_id || '',
+    activeProviderReady: !!activeProfile && activeProfile.enabled !== false && (activeProfile.provider_kind === 'supabase'
+      ? !!activeProfile.supabase?.api_url?.trim()
+      : !!activeProfile.webdav?.url?.trim()),
+    activeProviderAccountStatus: activeProfile?.provider_kind === 'supabase'
+      ? currentSettingsFormState.supabaseProfileStatuses?.[activeProfile.id] || null
+      : null,
+    activeProviderConnectionStatus: activeProfile?.provider_kind === 'supabase'
+      ? currentSettingsFormState.supabaseConnectionStatuses?.[activeProfile.id] || null
+      : null,
     storageProfileEditorOpen: !!currentSettingsFormState.storageProfileEditorOpen,
     storageProfileEditorMode: currentSettingsFormState.storageProfileEditorMode || 'create',
     storageProfileOriginalId: currentSettingsFormState.storageProfileOriginalId || '',
@@ -11972,6 +12022,7 @@ async function loadSettings() {
           },
         };
         syncVueSettingsForm(currentSettingsFormState);
+        if (profile.id === activeEndpointId) syncTelegramControlsState();
         if (profile.id === currentSettingsFormState.supabaseProfileId) {
           setSupabaseAuthFeedback({
             supabaseAccountStatus: status,
@@ -14391,12 +14442,23 @@ function setSupabaseAuthFeedback(patch) {
     ...patch,
   };
   syncVueSettingsForm(currentSettingsFormState);
+  syncTelegramControlsState();
 }
 
 async function loadSupabaseProfileAccountStatus(profileId, options = {}) {
   if (!profileId) return null;
   try {
     const status = await invoke('supabase_current_user', { profileId });
+    if (profileId === activeEndpointId) {
+      currentSettingsFormState = {
+        ...currentSettingsFormState,
+        supabaseProfileStatuses: {
+          ...(currentSettingsFormState.supabaseProfileStatuses || {}),
+          [profileId]: status,
+        },
+      };
+      syncTelegramControlsState();
+    }
     const isCurrentEditor = currentSettingsFormState.storageProfileEditorOpen
       && currentSettingsFormState.storageProfileDraft?.provider_kind === 'supabase'
       && currentSettingsFormState.storageProfileDraft?.id === profileId;

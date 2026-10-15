@@ -27,7 +27,7 @@ features:
     details: 桌面应用内置本机 HTTP API，可直接被脚本、定时任务或本地工具调用。
   - icon: "📨"
     title: Telegram Bridge
-    details: 支持 Telegram 与 WebDAV 双向同步，用桌面端统一配置与托管 bridge 生命周期。
+    details: 支持 Telegram 与当前 WebDAV 或 Supabase 空间双向同步，运行开关与状态仅保存在本机。
   - icon: "🏷️"
     title: 标记与历史
     details: 消息流支持标签、筛选、下载和历史索引，适合做长期可检索的传输工作台。
@@ -77,7 +77,7 @@ Transfer Genie（传输小精灵）适合需要自托管跨设备传输的人：
 | 用 NAS 或自建 WebDAV 做传输收件箱 | [`NAS WebDAV 传输`](/use-cases/nas-webdav-transfer) |
 | 在多台设备之间同步文字、链接和命令片段 | [`跨设备文本同步`](/use-cases/cross-device-text-sync) |
 | 让脚本把文本或文件发进传输消息流 | [`HTTP API 自动化发送`](/use-cases/local-http-api-automation) |
-| 把 Telegram 消息和文件同步到 WebDAV | [`Telegram 与 WebDAV 同步`](/use-cases/telegram-webdav-bridge) |
+| 把 Telegram 消息和文件同步到 WebDAV / Supabase | [`Telegram 与存储空间同步`](/use-cases/telegram-webdav-bridge) |
 | 找微信文件传输助手替代方案 | [`对比微信文件传输助手`](/compare/transfer-genie-vs-wechat-file-transfer) |
 
 </div>

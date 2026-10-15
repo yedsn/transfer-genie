@@ -11,6 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::oneshot;
 
 #[derive(Clone, Serialize)]
 pub struct TelegramBridgeStatus {
@@ -19,6 +20,8 @@ pub struct TelegramBridgeStatus {
     pub last_started_ms: Option<i64>,
     pub last_stopped_ms: Option<i64>,
     pub last_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
 }
 
 pub struct ManagedTelegramBridgeProcess {
@@ -29,6 +32,9 @@ pub struct ManagedTelegramBridgeProcess {
 #[derive(Default)]
 pub struct TelegramBridgeManager {
     pub process: Option<ManagedTelegramBridgeProcess>,
+    pub managed_cancel: Option<oneshot::Sender<()>>,
+    pub managed_running: bool,
+    pub managed_generation: Option<u64>,
     pub last_started_ms: Option<i64>,
     pub last_stopped_ms: Option<i64>,
     pub last_error: Option<String>,
@@ -65,7 +71,7 @@ pub fn telegram_bridge_status_from_manager(
     manager: &TelegramBridgeManager,
 ) -> TelegramBridgeStatus {
     TelegramBridgeStatus {
-        running: manager.process.is_some(),
+        running: manager.process.is_some() || manager.managed_running,
         pid: manager
             .process
             .as_ref()
@@ -74,6 +80,7 @@ pub fn telegram_bridge_status_from_manager(
         last_started_ms: manager.last_started_ms,
         last_stopped_ms: manager.last_stopped_ms,
         last_error: manager.last_error.clone(),
+        generation: manager.managed_generation,
     }
 }
 
@@ -83,7 +90,7 @@ pub fn telegram_bridge_runtime_snapshot(
 ) -> ModuleRuntimeStateSnapshot {
     ModuleRuntimeStateSnapshot {
         enabled,
-        running: manager.process.is_some(),
+        running: manager.process.is_some() || manager.managed_running,
         last_error: manager.last_error.clone(),
         last_started_ms: manager.last_started_ms,
         last_stopped_ms: manager.last_stopped_ms,
@@ -91,7 +98,55 @@ pub fn telegram_bridge_runtime_snapshot(
 }
 
 pub fn telegram_bridge_is_running(manager: &TelegramBridgeManager) -> bool {
-    manager.process.is_some()
+    manager.process.is_some() || manager.managed_running
+}
+
+pub fn attach_managed_task(
+    manager: &mut TelegramBridgeManager,
+    generation: u64,
+    cancel: oneshot::Sender<()>,
+) {
+    manager.managed_cancel = Some(cancel);
+    manager.managed_running = true;
+    manager.managed_generation = Some(generation);
+    manager.last_started_ms = Some(now_ms());
+    manager.last_error = None;
+}
+
+pub fn finish_managed_task(
+    manager: &mut TelegramBridgeManager,
+    generation: u64,
+    error: Option<String>,
+) {
+    if manager.managed_generation != Some(generation) {
+        return;
+    }
+    manager.managed_cancel = None;
+    manager.managed_running = false;
+    manager.last_stopped_ms = Some(now_ms());
+    if error.is_some() {
+        manager.last_error = error;
+    }
+}
+
+pub fn record_managed_task_error(
+    manager: &mut TelegramBridgeManager,
+    generation: u64,
+    error: String,
+) {
+    if manager.managed_generation == Some(generation) {
+        manager.last_error = Some(error);
+    }
+}
+
+pub fn stop_managed_task(manager: &mut TelegramBridgeManager) -> bool {
+    let Some(cancel) = manager.managed_cancel.take() else {
+        return false;
+    };
+    let _ = cancel.send(());
+    manager.managed_running = false;
+    manager.last_stopped_ms = Some(now_ms());
+    true
 }
 
 pub fn finish_telegram_bridge_process(
@@ -130,7 +185,7 @@ pub fn stop_active_process(manager: &mut TelegramBridgeManager) -> bool {
         finish_telegram_bridge_process(manager, process, None);
         true
     } else {
-        false
+        stop_managed_task(manager)
     }
 }
 
@@ -445,6 +500,58 @@ mod tests {
     fn telegram_bridge_is_running_reflects_process_presence() {
         let manager = TelegramBridgeManager::default();
         assert!(!telegram_bridge_is_running(&manager));
+    }
+
+    #[test]
+    fn managed_task_lifecycle_tracks_generation_and_cancellation() {
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let mut manager = TelegramBridgeManager::default();
+
+        attach_managed_task(&mut manager, 7, cancel_tx);
+
+        assert!(telegram_bridge_is_running(&manager));
+        assert_eq!(manager.managed_generation, Some(7));
+        assert_eq!(
+            telegram_bridge_status_from_manager(&manager).generation,
+            Some(7)
+        );
+        assert!(manager.last_started_ms.is_some());
+        assert!(stop_managed_task(&mut manager));
+        assert!(!telegram_bridge_is_running(&manager));
+        assert!(cancel_rx.blocking_recv().is_ok());
+        assert!(manager.last_stopped_ms.is_some());
+    }
+
+    #[test]
+    fn stale_managed_task_completion_cannot_finish_new_generation() {
+        let (old_cancel, _) = oneshot::channel();
+        let (new_cancel, _) = oneshot::channel();
+        let mut manager = TelegramBridgeManager::default();
+        attach_managed_task(&mut manager, 1, old_cancel);
+        attach_managed_task(&mut manager, 2, new_cancel);
+
+        finish_managed_task(&mut manager, 1, Some("stale failure".into()));
+
+        assert!(telegram_bridge_is_running(&manager));
+        assert_eq!(manager.managed_generation, Some(2));
+        assert!(manager.last_error.is_none());
+
+        finish_managed_task(&mut manager, 2, Some("current failure".into()));
+        assert!(!telegram_bridge_is_running(&manager));
+        assert_eq!(manager.last_error.as_deref(), Some("current failure"));
+    }
+
+    #[test]
+    fn managed_task_error_is_observable_only_for_current_generation() {
+        let (cancel, _) = oneshot::channel();
+        let mut manager = TelegramBridgeManager::default();
+        attach_managed_task(&mut manager, 9, cancel);
+
+        record_managed_task_error(&mut manager, 8, "stale".into());
+        assert!(manager.last_error.is_none());
+
+        record_managed_task_error(&mut manager, 9, "delivery unknown".into());
+        assert_eq!(manager.last_error.as_deref(), Some("delivery unknown"));
     }
 
     #[test]

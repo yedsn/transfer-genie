@@ -371,14 +371,38 @@ pub async fn create_space(
 }
 
 pub async fn validate_space_access(
-    _client: &Client,
+    client: &Client,
     config: &SupabaseStorageConfig,
-    _session: &SupabaseSession,
+    session: &SupabaseSession,
 ) -> Result<(), String> {
     if config.space_id.trim().is_empty() {
         return Err("尚未绑定账号中的 Supabase 空间".to_string());
     }
-    Ok(())
+    let response = client
+        .get(format!(
+            "{}/rest/v1/spaces",
+            config.api_url.trim_end_matches('/')
+        ))
+        .header("apikey", &config.anon_key)
+        .bearer_auth(&session.access_token)
+        .header("Accept-Profile", APP_SCHEMA)
+        .query(&[
+            ("id", format!("eq.{}", config.space_id)),
+            ("select", "id".to_string()),
+            ("limit", "1".to_string()),
+        ])
+        .send()
+        .await
+        .map_err(|error| format!("验证 Supabase 存储空间访问失败: {error}"))?;
+    let rows: Vec<Value> = parse_json_response(response, "spaces").await?;
+    if rows
+        .iter()
+        .any(|row| row["id"].as_str() == Some(config.space_id.as_str()))
+    {
+        Ok(())
+    } else {
+        Err("当前 Supabase 存储空间不存在或账号无权访问".to_string())
+    }
 }
 
 pub async fn push_operation(

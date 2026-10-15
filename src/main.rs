@@ -115,6 +115,7 @@ static SYSTEM_DICTATION_TARGET_APP_PID: std::sync::atomic::AtomicI32 =
     std::sync::atomic::AtomicI32::new(0);
 
 struct AppState {
+    app_handle: Option<AppHandle>,
     settings_path: PathBuf,
     db_path: PathBuf,
     files_base_dir: PathBuf,
@@ -132,6 +133,7 @@ struct AppState {
     registered_hotkey: Mutex<Option<Shortcut>>,
     registered_system_dictation_hotkey: Mutex<Option<Shortcut>>,
     telegram_bridge: Mutex<TelegramBridgeManager>,
+    telegram_bridge_generation: std::sync::atomic::AtomicU64,
     local_http_api: Mutex<LocalHttpApiManager>,
     update_guard: AsyncMutex<()>,
     auto_backup_guard: AsyncMutex<()>,
@@ -1482,7 +1484,10 @@ fn supabase_message_payload(message: &DbMessage) -> serde_json::Value {
         "sourceAudioMimeType":message.source_audio_mime_type,
         "transcriptRawText":message.transcript_raw_text,"marked":message.marked,
         "markedTagIds":message.marked_tag_ids,"markedPinned":message.marked_pinned,
-        "markedDueDate":message.marked_due_date
+        "markedDueDate":message.marked_due_date,
+        "sourceKind":message.source_kind,
+        "sourceChannelId":message.source_channel_id,
+        "sourceMessageId":message.source_message_id
     })
 }
 
@@ -2080,6 +2085,9 @@ async fn refresh_storage_transfer_source(
                     transcript_source: entry.transcript_source,
                     source_audio_mime_type: entry.source_audio_mime_type,
                     transcript_raw_text: entry.transcript_raw_text,
+                    source_kind: entry.source_kind,
+                    source_channel_id: entry.source_channel_id,
+                    source_message_id: entry.source_message_id,
                 };
                 if message.kind == "text" && message.content.is_none() {
                     let remote_path = resolved_remote_path(
@@ -2859,6 +2867,9 @@ async fn write_storage_transfer_message_to_webdav(
         transcript_source: source_message.transcript_source.clone(),
         source_audio_mime_type: source_message.source_audio_mime_type.clone(),
         transcript_raw_text: source_message.transcript_raw_text.clone(),
+        source_kind: source_message.source_kind.clone(),
+        source_channel_id: source_message.source_channel_id.clone(),
+        source_message_id: source_message.source_message_id.clone(),
     };
     crate::history::upsert_history_entries(&state.http, target, vec![message_to_history(&message)])
         .await?;
@@ -3493,6 +3504,9 @@ async fn import_storage_message_to_supabase(
         transcript_source: source_message.transcript_source.clone(),
         source_audio_mime_type: source_message.source_audio_mime_type.clone(),
         transcript_raw_text: source_message.transcript_raw_text.clone(),
+        source_kind: source_message.source_kind.clone(),
+        source_channel_id: source_message.source_channel_id.clone(),
+        source_message_id: source_message.source_message_id.clone(),
     };
     let mut message_base_revision = 0;
     let existing_by_id = db::get_message_by_id_for_scope(
@@ -4673,6 +4687,754 @@ fn supabase_send_result(profile_id: &str, message: &DbMessage) -> SendMessageRes
             .as_ref()
             .and_then(|_| message.content.clone()),
         transcript_raw_text: message.transcript_raw_text.clone(),
+    }
+}
+
+#[derive(Clone)]
+struct IntegrationTargetContext {
+    generation: Option<u64>,
+    provider: storage_provider::ProviderConfig,
+    owner_scope: String,
+    session: Option<supabase_auth::SupabaseSession>,
+}
+
+impl IntegrationTargetContext {
+    fn profile_id(&self) -> &str {
+        self.provider.profile_id()
+    }
+
+    fn provider_kind(&self) -> &'static str {
+        self.provider.provider_kind()
+    }
+}
+
+#[derive(Clone)]
+struct ExternalSourceIdentity {
+    kind: String,
+    channel_id: String,
+    message_id: String,
+}
+
+fn external_source_uuid(source: &ExternalSourceIdentity, entity_kind: &str) -> String {
+    uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_URL,
+        format!(
+            "transfer-genie:{entity_kind}:{}:{}:{}",
+            source.kind, source.channel_id, source.message_id
+        )
+        .as_bytes(),
+    )
+    .to_string()
+}
+
+fn external_source_filename(
+    sender: &str,
+    original_name: &str,
+    timestamp_ms: i64,
+    source: &ExternalSourceIdentity,
+) -> String {
+    let nonce = &external_source_uuid(source, "filename")[..8];
+    format!(
+        "{}__{}__{}__{}",
+        timestamp_ms,
+        encode_component(sender),
+        nonce,
+        encode_component(original_name)
+    )
+}
+
+fn integration_context_matches(state: &AppState, context: &IntegrationTargetContext) -> bool {
+    if let Some(generation) = context.generation {
+        if state
+            .telegram_bridge_generation
+            .load(std::sync::atomic::Ordering::SeqCst)
+            != generation
+        {
+            return false;
+        }
+    }
+    let current = current_settings(state)
+        .ok()
+        .and_then(|settings| storage_provider::resolve_active_provider(&settings).ok());
+    let Some(current) = current else {
+        return false;
+    };
+    if current.profile_id() != context.profile_id()
+        || current.provider_kind() != context.provider_kind()
+    {
+        return false;
+    }
+    match (&context.provider, &current, context.session.as_ref()) {
+        (
+            storage_provider::ProviderConfig::Webdav(expected),
+            storage_provider::ProviderConfig::Webdav(actual),
+            _,
+        ) => expected == actual,
+        (
+            storage_provider::ProviderConfig::Supabase(expected),
+            storage_provider::ProviderConfig::Supabase(actual),
+            Some(session),
+        ) => {
+            expected == actual
+                && context.owner_scope == session.user_id
+                && state
+                    .supabase_sessions
+                    .lock()
+                    .ok()
+                    .and_then(|sessions| sessions.get(&expected.id).cloned())
+                    .is_some_and(|current| current.user_id == session.user_id)
+        }
+        _ => false,
+    }
+}
+
+fn ensure_integration_context(
+    state: &AppState,
+    context: &IntegrationTargetContext,
+) -> Result<(), String> {
+    integration_context_matches(state, context)
+        .then_some(())
+        .ok_or_else(|| "目标存储空间已切换，已拒绝旧任务写入".to_string())
+}
+
+fn resolve_send_target_context(
+    state: &AppState,
+    settings: &Settings,
+) -> Result<IntegrationTargetContext, String> {
+    let provider = storage_provider::resolve_active_provider(settings)?;
+    match provider {
+        storage_provider::ProviderConfig::Webdav(endpoint) => Ok(IntegrationTargetContext {
+            generation: None,
+            provider: storage_provider::ProviderConfig::Webdav(endpoint),
+            owner_scope: String::new(),
+            session: None,
+        }),
+        storage_provider::ProviderConfig::Supabase(profile) => {
+            let config = profile
+                .supabase
+                .as_ref()
+                .ok_or_else(|| "Supabase 存储空间配置不完整".to_string())?;
+            if config.space_id.trim().is_empty() {
+                return Err("当前 Supabase 存储空间尚未完成绑定".to_string());
+            }
+            let session = state
+                .supabase_sessions
+                .lock()
+                .map_err(|_| "读取 Supabase 会话失败".to_string())?
+                .get(&profile.id)
+                .cloned()
+                .ok_or_else(|| "请先登录当前 Supabase 存储空间".to_string())?;
+            Ok(IntegrationTargetContext {
+                generation: None,
+                owner_scope: session.user_id.clone(),
+                provider: storage_provider::ProviderConfig::Supabase(profile),
+                session: Some(session),
+            })
+        }
+    }
+}
+
+async fn ingest_external_text(
+    state: &AppState,
+    context: &IntegrationTargetContext,
+    sender: &str,
+    timestamp_ms: i64,
+    text: String,
+    source: ExternalSourceIdentity,
+) -> Result<(), String> {
+    ensure_integration_context(state, context)?;
+    if db::find_message_by_source_for_scope(
+        &state.db_path,
+        context.profile_id(),
+        &context.owner_scope,
+        &source.kind,
+        &source.channel_id,
+        &source.message_id,
+    )
+    .map_err(|error| error.to_string())?
+    .is_some()
+    {
+        return Ok(());
+    }
+    let filename = external_source_filename(sender, "message.txt", timestamp_ms, &source);
+    let remote_path = message_remote_path(&filename, timestamp_ms);
+    let message = DbMessage {
+        endpoint_id: context.profile_id().to_string(),
+        filename: filename.clone(),
+        sender: sender.to_string(),
+        timestamp_ms,
+        size: text.len() as i64,
+        kind: "text".into(),
+        original_name: "message.txt".into(),
+        etag: None,
+        mtime: None,
+        content: Some(text.clone()),
+        local_path: None,
+        remote_path: None,
+        file_hash: None,
+        marked: false,
+        marked_tag_ids: Vec::new(),
+        marked_pinned: false,
+        marked_due_date: None,
+        format: "text".into(),
+        transcript_source: None,
+        source_audio_mime_type: None,
+        transcript_raw_text: None,
+        source_kind: Some(source.kind.clone()),
+        source_channel_id: Some(source.channel_id.clone()),
+        source_message_id: Some(source.message_id.clone()),
+    };
+    match &context.provider {
+        storage_provider::ProviderConfig::Supabase(profile) => {
+            let session = context
+                .session
+                .as_ref()
+                .ok_or_else(|| "请先登录当前 Supabase 存储空间".to_string())?;
+            let message_id = external_source_uuid(&source, "message");
+            let operation = outbox_operation(
+                &profile.id,
+                &session.user_id,
+                "message",
+                &message_id,
+                "upsert",
+                0,
+                supabase_message_payload(&message),
+            )?;
+            db::save_message_and_enqueue(&state.db_path, &message, &operation)
+                .map_err(|error| format!("保存 Telegram Supabase 文本失败: {error}"))?;
+            notify_supabase_outbox_pending(state);
+        }
+        storage_provider::ProviderConfig::Webdav(endpoint) => {
+            webdav::upload_file_ensuring_parent(
+                &state.http,
+                endpoint,
+                &remote_path,
+                text.into_bytes(),
+            )
+            .await?;
+            ensure_integration_context(state, context)?;
+            let mut message = message;
+            message.remote_path = Some(remote_path);
+            db::upsert_message(&state.db_path, &message).map_err(|error| error.to_string())?;
+            crate::history::upsert_history_entries(
+                &state.http,
+                endpoint,
+                vec![message_to_history(&message)],
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn ingest_external_file(
+    state: &AppState,
+    context: &IntegrationTargetContext,
+    sender: &str,
+    timestamp_ms: i64,
+    original_name: String,
+    bytes: Vec<u8>,
+    source: ExternalSourceIdentity,
+) -> Result<(), String> {
+    ensure_integration_context(state, context)?;
+    if db::find_message_by_source_for_scope(
+        &state.db_path,
+        context.profile_id(),
+        &context.owner_scope,
+        &source.kind,
+        &source.channel_id,
+        &source.message_id,
+    )
+    .map_err(|error| error.to_string())?
+    .is_some()
+    {
+        return Ok(());
+    }
+    let filename = external_source_filename(sender, &original_name, timestamp_ms, &source);
+    let remote_path = message_remote_path(&filename, timestamp_ms);
+    let file_hash = format!("{:x}", Sha256::digest(&bytes));
+    match &context.provider {
+        storage_provider::ProviderConfig::Supabase(profile) => {
+            let session = context
+                .session
+                .as_ref()
+                .ok_or_else(|| "请先登录当前 Supabase 存储空间".to_string())?;
+            let message_id = external_source_uuid(&source, "message");
+            let attachment_id = external_source_uuid(&source, "attachment");
+            let local_dir = endpoint_files_dir(state, &profile.id)
+                .join(&session.user_id)
+                .join("attachments")
+                .join(&attachment_id);
+            fs::create_dir_all(&local_dir)
+                .map_err(|error| format!("创建 Telegram 附件缓存失败: {error}"))?;
+            let local_path = local_dir.join(&original_name);
+            fs::write(&local_path, &bytes)
+                .map_err(|error| format!("保存 Telegram 附件原件失败: {error}"))?;
+            ensure_integration_context(state, context)?;
+            let config = profile
+                .supabase
+                .as_ref()
+                .ok_or_else(|| "Supabase 存储空间配置不完整".to_string())?;
+            let object_path = supabase_attachment_object_path(
+                &session.user_id,
+                &config.space_id,
+                &attachment_id,
+                &original_name,
+            );
+            let message = DbMessage {
+                endpoint_id: profile.id.clone(),
+                filename,
+                sender: sender.to_string(),
+                timestamp_ms,
+                size: bytes.len() as i64,
+                kind: "file".into(),
+                original_name: original_name.clone(),
+                etag: None,
+                mtime: None,
+                content: None,
+                local_path: Some(local_path.to_string_lossy().to_string()),
+                remote_path: Some(object_path.clone()),
+                file_hash: Some(file_hash.clone()),
+                marked: false,
+                marked_tag_ids: Vec::new(),
+                marked_pinned: false,
+                marked_due_date: None,
+                format: "text".into(),
+                transcript_source: None,
+                source_audio_mime_type: None,
+                transcript_raw_text: None,
+                source_kind: Some(source.kind.clone()),
+                source_channel_id: Some(source.channel_id.clone()),
+                source_message_id: Some(source.message_id.clone()),
+            };
+            let message_operation = outbox_operation(
+                &profile.id,
+                &session.user_id,
+                "message",
+                &message_id,
+                "upsert",
+                0,
+                supabase_message_payload(&message),
+            )?;
+            let mime_type = attachment_mime_type(&original_name);
+            let attachment_operation = outbox_operation(
+                &profile.id,
+                &session.user_id,
+                "attachment",
+                &attachment_id,
+                "upsert",
+                0,
+                serde_json::json!({
+                    "messageId":message_id,"originalName":original_name,"objectPath":object_path,
+                    "previewObjectPath":null,"mimeType":mime_type,"size":bytes.len(),"sha256":file_hash,"uploadStatus":"uploaded"
+                }),
+            )?;
+            db::save_file_message_and_enqueue(
+                &state.db_path,
+                &message,
+                &message_operation,
+                &attachment_id,
+                &object_path,
+                Some(mime_type),
+                &attachment_operation,
+            )
+            .map_err(|error| format!("保存 Telegram Supabase 附件失败: {error}"))?;
+            notify_supabase_outbox_pending(state);
+        }
+        storage_provider::ProviderConfig::Webdav(endpoint) => {
+            let local_dir = endpoint_files_dir(state, &endpoint.id);
+            fs::create_dir_all(&local_dir).map_err(|error| error.to_string())?;
+            let local_path = local_dir.join(&filename);
+            fs::write(&local_path, &bytes).map_err(|error| error.to_string())?;
+            ensure_integration_context(state, context)?;
+            webdav::upload_file_ensuring_parent(&state.http, endpoint, &remote_path, bytes.clone())
+                .await?;
+            ensure_integration_context(state, context)?;
+            let message = DbMessage {
+                endpoint_id: endpoint.id.clone(),
+                filename,
+                sender: sender.to_string(),
+                timestamp_ms,
+                size: bytes.len() as i64,
+                kind: "file".into(),
+                original_name,
+                etag: None,
+                mtime: None,
+                content: None,
+                local_path: Some(local_path.to_string_lossy().to_string()),
+                remote_path: Some(remote_path),
+                file_hash: Some(file_hash),
+                marked: false,
+                marked_tag_ids: Vec::new(),
+                marked_pinned: false,
+                marked_due_date: None,
+                format: "text".into(),
+                transcript_source: None,
+                source_audio_mime_type: None,
+                transcript_raw_text: None,
+                source_kind: Some(source.kind),
+                source_channel_id: Some(source.channel_id),
+                source_message_id: Some(source.message_id),
+            };
+            db::upsert_message(&state.db_path, &message).map_err(|error| error.to_string())?;
+            crate::history::upsert_history_entries(
+                &state.http,
+                endpoint,
+                vec![message_to_history(&message)],
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn telegram_outbound_file_bytes(
+    state: &AppState,
+    context: &IntegrationTargetContext,
+    message: &Message,
+) -> Result<Vec<u8>, String> {
+    if let Some(path) = message
+        .local_path
+        .as_deref()
+        .map(Path::new)
+        .filter(|path| path.is_file())
+    {
+        return fs::read(path).map_err(|error| format!("读取 Telegram 待发送附件失败: {error}"));
+    }
+    match &context.provider {
+        storage_provider::ProviderConfig::Webdav(endpoint) => {
+            let remote_path = resolved_remote_path(
+                message.remote_path.as_deref(),
+                &message.filename,
+                Some(message.timestamp_ms),
+            );
+            webdav::download_file(&state.http, endpoint, &remote_path).await
+        }
+        storage_provider::ProviderConfig::Supabase(profile) => {
+            let session = context
+                .session
+                .as_ref()
+                .ok_or_else(|| "请先登录当前 Supabase 存储空间".to_string())?;
+            let config = profile
+                .supabase
+                .as_ref()
+                .ok_or_else(|| "Supabase 存储空间配置不完整".to_string())?;
+            let object_path = message
+                .remote_path
+                .as_deref()
+                .ok_or_else(|| "Supabase 附件尚未上传".to_string())?;
+            supabase_sync::download_storage_object(&state.http, config, session, object_path).await
+        }
+    }
+}
+
+async fn resolve_telegram_integration_context(
+    state: &AppState,
+    generation: u64,
+) -> Result<IntegrationTargetContext, String> {
+    let settings = current_settings(state)?;
+    let provider = storage_provider::resolve_active_provider(&settings)?;
+    match provider {
+        storage_provider::ProviderConfig::Webdav(endpoint) => {
+            webdav::ensure_directory(&state.http, &endpoint, "files").await?;
+            Ok(IntegrationTargetContext {
+                generation: Some(generation),
+                provider: storage_provider::ProviderConfig::Webdav(endpoint),
+                owner_scope: String::new(),
+                session: None,
+            })
+        }
+        storage_provider::ProviderConfig::Supabase(profile) => {
+            let config = profile
+                .supabase
+                .as_ref()
+                .ok_or_else(|| "Supabase 存储空间配置不完整".to_string())?;
+            if config.space_id.trim().is_empty() {
+                return Err("当前 Supabase 存储空间尚未完成绑定".to_string());
+            }
+            let session = verified_supabase_session(state, &profile.id)
+                .await
+                .map_err(|error| error.message)?
+                .ok_or_else(|| "请先登录当前 Supabase 存储空间".to_string())?;
+            supabase_sync::validate_space_access(&state.http, config, &session).await?;
+            Ok(IntegrationTargetContext {
+                generation: Some(generation),
+                owner_scope: session.user_id.clone(),
+                provider: storage_provider::ProviderConfig::Supabase(profile),
+                session: Some(session),
+            })
+        }
+    }
+}
+
+fn telegram_managed_config(
+    settings: &Settings,
+) -> Result<telegram_bridge::ManagedTelegramConfig, String> {
+    let telegram = &settings.telegram;
+    let bot_token = telegram.bot_token.trim();
+    if bot_token.is_empty() {
+        return Err("请先填写 Telegram Bot Token".to_string());
+    }
+    let allowed_chat_id = telegram
+        .chat_id
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| "Telegram Chat ID 格式无效".to_string())?;
+    if allowed_chat_id == 0 {
+        return Err("Telegram Chat ID 不能为 0".to_string());
+    }
+    Ok(telegram_bridge::ManagedTelegramConfig {
+        device_sender_name: settings.sender_name.clone(),
+        telegram_sender_name: telegram.sender_name.clone(),
+        bot_token: bot_token.to_string(),
+        allowed_chat_id,
+        proxy_url: if telegram.proxy_enabled {
+            telegram.proxy_url.clone()
+        } else {
+            String::new()
+        },
+        poll_interval_secs: telegram.poll_interval_secs.max(1),
+    })
+}
+
+fn telegram_binding_key(context: &IntegrationTargetContext, chat_id: i64) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        context.provider_kind(),
+        context.profile_id(),
+        context.owner_scope,
+        chat_id
+    )
+}
+
+fn telegram_delivery_is_terminal(status: &str) -> bool {
+    matches!(
+        status,
+        "sent" | "delivery_unconfirmed" | "permanent_failure" | "sending"
+    )
+}
+
+fn telegram_message_is_external_source(message: &Message) -> bool {
+    message.source_kind.as_deref() == Some("telegram")
+}
+
+async fn run_managed_telegram_bridge(
+    app_handle: AppHandle,
+    generation: u64,
+    mut cancel: oneshot::Receiver<()>,
+) -> Result<(), String> {
+    let state = app_handle.state::<AppState>();
+    let settings = current_settings(&state)?;
+    let telegram = telegram_managed_config(&settings)?;
+    let mut context = resolve_telegram_integration_context(&state, generation).await?;
+    ensure_integration_context(&state, &context)?;
+    let client = telegram_bridge::build_managed_telegram_client(&telegram)?;
+    let binding_key = telegram_binding_key(&context, telegram.allowed_chat_id);
+    db::recover_telegram_sending_deliveries(&state.db_path, &binding_key, now_ms())
+        .map_err(|error| format!("恢复 Telegram 本机投递状态失败: {error}"))?;
+    let existing = db::telegram_bridge_binding_state(&state.db_path, &binding_key)
+        .map_err(|error| error.to_string())?;
+    let mut last_update_id = existing.as_ref().map(|state| state.0).unwrap_or(0);
+    let mut watermark_ms = now_ms();
+    let mut watermark_key = String::new();
+    db::upsert_telegram_bridge_binding_state(
+        &state.db_path,
+        &binding_key,
+        context.profile_id(),
+        &context.owner_scope,
+        context.provider_kind(),
+        last_update_id,
+        watermark_ms,
+        &watermark_key,
+        now_ms(),
+    )
+    .map_err(|error| error.to_string())?;
+
+    loop {
+        if let storage_provider::ProviderConfig::Supabase(profile) = &context.provider {
+            let session = valid_supabase_session(&state, &profile.id, false)
+                .await
+                .map_err(|error| error.message)?
+                .ok_or_else(|| "请先登录当前 Supabase 存储空间".to_string())?;
+            if session.user_id != context.owner_scope {
+                return Err("Supabase 登录账号已变化，请重新登录".to_string());
+            }
+            context.session = Some(session);
+        }
+        ensure_integration_context(&state, &context)?;
+        tokio::select! {
+            _ = &mut cancel => return Ok(()),
+            updates = telegram_bridge::fetch_managed_updates(&client, &telegram, last_update_id) => {
+                let updates = updates?;
+                for update in updates {
+                    ensure_integration_context(&state, &context)?;
+                    if let Some(payload) = update.payload {
+                        let source = ExternalSourceIdentity {
+                            kind: "telegram".into(), channel_id: update.chat_id.to_string(),
+                            message_id: update.message_id.to_string(),
+                        };
+                        let exists = db::find_message_by_source_for_scope(
+                            &state.db_path, context.profile_id(), &context.owner_scope,
+                            &source.kind, &source.channel_id, &source.message_id,
+                        ).map_err(|error| error.to_string())?.is_some();
+                        if !exists {
+                            match payload {
+                                telegram_bridge::ManagedInboundPayload::Text(text) => {
+                                    ingest_external_text(&state, &context, &update.sender, update.timestamp_ms, text, source).await?;
+                                }
+                                telegram_bridge::ManagedInboundPayload::File { file_id, original_name, size_hint } => {
+                                    let bytes = telegram_bridge::download_managed_file(&client, &telegram, &file_id, size_hint).await?;
+                                    ensure_integration_context(&state, &context)?;
+                                    ingest_external_file(&state, &context, &update.sender, update.timestamp_ms, original_name, bytes, source).await?;
+                                }
+                            }
+                        }
+                    }
+                    last_update_id = last_update_id.max(update.update_id);
+                    db::upsert_telegram_bridge_binding_state(
+                        &state.db_path, &binding_key, context.profile_id(), &context.owner_scope, context.provider_kind(),
+                        last_update_id, watermark_ms, &watermark_key, now_ms(),
+                    ).map_err(|error| error.to_string())?;
+                }
+            }
+        }
+
+        let provider_sync_result = if matches!(
+            context.provider,
+            storage_provider::ProviderConfig::Supabase(_)
+        ) {
+            if let (storage_provider::ProviderConfig::Supabase(profile), Some(session)) =
+                (&context.provider, context.session.as_ref())
+            {
+                pull_supabase_changes(&state, profile, session)
+                    .await
+                    .map(|_| ())
+            } else {
+                Err("Supabase Bridge 缺少本机会话".to_string())
+            }
+        } else {
+            sync_once(&state, false).await.map(|_| ())
+        };
+        if let Err(error) = provider_sync_result {
+            return Err(format!("刷新 Telegram Bridge 绑定空间失败: {error}"));
+        }
+
+        let messages = db::list_messages_after_for_scope(
+            &state.db_path,
+            context.profile_id(),
+            &context.owner_scope,
+            watermark_ms,
+            &watermark_key,
+            100,
+            false,
+        )
+        .map_err(|error| format!("读取 Telegram 待投递消息失败: {error}"))?;
+        for message in messages {
+            ensure_integration_context(&state, &context)?;
+            let stable_key = message
+                .message_id
+                .clone()
+                .unwrap_or_else(|| message.filename.clone());
+            if telegram_message_is_external_source(&message) {
+                watermark_ms = message.timestamp_ms;
+                watermark_key = stable_key.clone();
+                continue;
+            }
+            if let Some(record) =
+                db::get_telegram_delivery_record(&state.db_path, &binding_key, &stable_key)
+                    .map_err(|error| error.to_string())?
+            {
+                if telegram_delivery_is_terminal(&record.status) {
+                    watermark_ms = message.timestamp_ms;
+                    watermark_key = stable_key.clone();
+                    continue;
+                }
+            }
+            let attempt_ms = now_ms();
+            db::upsert_telegram_delivery_record(
+                &state.db_path,
+                &binding_key,
+                &db::TelegramDeliveryRecord {
+                    message_key: stable_key.clone(),
+                    status: "sending".into(),
+                    telegram_message_id: None,
+                    last_error: None,
+                    last_attempt_ms: Some(attempt_ms),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            let result = if message.kind == "text" {
+                telegram_bridge::send_managed_text(
+                    &client,
+                    &telegram,
+                    &message.sender,
+                    message.content.as_deref().unwrap_or_default(),
+                )
+                .await
+            } else {
+                match telegram_outbound_file_bytes(&state, &context, &message).await {
+                    Ok(bytes) => {
+                        telegram_bridge::send_managed_file(
+                            &client,
+                            &telegram,
+                            &message.sender,
+                            &message.original_name,
+                            bytes,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                }
+            };
+            let record = match result {
+                Ok(message_id) => db::TelegramDeliveryRecord {
+                    message_key: stable_key.clone(),
+                    status: "sent".into(),
+                    telegram_message_id: Some(message_id),
+                    last_error: None,
+                    last_attempt_ms: Some(attempt_ms),
+                },
+                Err(error) => db::TelegramDeliveryRecord {
+                    message_key: stable_key.clone(),
+                    status: telegram_bridge::managed_delivery_error_status(&error).into(),
+                    telegram_message_id: None,
+                    last_error: Some(error),
+                    last_attempt_ms: Some(attempt_ms),
+                },
+            };
+            let delivery_status = record.status.clone();
+            db::upsert_telegram_delivery_record(&state.db_path, &binding_key, &record)
+                .map_err(|error| error.to_string())?;
+            if record.status == "delivery_unconfirmed" || record.status == "permanent_failure" {
+                if let Ok(mut manager) = state.telegram_bridge.lock() {
+                    crate::telegram_bridge_runtime::record_managed_task_error(
+                        &mut manager,
+                        context.generation.unwrap_or_default(),
+                        record
+                            .last_error
+                            .clone()
+                            .unwrap_or_else(|| record.status.clone()),
+                    );
+                }
+            }
+            if delivery_status == "retryable_error" {
+                break;
+            }
+            watermark_ms = message.timestamp_ms;
+            watermark_key = stable_key;
+        }
+        db::upsert_telegram_bridge_binding_state(
+            &state.db_path,
+            &binding_key,
+            context.profile_id(),
+            &context.owner_scope,
+            context.provider_kind(),
+            last_update_id,
+            watermark_ms,
+            &watermark_key,
+            now_ms(),
+        )
+        .map_err(|error| error.to_string())?;
     }
 }
 
@@ -9285,7 +10047,28 @@ async fn send_text_impl(
     marked_options: Option<SendMarkedOptionsInput>,
 ) -> Result<SendMessageResult, String> {
     let settings = current_settings(&state)?;
+    let context = resolve_send_target_context(state, &settings)?;
     let format = normalize_send_text_format(format)?;
+    send_text_to_context(
+        state,
+        &context,
+        &settings.sender_name,
+        text,
+        format,
+        marked_options,
+    )
+    .await
+}
+
+async fn send_text_to_context(
+    state: &AppState,
+    context: &IntegrationTargetContext,
+    sender: &str,
+    text: String,
+    format: String,
+    marked_options: Option<SendMarkedOptionsInput>,
+) -> Result<SendMessageResult, String> {
+    ensure_integration_context(state, context)?;
     let is_markdown = format == "markdown";
     let extension = if is_markdown {
         "message.md"
@@ -9294,17 +10077,20 @@ async fn send_text_impl(
     };
 
     let timestamp_ms = now_ms();
-    let filename = build_message_filename(&settings.sender_name, extension, timestamp_ms);
+    let filename = build_message_filename(sender, extension, timestamp_ms);
     let remote_path = message_remote_path(&filename, timestamp_ms);
     let data = text.clone().into_bytes();
 
-    if let Some((profile, session)) = active_supabase_context(state, &settings)? {
+    if let (storage_provider::ProviderConfig::Supabase(profile), Some(session)) =
+        (&context.provider, context.session.as_ref())
+    {
         let _guard = state.sync_guard.lock().await;
+        ensure_integration_context(state, context)?;
         let message_id = uuid::Uuid::new_v4().to_string();
         let mut message = DbMessage {
             endpoint_id: profile.id.clone(),
             filename: filename.clone(),
-            sender: settings.sender_name.clone(),
+            sender: sender.to_string(),
             timestamp_ms,
             size: data.len() as i64,
             kind: MessageKind::Text.as_str().to_string(),
@@ -9323,11 +10109,14 @@ async fn send_text_impl(
             transcript_source: None,
             source_audio_mime_type: None,
             transcript_raw_text: None,
+            source_kind: None,
+            source_channel_id: None,
+            source_message_id: None,
         };
         let marked_changes = apply_supabase_send_marked_options(
             state,
-            &profile,
-            &session,
+            profile,
+            session,
             &mut message,
             marked_options.unwrap_or_default(),
         )?;
@@ -9354,14 +10143,17 @@ async fn send_text_impl(
         return Ok(supabase_send_result(&profile.id, &message));
     }
 
-    let endpoint = resolve_active_endpoint(&settings)?;
+    let storage_provider::ProviderConfig::Webdav(endpoint) = &context.provider else {
+        return Err("目标存储空间上下文无效".to_string());
+    };
 
-    webdav::upload_file_ensuring_parent(&state.http, &endpoint, &remote_path, data.clone()).await?;
+    webdav::upload_file_ensuring_parent(&state.http, endpoint, &remote_path, data.clone()).await?;
+    ensure_integration_context(state, context)?;
 
     let mut message = DbMessage {
         endpoint_id: endpoint.id.clone(),
         filename: filename.clone(),
-        sender: settings.sender_name.clone(),
+        sender: sender.to_string(),
         timestamp_ms,
         size: data.len() as i64,
         kind: MessageKind::Text.as_str().to_string(),
@@ -9380,9 +10172,12 @@ async fn send_text_impl(
         transcript_source: None,
         source_audio_mime_type: None,
         transcript_raw_text: None,
+        source_kind: None,
+        source_channel_id: None,
+        source_message_id: None,
     };
 
-    persist_sent_message_with_marked_options(state, &endpoint, &mut message, marked_options).await
+    persist_sent_message_with_marked_options(state, endpoint, &mut message, marked_options).await
 }
 
 fn cache_uploaded_bytes(target_path: &Path, data: &[u8]) -> Result<(), String> {
@@ -9634,6 +10429,32 @@ async fn send_file_path_impl(
     marked_options: Option<SendMarkedOptionsInput>,
 ) -> Result<SendMessageResult, String> {
     let settings = current_settings(state)?;
+    let context = resolve_send_target_context(state, &settings)?;
+    send_file_path_to_context(
+        state,
+        &context,
+        &settings.sender_name,
+        window,
+        source_path,
+        original_name,
+        client_id,
+        marked_options,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_file_path_to_context(
+    state: &AppState,
+    context: &IntegrationTargetContext,
+    sender: &str,
+    window: Option<&Window>,
+    source_path: &Path,
+    original_name: String,
+    client_id: Option<String>,
+    marked_options: Option<SendMarkedOptionsInput>,
+) -> Result<SendMessageResult, String> {
+    ensure_integration_context(state, context)?;
     let original_name = original_name.trim().to_string();
     if original_name.is_empty() {
         return Err("???????".to_string());
@@ -9644,10 +10465,13 @@ async fn send_file_path_impl(
         .map_err(|err| format!("????????: {err}"))?
         .len();
     let timestamp_ms = now_ms();
-    let filename = build_message_filename(&settings.sender_name, &original_name, timestamp_ms);
+    let filename = build_message_filename(sender, &original_name, timestamp_ms);
     let remote_path = message_remote_path(&filename, timestamp_ms);
-    if let Some((profile, session)) = active_supabase_context(state, &settings)? {
+    if let (storage_provider::ProviderConfig::Supabase(profile), Some(session)) =
+        (&context.provider, context.session.as_ref())
+    {
         let _guard = state.sync_guard.lock().await;
+        ensure_integration_context(state, context)?;
         let message_id = uuid::Uuid::new_v4().to_string();
         let attachment_id = uuid::Uuid::new_v4().to_string();
         let local_dir = endpoint_files_dir(state, &profile.id)
@@ -9675,7 +10499,7 @@ async fn send_file_path_impl(
         let mut message = DbMessage {
             endpoint_id: profile.id.clone(),
             filename: filename.clone(),
-            sender: settings.sender_name.clone(),
+            sender: sender.to_string(),
             timestamp_ms,
             size: total_bytes as i64,
             kind: MessageKind::File.as_str().into(),
@@ -9694,11 +10518,14 @@ async fn send_file_path_impl(
             transcript_source: None,
             source_audio_mime_type: None,
             transcript_raw_text: None,
+            source_kind: None,
+            source_channel_id: None,
+            source_message_id: None,
         };
         let marked_changes = apply_supabase_send_marked_options(
             state,
-            &profile,
-            &session,
+            profile,
+            session,
             &mut message,
             marked_options.unwrap_or_default(),
         )?;
@@ -9743,7 +10570,9 @@ async fn send_file_path_impl(
         notify_supabase_outbox_pending(state);
         return Ok(supabase_send_result(&profile.id, &message));
     }
-    let endpoint = resolve_active_endpoint(&settings)?;
+    let storage_provider::ProviderConfig::Webdav(endpoint) = &context.provider else {
+        return Err("目标存储空间上下文无效".to_string());
+    };
 
     let client_id = client_id
         .and_then(|value| {
@@ -9755,7 +10584,7 @@ async fn send_file_path_impl(
         })
         .unwrap_or_else(|| filename.clone());
 
-    webdav::ensure_parent_directories(&state.http, &endpoint, &remote_path).await?;
+    webdav::ensure_parent_directories(&state.http, endpoint, &remote_path).await?;
     if let Some(window) = window {
         emit_upload_progress(
             window,
@@ -9775,7 +10604,7 @@ async fn send_file_path_impl(
     let progress_original_name = original_name.clone();
     let upload_result = webdav::upload_file_path_with_progress(
         &state.http,
-        &endpoint,
+        endpoint,
         &remote_path,
         &source_path,
         move |sent, total| {
@@ -9820,6 +10649,7 @@ async fn send_file_path_impl(
         }
         return Err(err);
     }
+    ensure_integration_context(state, context)?;
 
     let endpoint_dir = endpoint_files_dir(state, &endpoint.id);
     let local_path = endpoint_dir.join(&filename);
@@ -9832,7 +10662,7 @@ async fn send_file_path_impl(
     let mut message = DbMessage {
         endpoint_id: endpoint.id.clone(),
         filename: filename.clone(),
-        sender: settings.sender_name.clone(),
+        sender: sender.to_string(),
         timestamp_ms,
         size: total_bytes as i64,
         kind: MessageKind::File.as_str().to_string(),
@@ -9851,10 +10681,13 @@ async fn send_file_path_impl(
         transcript_source: None,
         source_audio_mime_type: None,
         transcript_raw_text: None,
+        source_kind: None,
+        source_channel_id: None,
+        source_message_id: None,
     };
 
     let result =
-        persist_sent_message_with_marked_options(state, &endpoint, &mut message, marked_options)
+        persist_sent_message_with_marked_options(state, endpoint, &mut message, marked_options)
             .await?;
     persist_upload_history(
         state,
@@ -10018,6 +10851,9 @@ async fn send_speech_message_impl(
             transcript_source: Some("speech-to-text".to_string()),
             source_audio_mime_type: mime_type.clone(),
             transcript_raw_text: raw_transcript,
+            source_kind: None,
+            source_channel_id: None,
+            source_message_id: None,
         };
         let marked_changes = apply_supabase_send_marked_options(
             state,
@@ -10099,6 +10935,9 @@ async fn send_speech_message_impl(
         transcript_source: Some("speech-to-text".to_string()),
         source_audio_mime_type: mime_type.clone(),
         transcript_raw_text: raw_transcript,
+        source_kind: None,
+        source_channel_id: None,
+        source_message_id: None,
     };
 
     let result =
@@ -16356,7 +17195,8 @@ async fn discover_telegram_chats_impl(
 
 fn should_auto_start_telegram_bridge(settings: &Settings) -> bool {
     settings.telegram.auto_start
-        && crate::telegram_bridge_runtime::telegram_bridge_launch_config_is_valid(settings)
+        && telegram_managed_config(settings).is_ok()
+        && storage_provider::resolve_active_provider(settings).is_ok()
 }
 
 fn is_telegram_bridge_running(state: &AppState) -> Result<bool, String> {
@@ -16376,18 +17216,10 @@ fn record_telegram_bridge_restart_failure(state: &AppState, err: String) {
     }
 }
 
-fn active_endpoint_for_settings(settings: &Settings) -> Option<&WebDavEndpoint> {
-    let active_id = settings.active_webdav_id.as_deref()?;
-    settings
-        .webdav_endpoints
-        .iter()
-        .find(|endpoint| endpoint.id == active_id)
-}
-
 fn should_restart_telegram_bridge(previous: &Settings, normalized: &Settings) -> bool {
     previous.sender_name != normalized.sender_name
-        || previous.active_webdav_id != normalized.active_webdav_id
-        || active_endpoint_for_settings(previous) != active_endpoint_for_settings(normalized)
+        || previous.active_storage_profile_id != normalized.active_storage_profile_id
+        || previous.storage_profiles != normalized.storage_profiles
         || previous.telegram.sender_name != normalized.telegram.sender_name
         || previous.telegram.bot_token != normalized.telegram.bot_token
         || previous.telegram.chat_id != normalized.telegram.chat_id
@@ -16487,8 +17319,61 @@ fn telegram_bridge_status(state: &AppState) -> Result<TelegramBridgeStatus, Stri
 }
 
 async fn start_telegram_bridge_impl(state: &AppState) -> Result<TelegramBridgeStatus, String> {
-    crate::telegram_bridge_runtime::start_telegram_bridge_for_state(state, TELEGRAM_BRIDGE_ARG)
-        .await
+    {
+        let mut manager = state
+            .telegram_bridge
+            .lock()
+            .map_err(|_| "读取 Telegram Bridge 状态失败".to_string())?;
+        crate::telegram_bridge_runtime::refresh_telegram_bridge_manager(&mut manager);
+        if crate::telegram_bridge_runtime::telegram_bridge_is_running(&manager) {
+            return Ok(
+                crate::telegram_bridge_runtime::telegram_bridge_status_from_manager(&manager),
+            );
+        }
+    }
+    let settings = current_settings(state)?;
+    let _ = telegram_managed_config(&settings)?;
+    let generation = state
+        .telegram_bridge_generation
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        .wrapping_add(1);
+    let context = resolve_telegram_integration_context(state, generation).await?;
+    ensure_integration_context(state, &context)?;
+    let app_handle = state
+        .app_handle
+        .clone()
+        .ok_or_else(|| "Telegram Bridge 主进程任务未连接应用句柄".to_string())?;
+    let (cancel_tx, cancel_rx) = oneshot::channel();
+    {
+        let mut manager = state
+            .telegram_bridge
+            .lock()
+            .map_err(|_| "更新 Telegram Bridge 状态失败".to_string())?;
+        crate::telegram_bridge_runtime::refresh_telegram_bridge_manager(&mut manager);
+        if crate::telegram_bridge_runtime::telegram_bridge_is_running(&manager) {
+            return Ok(
+                crate::telegram_bridge_runtime::telegram_bridge_status_from_manager(&manager),
+            );
+        }
+        crate::telegram_bridge_runtime::attach_managed_task(&mut manager, generation, cancel_tx);
+    }
+    tokio::spawn(async move {
+        let result = run_managed_telegram_bridge(app_handle.clone(), generation, cancel_rx).await;
+        let state = app_handle.state::<AppState>();
+        if let Ok(mut manager) = state.telegram_bridge.lock() {
+            crate::telegram_bridge_runtime::finish_managed_task(
+                &mut manager,
+                generation,
+                result.err(),
+            );
+        }
+        let _ = persist_integration_module_statuses(&state);
+    });
+    let manager = state
+        .telegram_bridge
+        .lock()
+        .map_err(|_| "读取 Telegram Bridge 状态失败".to_string())?;
+    Ok(crate::telegram_bridge_runtime::telegram_bridge_status_from_manager(&manager))
 }
 
 fn stop_telegram_bridge_impl(state: &AppState) -> Result<TelegramBridgeStatus, String> {
@@ -17752,6 +18637,9 @@ async fn sync_once(state: &AppState, manual: bool) -> Result<usize, String> {
             transcript_source,
             source_audio_mime_type,
             transcript_raw_text,
+            source_kind: history_entry.and_then(|entry| entry.source_kind.clone()),
+            source_channel_id: history_entry.and_then(|entry| entry.source_channel_id.clone()),
+            source_message_id: history_entry.and_then(|entry| entry.source_message_id.clone()),
         });
 
         if let Some(history) = history_entry {
@@ -17771,6 +18659,9 @@ async fn sync_once(state: &AppState, manual: bool) -> Result<usize, String> {
             message.transcript_source = history.transcript_source.clone();
             message.source_audio_mime_type = history.source_audio_mime_type.clone();
             message.transcript_raw_text = history.transcript_raw_text.clone();
+            message.source_kind = history.source_kind.clone();
+            message.source_channel_id = history.source_channel_id.clone();
+            message.source_message_id = history.source_message_id.clone();
             if history.transcript_source.as_deref() == Some("speech-to-text") {
                 message.content = history.transcript_text.clone();
             }
@@ -17916,6 +18807,9 @@ fn message_to_history(message: &DbMessage) -> HistoryEntry {
             .as_ref()
             .and_then(|_| message.content.clone()),
         transcript_raw_text: message.transcript_raw_text.clone(),
+        source_kind: message.source_kind.clone(),
+        source_channel_id: message.source_channel_id.clone(),
+        source_message_id: message.source_message_id.clone(),
     }
 }
 
@@ -18866,6 +19760,7 @@ fn main() {
             let (sync_loop_signal, _) = watch::channel(0_u64);
 
             app.manage(AppState {
+                app_handle: Some(app.handle().clone()),
                 settings_path,
                 db_path,
                 files_base_dir,
@@ -18887,6 +19782,7 @@ fn main() {
                 registered_hotkey: Mutex::new(None),
                 registered_system_dictation_hotkey: Mutex::new(None),
                 telegram_bridge: Mutex::new(TelegramBridgeManager::default()),
+                telegram_bridge_generation: std::sync::atomic::AtomicU64::new(0),
                 local_http_api: Mutex::new(LocalHttpApiManager::default()),
                 update_guard: AsyncMutex::new(()),
                 auto_backup_guard: AsyncMutex::new(()),
@@ -19717,12 +20613,16 @@ mod tests {
         Query(query): Query<TestHashMap<String, String>>,
     ) -> AxumResponse {
         if table == "spaces" {
+            let requested_id = query.get("id").and_then(|value| value.strip_prefix("eq."));
             let mut rows = state
                 .snapshots
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|(key, _)| key.starts_with("spaces/"))
+                .filter(|(key, snapshot)| {
+                    key.starts_with("spaces/")
+                        && requested_id.is_none_or(|id| snapshot["id"].as_str() == Some(id))
+                })
                 .map(|(_, snapshot)| snapshot.clone())
                 .collect::<Vec<_>>();
             rows.sort_by(|left, right| {
@@ -20004,8 +20904,20 @@ mod tests {
         HttpStatusCode::OK
     }
 
+    fn seed_test_supabase_space(state: &TestSupabaseState, space_id: &str) {
+        state.snapshots.lock().unwrap().insert(
+            format!("spaces/{space_id}"),
+            serde_json::json!({
+                "id": space_id,
+                "name": "Ready",
+                "updated_at": "2026-01-01T00:00:00Z"
+            }),
+        );
+    }
+
     async fn spawn_test_supabase() -> TestSupabaseServer {
         let state = TestSupabaseState::default();
+        seed_test_supabase_space(&state, "00000000-0000-4000-8000-000000000001");
         let app = TestRouter::new()
             .route("/auth/v1/user", get(test_supabase_current_user))
             .route("/rest/v1/:table", get(test_supabase_snapshot))
@@ -20567,6 +21479,7 @@ mod tests {
         let (sync_loop_signal, _) = watch::channel(0_u64);
 
         AppState {
+            app_handle: None,
             settings_path,
             db_path,
             files_base_dir: workspace_layout.endpoints_dir(),
@@ -20584,6 +21497,7 @@ mod tests {
             registered_hotkey: Mutex::new(None),
             registered_system_dictation_hotkey: Mutex::new(None),
             telegram_bridge: Mutex::new(TelegramBridgeManager::default()),
+            telegram_bridge_generation: std::sync::atomic::AtomicU64::new(0),
             local_http_api: Mutex::new(LocalHttpApiManager::default()),
             update_guard: AsyncMutex::new(()),
             auto_backup_guard: AsyncMutex::new(()),
@@ -20623,7 +21537,515 @@ mod tests {
             transcript_source: None,
             source_audio_mime_type: None,
             transcript_raw_text: None,
+            source_kind: None,
+            source_channel_id: None,
+            source_message_id: None,
         }
+    }
+
+    #[test]
+    fn explicit_send_context_is_immutable_and_rejects_profile_switch() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-explicit-send-context-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let mut settings = test_settings();
+        let first = StorageProfile::from_webdav(&settings.webdav_endpoints[0]);
+        let mut second = first.clone();
+        second.id = "webdav-second".into();
+        second.name = "Second".into();
+        settings.storage_profiles = vec![first.clone(), second.clone()];
+        settings.active_storage_profile_id = Some(first.id.clone());
+        settings.active_webdav_id = Some(first.id.clone());
+        let state = test_app_state(&temp_dir, settings.clone());
+
+        let context = resolve_send_target_context(&state, &settings).unwrap();
+        assert_eq!(context.profile_id(), first.id);
+        assert!(integration_context_matches(&state, &context));
+
+        settings.active_storage_profile_id = Some(second.id.clone());
+        settings.active_webdav_id = Some(second.id.clone());
+        *state.settings.lock().unwrap() = settings;
+
+        assert_eq!(context.profile_id(), first.id);
+        assert!(!integration_context_matches(&state, &context));
+        assert!(ensure_integration_context(&state, &context)
+            .unwrap_err()
+            .contains("目标存储空间已切换"));
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn telegram_file_download_result_is_rejected_after_target_switches() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-telegram-stale-file-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let mut settings = test_settings();
+        let webdav = StorageProfile::from_webdav(&settings.webdav_endpoints[0]);
+        let mut supabase_a = test_supabase_settings().storage_profiles.remove(0);
+        supabase_a.id = "supabase-a".into();
+        supabase_a.name = "Supabase A".into();
+        let mut supabase_b = supabase_a.clone();
+        supabase_b.id = "supabase-b".into();
+        supabase_b.name = "Supabase B".into();
+        supabase_b.supabase.as_mut().unwrap().space_id =
+            "00000000-0000-4000-8000-000000000002".into();
+        settings.storage_profiles = vec![webdav.clone(), supabase_a.clone(), supabase_b.clone()];
+        settings.active_storage_profile_id = Some(webdav.id.clone());
+        settings.active_webdav_id = Some(webdav.id.clone());
+        let state = test_app_state(&temp_dir, settings.clone());
+        db::init_db(&state.db_path, Some(&webdav.id)).unwrap();
+        state
+            .telegram_bridge_generation
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        let downloaded_bytes = b"telegram download completed before switch".to_vec();
+        let source = ExternalSourceIdentity {
+            kind: "telegram".into(),
+            channel_id: "-1003".into(),
+            message_id: "301".into(),
+        };
+
+        let webdav_context = IntegrationTargetContext {
+            generation: Some(1),
+            provider: storage_provider::ProviderConfig::Webdav(webdav.to_webdav().unwrap()),
+            owner_scope: String::new(),
+            session: None,
+        };
+        settings.active_storage_profile_id = Some(supabase_a.id.clone());
+        settings.active_webdav_id = None;
+        *state.settings.lock().unwrap() = settings.clone();
+        state
+            .telegram_bridge_generation
+            .store(2, std::sync::atomic::Ordering::SeqCst);
+        let error = ingest_external_file(
+            &state,
+            &webdav_context,
+            "telegram-user",
+            3000,
+            "stale.bin".into(),
+            downloaded_bytes.clone(),
+            source.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("目标存储空间已切换"));
+
+        let session = supabase_auth::SupabaseSession {
+            access_token: "access-token".into(),
+            refresh_token: "refresh-token".into(),
+            user_id: "user-a".into(),
+            email: "user@example.invalid".into(),
+            expires_at: i64::MAX,
+        };
+        state
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .insert(supabase_a.id.clone(), session.clone());
+        let supabase_a_context = IntegrationTargetContext {
+            generation: Some(2),
+            provider: storage_provider::ProviderConfig::Supabase(supabase_a.clone()),
+            owner_scope: session.user_id.clone(),
+            session: Some(session.clone()),
+        };
+        settings.active_storage_profile_id = Some(webdav.id.clone());
+        settings.active_webdav_id = Some(webdav.id.clone());
+        *state.settings.lock().unwrap() = settings.clone();
+        state
+            .telegram_bridge_generation
+            .store(3, std::sync::atomic::Ordering::SeqCst);
+        assert!(ingest_external_file(
+            &state,
+            &supabase_a_context,
+            "telegram-user",
+            3001,
+            "stale.bin".into(),
+            downloaded_bytes.clone(),
+            source.clone(),
+        )
+        .await
+        .unwrap_err()
+        .contains("目标存储空间已切换"));
+
+        state
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .insert(supabase_a.id.clone(), session.clone());
+        settings.active_storage_profile_id = Some(supabase_a.id.clone());
+        settings.active_webdav_id = None;
+        *state.settings.lock().unwrap() = settings.clone();
+        state
+            .telegram_bridge_generation
+            .store(4, std::sync::atomic::Ordering::SeqCst);
+        let supabase_space_context = IntegrationTargetContext {
+            generation: Some(4),
+            provider: storage_provider::ProviderConfig::Supabase(supabase_a.clone()),
+            owner_scope: session.user_id.clone(),
+            session: Some(session),
+        };
+        settings.active_storage_profile_id = Some(supabase_b.id.clone());
+        *state.settings.lock().unwrap() = settings;
+        state
+            .telegram_bridge_generation
+            .store(5, std::sync::atomic::Ordering::SeqCst);
+        assert!(ingest_external_file(
+            &state,
+            &supabase_space_context,
+            "telegram-user",
+            3002,
+            "stale.bin".into(),
+            downloaded_bytes,
+            source,
+        )
+        .await
+        .unwrap_err()
+        .contains("目标存储空间已切换"));
+
+        assert!(db::list_messages(&state.db_path, &webdav.id, None)
+            .unwrap()
+            .is_empty());
+        assert!(db::list_messages_for_scope(
+            &state.db_path,
+            &supabase_a.id,
+            "user-a",
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap()
+        .is_empty());
+        assert!(db::list_messages_for_scope(
+            &state.db_path,
+            &supabase_b.id,
+            "user-a",
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap()
+        .is_empty());
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn external_supabase_text_and_file_ingestion_is_atomic_offline_and_idempotent() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-external-supabase-ingest-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let settings = test_supabase_settings();
+        let state = test_app_state(&temp_dir, settings.clone());
+        db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+        install_test_supabase_session(&state);
+        let context = resolve_send_target_context(&state, &settings).unwrap();
+        let text_source = ExternalSourceIdentity {
+            kind: "telegram".into(),
+            channel_id: "-1001".into(),
+            message_id: "101".into(),
+        };
+        ingest_external_text(
+            &state,
+            &context,
+            "telegram-user",
+            1000,
+            "hello".into(),
+            text_source.clone(),
+        )
+        .await
+        .unwrap();
+        ingest_external_text(
+            &state,
+            &context,
+            "telegram-user",
+            1000,
+            "hello".into(),
+            text_source,
+        )
+        .await
+        .unwrap();
+
+        let file_source = ExternalSourceIdentity {
+            kind: "telegram".into(),
+            channel_id: "-1001".into(),
+            message_id: "102".into(),
+        };
+        let file_bytes = b"offline telegram file".to_vec();
+        ingest_external_file(
+            &state,
+            &context,
+            "telegram-user",
+            1001,
+            "note.txt".into(),
+            file_bytes.clone(),
+            file_source.clone(),
+        )
+        .await
+        .unwrap();
+        ingest_external_file(
+            &state,
+            &context,
+            "telegram-user",
+            1001,
+            "note.txt".into(),
+            file_bytes.clone(),
+            file_source,
+        )
+        .await
+        .unwrap();
+
+        let messages = db::list_messages_for_scope(
+            &state.db_path,
+            "supabase-1",
+            "user-a",
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            db::count_pending_outbox(&state.db_path, "supabase-1", "user-a").unwrap(),
+            3
+        );
+        let file = messages
+            .iter()
+            .find(|message| message.kind == "file")
+            .unwrap();
+        let local_path = PathBuf::from(file.local_path.as_ref().unwrap());
+        assert_eq!(fs::read(&local_path).unwrap(), file_bytes);
+        let attachment_id = external_source_uuid(
+            &ExternalSourceIdentity {
+                kind: "telegram".into(),
+                channel_id: "-1001".into(),
+                message_id: "102".into(),
+            },
+            "attachment",
+        );
+        assert!(db::get_attachment_sync_record(
+            &state.db_path,
+            "supabase-1",
+            "user-a",
+            &attachment_id,
+        )
+        .unwrap()
+        .is_some());
+        drop(state);
+        assert_eq!(fs::read(local_path).unwrap(), b"offline telegram file");
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn external_webdav_text_ingestion_persists_source_and_deduplicates() {
+        let server = spawn_test_dav().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-external-webdav-ingest-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let mut settings = test_settings_with_url(server.base_url.clone());
+        let profile = StorageProfile::from_webdav(&settings.webdav_endpoints[0]);
+        settings.storage_profiles = vec![profile.clone()];
+        settings.active_storage_profile_id = Some(profile.id.clone());
+        let state = test_app_state(&temp_dir, settings.clone());
+        db::init_db(&state.db_path, Some(&profile.id)).unwrap();
+        let context = resolve_send_target_context(&state, &settings).unwrap();
+        let source = ExternalSourceIdentity {
+            kind: "telegram".into(),
+            channel_id: "-1002".into(),
+            message_id: "201".into(),
+        };
+
+        ingest_external_text(
+            &state,
+            &context,
+            "telegram-user",
+            2000,
+            "hello WebDAV".into(),
+            source.clone(),
+        )
+        .await
+        .unwrap();
+        ingest_external_text(
+            &state,
+            &context,
+            "telegram-user",
+            2000,
+            "hello WebDAV".into(),
+            source.clone(),
+        )
+        .await
+        .unwrap();
+
+        let messages =
+            db::list_messages_for_scope(&state.db_path, &profile.id, "", None, None, false, None)
+                .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].source_kind.as_deref(), Some("telegram"));
+        assert_eq!(messages[0].source_channel_id.as_deref(), Some("-1002"));
+        assert_eq!(messages[0].source_message_id.as_deref(), Some("201"));
+        let remote_path = messages[0].remote_path.as_ref().unwrap();
+        let remote_key = decode_test_dav_path(remote_path.trim_start_matches('/'));
+        assert_eq!(
+            server
+                .state
+                .files
+                .lock()
+                .unwrap()
+                .get(&remote_key)
+                .cloned()
+                .unwrap(),
+            b"hello WebDAV"
+        );
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn synchronized_telegram_source_is_skipped_by_every_device() {
+        let telegram_message = Message {
+            filename: "telegram.txt".into(),
+            message_id: Some("message-telegram".into()),
+            sender: "telegram-user".into(),
+            timestamp_ms: 1_000,
+            size: 5,
+            kind: "text".into(),
+            original_name: "message.txt".into(),
+            content: Some("hello".into()),
+            local_path: None,
+            remote_path: None,
+            file_hash: None,
+            download_exists: false,
+            marked: false,
+            marked_tag_ids: Vec::new(),
+            marked_pinned: false,
+            marked_due_date: None,
+            format: "text".into(),
+            transcript_source: None,
+            source_audio_mime_type: None,
+            transcript_raw_text: None,
+            source_kind: Some("telegram".into()),
+            source_channel_id: Some("-1001".into()),
+            source_message_id: Some("42".into()),
+        };
+        assert!(telegram_message_is_external_source(&telegram_message));
+        assert!(telegram_message_is_external_source(
+            &telegram_message.clone()
+        ));
+
+        let mut ordinary_message = telegram_message;
+        ordinary_message.source_kind = None;
+        ordinary_message.source_channel_id = None;
+        ordinary_message.source_message_id = None;
+        assert!(!telegram_message_is_external_source(&ordinary_message));
+    }
+
+    #[test]
+    fn telegram_auto_start_preference_is_device_local_and_absent_from_cloud_payloads() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "transfer-genie-telegram-device-settings-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let device_a = temp_root.join("device-a");
+        let device_b = temp_root.join("device-b");
+        fs::create_dir_all(&device_a).unwrap();
+        fs::create_dir_all(&device_b).unwrap();
+
+        let mut settings_a = test_supabase_settings();
+        settings_a.telegram.auto_start = true;
+        let settings_b = test_supabase_settings();
+        write_settings_audited(&device_a.join("settings.json"), &settings_a).unwrap();
+        write_settings_audited(&device_b.join("settings.json"), &settings_b).unwrap();
+
+        let loaded_a = load_settings(&device_a.join("settings.json"), &device_a).unwrap();
+        let loaded_b = load_settings(&device_b.join("settings.json"), &device_b).unwrap();
+        assert!(loaded_a.telegram.auto_start);
+        assert!(!loaded_b.telegram.auto_start);
+
+        let mut message = test_db_message("supabase-1", "message.txt", "message.txt", 1, 5);
+        message.kind = "text".into();
+        message.content = Some("hello".into());
+        let payload = supabase_message_payload(&message);
+        let serialized = payload.to_string();
+        assert!(!serialized.contains("telegram"));
+        assert!(!serialized.contains("auto_start"));
+        assert!(!serialized.contains("running"));
+        assert!(!serialized.contains("last_update_id"));
+        assert!(!serialized.contains("delivery"));
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[tokio::test]
+    async fn telegram_supabase_binding_requires_bound_signed_in_accessible_space() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-telegram-binding-guards-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let mut unbound = test_supabase_settings();
+        unbound.storage_profiles[0]
+            .supabase
+            .as_mut()
+            .unwrap()
+            .space_id
+            .clear();
+        let unbound_state = test_app_state(&temp_dir, unbound);
+        assert!(resolve_telegram_integration_context(&unbound_state, 1)
+            .await
+            .err()
+            .expect("unbound Supabase space should fail")
+            .contains("尚未完成绑定"));
+
+        let signed_out = test_supabase_settings();
+        let signed_out_state = test_app_state(&temp_dir, signed_out);
+        assert!(resolve_telegram_integration_context(&signed_out_state, 2)
+            .await
+            .err()
+            .expect("signed-out Supabase profile should fail")
+            .contains("请先登录"));
+
+        let server = spawn_test_supabase().await;
+        let mut inaccessible_settings = test_supabase_settings_with_url(server.base_url.clone());
+        inaccessible_settings.storage_profiles[0]
+            .supabase
+            .as_mut()
+            .unwrap()
+            .space_id = "00000000-0000-4000-8000-000000000099".to_string();
+        let inaccessible_state = test_app_state(&temp_dir, inaccessible_settings.clone());
+        install_test_supabase_session(&inaccessible_state);
+        assert!(resolve_telegram_integration_context(&inaccessible_state, 3)
+            .await
+            .err()
+            .expect("inaccessible Supabase space should fail")
+            .contains("不存在或账号无权访问"));
+
+        let space_id = inaccessible_settings.storage_profiles[0]
+            .supabase
+            .as_ref()
+            .unwrap()
+            .space_id
+            .clone();
+        server.state.snapshots.lock().unwrap().insert(
+            format!("spaces/{space_id}"),
+            serde_json::json!({
+                "id":space_id,
+                "name":"Ready",
+                "updated_at":"2026-01-01T00:00:00Z"
+            }),
+        );
+        let context = resolve_telegram_integration_context(&inaccessible_state, 4)
+            .await
+            .unwrap();
+        assert_eq!(context.profile_id(), "supabase-1");
+        assert_eq!(context.owner_scope, "user-a");
+        let _ = fs::remove_dir_all(temp_dir);
     }
 
     #[cfg(target_os = "windows")]
@@ -20677,6 +22099,9 @@ mod tests {
             source_audio_mime_type: None,
             transcript_text: None,
             transcript_raw_text: None,
+            source_kind: Some("telegram".to_string()),
+            source_channel_id: Some("-1001".to_string()),
+            source_message_id: Some("42".to_string()),
         };
 
         let json = serde_json::to_string(&entry).unwrap();
@@ -20694,6 +22119,9 @@ mod tests {
         assert_eq!(deserialized_old.transcript_source, None);
         assert_eq!(deserialized_old.source_audio_mime_type, None);
         assert_eq!(deserialized_old.transcript_text, None);
+        assert_eq!(deserialized_old.source_kind, None);
+        assert_eq!(deserialized_old.source_channel_id, None);
+        assert_eq!(deserialized_old.source_message_id, None);
     }
 
     #[test]
@@ -20720,6 +22148,9 @@ mod tests {
                 transcript_source: None,
                 source_audio_mime_type: None,
                 transcript_raw_text: None,
+                source_kind: None,
+                source_channel_id: None,
+                source_message_id: None,
             },
             Message {
                 filename: "old-marked.txt".to_string(),
@@ -20742,6 +22173,9 @@ mod tests {
                 transcript_source: None,
                 source_audio_mime_type: None,
                 transcript_raw_text: None,
+                source_kind: None,
+                source_channel_id: None,
+                source_message_id: None,
             },
             Message {
                 filename: "new-unmarked.txt".to_string(),
@@ -20764,6 +22198,9 @@ mod tests {
                 transcript_source: None,
                 source_audio_mime_type: None,
                 transcript_raw_text: None,
+                source_kind: None,
+                source_channel_id: None,
+                source_message_id: None,
             },
         ];
 
@@ -20796,6 +22233,9 @@ mod tests {
             transcript_source: Some("speech-to-text".to_string()),
             source_audio_mime_type: Some("audio/wav".to_string()),
             transcript_raw_text: Some("原始转写".to_string()),
+            source_kind: None,
+            source_channel_id: None,
+            source_message_id: None,
         };
 
         let history = message_to_history(&message);
@@ -21681,6 +23121,9 @@ mod tests {
                 source_audio_mime_type: None,
                 transcript_text: None,
                 transcript_raw_text: None,
+                source_kind: None,
+                source_channel_id: None,
+                source_message_id: None,
             },
             HistoryEntry {
                 filename: "unselected.txt".to_string(),
@@ -21699,6 +23142,9 @@ mod tests {
                 source_audio_mime_type: None,
                 transcript_text: None,
                 transcript_raw_text: None,
+                source_kind: None,
+                source_channel_id: None,
+                source_message_id: None,
             },
             HistoryEntry {
                 filename: "not-marked.txt".to_string(),
@@ -21717,6 +23163,9 @@ mod tests {
                 source_audio_mime_type: None,
                 transcript_text: None,
                 transcript_raw_text: None,
+                source_kind: None,
+                source_channel_id: None,
+                source_message_id: None,
             },
         ];
 
@@ -21754,6 +23203,9 @@ mod tests {
             source_audio_mime_type: None,
             transcript_text: None,
             transcript_raw_text: None,
+            source_kind: None,
+            source_channel_id: None,
+            source_message_id: None,
         }];
 
         let changed = apply_marked_tag_ids_to_entries(&mut entries, &[], &["tag-a".to_string()]);
@@ -22317,6 +23769,9 @@ mod tests {
             transcript_source: None,
             source_audio_mime_type: None,
             transcript_raw_text: None,
+            source_kind: None,
+            source_channel_id: None,
+            source_message_id: None,
         };
         let first = build_storage_transfer_items(
             "source",
@@ -22501,6 +23956,9 @@ mod tests {
             transcript_source: None,
             source_audio_mime_type: None,
             transcript_raw_text: None,
+            source_kind: None,
+            source_channel_id: None,
+            source_message_id: None,
         };
         let items = build_storage_transfer_items("source", "", "target", &[message], &[]);
         db::create_or_resume_storage_transfer(
@@ -22551,6 +24009,9 @@ mod tests {
             transcript_source: None,
             source_audio_mime_type: None,
             transcript_raw_text: None,
+            source_kind: None,
+            source_channel_id: None,
+            source_message_id: None,
         };
         let item = build_storage_transfer_items(
             "source",
@@ -22587,6 +24048,9 @@ mod tests {
             transcript_source: source.transcript_source.clone(),
             source_audio_mime_type: source.source_audio_mime_type.clone(),
             transcript_raw_text: source.transcript_raw_text.clone(),
+            source_kind: source.source_kind.clone(),
+            source_channel_id: source.source_channel_id.clone(),
+            source_message_id: source.source_message_id.clone(),
         };
         assert!(storage_transfer_message_matches(&matching_target, &source));
         let mut conflicting_target = matching_target;
@@ -22651,6 +24115,9 @@ mod tests {
             transcript_source: None,
             source_audio_mime_type: None,
             transcript_raw_text: None,
+            source_kind: None,
+            source_channel_id: None,
+            source_message_id: None,
         };
         let source_tag = MarkedTag {
             id: "tag-a".into(),
@@ -22691,6 +24158,9 @@ mod tests {
             transcript_source: None,
             source_audio_mime_type: None,
             transcript_raw_text: None,
+            source_kind: None,
+            source_channel_id: None,
+            source_message_id: None,
         };
         db::replace_marked_tags(
             &state.db_path,
@@ -22774,6 +24244,9 @@ mod tests {
             transcript_source: None,
             source_audio_mime_type: None,
             transcript_raw_text: None,
+            source_kind: None,
+            source_channel_id: None,
+            source_message_id: None,
         };
         let source_tag = MarkedTag {
             id: "tag-a".into(),
@@ -22895,6 +24368,7 @@ mod tests {
     #[tokio::test]
     async fn supabase_attachment_message_not_found_restores_message_before_retry() {
         let server = spawn_test_supabase().await;
+        seed_test_supabase_space(&server.state, "11111111-1111-4111-8111-111111111111");
         let dir = std::env::temp_dir().join(format!(
             "transfer-genie-supabase-attachment-repair-{}",
             uuid::Uuid::new_v4()
@@ -23276,6 +24750,8 @@ mod tests {
             let target_dav = spawn_test_dav().await;
             let source_supabase = spawn_test_supabase().await;
             let target_supabase = spawn_test_supabase().await;
+            seed_test_supabase_space(&source_supabase.state, "source-space");
+            seed_test_supabase_space(&target_supabase.state, "target-space");
             let case_name = format!("{source_kind}-to-{target_kind}");
             let dir = std::env::temp_dir().join(format!(
                 "transfer-genie-provider-pair-{case_name}-{}",
@@ -23409,6 +24885,9 @@ mod tests {
                     transcript_source: None,
                     source_audio_mime_type: None,
                     transcript_raw_text: None,
+                    source_kind: None,
+                    source_channel_id: None,
+                    source_message_id: None,
                 },
                 Message {
                     filename: "source.bin".into(),
@@ -23435,6 +24914,9 @@ mod tests {
                     transcript_source: None,
                     source_audio_mime_type: None,
                     transcript_raw_text: None,
+                    source_kind: None,
+                    source_channel_id: None,
+                    source_message_id: None,
                 },
             ];
             let items = build_storage_transfer_items(
@@ -23632,6 +25114,7 @@ mod tests {
     async fn storage_transfer_to_supabase_publishes_target_owned_image_preview() {
         let source_server = spawn_test_dav().await;
         let target_server = spawn_test_supabase().await;
+        seed_test_supabase_space(&target_server.state, "target-space");
         let bytes = png_fixture_bytes();
         source_server.state.insert("files/photo.png", bytes.clone());
         let dir = std::env::temp_dir().join(format!(
@@ -23697,6 +25180,9 @@ mod tests {
             transcript_source: None,
             source_audio_mime_type: None,
             transcript_raw_text: None,
+            source_kind: None,
+            source_channel_id: None,
+            source_message_id: None,
         };
         let item = build_storage_transfer_items(
             "source-webdav",
@@ -23765,6 +25251,8 @@ mod tests {
     async fn supabase_to_supabase_transfer_republishes_preview_under_target_scope() {
         let source_server = spawn_test_supabase().await;
         let target_server = spawn_test_supabase().await;
+        seed_test_supabase_space(&source_server.state, "source-space");
+        seed_test_supabase_space(&target_server.state, "target-space");
         let bytes = png_fixture_bytes();
         let source_object_path = "source-user/source-space/source-attachment/photo.png";
         let source_preview_path = "source-user/source-space/source-attachment/preview.jpg";
@@ -23854,6 +25342,9 @@ mod tests {
             transcript_source: None,
             source_audio_mime_type: None,
             transcript_raw_text: None,
+            source_kind: None,
+            source_channel_id: None,
+            source_message_id: None,
         };
         let item = build_storage_transfer_items(
             "source",
@@ -23988,6 +25479,9 @@ mod tests {
             transcript_source: None,
             source_audio_mime_type: None,
             transcript_raw_text: None,
+            source_kind: None,
+            source_channel_id: None,
+            source_message_id: None,
         };
         let item = build_storage_transfer_items(
             "source",
@@ -24086,6 +25580,9 @@ mod tests {
             transcript_source: None,
             source_audio_mime_type: None,
             transcript_raw_text: None,
+            source_kind: None,
+            source_channel_id: None,
+            source_message_id: None,
         };
         let item = build_storage_transfer_items(
             "source",
@@ -24205,6 +25702,9 @@ mod tests {
             transcript_source: None,
             source_audio_mime_type: None,
             transcript_raw_text: None,
+            source_kind: None,
+            source_channel_id: None,
+            source_message_id: None,
         };
         let item = build_storage_transfer_items(
             "source",
@@ -24338,6 +25838,9 @@ mod tests {
             transcript_source: None,
             source_audio_mime_type: None,
             transcript_raw_text: None,
+            source_kind: None,
+            source_channel_id: None,
+            source_message_id: None,
         };
         let mut item = build_storage_transfer_items(
             "source",
@@ -24392,6 +25895,9 @@ mod tests {
                 source_audio_mime_type: None,
                 transcript_text: None,
                 transcript_raw_text: None,
+                source_kind: None,
+                source_channel_id: None,
+                source_message_id: None,
             }],
         )
         .await
@@ -25052,6 +26558,9 @@ mod tests {
                 source_audio_mime_type: None,
                 transcript_text: None,
                 transcript_raw_text: None,
+                source_kind: None,
+                source_channel_id: None,
+                source_message_id: None,
             });
         }
         crate::history::upsert_history_entries(&state.http, &webdav_a, source_entries.clone())
@@ -26935,6 +28444,43 @@ mod tests {
     }
 
     #[test]
+    fn external_source_ids_and_filenames_are_stable_without_exposing_token_data() {
+        let source = ExternalSourceIdentity {
+            kind: "telegram".into(),
+            channel_id: "-100123".into(),
+            message_id: "456".into(),
+        };
+        assert_eq!(
+            external_source_uuid(&source, "message"),
+            external_source_uuid(&source, "message")
+        );
+        assert_ne!(
+            external_source_uuid(&source, "message"),
+            external_source_uuid(&source, "attachment")
+        );
+        let filename = external_source_filename("Alice", "报告.pdf", 1000, &source);
+        assert_eq!(
+            filename,
+            external_source_filename("Alice", "报告.pdf", 1000, &source)
+        );
+        assert!(filename.starts_with("1000__Alice__"));
+        assert!(!filename.contains("bot"));
+    }
+
+    #[test]
+    fn telegram_terminal_delivery_states_advance_outbound_watermark() {
+        for status in [
+            "sent",
+            "delivery_unconfirmed",
+            "permanent_failure",
+            "sending",
+        ] {
+            assert!(telegram_delivery_is_terminal(status), "{status}");
+        }
+        assert!(!telegram_delivery_is_terminal("retryable_error"));
+    }
+
+    #[test]
     fn webdav_sync_runtime_snapshot_reflects_sync_state_and_endpoint_enablement() {
         let temp_dir =
             std::env::temp_dir().join(format!("transfer-genie-webdav-runtime-{}", now_ms()));
@@ -28258,6 +29804,9 @@ mod tests {
             transcript_source: None,
             source_audio_mime_type: None,
             transcript_raw_text: None,
+            source_kind: None,
+            source_channel_id: None,
+            source_message_id: None,
         };
         let remote = crate::types::DavEntry {
             filename: "message.txt".to_string(),

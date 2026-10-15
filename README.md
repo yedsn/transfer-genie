@@ -135,8 +135,8 @@ Transfer Genie（传输小精灵）使用 **Tauri + Rust + WebDAV** 构建，目
 
 1. 在设置页配置 `Bot Token`、`Chat ID`、轮询间隔等参数
 2. 启动 Telegram Bridge
-3. Telegram 发来的文本/文件同步到 WebDAV
-4. WebDAV 中新产生的消息也可继续转发到 Telegram
+3. Telegram 发来的文本/文件进入当前活动的 WebDAV 或 Supabase 存储空间
+4. 当前空间中新产生的非 Telegram 来源消息也可继续转发到 Telegram
 
 ## 快速开始
 
@@ -220,7 +220,7 @@ curl -X POST "http://127.0.0.1:6011/api/send-text" \
 
 ## Telegram Bridge 速览
 
-Telegram Bridge 用于在一个 Telegram 会话与一个 WebDAV 端点之间做双向同步。
+Telegram Bridge 用于在一个 Telegram 会话与当前活动存储空间之间做双向同步，桌面托管模式支持 WebDAV 和 Supabase。
 
 你可以在桌面应用设置页中直接完成：
 
@@ -228,9 +228,11 @@ Telegram Bridge 用于在一个 Telegram 会话与一个 WebDAV 端点之间做�
 - `Chat ID` 自动获取
 - 轮询间隔配置
 - 代理配置
-- bridge 启停与自启动
+- bridge 启停与本机自启动
 
-推荐优先使用桌面端内置的桥接管理，而不是手工单独运行 `telegram_bridge`。
+Bridge 的自启动、运行状态、Telegram 游标和投递记录只保存在当前设备，不会写入 Supabase，也不会让同账号的其他设备自动启动。Supabase 暂时离线时，Telegram 入站消息先保存在本机 SQLite/outbox，网络恢复后继续上传；客户端不需要数据库密码或 service-role Key。
+
+推荐优先使用桌面端内置的桥接管理。独立 `telegram_bridge` 命令仍兼容旧 WebDAV 配置，但不负责 Supabase 登录与 Session 恢复。
 
 完整说明见：[`docs/integrations/telegram-bridge.md`](docs/integrations/telegram-bridge.md)
 

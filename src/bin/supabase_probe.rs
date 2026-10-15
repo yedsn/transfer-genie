@@ -513,6 +513,9 @@ async fn run_contract(
         "originalName": "probe.txt",
         "content": "supabase rust probe",
         "format": "text",
+        "sourceKind": "telegram",
+        "sourceChannelId": "-100123",
+        "sourceMessageId": "456",
         "markedTagIds": []
     });
     let create_args = rpc_payload(
@@ -576,6 +579,8 @@ async fn run_contract(
                 "sender":"probe-device-b","timestampMs":1730000000000_i64,
                 "size":25,"kind":"text","originalName":"probe.txt",
                 "content":"updated while A was offline","format":"text",
+                "sourceKind":"telegram","sourceChannelId":"-100123",
+                "sourceMessageId":"456",
                 "markedTagIds":[]
             }),
         ),
@@ -606,7 +611,91 @@ async fn run_contract(
     let rows_a = select_message(client, config, user_a, &message_id).await?;
     let rows_b = select_message(client, config, user_b, &message_id).await?;
     expect(rows_a.len() == 1, "owner could not read its message")?;
+    expect(
+        rows_a[0]["source_kind"] == "telegram"
+            && rows_a[0]["source_channel_id"] == "-100123"
+            && rows_a[0]["source_message_id"] == "456",
+        "message source identity did not round-trip through RPC and REST pull",
+    )?;
     expect(rows_b.is_empty(), "RLS exposed a message to another user")?;
+    let legacy_message_id = random_uuid();
+    let legacy_create = rpc(
+        client,
+        config,
+        user_a,
+        "message_apply",
+        rpc_payload(
+            &random_uuid(),
+            "probe-legacy-null-source",
+            &space_id,
+            &legacy_message_id,
+            "upsert",
+            0,
+            json!({
+                "sender":"legacy","timestampMs":1730000000001_i64,
+                "size":6,"kind":"text","originalName":"legacy.txt",
+                "content":"legacy","format":"text","markedTagIds":[]
+            }),
+        ),
+    )
+    .await?;
+    expect(
+        legacy_create["status"] == "applied",
+        "legacy null-source row did not apply",
+    )?;
+    let legacy_rows = select_message(client, config, user_a, &legacy_message_id).await?;
+    expect(
+        legacy_rows.len() == 1
+            && legacy_rows[0]["source_kind"].is_null()
+            && legacy_rows[0]["source_channel_id"].is_null()
+            && legacy_rows[0]["source_message_id"].is_null(),
+        "legacy message did not preserve null source metadata",
+    )?;
+    let duplicate_source_id = random_uuid();
+    let duplicate_source = rpc(
+        client,
+        config,
+        user_a,
+        "message_apply",
+        rpc_payload(
+            &random_uuid(),
+            "probe-duplicate-source",
+            &space_id,
+            &duplicate_source_id,
+            "upsert",
+            0,
+            create_payload.clone(),
+        ),
+    )
+    .await?;
+    expect(
+        duplicate_source["status"] == "applied"
+            && duplicate_source["idempotent"] == true
+            && duplicate_source["entityId"] == message_id,
+        "duplicate external source was not handled idempotently",
+    )?;
+    let same_id_duplicate = rpc(
+        client,
+        config,
+        user_a,
+        "message_apply",
+        rpc_payload(
+            &random_uuid(),
+            "probe-same-id-duplicate-source",
+            &space_id,
+            &message_id,
+            "upsert",
+            0,
+            create_payload.clone(),
+        ),
+    )
+    .await?;
+    expect(
+        same_id_duplicate["status"] == "applied"
+            && same_id_duplicate["idempotent"] == true
+            && same_id_duplicate["entityId"] == message_id,
+        "same-id duplicate external source was not handled idempotently",
+    )?;
 
     let stale = rpc(
         client,

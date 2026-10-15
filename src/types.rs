@@ -945,6 +945,12 @@ pub struct Message {
     pub source_audio_mime_type: Option<String>,
     #[serde(default)]
     pub transcript_raw_text: Option<String>,
+    #[serde(default)]
+    pub source_kind: Option<String>,
+    #[serde(default)]
+    pub source_channel_id: Option<String>,
+    #[serde(default)]
+    pub source_message_id: Option<String>,
 }
 
 #[derive(Clone, Serialize)]

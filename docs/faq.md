@@ -44,9 +44,9 @@ Transfer Genie 是一个基于 WebDAV 的跨设备文件传输与文本同步桌
 
 适合脚本、定时任务或本地程序自动投递文本和文件。
 
-## 能把 Telegram 和 WebDAV 连起来吗？
+## 能把 Telegram 和 WebDAV / Supabase 连起来吗？
 
-可以。Telegram Bridge 支持把 Telegram 会话中的文本和文件同步到 WebDAV，也可以把 WebDAV 中的新消息转发到 Telegram。
+可以。桌面托管的 Telegram Bridge 支持把 Telegram 会话中的文本和文件同步到当前活动的 WebDAV 或 Supabase 空间，也可以把空间中的新消息转发到 Telegram。Bridge 的自启动与运行状态只保存在当前机器，不会通过 Supabase 同步到其他设备。
 
 ## 需要自己搭服务器吗？
 
@@ -91,6 +91,6 @@ It can be, especially when you want files to stay in your own WebDAV or NAS stor
 
 Yes. Use the local HTTP API to post text or files from scripts and scheduled jobs.
 
-### Can it bridge Telegram and WebDAV?
+### Can it bridge Telegram with WebDAV or Supabase?
 
-Yes. Telegram Bridge syncs Telegram messages and files with a WebDAV endpoint.
+Yes. The desktop-managed Telegram Bridge syncs Telegram messages and files with the active WebDAV or Supabase space. Auto-start and runtime state remain device-local.

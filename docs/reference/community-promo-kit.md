@@ -54,7 +54,7 @@ description: Transfer Genie 社区发布文案包，包含中文技术社区长�
 - 如果你有 NAS、WebDAV 网盘或自建存储，可以直接复用已有存储，不需要再注册一个云服务。
 - 如果你经常在多台设备之间传命令、链接、配置片段、截图或构建产物，它会比普通剪贴板同步更适合保留历史。
 - 如果你想接自动化，它内置本机 HTTP API，可以用脚本直接 `POST /api/send-text` 或 `POST /api/send-file`。
-- 如果你习惯用 Telegram 收文件，也可以通过 Telegram Bridge 把 Telegram 会话和 WebDAV 端点连起来。
+- 如果你习惯用 Telegram 收文件，也可以通过 Telegram Bridge 把 Telegram 会话和当前 WebDAV 或 Supabase 空间连起来。
 
 ## 它跟常见替代方案有什么不同
 
@@ -86,7 +86,7 @@ description: Transfer Genie 社区发布文案包，包含中文技术社区长�
 
 ### 场景四：Telegram 与 WebDAV 同步
 
-Telegram Bridge 可以把 Telegram 中的新文本和文件同步到 WebDAV，也可以把 WebDAV 中的新消息转发到 Telegram。
+Telegram Bridge 可以把 Telegram 中的新文本和文件同步到当前 WebDAV 或 Supabase 空间，也可以把空间中的新消息转发到 Telegram；开关和运行状态只属于当前设备。
 
 ## 技术上为什么值得看一眼
 

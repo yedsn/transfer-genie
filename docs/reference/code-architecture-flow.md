@@ -12,8 +12,8 @@ transfer-genie/
 |   +-- db.rs                      # SQLite 持久化 (messages / download_history / upload_history / marked_tags / partial_downloads)
 |   +-- history.rs                 # 远端历史索引 (manifest 分片 + legacy 单文件)
 |   +-- filenames.rs               # 文件名编解码 + 时间桶路径
-|   +-- telegram_bridge.rs         # Telegram Bridge 子进程主循环 (poll + 双向转发)
-|   +-- telegram_bridge_runtime.rs  # Bridge 进程管理 (spawn/stop/refresh + 状态持久化)
+|   +-- telegram_bridge.rs         # Telegram Bot API、消息解析与独立 WebDAV 兼容循环
+|   +-- telegram_bridge_runtime.rs  # 桌面 managed task / 独立进程兼容生命周期管理
 |   +-- integration_runtime.rs     # 集成模块通用接口 (Sync/Bridge trait) + 状态序列化
 |   +-- webdav_sync_runtime.rs      # WebDAV Sync 适配器 (status/cancel/refresh)
 |   +-- types.rs                   # 全局结构体定义
@@ -60,7 +60,7 @@ Rust 侧的核心是一个 `AppState` 结构体，通过 Tauri 的 State 注入�
 | `sync_cancel` | `Mutex<Option<oneshot::Sender>>` | 取消当前同步的信道 |
 | `sync_loop_signal` | `watch::Sender<u64>` | 自动同步定时时钟 (保存设置时重置) |
 | `http` | `Client` | 共享 reqwest HTTP 客户端 |
-| `telegram_bridge` | `Mutex<TelegramBridgeManager>` | Bridge 子进程生命周期管理器 |
+| `telegram_bridge` | `Mutex<TelegramBridgeManager>` | Bridge managed task 生命周期、取消与 generation 状态 |
 | `local_http_api` | `Mutex<LocalHttpApiManager>` | 本机 HTTP API 服务管理器 |
 | `db_path` | `PathBuf` | `messages.sqlite3` 路径 |
 | `files_base_dir` | `PathBuf` | 下载目录根路径 |
@@ -131,37 +131,21 @@ Tauri 命令
 
 ```text
 +----------------------------------------------------+
-|  telegram_bridge.rs (子进程)                      |
+|  main.rs managed Bridge task                       |
 |                                                    |
-|  主循环 run():                                  |
-|    1. fetch_updates()  --> Telegram getUpdates      |
-|    2. process_update():                            |
-|       +-- 验证 chat_id                           |
-|       +-- InboundPayload::Text -> 上传 WebDAV      |
-|       +-- InboundPayload::File  -> 下载 +          |
-|           上传 WebDAV                              |
-|    3. sync_webdav_to_telegram():                   |
-|       +-- load_history_with_layout()               |
-|       +-- 跳过已发送 / 永久失败的消息          |
-|       +-- 文本 -> send_message                     |
-|          文件  -> send_document                    |
+|  1. 固定当前 Provider/profile/owner/generation    |
+|  2. telegram_bridge.rs 轮询并下载 Telegram update |
+|  3. WebDAV: 文件 + history + 本地索引             |
+|     Supabase: SQLite + outbox + 私有 Storage       |
+|  4. Provider 同步/补拉后从本地索引选择出站消息    |
+|  5. SQLite 本机账本记录 cursor/watermark/delivery |
+|  6. 来源为 telegram 的消息始终跳过，避免回环      |
 |                                                    |
-|  状态文件: telegram-bridge-state.json            |
+|  TelegramBridgeManager: cancellation + generation |
+|  不生成包含 Supabase Session/Bot Token 的 runtime |
 +----------------------------------------------------+
-       |  通过 runtime.json 配置文件
-+----------------------------------------------------+
-|  main.rs (主进程)                                |
-|                                                    |
-|  TelegramBridgeManager:                            |
-|    spawn_telegram_bridge_process()                  |
-|    - 写 runtime.json (含 WebDAV 端点凭据)        |
-|    - 启动子进程 (transfer-genie --telegram-bridge)|
-|    - 刷新状态: refresh_telegram_bridge_manager()    |
-|                                                    |
-|  前端控制:                                      |
-|    start_telegram_bridge -> spawn + 监控           |
-|    stop_telegram_bridge  -> kill + 清理            |
-+----------------------------------------------------+
+
+独立 `telegram_bridge` 二进制仍保留旧 WebDAV 配置与子进程执行路径，不负责 Supabase 登录。
 ```
 
 ### 4. 本机 HTTP API 服务
@@ -285,9 +269,7 @@ main.js invoke() 调用
 |   +-- snapshots/                  # 文件变更快照 (最多保留 20 份)
 |   +-- runtime/                    # 运行时临时文件
 |   +-- plugins/
-|       +-- telegram-bridge/       # Bridge 子进程目录
-|       |   +-- runtime.json        # 运行时配置 (含 WebDAV 凭据)
-|       |   +-- state.json          # Bridge 状态 (last_update_id / outbound_messages)
+|       +-- telegram-bridge/       # 独立 WebDAV 兼容模式目录
 |       +-- module-status.json      # 模块状态汇总
 ```
 
@@ -339,7 +321,7 @@ main.js invoke() 调用
 
 4. **断点续传** — 下载记录存在 `partial_downloads` 表，`download_file_stream_with_range` 支持 Range 请求续传。`DownloadTransferMode` 区分 fresh / resumed / restarted。
 
-5. **Bridge 子进程模式** — Telegram Bridge 不是线程而是独立子进程，通过 `runtime.json` 传递配置（含 WebDAV 凭据），通过 `state.json` 维护偏移量。主进程 `TelegramBridgeManager` 监控子进程存活并刷新状态。
+5. **Bridge 托管任务模式** — 桌面 Bridge 是主进程内可取消异步任务，启动时固定 Provider/profile/owner/generation；游标与投递账本仅在本机 SQLite。旧独立 WebDAV 命令仍使用兼容配置路径。
 
 6. **设置加密导出** — `export_settings` 使用 PBKDF2 派生密钥 + AES-256-GCM 加密，确保 WebDAV/Telegram 凭据安全。
 

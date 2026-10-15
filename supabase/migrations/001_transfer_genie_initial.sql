@@ -52,6 +52,9 @@ create table if not exists transfer_genie.messages (
   transcript_source text,
   source_audio_mime_type text,
   transcript_raw_text text,
+  source_kind text,
+  source_channel_id text,
+  source_message_id text,
   marked boolean not null default false,
   marked_tag_ids text[] not null default '{}',
   marked_pinned boolean not null default false,
@@ -75,6 +78,9 @@ create index if not exists messages_space_deleted_idx
 create unique index if not exists messages_legacy_filename_idx
   on transfer_genie.messages (owner_id, space_id, legacy_filename)
   where legacy_filename is not null;
+create unique index if not exists messages_external_source_idx
+  on transfer_genie.messages (owner_id, space_id, source_kind, source_channel_id, source_message_id)
+  where source_kind is not null and source_channel_id is not null and source_message_id is not null;
 
 create table if not exists transfer_genie.tags (
   id text not null,
@@ -395,6 +401,7 @@ as $function$
 declare
   v_user_id uuid := transfer_genie.require_user();
   v_existing transfer_genie.messages;
+  v_source_existing transfer_genie.messages;
   v_result jsonb;
   v_revision bigint;
   v_seq bigint;
@@ -415,6 +422,34 @@ begin
   v_result := transfer_genie.operation_result(v_user_id, p_space_id, p_operation_id, p_payload_hash);
   if v_result is not null then return v_result; end if;
   perform transfer_genie.assert_space_owner(v_user_id, p_space_id);
+
+  if p_action = 'upsert'
+     and nullif(p_payload ->> 'sourceKind', '') is not null
+     and nullif(p_payload ->> 'sourceChannelId', '') is not null
+     and nullif(p_payload ->> 'sourceMessageId', '') is not null then
+    perform pg_advisory_xact_lock(hashtextextended(
+      'source:' || v_user_id::text || ':' || p_space_id::text || ':' ||
+      nullif(p_payload ->> 'sourceKind', '') || ':' ||
+      nullif(p_payload ->> 'sourceChannelId', '') || ':' ||
+      nullif(p_payload ->> 'sourceMessageId', ''), 0));
+    select * into v_source_existing from transfer_genie.messages
+    where owner_id = v_user_id and space_id = p_space_id
+      and source_kind = nullif(p_payload ->> 'sourceKind', '')
+      and source_channel_id = nullif(p_payload ->> 'sourceChannelId', '')
+      and source_message_id = nullif(p_payload ->> 'sourceMessageId', '')
+    for update;
+
+    if found and (v_source_existing.id <> p_message_id or p_base_revision = 0) then
+      v_result := jsonb_build_object(
+        'status', 'applied', 'entityType', 'message', 'entityId', v_source_existing.id,
+        'revision', v_source_existing.revision, 'changeSeq', 0, 'idempotent', true
+      );
+      insert into transfer_genie.applied_operations
+        (owner_id, space_id, operation_id, payload_hash, result)
+      values (v_user_id, p_space_id, p_operation_id, p_payload_hash, v_result);
+      return v_result;
+    end if;
+  end if;
 
   select * into v_existing from transfer_genie.messages
   where owner_id = v_user_id and space_id = p_space_id and id = p_message_id
@@ -456,7 +491,8 @@ begin
       insert into transfer_genie.messages (
         id, owner_id, space_id, sender, timestamp_ms, size, kind, original_name,
         content, format, file_hash, legacy_filename, transcript_source,
-        source_audio_mime_type, transcript_raw_text, marked, marked_tag_ids,
+        source_audio_mime_type, transcript_raw_text, source_kind, source_channel_id,
+        source_message_id, marked, marked_tag_ids,
         marked_pinned, marked_due_date, revision, deleted_at, created_at, updated_at
       ) values (
         p_message_id, v_user_id, p_space_id,
@@ -466,6 +502,8 @@ begin
         coalesce(nullif(p_payload ->> 'format', ''), 'text'), p_payload ->> 'fileHash',
         p_payload ->> 'legacyFilename', p_payload ->> 'transcriptSource',
         p_payload ->> 'sourceAudioMimeType', p_payload ->> 'transcriptRawText',
+        nullif(p_payload ->> 'sourceKind', ''), nullif(p_payload ->> 'sourceChannelId', ''),
+        nullif(p_payload ->> 'sourceMessageId', ''),
         coalesce((p_payload ->> 'marked')::boolean, false), v_tag_ids,
         coalesce((p_payload ->> 'markedPinned')::boolean, false),
         nullif(p_payload ->> 'markedDueDate', '')::date,
@@ -477,7 +515,9 @@ begin
         content = excluded.content, format = excluded.format, file_hash = excluded.file_hash,
         legacy_filename = excluded.legacy_filename, transcript_source = excluded.transcript_source,
         source_audio_mime_type = excluded.source_audio_mime_type,
-        transcript_raw_text = excluded.transcript_raw_text, marked = excluded.marked,
+        transcript_raw_text = excluded.transcript_raw_text, source_kind = excluded.source_kind,
+        source_channel_id = excluded.source_channel_id, source_message_id = excluded.source_message_id,
+        marked = excluded.marked,
         marked_tag_ids = excluded.marked_tag_ids, marked_pinned = excluded.marked_pinned,
         marked_due_date = excluded.marked_due_date, revision = excluded.revision,
         deleted_at = null, updated_at = now();

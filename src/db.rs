@@ -42,6 +42,9 @@ pub struct DbMessage {
     pub transcript_source: Option<String>,
     pub source_audio_mime_type: Option<String>,
     pub transcript_raw_text: Option<String>,
+    pub source_kind: Option<String>,
+    pub source_channel_id: Option<String>,
+    pub source_message_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -178,6 +181,15 @@ pub struct SupabaseHistoryCursor {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TelegramDeliveryRecord {
+    pub message_key: String,
+    pub status: String,
+    pub telegram_message_id: Option<i64>,
+    pub last_error: Option<String>,
+    pub last_attempt_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StorageTransferItem {
     pub item_type: String,
     pub source_key: String,
@@ -286,7 +298,8 @@ fn ensure_account_scoped_business_keys(conn: &mut Connection) -> rusqlite::Resul
                remote_path TEXT,file_hash TEXT,marked BOOLEAN NOT NULL DEFAULT 0,
                marked_tag_ids TEXT NOT NULL DEFAULT '[]',marked_pinned BOOLEAN NOT NULL DEFAULT 0,
                marked_due_date TEXT,format TEXT NOT NULL DEFAULT 'text',transcript_source TEXT,
-               source_audio_mime_type TEXT,transcript_raw_text TEXT,message_id TEXT,
+               source_audio_mime_type TEXT,transcript_raw_text TEXT,source_kind TEXT,
+               source_channel_id TEXT,source_message_id TEXT,message_id TEXT,
                remote_revision INTEGER NOT NULL DEFAULT 0,deleted_at_ms INTEGER,
                sync_state TEXT NOT NULL DEFAULT 'synced',owner_scope TEXT NOT NULL DEFAULT '',
                PRIMARY KEY(endpoint_id,owner_scope,filename)
@@ -294,7 +307,8 @@ fn ensure_account_scoped_business_keys(conn: &mut Connection) -> rusqlite::Resul
              INSERT INTO messages_account_scoped SELECT endpoint_id,filename,sender,timestamp_ms,size,
                kind,original_name,etag,mtime,content,local_path,remote_path,file_hash,marked,
                marked_tag_ids,marked_pinned,marked_due_date,format,transcript_source,
-               source_audio_mime_type,transcript_raw_text,message_id,remote_revision,deleted_at_ms,
+               source_audio_mime_type,transcript_raw_text,source_kind,source_channel_id,
+               source_message_id,message_id,remote_revision,deleted_at_ms,
                sync_state,owner_scope FROM messages;
              DROP TABLE messages;
              ALTER TABLE messages_account_scoped RENAME TO messages;",
@@ -324,6 +338,9 @@ fn ensure_local_first_sync_schema(conn: &Connection) -> rusqlite::Result<()> {
     let columns = table_columns(conn, "messages")?;
     let additions = [
         ("message_id", "TEXT"),
+        ("source_kind", "TEXT"),
+        ("source_channel_id", "TEXT"),
+        ("source_message_id", "TEXT"),
         ("remote_revision", "INTEGER NOT NULL DEFAULT 0"),
         ("deleted_at_ms", "INTEGER"),
         ("sync_state", "TEXT NOT NULL DEFAULT 'synced'"),
@@ -360,6 +377,10 @@ fn ensure_local_first_sync_schema(conn: &Connection) -> rusqlite::Result<()> {
          WHERE message_id IS NULL OR trim(message_id) = '';
          CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_profile_message_id
            ON messages(endpoint_id, owner_scope, message_id);
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_external_source
+           ON messages(endpoint_id, owner_scope, source_kind, source_channel_id, source_message_id)
+           WHERE source_kind IS NOT NULL AND source_channel_id IS NOT NULL
+             AND source_message_id IS NOT NULL;
          CREATE INDEX IF NOT EXISTS idx_messages_profile_revision
            ON messages(endpoint_id, owner_scope, remote_revision);
          CREATE INDEX IF NOT EXISTS idx_messages_profile_deleted
@@ -446,8 +467,28 @@ fn ensure_local_first_sync_schema(conn: &Connection) -> rusqlite::Result<()> {
            updated_at_ms INTEGER NOT NULL,
            PRIMARY KEY(endpoint_id, owner_scope, attachment_id)
          );
-          CREATE INDEX IF NOT EXISTS idx_attachment_sync_message
+         CREATE INDEX IF NOT EXISTS idx_attachment_sync_message
             ON attachment_sync(endpoint_id, owner_scope, message_id);
+
+         CREATE TABLE IF NOT EXISTS telegram_bridge_bindings (
+           binding_key TEXT PRIMARY KEY,
+           profile_id TEXT NOT NULL,
+           owner_scope TEXT NOT NULL DEFAULT '',
+           provider_kind TEXT NOT NULL,
+           last_update_id INTEGER NOT NULL DEFAULT 0,
+           start_watermark_ms INTEGER NOT NULL DEFAULT 0,
+           start_watermark_key TEXT NOT NULL DEFAULT '',
+           updated_at_ms INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS telegram_delivery_ledger (
+           binding_key TEXT NOT NULL,
+           message_key TEXT NOT NULL,
+           status TEXT NOT NULL,
+           telegram_message_id INTEGER,
+           last_error TEXT,
+           last_attempt_ms INTEGER,
+           PRIMARY KEY(binding_key,message_key)
+         );
 
          CREATE TABLE IF NOT EXISTS storage_import_batches (
            batch_id TEXT PRIMARY KEY,
@@ -929,7 +970,7 @@ pub fn get_message(
     let conn = Connection::open(path)?;
     conn
     .query_row(
-      "SELECT endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, marked_due_date, format, transcript_source, source_audio_mime_type, transcript_raw_text \
+      "SELECT endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, marked_due_date, format, transcript_source, source_audio_mime_type, transcript_raw_text, source_kind, source_channel_id, source_message_id \
        FROM messages WHERE endpoint_id = ?1 AND filename = ?2",
       params![endpoint_id, filename],
       |row| {
@@ -956,6 +997,9 @@ pub fn get_message(
           transcript_source: row.get(18)?,
           source_audio_mime_type: row.get(19)?,
           transcript_raw_text: row.get(20)?,
+          source_kind: row.get(21)?,
+          source_channel_id: row.get(22)?,
+          source_message_id: row.get(23)?,
         })
       },
     )
@@ -966,8 +1010,8 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
     let conn = Connection::open(path)?;
     conn.execute(
     "INSERT INTO messages\
-      (endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, marked_due_date, format, transcript_source, source_audio_mime_type, transcript_raw_text)\
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)\
+      (endpoint_id, filename, sender, timestamp_ms, size, kind, original_name, etag, mtime, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, marked_due_date, format, transcript_source, source_audio_mime_type, transcript_raw_text, source_kind, source_channel_id, source_message_id)\
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)\
       ON CONFLICT(endpoint_id, owner_scope, filename) DO UPDATE SET \
         sender=excluded.sender,\
         timestamp_ms=excluded.timestamp_ms,\
@@ -987,7 +1031,10 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
         format=excluded.format,\
         transcript_source=excluded.transcript_source,\
         source_audio_mime_type=excluded.source_audio_mime_type,\
-        transcript_raw_text=excluded.transcript_raw_text",
+        transcript_raw_text=excluded.transcript_raw_text,\
+        source_kind=excluded.source_kind,\
+        source_channel_id=excluded.source_channel_id,\
+        source_message_id=excluded.source_message_id",
     params![
       message.endpoint_id,
       message.filename,
@@ -1010,6 +1057,9 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
       message.transcript_source,
       message.source_audio_mime_type,
       message.transcript_raw_text,
+      message.source_kind,
+      message.source_channel_id,
+      message.source_message_id,
     ],
   )?;
     Ok(())
@@ -2443,8 +2493,9 @@ fn apply_pulled_message(
         "INSERT INTO messages (
            endpoint_id,filename,sender,timestamp_ms,size,kind,original_name,content,format,file_hash,
            marked,marked_tag_ids,marked_pinned,marked_due_date,transcript_source,source_audio_mime_type,
-           transcript_raw_text,message_id,remote_revision,deleted_at_ms,sync_state,owner_scope
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,'synced',?21)
+           transcript_raw_text,source_kind,source_channel_id,source_message_id,
+           message_id,remote_revision,deleted_at_ms,sync_state,owner_scope
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,'synced',?24)
          ON CONFLICT(endpoint_id,owner_scope,filename) DO UPDATE SET
            sender=excluded.sender,timestamp_ms=excluded.timestamp_ms,size=excluded.size,
            kind=excluded.kind,original_name=excluded.original_name,content=excluded.content,
@@ -2452,7 +2503,9 @@ fn apply_pulled_message(
            marked_tag_ids=excluded.marked_tag_ids,marked_pinned=excluded.marked_pinned,
            marked_due_date=excluded.marked_due_date,transcript_source=excluded.transcript_source,
            source_audio_mime_type=excluded.source_audio_mime_type,
-           transcript_raw_text=excluded.transcript_raw_text,message_id=excluded.message_id,
+           transcript_raw_text=excluded.transcript_raw_text,source_kind=excluded.source_kind,
+           source_channel_id=excluded.source_channel_id,source_message_id=excluded.source_message_id,
+           message_id=excluded.message_id,
            remote_revision=excluded.remote_revision,deleted_at_ms=excluded.deleted_at_ms,
            sync_state='synced',owner_scope=excluded.owner_scope",
         params![
@@ -2474,6 +2527,9 @@ fn apply_pulled_message(
             snapshot["transcript_source"].as_str(),
             snapshot["source_audio_mime_type"].as_str(),
             snapshot["transcript_raw_text"].as_str(),
+            snapshot["source_kind"].as_str(),
+            snapshot["source_channel_id"].as_str(),
+            snapshot["source_message_id"].as_str(),
             change.entity_id,
             change.revision,
             deleted.then_some(now_ms),
@@ -2614,8 +2670,9 @@ pub fn save_message_and_enqueue(
            sender=?3,timestamp_ms=?4,size=?5,kind=?6,original_name=?7,content=?8,
            marked=?9,marked_tag_ids=?10,marked_pinned=?11,marked_due_date=?12,
            format=?13,transcript_source=?14,source_audio_mime_type=?15,
-           transcript_raw_text=?16,sync_state='pending',deleted_at_ms=NULL
-         WHERE endpoint_id=?1 AND filename=?2 AND owner_scope=?17",
+           transcript_raw_text=?16,source_kind=?17,source_channel_id=?18,source_message_id=?19,
+           sync_state='pending',deleted_at_ms=NULL
+         WHERE endpoint_id=?1 AND filename=?2 AND owner_scope=?20",
         params![
             message.endpoint_id,
             message.filename,
@@ -2633,6 +2690,9 @@ pub fn save_message_and_enqueue(
             message.transcript_source,
             message.source_audio_mime_type,
             message.transcript_raw_text,
+            message.source_kind,
+            message.source_channel_id,
+            message.source_message_id,
             operation.owner_scope,
         ],
     )?;
@@ -2642,9 +2702,10 @@ pub fn save_message_and_enqueue(
               endpoint_id,filename,sender,timestamp_ms,size,kind,original_name,etag,mtime,
               content,local_path,remote_path,file_hash,marked,marked_tag_ids,marked_pinned,
               marked_due_date,format,transcript_source,source_audio_mime_type,
-              transcript_raw_text,message_id,remote_revision,deleted_at_ms,sync_state,owner_scope
+              transcript_raw_text,source_kind,source_channel_id,source_message_id,
+              message_id,remote_revision,deleted_at_ms,sync_state,owner_scope
             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,
-              ?17,?18,?19,?20,?21,?22,?23,NULL,'pending',?24)",
+              ?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,NULL,'pending',?27)",
             params![
                 message.endpoint_id,
                 message.filename,
@@ -2667,6 +2728,9 @@ pub fn save_message_and_enqueue(
                 message.transcript_source,
                 message.source_audio_mime_type,
                 message.transcript_raw_text,
+                message.source_kind,
+                message.source_channel_id,
+                message.source_message_id,
                 operation.entity_id,
                 operation.base_revision,
                 operation.owner_scope,
@@ -2691,12 +2755,13 @@ pub fn save_file_message_and_enqueue(
     tx.execute(
         "INSERT INTO messages (endpoint_id,filename,sender,timestamp_ms,size,kind,original_name,content,
          local_path,remote_path,file_hash,marked,marked_tag_ids,marked_pinned,marked_due_date,format,
-         message_id,remote_revision,deleted_at_ms,sync_state,owner_scope)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,0,NULL,'pending',?18)",
+         source_kind,source_channel_id,source_message_id,message_id,remote_revision,deleted_at_ms,sync_state,owner_scope)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,0,NULL,'pending',?21)",
         params![message.endpoint_id,message.filename,message.sender,message.timestamp_ms,message.size,
             message.kind,message.original_name,message.content,message.local_path,message.remote_path,
             message.file_hash,message.marked,serialize_tag_ids(&message.marked_tag_ids)?,
-            message.marked_pinned,message.marked_due_date,message.format,message_operation.entity_id,
+            message.marked_pinned,message.marked_due_date,message.format,message.source_kind,
+            message.source_channel_id,message.source_message_id,message_operation.entity_id,
             message_operation.owner_scope],
     )?;
     tx.execute(
@@ -2765,9 +2830,10 @@ pub fn save_message_with_marked_changes_and_enqueue(
           endpoint_id,filename,sender,timestamp_ms,size,kind,original_name,etag,mtime,
           content,local_path,remote_path,file_hash,marked,marked_tag_ids,marked_pinned,
           marked_due_date,format,transcript_source,source_audio_mime_type,
-          transcript_raw_text,message_id,remote_revision,deleted_at_ms,sync_state,owner_scope
+          transcript_raw_text,source_kind,source_channel_id,source_message_id,
+          message_id,remote_revision,deleted_at_ms,sync_state,owner_scope
         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,
-          ?17,?18,?19,?20,?21,?22,0,NULL,'pending',?23)",
+          ?17,?18,?19,?20,?21,?22,?23,?24,?25,0,NULL,'pending',?26)",
         params![
             message.endpoint_id,
             message.filename,
@@ -2790,6 +2856,9 @@ pub fn save_message_with_marked_changes_and_enqueue(
             message.transcript_source,
             message.source_audio_mime_type,
             message.transcript_raw_text,
+            message.source_kind,
+            message.source_channel_id,
+            message.source_message_id,
             message_operation.entity_id,
             message_operation.owner_scope,
         ],
@@ -3975,18 +4044,22 @@ pub fn apply_imported_message(
     )?;
     tx.execute("INSERT INTO messages(endpoint_id,filename,sender,timestamp_ms,size,kind,original_name,etag,mtime,
       content,local_path,remote_path,file_hash,marked,marked_tag_ids,marked_pinned,marked_due_date,format,
-      transcript_source,source_audio_mime_type,transcript_raw_text,message_id,remote_revision,deleted_at_ms,sync_state,owner_scope)
-      VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,NULL,'pending',?24)
+      transcript_source,source_audio_mime_type,transcript_raw_text,source_kind,source_channel_id,
+      source_message_id,message_id,remote_revision,deleted_at_ms,sync_state,owner_scope)
+      VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,NULL,'pending',?27)
       ON CONFLICT(endpoint_id,owner_scope,filename) DO UPDATE SET sender=excluded.sender,timestamp_ms=excluded.timestamp_ms,
       size=excluded.size,kind=excluded.kind,original_name=excluded.original_name,content=excluded.content,
       local_path=excluded.local_path,remote_path=excluded.remote_path,file_hash=excluded.file_hash,marked=excluded.marked,
       marked_tag_ids=excluded.marked_tag_ids,marked_pinned=excluded.marked_pinned,marked_due_date=excluded.marked_due_date,
       format=excluded.format,transcript_source=excluded.transcript_source,source_audio_mime_type=excluded.source_audio_mime_type,
-      transcript_raw_text=excluded.transcript_raw_text,message_id=excluded.message_id,deleted_at_ms=NULL,sync_state='pending'",
+      transcript_raw_text=excluded.transcript_raw_text,source_kind=excluded.source_kind,
+      source_channel_id=excluded.source_channel_id,source_message_id=excluded.source_message_id,
+      message_id=excluded.message_id,deleted_at_ms=NULL,sync_state='pending'",
       params![message.endpoint_id,message.filename,message.sender,message.timestamp_ms,message.size,message.kind,message.original_name,
       message.etag,message.mtime,message.content,message.local_path,message.remote_path,message.file_hash,message.marked,
       serialize_tag_ids(&message.marked_tag_ids)?,message.marked_pinned,message.marked_due_date,message.format,
-      message.transcript_source,message.source_audio_mime_type,message.transcript_raw_text,message_operation.entity_id,
+      message.transcript_source,message.source_audio_mime_type,message.transcript_raw_text,message.source_kind,
+      message.source_channel_id,message.source_message_id,message_operation.entity_id,
       message_operation.base_revision,message_operation.owner_scope])?;
     enqueue_outbox(&tx, message_operation)?;
     if let Some((
@@ -4094,7 +4167,7 @@ pub fn get_message_for_scope(
         "SELECT endpoint_id, filename, sender, timestamp_ms, size, kind, original_name,
           etag, mtime, content, local_path, remote_path, file_hash, marked, marked_tag_ids,
           marked_pinned, marked_due_date, format, transcript_source, source_audio_mime_type,
-          transcript_raw_text FROM messages
+          transcript_raw_text, source_kind, source_channel_id, source_message_id FROM messages
          WHERE endpoint_id=?1 AND owner_scope=?2 AND filename=?3 AND deleted_at_ms IS NULL",
         params![endpoint_id, owner_scope, filename],
         |row| {
@@ -4121,10 +4194,38 @@ pub fn get_message_for_scope(
                 transcript_source: row.get(18)?,
                 source_audio_mime_type: row.get(19)?,
                 transcript_raw_text: row.get(20)?,
+                source_kind: row.get(21)?,
+                source_channel_id: row.get(22)?,
+                source_message_id: row.get(23)?,
             })
         },
     )
     .optional()
+}
+
+pub fn find_message_by_source_for_scope(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    source_kind: &str,
+    source_channel_id: &str,
+    source_message_id: &str,
+) -> rusqlite::Result<Option<String>> {
+    Connection::open(path)?
+        .query_row(
+            "SELECT filename FROM messages WHERE endpoint_id=?1 AND owner_scope=?2
+             AND source_kind=?3 AND source_channel_id=?4 AND source_message_id=?5
+             AND deleted_at_ms IS NULL LIMIT 1",
+            params![
+                endpoint_id,
+                owner_scope,
+                source_kind,
+                source_channel_id,
+                source_message_id
+            ],
+            |row| row.get(0),
+        )
+        .optional()
 }
 
 pub fn get_message_by_id_for_scope(
@@ -4138,7 +4239,7 @@ pub fn get_message_by_id_for_scope(
         "SELECT endpoint_id, filename, sender, timestamp_ms, size, kind, original_name,
           etag, mtime, content, local_path, remote_path, file_hash, marked, marked_tag_ids,
           marked_pinned, marked_due_date, format, transcript_source, source_audio_mime_type,
-          transcript_raw_text, remote_revision FROM messages
+          transcript_raw_text, source_kind, source_channel_id, source_message_id, remote_revision FROM messages
          WHERE endpoint_id=?1 AND owner_scope=?2 AND message_id=?3 AND deleted_at_ms IS NULL",
         params![endpoint_id, owner_scope, message_id],
         |row| {
@@ -4166,8 +4267,11 @@ pub fn get_message_by_id_for_scope(
                     transcript_source: row.get(18)?,
                     source_audio_mime_type: row.get(19)?,
                     transcript_raw_text: row.get(20)?,
+                    source_kind: row.get(21)?,
+                    source_channel_id: row.get(22)?,
+                    source_message_id: row.get(23)?,
                 },
-                row.get(21)?,
+                row.get(24)?,
             ))
         },
     )
@@ -4432,7 +4536,7 @@ pub fn list_messages(
 }
 
 fn message_row_select_sql() -> &'static str {
-    "filename, sender, timestamp_ms, size, kind, original_name, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, marked_due_date, format, transcript_source, source_audio_mime_type, transcript_raw_text, message_id"
+    "filename, sender, timestamp_ms, size, kind, original_name, content, local_path, remote_path, file_hash, marked, marked_tag_ids, marked_pinned, marked_due_date, format, transcript_source, source_audio_mime_type, transcript_raw_text, message_id, source_kind, source_channel_id, source_message_id"
 }
 
 fn map_message_row(row: &Row<'_>) -> rusqlite::Result<Message> {
@@ -4458,6 +4562,9 @@ fn map_message_row(row: &Row<'_>) -> rusqlite::Result<Message> {
         transcript_source: row.get(15)?,
         source_audio_mime_type: row.get(16)?,
         transcript_raw_text: row.get(17)?,
+        source_kind: row.get(19)?,
+        source_channel_id: row.get(20)?,
+        source_message_id: row.get(21)?,
     })
 }
 
@@ -4723,8 +4830,8 @@ pub fn list_messages_after_for_scope(
     let sql = format!(
         "SELECT {} FROM messages
          WHERE endpoint_id=?1 AND owner_scope=?2 AND deleted_at_ms IS NULL{}
-           AND (timestamp_ms>?3 OR (timestamp_ms=?3 AND message_id>?4))
-         ORDER BY timestamp_ms ASC,message_id ASC LIMIT ?5",
+           AND (timestamp_ms>?3 OR (timestamp_ms=?3 AND coalesce(message_id,filename)>?4))
+         ORDER BY timestamp_ms ASC,coalesce(message_id,filename) ASC LIMIT ?5",
         message_row_select_sql(),
         marked_clause
     );
@@ -4738,6 +4845,118 @@ pub fn list_messages_after_for_scope(
             &after_filename,
             &limit,
         ],
+    )
+}
+
+pub fn telegram_bridge_binding_state(
+    path: &Path,
+    binding_key: &str,
+) -> rusqlite::Result<Option<(i64, i64, String)>> {
+    Connection::open(path)?
+        .query_row(
+            "SELECT last_update_id,start_watermark_ms,start_watermark_key
+             FROM telegram_bridge_bindings WHERE binding_key=?1",
+            [binding_key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn upsert_telegram_bridge_binding_state(
+    path: &Path,
+    binding_key: &str,
+    profile_id: &str,
+    owner_scope: &str,
+    provider_kind: &str,
+    last_update_id: i64,
+    watermark_ms: i64,
+    watermark_key: &str,
+    updated_at_ms: i64,
+) -> rusqlite::Result<()> {
+    Connection::open(path)?.execute(
+        "INSERT INTO telegram_bridge_bindings(
+           binding_key,profile_id,owner_scope,provider_kind,last_update_id,
+           start_watermark_ms,start_watermark_key,updated_at_ms)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+         ON CONFLICT(binding_key) DO UPDATE SET
+           profile_id=excluded.profile_id,owner_scope=excluded.owner_scope,
+           provider_kind=excluded.provider_kind,last_update_id=excluded.last_update_id,
+           start_watermark_ms=excluded.start_watermark_ms,
+           start_watermark_key=excluded.start_watermark_key,updated_at_ms=excluded.updated_at_ms",
+        params![
+            binding_key,
+            profile_id,
+            owner_scope,
+            provider_kind,
+            last_update_id,
+            watermark_ms,
+            watermark_key,
+            updated_at_ms
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn get_telegram_delivery_record(
+    path: &Path,
+    binding_key: &str,
+    message_key: &str,
+) -> rusqlite::Result<Option<TelegramDeliveryRecord>> {
+    Connection::open(path)?
+        .query_row(
+            "SELECT message_key,status,telegram_message_id,last_error,last_attempt_ms
+             FROM telegram_delivery_ledger WHERE binding_key=?1 AND message_key=?2",
+            params![binding_key, message_key],
+            |row| {
+                Ok(TelegramDeliveryRecord {
+                    message_key: row.get(0)?,
+                    status: row.get(1)?,
+                    telegram_message_id: row.get(2)?,
+                    last_error: row.get(3)?,
+                    last_attempt_ms: row.get(4)?,
+                })
+            },
+        )
+        .optional()
+}
+
+pub fn upsert_telegram_delivery_record(
+    path: &Path,
+    binding_key: &str,
+    record: &TelegramDeliveryRecord,
+) -> rusqlite::Result<()> {
+    Connection::open(path)?.execute(
+        "INSERT INTO telegram_delivery_ledger(
+           binding_key,message_key,status,telegram_message_id,last_error,last_attempt_ms)
+         VALUES(?1,?2,?3,?4,?5,?6)
+         ON CONFLICT(binding_key,message_key) DO UPDATE SET status=excluded.status,
+           telegram_message_id=excluded.telegram_message_id,last_error=excluded.last_error,
+           last_attempt_ms=excluded.last_attempt_ms",
+        params![
+            binding_key,
+            record.message_key,
+            record.status,
+            record.telegram_message_id,
+            record.last_error,
+            record.last_attempt_ms
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn recover_telegram_sending_deliveries(
+    path: &Path,
+    binding_key: &str,
+    updated_at_ms: i64,
+) -> rusqlite::Result<usize> {
+    Connection::open(path)?.execute(
+        "UPDATE telegram_delivery_ledger
+         SET status='delivery_unconfirmed',
+             last_error=coalesce(last_error,'应用在确认 Telegram 投递结果前退出'),
+             last_attempt_ms=coalesce(last_attempt_ms,?2)
+         WHERE binding_key=?1 AND status='sending'",
+        params![binding_key, updated_at_ms],
     )
 }
 
@@ -5679,6 +5898,9 @@ mod tests {
             transcript_source: None,
             source_audio_mime_type: None,
             transcript_raw_text: None,
+            source_kind: None,
+            source_channel_id: None,
+            source_message_id: None,
         }
     }
 
@@ -5710,6 +5932,9 @@ mod tests {
             transcript_source: None,
             source_audio_mime_type: None,
             transcript_raw_text: None,
+            source_kind: None,
+            source_channel_id: None,
+            source_message_id: None,
         }
     }
 
@@ -6187,6 +6412,9 @@ mod tests {
         assert_eq!(message.marked_due_date, None);
         assert_eq!(message.transcript_source, None);
         assert_eq!(message.source_audio_mime_type, None);
+        assert_eq!(message.source_kind, None);
+        assert_eq!(message.source_channel_id, None);
+        assert_eq!(message.source_message_id, None);
         assert!(list_marked_tags(&path, "endpoint-1")
             .expect("list marked tags after migration")
             .is_empty());
@@ -6236,6 +6464,24 @@ mod tests {
             .expect("count stable ids");
         assert_eq!(count, 2);
         assert_eq!(stable_ids, 2);
+        let source_columns: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('messages')
+                 WHERE name IN ('source_kind','source_channel_id','source_message_id')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count source columns");
+        assert_eq!(source_columns, 3);
+        let populated_sources: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM messages WHERE source_kind IS NOT NULL
+                 OR source_channel_id IS NOT NULL OR source_message_id IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count populated source identities");
+        assert_eq!(populated_sources, 0);
         for table in [
             "sync_outbox",
             "sync_checkpoints",
@@ -6303,6 +6549,302 @@ mod tests {
             .expect("count outbox after rollback");
         assert_eq!(stored, "atomic.txt");
         assert_eq!(outbox_count, 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn telegram_source_identity_is_unique_within_scope_but_reusable_across_owners() {
+        let path = temp_db_path("telegram-source-identity");
+        init_db(&path, None).expect("initialize database");
+        let mut first = sample_message("telegram-a.txt", 100, &[], false);
+        first.marked = false;
+        first.source_kind = Some("telegram".into());
+        first.source_channel_id = Some("-100123".into());
+        first.source_message_id = Some("456".into());
+        let operation =
+            |operation_id: &str, owner_scope: &str, entity_id: &str| NewOutboxOperation {
+                operation_id: operation_id.into(),
+                endpoint_id: first.endpoint_id.clone(),
+                owner_scope: owner_scope.into(),
+                entity_type: "message".into(),
+                entity_id: entity_id.into(),
+                action: "upsert".into(),
+                base_revision: 0,
+                payload_json: "{}".into(),
+                payload_hash: format!("hash-{operation_id}"),
+                created_at_ms: 100,
+            };
+        save_message_and_enqueue(&path, &first, &operation("op-a", "user-a", "message-a"))
+            .expect("save first Telegram message");
+
+        let mut duplicate = first.clone();
+        duplicate.filename = "telegram-duplicate.txt".into();
+        assert!(save_message_and_enqueue(
+            &path,
+            &duplicate,
+            &operation("op-duplicate", "user-a", "message-duplicate"),
+        )
+        .is_err());
+
+        let mut other_owner = first.clone();
+        other_owner.filename = "telegram-other-owner.txt".into();
+        save_message_and_enqueue(
+            &path,
+            &other_owner,
+            &operation("op-b", "user-b", "message-b"),
+        )
+        .expect("same Telegram source is isolated by owner scope");
+        let conn = Connection::open(&path).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM messages WHERE source_kind='telegram'
+                 AND source_channel_id='-100123' AND source_message_id='456'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn telegram_bridge_local_state_is_binding_scoped_and_survives_reopen() {
+        let path = temp_db_path("telegram-local-state");
+        init_db(&path, None).expect("initialize database");
+        upsert_telegram_bridge_binding_state(
+            &path,
+            "supabase:profile-a:user-a:-1001",
+            "profile-a",
+            "user-a",
+            "supabase",
+            42,
+            1000,
+            "message-a",
+            2000,
+        )
+        .unwrap();
+        upsert_telegram_bridge_binding_state(
+            &path,
+            "supabase:profile-a:user-b:-1001",
+            "profile-a",
+            "user-b",
+            "supabase",
+            7,
+            3000,
+            "message-b",
+            4000,
+        )
+        .unwrap();
+        upsert_telegram_delivery_record(
+            &path,
+            "supabase:profile-a:user-a:-1001",
+            &TelegramDeliveryRecord {
+                message_key: "message-a".into(),
+                status: "delivery_unconfirmed".into(),
+                telegram_message_id: None,
+                last_error: Some("request result unknown".into()),
+                last_attempt_ms: Some(5000),
+            },
+        )
+        .unwrap();
+        upsert_telegram_delivery_record(
+            &path,
+            "supabase:profile-a:user-a:-1001",
+            &TelegramDeliveryRecord {
+                message_key: "message-crashed".into(),
+                status: "sending".into(),
+                telegram_message_id: None,
+                last_error: None,
+                last_attempt_ms: Some(5001),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            recover_telegram_sending_deliveries(&path, "supabase:profile-a:user-a:-1001", 6000,)
+                .unwrap(),
+            1
+        );
+
+        drop(Connection::open(&path).unwrap());
+
+        assert_eq!(
+            telegram_bridge_binding_state(&path, "supabase:profile-a:user-a:-1001").unwrap(),
+            Some((42, 1000, "message-a".into()))
+        );
+        assert_eq!(
+            telegram_bridge_binding_state(&path, "supabase:profile-a:user-b:-1001").unwrap(),
+            Some((7, 3000, "message-b".into()))
+        );
+        let record =
+            get_telegram_delivery_record(&path, "supabase:profile-a:user-a:-1001", "message-a")
+                .unwrap()
+                .expect("delivery record");
+        assert_eq!(record.status, "delivery_unconfirmed");
+        assert_eq!(record.last_error.as_deref(), Some("request result unknown"));
+        let recovered = get_telegram_delivery_record(
+            &path,
+            "supabase:profile-a:user-a:-1001",
+            "message-crashed",
+        )
+        .unwrap()
+        .expect("recovered delivery record");
+        assert_eq!(recovered.status, "delivery_unconfirmed");
+        assert!(get_telegram_delivery_record(
+            &path,
+            "supabase:profile-a:user-b:-1001",
+            "message-a",
+        )
+        .unwrap()
+        .is_none());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn telegram_outbound_watermark_query_is_scope_isolated_and_excludes_history() {
+        let path = temp_db_path("telegram-outbound-watermark");
+        init_db(&path, None).unwrap();
+
+        for (owner, filename, timestamp_ms) in [
+            ("user-a", "history.txt", 999),
+            ("user-a", "same-time-before.txt", 1_000),
+            ("user-a", "live.txt", 1_001),
+            ("user-b", "other-owner.txt", 1_002),
+        ] {
+            let mut message = sample_message(filename, timestamp_ms, &[], false);
+            message.marked = false;
+            let operation = NewOutboxOperation {
+                operation_id: format!("operation-{owner}-{filename}"),
+                endpoint_id: message.endpoint_id.clone(),
+                owner_scope: owner.into(),
+                entity_type: "message".into(),
+                entity_id: format!("message-{owner}-{filename}"),
+                action: "upsert".into(),
+                base_revision: 0,
+                payload_json: "{}".into(),
+                payload_hash: format!("hash-{owner}-{filename}"),
+                created_at_ms: timestamp_ms,
+            };
+            save_message_and_enqueue(&path, &message, &operation).unwrap();
+        }
+
+        let messages = list_messages_after_for_scope(
+            &path,
+            "endpoint-1",
+            "user-a",
+            1_000,
+            "same-time-before.txt",
+            10,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.filename.as_str())
+                .collect::<Vec<_>>(),
+            vec!["live.txt"]
+        );
+        assert!(
+            list_messages_after_for_scope(&path, "endpoint-1", "user-a", 2_000, "", 10, false,)
+                .unwrap()
+                .is_empty()
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn provider_sync_results_make_text_and_files_eligible_for_telegram_outbound() {
+        let path = temp_db_path("telegram-provider-sync-outbound");
+        init_db(&path, None).unwrap();
+
+        let mut webdav_text = sample_message("webdav-text.txt", 1_001, &[], false);
+        webdav_text.endpoint_id = "endpoint-webdav".into();
+        webdav_text.marked = false;
+        upsert_message(&path, &webdav_text).unwrap();
+        let webdav_file = sample_file_message(
+            "endpoint-webdav",
+            "webdav-file.bin",
+            "webdav-file.bin",
+            1_002,
+        );
+        upsert_message(&path, &webdav_file).unwrap();
+
+        let mut supabase_text = remote_message("supabase-text", "supabase-text.txt", 1_003);
+        supabase_text["kind"] = serde_json::json!("text");
+        let mut supabase_file = remote_message("supabase-file", "supabase-file.bin", 1_004);
+        supabase_file["kind"] = serde_json::json!("file");
+        supabase_file["content"] = serde_json::Value::Null;
+        apply_supabase_message_page(
+            &path,
+            "endpoint-supabase",
+            "user-a",
+            &[supabase_text, supabase_file],
+            &[],
+            &[],
+            false,
+            true,
+            2_000,
+        )
+        .unwrap();
+
+        let webdav =
+            list_messages_after_for_scope(&path, "endpoint-webdav", "", 1_000, "", 10, false)
+                .unwrap();
+        assert_eq!(
+            webdav
+                .iter()
+                .map(|message| message.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["text", "file"]
+        );
+
+        let supabase = list_messages_after_for_scope(
+            &path,
+            "endpoint-supabase",
+            "user-a",
+            1_000,
+            "",
+            10,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            supabase
+                .iter()
+                .map(|message| message.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["text", "file"]
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pulled_supabase_message_preserves_external_source_identity() {
+        let path = temp_db_path("pulled-source-identity");
+        init_db(&path, None).unwrap();
+        let mut remote = remote_message("message-telegram", "telegram.txt", 100);
+        remote["source_kind"] = serde_json::json!("telegram");
+        remote["source_channel_id"] = serde_json::json!("-100123");
+        remote["source_message_id"] = serde_json::json!("456");
+        apply_supabase_message_page(
+            &path,
+            "profile-a",
+            "user-a",
+            &[remote],
+            &[],
+            &[],
+            false,
+            true,
+            200,
+        )
+        .unwrap();
+        let stored = get_message_for_scope(&path, "profile-a", "user-a", "telegram.txt")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.source_kind.as_deref(), Some("telegram"));
+        assert_eq!(stored.source_channel_id.as_deref(), Some("-100123"));
+        assert_eq!(stored.source_message_id.as_deref(), Some("456"));
         let _ = std::fs::remove_file(path);
     }
 

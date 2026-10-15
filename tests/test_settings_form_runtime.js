@@ -23,16 +23,26 @@ function testNormalizeTelegramPollInterval() {
 }
 
 function testGetTelegramBridgeFormState() {
+  const configuredProvider = runtime.getTelegramBridgeProviderState({
+    activeProviderKind: 'webdav',
+    activeProviderName: '主空间',
+    activeProviderReady: true,
+  });
   const configured = runtime.getTelegramBridgeFormState(
     {
       telegramBotToken: ' 123:abc ',
       telegramChatId: ' -1001 ',
     },
-    true
+    true,
+    configuredProvider,
   );
   assert.deepEqual(configured, {
     botToken: '123:abc',
     chatId: '-1001',
+    provider: configuredProvider,
+    providerLabel: 'WebDAV',
+    spaceName: '主空间',
+    availabilityReason: '',
     isConfigured: true,
   });
 
@@ -53,6 +63,53 @@ function testGetTelegramBridgeFormState() {
     true
   );
   assert.equal(invalidChatId.isConfigured, false);
+}
+
+function testTelegramBridgeProviderStates() {
+  const webdav = runtime.getTelegramBridgeProviderState({
+    activeProviderKind: 'webdav',
+    activeProviderName: '公司网盘',
+    activeProviderReady: true,
+  });
+  assert.equal(webdav.ready, true);
+  assert.equal(webdav.providerLabel, 'WebDAV');
+  assert.equal(webdav.spaceName, '公司网盘');
+
+  const unbound = runtime.getTelegramBridgeProviderState({
+    activeProviderKind: 'supabase',
+    activeProviderName: '团队空间',
+    activeProviderSpaceId: '',
+  });
+  assert.equal(unbound.reasonCode, 'unbound');
+  assert.match(unbound.reason, /尚未完成绑定/);
+
+  const signedOut = runtime.getTelegramBridgeProviderState({
+    activeProviderKind: 'supabase',
+    activeProviderName: '团队空间',
+    activeProviderSpaceId: 'space-a',
+    activeProviderAccountStatus: { signedIn: false },
+  });
+  assert.equal(signedOut.reasonCode, 'login_required');
+
+  const unavailable = runtime.getTelegramBridgeProviderState({
+    activeProviderKind: 'supabase',
+    activeProviderName: '团队空间',
+    activeProviderSpaceId: 'space-a',
+    activeProviderAccountStatus: { signedIn: true },
+    activeProviderConnectionStatus: { schema: false, message: '空间不可访问' },
+  });
+  assert.equal(unavailable.reasonCode, 'inaccessible');
+  assert.equal(unavailable.reason, '空间不可访问');
+
+  const ready = runtime.getTelegramBridgeProviderState({
+    activeProviderKind: 'supabase',
+    activeProviderName: '团队空间',
+    activeProviderSpaceId: 'space-a',
+    activeProviderAccountStatus: { signedIn: true },
+    activeProviderConnectionStatus: { schema: true, rpc: true, rls: true, storage: true },
+  });
+  assert.equal(ready.ready, true);
+  assert.equal(ready.providerLabel, 'Supabase');
 }
 
 function testNormalizeLocalHttpApiBindPort() {
@@ -378,6 +435,7 @@ function testShortcutSettingsMarkup() {
 
 testNormalizeTelegramPollInterval();
 testGetTelegramBridgeFormState();
+testTelegramBridgeProviderStates();
 testNormalizeLocalHttpApiBindPort();
 testGetLocalHttpApiConfiguredUrl();
 testGetCurrentSenderName();

@@ -46,6 +46,40 @@ pub struct TelegramBridgeConfig {
     pub temp_dir: String,
 }
 
+#[derive(Clone)]
+pub struct ManagedTelegramConfig {
+    pub device_sender_name: String,
+    pub telegram_sender_name: String,
+    pub bot_token: String,
+    pub allowed_chat_id: i64,
+    pub proxy_url: String,
+    pub poll_interval_secs: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct ManagedTelegramUpdate {
+    pub update_id: i64,
+    pub message_id: i64,
+    pub chat_id: i64,
+    pub timestamp_ms: i64,
+    pub sender: String,
+    pub payload: Option<ManagedInboundPayload>,
+}
+
+#[derive(Clone, Debug)]
+pub enum ManagedInboundPayload {
+    Text(String),
+    File {
+        file_id: String,
+        original_name: String,
+        size_hint: Option<i64>,
+    },
+}
+
+pub fn managed_update_payload(update: &ManagedTelegramUpdate) -> Option<&ManagedInboundPayload> {
+    update.payload.as_ref()
+}
+
 impl TelegramBridgeConfig {
     pub fn load(path: &Path) -> Result<Self, String> {
         let raw = fs::read_to_string(path)
@@ -469,6 +503,234 @@ fn build_telegram_client(config: &TelegramBridgeConfig) -> Result<Client, String
         .map_err(|err| format!("创建 Telegram HTTP 客户端失败: {err}"))
 }
 
+pub fn build_managed_telegram_client(config: &ManagedTelegramConfig) -> Result<Client, String> {
+    let mut builder =
+        Client::builder().timeout(Duration::from_secs(config.poll_interval_secs.max(30) + 15));
+    if !config.proxy_url.trim().is_empty() {
+        let proxy = Proxy::all(config.proxy_url.trim())
+            .map_err(|err| format!("Telegram 代理地址无效: {err}"))?;
+        builder = builder.proxy(proxy);
+    }
+    builder
+        .build()
+        .map_err(|err| format!("创建 Telegram HTTP 客户端失败: {err}"))
+}
+
+pub async fn fetch_managed_updates(
+    client: &Client,
+    config: &ManagedTelegramConfig,
+    last_update_id: i64,
+) -> Result<Vec<ManagedTelegramUpdate>, String> {
+    let response = client
+        .post(telegram_api_url(&config.bot_token, "getUpdates"))
+        .json(&serde_json::json!({
+          "offset": last_update_id + 1,
+          "timeout": config.poll_interval_secs,
+          "allowed_updates": ["message"],
+        }))
+        .send()
+        .await
+        .map_err(|err| {
+            redact_telegram_secret(&format!("轮询 Telegram 失败: {err}"), &config.bot_token)
+        })?;
+    let updates = parse_telegram_response::<Vec<TelegramUpdate>>(response)
+        .await
+        .map_err(|err| redact_telegram_secret(&err.to_string(), &config.bot_token))?;
+    Ok(updates
+        .into_iter()
+        .map(|update| managed_update(config, update))
+        .collect())
+}
+
+fn managed_update(config: &ManagedTelegramConfig, update: TelegramUpdate) -> ManagedTelegramUpdate {
+    let update_id = update.update_id;
+    let Some(message) = update.message else {
+        return ManagedTelegramUpdate {
+            update_id,
+            message_id: 0,
+            chat_id: 0,
+            timestamp_ms: 0,
+            sender: String::new(),
+            payload: None,
+        };
+    };
+    let payload = if message.chat.id == config.allowed_chat_id {
+        extract_inbound_payload(&message).map(|payload| match payload {
+            InboundPayload::Text(text) => ManagedInboundPayload::Text(text),
+            InboundPayload::File {
+                file_id,
+                original_name,
+                size_hint,
+            } => ManagedInboundPayload::File {
+                file_id,
+                original_name,
+                size_hint,
+            },
+        })
+    } else {
+        None
+    };
+    let sender = if !config.telegram_sender_name.trim().is_empty() {
+        config.telegram_sender_name.trim().to_string()
+    } else {
+        resolve_sender(message.from.as_ref())
+    };
+    ManagedTelegramUpdate {
+        update_id,
+        message_id: message.message_id,
+        chat_id: message.chat.id,
+        timestamp_ms: message.date * 1000,
+        sender,
+        payload,
+    }
+}
+
+pub async fn download_managed_file(
+    client: &Client,
+    config: &ManagedTelegramConfig,
+    file_id: &str,
+    size_hint: Option<i64>,
+) -> Result<Vec<u8>, String> {
+    if size_hint.is_some_and(|size| size > TELEGRAM_GET_FILE_LIMIT_BYTES) {
+        return Err(format!(
+            "Telegram 入站文件超过 {} MB 限制",
+            TELEGRAM_GET_FILE_LIMIT_BYTES / 1024 / 1024
+        ));
+    }
+    let adapter = TelegramBridgeConfig {
+        device_sender_name: config.device_sender_name.clone(),
+        telegram_sender_name: config.telegram_sender_name.clone(),
+        telegram_bot_token: config.bot_token.clone(),
+        allowed_chat_id: config.allowed_chat_id,
+        proxy_url: config.proxy_url.clone(),
+        webdav: WebDavEndpoint {
+            id: "managed".into(),
+            name: "managed".into(),
+            url: "http://localhost".into(),
+            username: String::new(),
+            password: String::new(),
+            enabled: true,
+        },
+        poll_interval_secs: config.poll_interval_secs,
+        state_path: String::new(),
+        temp_dir: String::new(),
+    };
+    let file = get_file(client, &adapter, file_id)
+        .await
+        .map_err(|err| redact_telegram_secret(&err.to_string(), &config.bot_token))?;
+    let path = file
+        .file_path
+        .ok_or_else(|| "Telegram file_path 为空".to_string())?;
+    download_telegram_file(client, &adapter, &path)
+        .await
+        .map_err(|err| redact_telegram_secret(&err.to_string(), &config.bot_token))
+}
+
+pub async fn send_managed_text(
+    client: &Client,
+    config: &ManagedTelegramConfig,
+    sender: &str,
+    text: &str,
+) -> Result<i64, String> {
+    let sender = managed_outbound_sender(config, sender);
+    let adapter = managed_adapter(config);
+    send_message(client, &adapter, &format!("{sender}:\n{text}"))
+        .await
+        .map_err(|error| managed_send_error(error, &config.bot_token))
+}
+
+pub async fn send_managed_file(
+    client: &Client,
+    config: &ManagedTelegramConfig,
+    sender: &str,
+    file_name: &str,
+    bytes: Vec<u8>,
+) -> Result<i64, String> {
+    if bytes.len() as i64 > TELEGRAM_SEND_FILE_LIMIT_BYTES {
+        return Err(format!(
+            "文件超过 {} MB 的 Telegram 发送限制",
+            TELEGRAM_SEND_FILE_LIMIT_BYTES / 1024 / 1024
+        ));
+    }
+    let sender = managed_outbound_sender(config, sender);
+    send_document(
+        client,
+        &managed_adapter(config),
+        file_name,
+        bytes,
+        &format!("From {sender}"),
+    )
+    .await
+    .map_err(|error| managed_send_error(error, &config.bot_token))
+}
+
+pub fn managed_delivery_error_status(error: &str) -> &'static str {
+    if error.starts_with("telegram_delivery_unconfirmed:") {
+        "delivery_unconfirmed"
+    } else if error.starts_with("telegram_permanent:") || error.contains("发送限制") {
+        "permanent_failure"
+    } else {
+        "retryable_error"
+    }
+}
+
+fn managed_send_error(error: BridgeError, bot_token: &str) -> String {
+    let message = redact_telegram_secret(&error.message, bot_token);
+    match (error.kind, error.category) {
+        (ErrorKind::Transient, "telegram_network") => format!(
+            "telegram_delivery_unconfirmed:{}: {}",
+            error.category, message
+        ),
+        (ErrorKind::Permanent, _) => {
+            format!("telegram_permanent:{}: {}", error.category, message)
+        }
+        (ErrorKind::Transient, _) => {
+            format!("telegram_retryable:{}: {}", error.category, message)
+        }
+    }
+}
+
+fn redact_telegram_secret(message: &str, bot_token: &str) -> String {
+    let token = bot_token.trim();
+    if token.is_empty() {
+        message.to_string()
+    } else {
+        message.replace(token, "[REDACTED_TELEGRAM_BOT_TOKEN]")
+    }
+}
+
+fn managed_outbound_sender(config: &ManagedTelegramConfig, sender: &str) -> String {
+    if !config.telegram_sender_name.is_empty()
+        && !config.device_sender_name.is_empty()
+        && sender == config.device_sender_name
+    {
+        config.telegram_sender_name.clone()
+    } else {
+        sender.to_string()
+    }
+}
+
+fn managed_adapter(config: &ManagedTelegramConfig) -> TelegramBridgeConfig {
+    TelegramBridgeConfig {
+        device_sender_name: config.device_sender_name.clone(),
+        telegram_sender_name: config.telegram_sender_name.clone(),
+        telegram_bot_token: config.bot_token.clone(),
+        allowed_chat_id: config.allowed_chat_id,
+        proxy_url: config.proxy_url.clone(),
+        webdav: WebDavEndpoint {
+            id: "managed".into(),
+            name: "managed".into(),
+            url: "http://localhost".into(),
+            username: String::new(),
+            password: String::new(),
+            enabled: true,
+        },
+        poll_interval_secs: config.poll_interval_secs,
+        state_path: String::new(),
+        temp_dir: String::new(),
+    }
+}
+
 async fn fetch_updates(
     client: &Client,
     config: &TelegramBridgeConfig,
@@ -531,6 +793,8 @@ async fn process_update(
         &payload,
         &sender,
         message.date * 1000,
+        message.chat.id,
+        message.message_id,
     )
     .await?;
     state
@@ -548,6 +812,8 @@ async fn import_into_webdav(
     payload: &InboundPayload,
     sender: &str,
     timestamp_ms: i64,
+    source_channel_id: i64,
+    source_message_id: i64,
 ) -> Result<String, BridgeError> {
     match payload {
         InboundPayload::Text(text) => {
@@ -582,6 +848,9 @@ async fn import_into_webdav(
                     source_audio_mime_type: None,
                     transcript_text: Some(text.clone()),
                     transcript_raw_text: None,
+                    source_kind: Some("telegram".to_string()),
+                    source_channel_id: Some(source_channel_id.to_string()),
+                    source_message_id: Some(source_message_id.to_string()),
                 },
             )
             .await
@@ -651,6 +920,9 @@ async fn import_into_webdav(
                     source_audio_mime_type: None,
                     transcript_text: None,
                     transcript_raw_text: None,
+                    source_kind: Some("telegram".to_string()),
+                    source_channel_id: Some(source_channel_id.to_string()),
+                    source_message_id: Some(source_message_id.to_string()),
                 },
             )
             .await
@@ -790,6 +1062,9 @@ async fn collect_remote_messages(
                     source_audio_mime_type: None,
                     transcript_text: None,
                     transcript_raw_text: None,
+                    source_kind: None,
+                    source_channel_id: None,
+                    source_message_id: None,
                 };
                 map.insert(entry.filename.clone(), history_entry.clone());
                 derived_entries.push(history_entry);
@@ -1242,6 +1517,217 @@ fn log_bridge_error(event: &str, err: &BridgeError) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Bytes;
+    use axum::extract::{Path as AxumPath, State as AxumState};
+    use axum::http::StatusCode;
+    use axum::routing::get;
+    use axum::Router;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct StandaloneDavState {
+        files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    }
+
+    async fn standalone_dav_get(
+        AxumState(state): AxumState<StandaloneDavState>,
+        AxumPath(path): AxumPath<String>,
+    ) -> Result<Vec<u8>, StatusCode> {
+        state
+            .files
+            .lock()
+            .unwrap()
+            .get(&path)
+            .cloned()
+            .ok_or(StatusCode::NOT_FOUND)
+    }
+
+    async fn standalone_dav_put(
+        AxumState(state): AxumState<StandaloneDavState>,
+        AxumPath(path): AxumPath<String>,
+        body: Bytes,
+    ) -> StatusCode {
+        state.files.lock().unwrap().insert(path, body.to_vec());
+        StatusCode::CREATED
+    }
+
+    async fn spawn_standalone_dav() -> (String, StandaloneDavState, tokio::task::JoinHandle<()>) {
+        let state = StandaloneDavState::default();
+        let app = Router::new()
+            .route("/*path", get(standalone_dav_get).put(standalone_dav_put))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{address}/"), state, task)
+    }
+
+    fn managed_test_config() -> ManagedTelegramConfig {
+        ManagedTelegramConfig {
+            device_sender_name: "device".into(),
+            telegram_sender_name: String::new(),
+            bot_token: "redacted".into(),
+            allowed_chat_id: 100,
+            proxy_url: String::new(),
+            poll_interval_secs: 5,
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_standalone_webdav_config_and_text_ingest_remain_compatible() {
+        let (base_url, dav_state, task) = spawn_standalone_dav().await;
+        let root = std::env::temp_dir().join(format!(
+            "transfer-genie-standalone-webdav-smoke-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let config_path = root.join("runtime.json");
+        fs::write(
+            &config_path,
+            serde_json::json!({
+                "telegram_bot_token":"legacy-token",
+                "allowed_chat_id":-100123,
+                "webdav":{
+                    "id":"legacy-webdav",
+                    "name":"Legacy WebDAV",
+                    "url":base_url,
+                    "username":"",
+                    "password":"",
+                    "enabled":true
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let config = TelegramBridgeConfig::load(&config_path).unwrap();
+        assert_eq!(config.webdav.id, "legacy-webdav");
+        assert_eq!(config.poll_interval_secs, DEFAULT_POLL_INTERVAL_SECS);
+        assert!(config.state_path.ends_with("telegram-bridge-state.json"));
+
+        let client = Client::new();
+        let filename = import_into_webdav(
+            &client,
+            &client,
+            &config,
+            &InboundPayload::Text("standalone smoke".into()),
+            "telegram-user",
+            1_700_000_000_000,
+            -100123,
+            456,
+        )
+        .await
+        .unwrap();
+        let remote_path = message_remote_path(&filename, 1_700_000_000_000);
+        assert_eq!(
+            dav_state
+                .files
+                .lock()
+                .unwrap()
+                .get(remote_path.trim_start_matches('/'))
+                .cloned(),
+            Some(b"standalone smoke".to_vec())
+        );
+        let history = load_history_with_layout(&client, &config.webdav)
+            .await
+            .unwrap();
+        assert_eq!(history.entries.len(), 1);
+        assert_eq!(history.entries[0].source_kind.as_deref(), Some("telegram"));
+        assert_eq!(
+            history.entries[0].source_channel_id.as_deref(),
+            Some("-100123")
+        );
+        assert_eq!(history.entries[0].source_message_id.as_deref(), Some("456"));
+
+        task.abort();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn managed_updates_keep_unsupported_and_foreign_offsets_without_payload() {
+        let config = managed_test_config();
+        let unsupported = managed_update(
+            &config,
+            TelegramUpdate {
+                update_id: 10,
+                message: Some(TelegramMessage {
+                    message_id: 20,
+                    date: 30,
+                    chat: TelegramChat { id: 100 },
+                    from: None,
+                    text: None,
+                    document: None,
+                    photo: Vec::new(),
+                    video: None,
+                    audio: None,
+                    voice: None,
+                    animation: None,
+                }),
+            },
+        );
+        assert_eq!(unsupported.update_id, 10);
+        assert!(managed_update_payload(&unsupported).is_none());
+
+        let foreign = managed_update(
+            &config,
+            TelegramUpdate {
+                update_id: 11,
+                message: Some(TelegramMessage {
+                    message_id: 21,
+                    date: 31,
+                    chat: TelegramChat { id: 200 },
+                    from: None,
+                    text: Some("ignore".into()),
+                    document: None,
+                    photo: Vec::new(),
+                    video: None,
+                    audio: None,
+                    voice: None,
+                    animation: None,
+                }),
+            },
+        );
+        assert_eq!(foreign.update_id, 11);
+        assert!(managed_update_payload(&foreign).is_none());
+    }
+
+    #[test]
+    fn managed_delivery_error_status_distinguishes_unknown_retryable_and_permanent() {
+        assert_eq!(
+            managed_delivery_error_status(
+                "telegram_delivery_unconfirmed:telegram_network: timeout"
+            ),
+            "delivery_unconfirmed"
+        );
+        assert_eq!(
+            managed_delivery_error_status("telegram_retryable:telegram_api: 503"),
+            "retryable_error"
+        );
+        assert_eq!(
+            managed_delivery_error_status("telegram_permanent:telegram_api: 400"),
+            "permanent_failure"
+        );
+        assert_eq!(
+            managed_delivery_error_status("文件超过 50 MB 的 Telegram 发送限制"),
+            "permanent_failure"
+        );
+    }
+
+    #[test]
+    fn managed_errors_redact_telegram_bot_token() {
+        let token = "123456:secret-token";
+        let network_error = BridgeError::transient(
+            "telegram_network",
+            format!("request failed for https://api.telegram.org/bot{token}/sendMessage"),
+        );
+        let rendered = managed_send_error(network_error, token);
+
+        assert!(!rendered.contains(token));
+        assert!(rendered.contains("[REDACTED_TELEGRAM_BOT_TOKEN]"));
+        assert_eq!(
+            redact_telegram_secret("ordinary Telegram error", token),
+            "ordinary Telegram error"
+        );
+    }
 
     #[test]
     fn bridge_state_round_trip_persists_records() {
@@ -1348,6 +1834,9 @@ mod tests {
             source_audio_mime_type: None,
             transcript_text: None,
             transcript_raw_text: None,
+            source_kind: Some("telegram".to_string()),
+            source_channel_id: Some("1".to_string()),
+            source_message_id: Some("2".to_string()),
         };
         let sent = HistoryEntry {
             filename: "b".to_string(),

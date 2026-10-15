@@ -24,7 +24,7 @@ Transfer Genie 适合需要自托管跨设备传输的人：不想依赖中心�
 | 文本与文件传输 | 支持发送普通文本、Markdown 和文件，并在消息流中查看发送者、时间和下载状态。 |
 | 标记与筛选 | 支持标签、已标记消息和历史检索，适合整理长期传输记录。 |
 | 本机 HTTP API | 默认监听 `127.0.0.1:6011`，支持 `POST /api/send-text` 和 `POST /api/send-file`。 |
-| Telegram Bridge | 支持 Telegram 会话与当前 WebDAV 端点之间的文本和文件同步。 |
+| Telegram Bridge | 支持 Telegram 会话与当前 WebDAV 或 Supabase 存储空间之间的文本和文件同步；运行开关仅保存在本机。 |
 
 ## 典型使用场景
 

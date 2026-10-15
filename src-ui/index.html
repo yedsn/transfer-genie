@@ -1192,10 +1192,15 @@
                     轮询间隔（秒）
                     <input id="telegram-poll-interval" type="number" min="1" step="1" :value="ui.settingsForm.telegramPollIntervalSecs" @input="updateSettingsFormField('telegramPollIntervalSecs', Number($event.target.value || 10))" />
                   </label>
-                  <span class="field-hint">Telegram bridge 始终跟随当前活动的 WebDAV 端点，切换端点时运行中的服务会自动重启。</span>
+                  <div class="telegram-bridge-binding-summary">
+                    <span>当前绑定空间：<strong id="telegram-active-space">未选择存储空间</strong></span>
+                    <span>Provider：<strong id="telegram-active-provider">未选择</strong></span>
+                    <span id="telegram-availability" class="field-hint">请先选择当前活动存储空间</span>
+                  </div>
+                  <span class="field-hint">Telegram Bridge 跟随当前活动存储空间（WebDAV 或 Supabase）；切换空间时运行中的服务会自动重新绑定。</span>
                   <div class="telegram-bridge-actions">
                     <label class="toggle-left telegram-inline-toggle">
-                      <span class="toggle-label">自启动服务</span>
+                      <span class="toggle-label">本机自启动（仅当前设备）</span>
                       <input id="telegram-auto-start" type="checkbox" :checked="ui.settingsForm.telegramAutoStart" @change="updateSettingsFormField('telegramAutoStart', $event.target.checked)" />
                     </label>
                     <button id="telegram-start-service" class="button ghost" type="button">启动服务</button>

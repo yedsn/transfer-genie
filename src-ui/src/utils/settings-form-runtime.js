@@ -8,14 +8,50 @@
     return Math.max(minimum, Number(value) || minimum);
   }
 
-  function getTelegramBridgeFormState(formState, hasActiveEndpoint) {
+  function getTelegramBridgeProviderState(formState) {
+    var state = formState || {};
+    var kind = String(state.activeProviderKind || '').trim().toLowerCase();
+    var name = String(state.activeProviderName || '').trim();
+    var providerLabel = kind === 'supabase' ? 'Supabase' : kind === 'webdav' ? 'WebDAV' : '未选择';
+    var spaceName = name || (kind === 'supabase' ? 'Supabase 存储空间' : kind === 'webdav' ? 'WebDAV 存储空间' : '未选择存储空间');
+    if (!kind) {
+      return { providerKind: '', providerLabel: providerLabel, spaceName: spaceName, ready: false, reason: '请先选择当前活动存储空间', reasonCode: 'no_provider' };
+    }
+    if (kind === 'webdav') {
+      var webdavReady = !!state.activeProviderReady;
+      return { providerKind: kind, providerLabel: providerLabel, spaceName: spaceName, ready: webdavReady, reason: webdavReady ? '' : '当前 WebDAV 存储空间配置不完整或不可用', reasonCode: webdavReady ? '' : 'webdav_unavailable' };
+    }
+    var spaceId = String(state.activeProviderSpaceId || '').trim();
+    if (!spaceId) {
+      return { providerKind: kind, providerLabel: providerLabel, spaceName: spaceName, ready: false, reason: '当前 Supabase 存储空间尚未完成绑定', reasonCode: 'unbound' };
+    }
+    var account = state.activeProviderAccountStatus || {};
+    if (!account.signedIn) {
+      return { providerKind: kind, providerLabel: providerLabel, spaceName: spaceName, ready: false, reason: '请先登录当前 Supabase 存储空间', reasonCode: 'login_required' };
+    }
+    var connection = state.activeProviderConnectionStatus || {};
+    if (connection.errorCode === 'AUTH_SESSION_INVALID' || connection.error_code === 'AUTH_SESSION_INVALID') {
+      return { providerKind: kind, providerLabel: providerLabel, spaceName: spaceName, ready: false, reason: 'Supabase 会话已失效，请重新登录', reasonCode: 'session_invalid' };
+    }
+    if (connection.schema === false || connection.rpc === false || connection.rls === false || connection.storage === false) {
+      return { providerKind: kind, providerLabel: providerLabel, spaceName: spaceName, ready: false, reason: connection.message || '当前 Supabase 存储空间不可访问', reasonCode: 'inaccessible' };
+    }
+    return { providerKind: kind, providerLabel: providerLabel, spaceName: spaceName, ready: true, reason: '', reasonCode: '' };
+  }
+
+  function getTelegramBridgeFormState(formState, hasActiveEndpoint, providerState) {
     var state = formState || {};
     var botToken = String(state.telegramBotToken || '').trim();
     var chatId = String(state.telegramChatId || '').trim();
+    var provider = providerState || getTelegramBridgeProviderState(state);
     return {
       botToken: botToken,
       chatId: chatId,
-      isConfigured: !!botToken && /^-?\d+$/.test(chatId) && !!hasActiveEndpoint,
+      provider: provider,
+      providerLabel: provider.providerLabel,
+      spaceName: provider.spaceName,
+      availabilityReason: provider.reason,
+      isConfigured: !!botToken && /^-?\d+$/.test(chatId) && provider.ready,
     };
   }
 
@@ -214,6 +250,7 @@
 
   globalScope.transferGenieSettingsFormRuntime = {
     normalizeTelegramPollInterval: normalizeTelegramPollInterval,
+    getTelegramBridgeProviderState: getTelegramBridgeProviderState,
     getTelegramBridgeFormState: getTelegramBridgeFormState,
     normalizeLocalHttpApiBindPort: normalizeLocalHttpApiBindPort,
     getLocalHttpApiConfiguredUrl: getLocalHttpApiConfiguredUrl,

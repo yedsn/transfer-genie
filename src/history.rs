@@ -42,6 +42,12 @@ pub struct HistoryEntry {
     pub transcript_text: Option<String>,
     #[serde(default)]
     pub transcript_raw_text: Option<String>,
+    #[serde(default)]
+    pub source_kind: Option<String>,
+    #[serde(default)]
+    pub source_channel_id: Option<String>,
+    #[serde(default)]
+    pub source_message_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -937,6 +943,9 @@ mod tests {
             source_audio_mime_type: Some("audio/wav".to_string()),
             transcript_text: Some("hello".to_string()),
             transcript_raw_text: Some("raw hello".to_string()),
+            source_kind: Some("telegram".to_string()),
+            source_channel_id: Some("-100123".to_string()),
+            source_message_id: Some("456".to_string()),
         }];
 
         let json = serde_json::to_vec_pretty(&entries).expect("serialize history");
@@ -953,6 +962,9 @@ mod tests {
         );
         assert_eq!(decoded[0].transcript_text.as_deref(), Some("hello"));
         assert_eq!(decoded[0].transcript_raw_text.as_deref(), Some("raw hello"));
+        assert_eq!(decoded[0].source_kind.as_deref(), Some("telegram"));
+        assert_eq!(decoded[0].source_channel_id.as_deref(), Some("-100123"));
+        assert_eq!(decoded[0].source_message_id.as_deref(), Some("456"));
     }
 
     #[test]
@@ -966,6 +978,9 @@ mod tests {
         assert_eq!(decoded[0].transcript_source, None);
         assert_eq!(decoded[0].source_audio_mime_type, None);
         assert_eq!(decoded[0].transcript_text, None);
+        assert_eq!(decoded[0].source_kind, None);
+        assert_eq!(decoded[0].source_channel_id, None);
+        assert_eq!(decoded[0].source_message_id, None);
     }
 
     #[test]
@@ -999,6 +1014,9 @@ mod tests {
             source_audio_mime_type: None,
             transcript_text: None,
             transcript_raw_text: None,
+            source_kind: None,
+            source_channel_id: None,
+            source_message_id: None,
         }
     }
 
