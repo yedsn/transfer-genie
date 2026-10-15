@@ -339,7 +339,7 @@ async fn parse_json_response<T: serde::de::DeserializeOwned>(
     serde_json::from_str(&body).map_err(|error| format!("Supabase {action} 返回无效: {error}"))
 }
 
-pub async fn ensure_space(
+pub async fn create_space(
     client: &Client,
     config: &SupabaseStorageConfig,
     session: &SupabaseSession,
@@ -368,6 +368,17 @@ pub async fn ensure_space(
             sanitize_error(&body)
         ))
     }
+}
+
+pub async fn validate_space_access(
+    _client: &Client,
+    config: &SupabaseStorageConfig,
+    _session: &SupabaseSession,
+) -> Result<(), String> {
+    if config.space_id.trim().is_empty() {
+        return Err("尚未绑定账号中的 Supabase 空间".to_string());
+    }
+    Ok(())
 }
 
 pub async fn push_operation(

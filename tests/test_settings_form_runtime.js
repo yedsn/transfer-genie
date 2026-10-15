@@ -306,7 +306,8 @@ function testShortcutSettingsMarkup() {
   const supabaseEmailIndex = html.indexOf('id="supabase-email"');
   assert.ok(supabaseEmailIndex > storageProfileEditorIndex, 'Supabase account controls are inside the storage profile editor');
   assert.match(html, /id="supabase-logout"/);
-  assert.match(html, /请先保存这个存储空间，再登录账号/);
+  assert.match(html, /登录只会暂存在当前向导，完成绑定后才保存/);
+  assert.match(html, /storage-profile-wizard-steps/);
   assert.match(html, /storage-profile-account-summary/);
   assert.match(html, /账号邮箱/);
   assert.match(html, /用户 ID/);
@@ -314,7 +315,7 @@ function testShortcutSettingsMarkup() {
   assert.match(html, /账号中的存储空间/);
   assert.match(html, /ui.settingsForm.supabaseSpaces/);
   assert.doesNotMatch(html, /添加并切换/);
-  assert.ok(html.includes("space.current ? '正在使用' : '切换'"));
+  assert.match(html, /useSupabaseSpace/);
   assert.match(html, /loadSupabaseSpaces/);
   assert.match(html, /useSupabaseSpace/);
   assert.match(html, /v-if="ui.settingsForm.supabaseAccountStatus\?\.signedIn"/);
@@ -323,6 +324,7 @@ function testShortcutSettingsMarkup() {
   assert.match(html, /测试连接只使用弹框里的草稿/);
   assert.match(html, /cancelStorageProfileEditor/);
   assert.match(html, /保存此空间/);
+  assert.match(html, /完成绑定/);
   assert.match(html, /storageImportBusy/);
   assert.match(html, /role="progressbar"/);
   assert.doesNotMatch(html, /WebDAV 刷新间隔（秒）/);
@@ -332,6 +334,8 @@ function testShortcutSettingsMarkup() {
   const styles = readFileSync(new URL('../src-ui/src/styles.css', import.meta.url), 'utf8');
   assert.match(styles, /\.endpoint-header-actions \.button,[\s\S]*white-space: nowrap/);
   assert.match(styles, /\.storage-profile-editor-grid input:focus/);
+  assert.match(styles, /\.storage-profile-wizard-steps/);
+  assert.match(styles, /\.storage-profile-confirm-card/);
   assert.match(styles, /\.supabase-space-list/);
   assert.match(styles, /\.supabase-space-item\.is-current/);
   assert.match(styles, /\.endpoint-card\.is-active/);
@@ -350,6 +354,9 @@ function testShortcutSettingsMarkup() {
   assert.match(legacyMain, /async function loadSupabaseSpaces/);
   assert.match(legacyMain, /async function useSupabaseSpace/);
   assert.match(legacyMain, /switch_supabase_space/);
+  assert.match(legacyMain, /supabase_draft_sign_in/);
+  assert.match(legacyMain, /complete_supabase_binding/);
+  assert.match(legacyMain, /create_supabase_space/);
   assert.doesNotMatch(legacyMain, /add_supabase_space_profile/);
   assert.match(legacyMain, /storageProfileEditorMode: 'edit'/);
   assert.match(legacyMain, /存储空间已保存，现在可以登录 Supabase 账号/);

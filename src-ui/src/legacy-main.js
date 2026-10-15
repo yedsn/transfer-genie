@@ -1223,6 +1223,12 @@ let currentSettingsFormState = {
   storageProfileTestResult: null,
   storageProfileTestMessage: '',
   storageProfileTestMessageKind: '',
+  storageProfileWizardStep: 'connection',
+  storageProfileBindingFlowId: '',
+  storageProfileWizardBusy: false,
+  storageProfileSpaceCreateOpen: false,
+  storageProfileSpaceCreateName: '',
+  storageProfileWizardError: '',
   supabaseProfileId: '',
   supabaseProfileName: 'Supabase',
   supabaseProfileEnabled: true,
@@ -11834,6 +11840,12 @@ function applySettings(settings) {
     storageProfileTestResult: currentSettingsFormState.storageProfileTestResult || null,
     storageProfileTestMessage: currentSettingsFormState.storageProfileTestMessage || '',
     storageProfileTestMessageKind: currentSettingsFormState.storageProfileTestMessageKind || '',
+    storageProfileWizardStep: currentSettingsFormState.storageProfileWizardStep || 'connection',
+    storageProfileBindingFlowId: currentSettingsFormState.storageProfileBindingFlowId || '',
+    storageProfileWizardBusy: !!currentSettingsFormState.storageProfileWizardBusy,
+    storageProfileSpaceCreateOpen: !!currentSettingsFormState.storageProfileSpaceCreateOpen,
+    storageProfileSpaceCreateName: currentSettingsFormState.storageProfileSpaceCreateName || '',
+    storageProfileWizardError: currentSettingsFormState.storageProfileWizardError || '',
     supabaseProfileId: supabaseProfile?.id || '',
     supabaseProfileName: supabaseProfile?.name || 'Supabase',
     supabaseProfileEnabled: supabaseProfile?.enabled !== false,
@@ -13759,6 +13771,12 @@ function editStorageProfile(profile) {
     storageProfileTestResult: null,
     storageProfileTestMessage: '',
     storageProfileTestMessageKind: '',
+    storageProfileWizardStep: providerKind === 'supabase' ? 'connection' : 'details',
+    storageProfileBindingFlowId: '',
+    storageProfileWizardBusy: false,
+    storageProfileSpaceCreateOpen: false,
+    storageProfileSpaceCreateName: '',
+    storageProfileWizardError: '',
     storageProfileDraft: {
       id: profile.id,
       provider_kind: providerKind,
@@ -13815,16 +13833,23 @@ function newStorageProfileDraft(providerKind = '') {
 }
 
 function openStorageProfileEditor(providerKind = '') {
+  const draft = newStorageProfileDraft(providerKind);
   currentSettingsFormState = {
     ...currentSettingsFormState,
     storageProfileEditorOpen: true,
     storageProfileEditorMode: 'create',
     storageProfileOriginalId: '',
-    storageProfileDraft: newStorageProfileDraft(providerKind),
+    storageProfileDraft: draft,
     storageProfileTestBusy: false,
     storageProfileTestResult: null,
     storageProfileTestMessage: '',
     storageProfileTestMessageKind: '',
+    storageProfileWizardStep: providerKind === 'supabase' ? 'connection' : 'details',
+    storageProfileBindingFlowId: '',
+    storageProfileWizardBusy: false,
+    storageProfileSpaceCreateOpen: false,
+    storageProfileSpaceCreateName: '',
+    storageProfileWizardError: '',
     supabaseProfileId: '',
     supabaseEmail: '',
     supabasePassword: '',
@@ -13840,8 +13865,18 @@ function openStorageProfileEditor(providerKind = '') {
   syncVueSettingsForm(currentSettingsFormState);
 }
 
-function cancelStorageProfileEditor() {
-  if (currentSettingsFormState.storageProfileTestBusy || currentSettingsFormState.supabaseAuthBusy) return;
+async function cancelStorageProfileEditor(force = false) {
+  if (!force && (currentSettingsFormState.storageProfileTestBusy
+    || currentSettingsFormState.supabaseAuthBusy
+    || currentSettingsFormState.storageProfileWizardBusy)) return;
+  const bindingFlowId = currentSettingsFormState.storageProfileBindingFlowId;
+  if (bindingFlowId) {
+    try {
+      await invoke('cancel_supabase_binding_flow', { input: { flowId: bindingFlowId } });
+    } catch (_) {
+      // Closing the modal must not be blocked by best-effort draft cleanup.
+    }
+  }
   currentSettingsFormState = {
     ...currentSettingsFormState,
     storageProfileEditorOpen: false,
@@ -13852,6 +13887,12 @@ function cancelStorageProfileEditor() {
     storageProfileTestResult: null,
     storageProfileTestMessage: '',
     storageProfileTestMessageKind: '',
+    storageProfileWizardStep: 'connection',
+    storageProfileBindingFlowId: '',
+    storageProfileWizardBusy: false,
+    storageProfileSpaceCreateOpen: false,
+    storageProfileSpaceCreateName: '',
+    storageProfileWizardError: '',
     supabaseProfileId: '',
     supabaseEmail: '',
     supabasePassword: '',
@@ -13869,6 +13910,9 @@ function cancelStorageProfileEditor() {
 
 function updateStorageProfileDraft(field, value) {
   const current = currentSettingsFormState.storageProfileDraft || newStorageProfileDraft();
+  const bindingFlowId = currentSettingsFormState.storageProfileBindingFlowId;
+  const invalidatesBindingFlow = !!bindingFlowId
+    && (field === 'supabase.api_url' || field === 'supabase.anon_key' || field === 'provider_kind');
   let draft = { ...current };
   if (field === 'provider_kind') {
     const next = newStorageProfileDraft(value);
@@ -13886,7 +13930,16 @@ function updateStorageProfileDraft(field, value) {
     storageProfileTestResult: null,
     storageProfileTestMessage: '',
     storageProfileTestMessageKind: '',
+    storageProfileWizardError: '',
+    ...((field === 'supabase.api_url' || field === 'supabase.anon_key') ? {
+      storageProfileWizardStep: 'connection',
+      storageProfileBindingFlowId: '',
+      supabaseAccountStatus: null,
+      supabaseSpaces: [],
+      supabaseSpacesMessage: '',
+    } : {}),
     ...(field === 'provider_kind' ? {
+      storageProfileWizardStep: value === 'supabase' ? 'connection' : 'details',
       supabaseProfileId: '',
       supabaseEmail: '',
       supabasePassword: '',
@@ -13901,6 +13954,11 @@ function updateStorageProfileDraft(field, value) {
     } : {}),
   };
   syncVueSettingsForm(currentSettingsFormState);
+  if (invalidatesBindingFlow) {
+    void invoke('cancel_supabase_binding_flow', { input: { flowId: bindingFlowId } }).catch(() => {
+      // Editing the connection must immediately forget the local flow even if cleanup fails.
+    });
+  }
 }
 
 async function testStorageProfileDraftConnection() {
@@ -13973,6 +14031,201 @@ async function testStorageProfileDraftConnection() {
       storageProfileTestResult: null,
       storageProfileTestMessage: `测试连接失败：${message}`,
       storageProfileTestMessageKind: 'error',
+    });
+    return null;
+  }
+}
+
+const SUPABASE_PROFILE_WIZARD_STEPS = ['connection', 'account', 'space', 'confirm'];
+
+function storageProfileWizardStepIndex(step = currentSettingsFormState.storageProfileWizardStep) {
+  return Math.max(0, SUPABASE_PROFILE_WIZARD_STEPS.indexOf(step));
+}
+
+function storageProfileWizardStepState(step) {
+  const currentIndex = storageProfileWizardStepIndex();
+  const targetIndex = storageProfileWizardStepIndex(step);
+  return targetIndex < currentIndex ? 'complete' : targetIndex === currentIndex ? 'current' : 'pending';
+}
+
+function setStorageProfileWizardStep(step) {
+  if (!SUPABASE_PROFILE_WIZARD_STEPS.includes(step)) return;
+  setSupabaseAuthFeedback({ storageProfileWizardStep: step, storageProfileWizardError: '' });
+}
+
+function storageProfileWizardCanContinue() {
+  const step = currentSettingsFormState.storageProfileWizardStep;
+  if (step === 'connection') {
+    const result = currentSettingsFormState.storageProfileTestResult;
+    return !!(result?.network && result?.publicKey);
+  }
+  if (step === 'account') return !!currentSettingsFormState.supabaseAccountStatus?.signedIn;
+  if (step === 'space') return !!String(currentSettingsFormState.storageProfileDraft?.supabase?.space_id || '').trim();
+  return step === 'confirm';
+}
+
+async function continueStorageProfileWizard() {
+  const step = currentSettingsFormState.storageProfileWizardStep;
+  if (step === 'connection') {
+    if (!storageProfileWizardCanContinue()) {
+      setSupabaseAuthFeedback({ storageProfileWizardError: '请先完成连接测试，确认 Supabase 服务和公开 Key 可用。' });
+      return;
+    }
+    setStorageProfileWizardStep('account');
+    return;
+  }
+  if (step === 'account') {
+    if (!storageProfileWizardCanContinue()) {
+      setSupabaseAuthFeedback({ storageProfileWizardError: '请先登录 Supabase 账号。' });
+      return;
+    }
+    setStorageProfileWizardStep('space');
+    if (!currentSettingsFormState.supabaseSpacesLoading && !currentSettingsFormState.supabaseSpaces.length) {
+      await loadSupabaseSpaces();
+    }
+    return;
+  }
+  if (step === 'space') {
+    if (!storageProfileWizardCanContinue()) {
+      setSupabaseAuthFeedback({ storageProfileWizardError: '请选择一个账号中的存储空间，或明确新建空间。' });
+      return;
+    }
+    setStorageProfileWizardStep('confirm');
+    return;
+  }
+  await completeStorageProfileWizard();
+}
+
+function backStorageProfileWizard() {
+  const index = storageProfileWizardStepIndex();
+  if (index > 0) setStorageProfileWizardStep(SUPABASE_PROFILE_WIZARD_STEPS[index - 1]);
+}
+
+function selectedSupabaseSpace() {
+  const spaceId = String(currentSettingsFormState.storageProfileDraft?.supabase?.space_id || '').trim();
+  return (currentSettingsFormState.supabaseSpaces || []).find((space) => space.id === spaceId) || null;
+}
+
+function toggleSupabaseSpaceCreate(open = !currentSettingsFormState.storageProfileSpaceCreateOpen) {
+  setSupabaseAuthFeedback({
+    storageProfileSpaceCreateOpen: !!open,
+    storageProfileSpaceCreateName: open
+      ? currentSettingsFormState.storageProfileSpaceCreateName || ''
+      : '',
+    storageProfileWizardError: '',
+  });
+}
+
+async function createSupabaseSpaceFromWizard() {
+  const name = String(currentSettingsFormState.storageProfileSpaceCreateName || '').trim();
+  if (!name) {
+    setSupabaseAuthFeedback({ storageProfileWizardError: '请输入新空间名称。' });
+    return null;
+  }
+  const confirmed = await showConfirmationDialog({
+    title: '确认新建 Supabase 空间',
+    message: '将在当前 Supabase 账号中创建“' + name + '”。只有这一步会创建远端空间，是否继续？',
+    confirmLabel: '确认创建',
+  });
+  if (!confirmed) return null;
+  setSupabaseAuthFeedback({ storageProfileWizardBusy: true, storageProfileWizardError: '' });
+  try {
+    const space = await invoke('create_supabase_space', {
+      input: {
+        flowId: currentSettingsFormState.storageProfileEditorMode === 'create'
+          ? currentSettingsFormState.storageProfileBindingFlowId || null
+          : null,
+        profileId: currentSettingsFormState.storageProfileEditorMode === 'edit'
+          ? currentSettingsFormState.supabaseProfileId || null
+          : null,
+        name,
+      },
+    });
+    const spaces = [space, ...(currentSettingsFormState.supabaseSpaces || []).filter((item) => item.id !== space.id)];
+    const draft = currentSettingsFormState.storageProfileDraft;
+    setSupabaseAuthFeedback({
+      storageProfileWizardBusy: false,
+      storageProfileSpaceCreateOpen: false,
+      storageProfileSpaceCreateName: '',
+      supabaseSpaces: spaces,
+      supabaseSpacesMessage: '新空间已创建，请确认选择后继续。',
+      storageProfileDraft: {
+        ...draft,
+        supabase: { ...(draft.supabase || {}), space_id: space.id },
+      },
+    });
+    return space;
+  } catch (error) {
+    setSupabaseAuthFeedback({
+      storageProfileWizardBusy: false,
+      storageProfileWizardError: '创建空间失败：' + supabaseErrorMessage(error),
+    });
+    return null;
+  }
+}
+
+async function completeStorageProfileWizard() {
+  if (currentSettingsFormState.storageProfileWizardBusy) return null;
+  const draft = currentSettingsFormState.storageProfileDraft;
+  const spaceId = String(draft?.supabase?.space_id || '').trim();
+  if (!spaceId) {
+    setSupabaseAuthFeedback({ storageProfileWizardError: '请选择要绑定的 Supabase 空间。' });
+    return null;
+  }
+  setSupabaseAuthFeedback({ storageProfileWizardBusy: true, storageProfileWizardError: '' });
+  try {
+    let updated;
+    const profile = {
+      id: String(draft.id || 'supabase-' + Date.now()),
+      name: String(draft.name || 'Supabase').trim() || 'Supabase',
+      provider_kind: 'supabase',
+      enabled: draft.enabled !== false,
+      webdav: null,
+      supabase: {
+        api_url: String(draft.supabase?.api_url || '').trim().replace(/\/$/, ''),
+        anon_key: String(draft.supabase?.anon_key || '').trim(),
+        space_id: spaceId,
+      },
+    };
+    if (currentSettingsFormState.storageProfileEditorMode === 'create') {
+      updated = await invoke('complete_supabase_binding', {
+        input: {
+          flowId: currentSettingsFormState.storageProfileBindingFlowId,
+          originalProfileId: null,
+          profile,
+          spaceId,
+        },
+      });
+    } else if (currentSettingsFormState.storageProfileBindingFlowId) {
+      const originalId = currentSettingsFormState.storageProfileOriginalId;
+      updated = await invoke('complete_supabase_binding', {
+        input: {
+          flowId: currentSettingsFormState.storageProfileBindingFlowId,
+          originalProfileId: originalId,
+          profile: { ...profile, id: originalId },
+          spaceId,
+        },
+      });
+    } else {
+      const originalId = currentSettingsFormState.storageProfileOriginalId;
+      const original = (currentSettingsFormState.storageProfiles || []).find((item) => item.id === originalId);
+      if (original?.supabase?.space_id !== spaceId) {
+        updated = await invoke('switch_supabase_space', {
+          input: { sourceProfileId: originalId, spaceId },
+        });
+      }
+      updated = await invoke('save_storage_profile', {
+        input: { originalProfileId: originalId, profile: { ...profile, id: originalId } },
+      });
+    }
+    applySettings(updated);
+    setSuccessStatus(profile.name + ' 已完成绑定');
+    await cancelStorageProfileEditor(true);
+    return updated;
+  } catch (error) {
+    setSupabaseAuthFeedback({
+      storageProfileWizardBusy: false,
+      storageProfileWizardError: '完成绑定失败：' + supabaseErrorMessage(error),
     });
     return null;
   }
@@ -14179,15 +14432,22 @@ async function loadSupabaseProfileAccountStatus(profileId, options = {}) {
 }
 
 async function loadSupabaseSpaces(profileId = currentSettingsFormState.supabaseProfileId) {
-  if (!profileId || currentSettingsFormState.supabaseSpacesLoading) return [];
-  const requestedProfileId = profileId;
+  const bindingFlowId = currentSettingsFormState.storageProfileBindingFlowId;
+  const isDraftFlow = !!bindingFlowId;
+  if ((!profileId && !isDraftFlow) || currentSettingsFormState.supabaseSpacesLoading) return [];
+  const requestedProfileId = profileId || bindingFlowId;
   setSupabaseAuthFeedback({
     supabaseSpacesLoading: true,
     supabaseSpacesMessage: '正在读取这个账号的存储空间...',
   });
   try {
-    const spaces = await invoke('list_supabase_spaces', { profileId });
-    if (currentSettingsFormState.supabaseProfileId !== requestedProfileId) return [];
+    const spaces = isDraftFlow
+      ? await invoke('list_supabase_draft_spaces', { input: { flowId: bindingFlowId } })
+      : await invoke('list_supabase_spaces', { profileId });
+    const activeRequestId = isDraftFlow
+      ? currentSettingsFormState.storageProfileBindingFlowId
+      : currentSettingsFormState.supabaseProfileId;
+    if (activeRequestId !== requestedProfileId) return [];
     setSupabaseAuthFeedback({
       supabaseSpaces: Array.isArray(spaces) ? spaces : [],
       supabaseSpacesLoading: false,
@@ -14197,7 +14457,10 @@ async function loadSupabaseSpaces(profileId = currentSettingsFormState.supabaseP
     });
     return spaces || [];
   } catch (error) {
-    if (currentSettingsFormState.supabaseProfileId !== requestedProfileId) return [];
+    const activeRequestId = isDraftFlow
+      ? currentSettingsFormState.storageProfileBindingFlowId
+      : currentSettingsFormState.supabaseProfileId;
+    if (activeRequestId !== requestedProfileId) return [];
     setSupabaseAuthFeedback({
       supabaseSpaces: [],
       supabaseSpacesLoading: false,
@@ -14209,34 +14472,22 @@ async function loadSupabaseSpaces(profileId = currentSettingsFormState.supabaseP
 
 async function useSupabaseSpace(space) {
   if (!space?.id || currentSettingsFormState.supabaseAuthBusy) return null;
-  if (space.current) {
+  if (space.current && currentSettingsFormState.storageProfileDraft?.supabase?.space_id === space.id) {
     setSuccessStatus('当前已经在使用这个 Supabase 空间');
     return null;
   }
+  const draft = currentSettingsFormState.storageProfileDraft;
   setSupabaseAuthFeedback({
-    supabaseAuthBusy: true,
-    supabaseSpacesMessage: `正在切换到 ${space.name || 'Supabase 空间'}...`,
+    storageProfileDraft: {
+      ...draft,
+      supabase: { ...(draft.supabase || {}), space_id: space.id },
+    },
+    supabaseSpacesMessage: currentSettingsFormState.storageProfileEditorMode === 'create'
+      ? '已选择“' + (space.name || 'Supabase 空间') + '”，点击下一步查看绑定信息。'
+      : '已选择“' + (space.name || 'Supabase 空间') + '”，完成确认后才会切换。',
+    storageProfileWizardError: '',
   });
-  try {
-    const updated = await invoke('switch_supabase_space', {
-      input: {
-        sourceProfileId: currentSettingsFormState.supabaseProfileId,
-        spaceId: space.id,
-      },
-    });
-    setSupabaseAuthFeedback({ supabaseAuthBusy: false });
-    applySettings(updated);
-    cancelStorageProfileEditor();
-    await loadMessages({ scrollToBottom: true });
-    setSuccessStatus(`已切换到 ${space.name || 'Supabase 空间'}`);
-    return updated;
-  } catch (error) {
-    setSupabaseAuthFeedback({
-      supabaseAuthBusy: false,
-      supabaseSpacesMessage: `切换空间失败：${supabaseErrorMessage(error)}`,
-    });
-    return null;
-  }
+  return space;
 }
 
 function supabaseErrorMessage(error) {
@@ -14375,13 +14626,41 @@ async function signInSupabase() {
     supabaseAuthMessageKind: 'info',
   });
   try {
-    const status = await settingsFormRuntime.performSupabaseSignIn(currentSettingsFormState, {
-      ensureProfileSaved: ensureSupabaseProfileSaved,
-      signIn: (input) => invoke('supabase_sign_in', { input }),
-    });
+    let status;
+    const draft = currentSettingsFormState.storageProfileDraft;
+    const originalProfile = (currentSettingsFormState.storageProfiles || []).find(
+      (item) => item.id === currentSettingsFormState.storageProfileOriginalId,
+    );
+    const connectionChanged = currentSettingsFormState.storageProfileEditorMode === 'edit'
+      && (String(originalProfile?.supabase?.api_url || '').trim().replace(/\/$/, '') !== String(draft?.supabase?.api_url || '').trim().replace(/\/$/, '')
+        || String(originalProfile?.supabase?.anon_key || '').trim() !== String(draft?.supabase?.anon_key || '').trim());
+    const useDraftFlow = draft?.provider_kind === 'supabase'
+      && (currentSettingsFormState.storageProfileEditorMode === 'create' || connectionChanged);
+    if (useDraftFlow) {
+      const email = String(currentSettingsFormState.supabaseEmail || '').trim();
+      const password = String(currentSettingsFormState.supabasePassword || '');
+      if (!email || !password) throw new Error('请输入 Supabase 登录邮箱和密码');
+      status = await invoke('supabase_draft_sign_in', {
+        input: {
+          flowId: currentSettingsFormState.storageProfileBindingFlowId || null,
+          apiUrl: String(draft.supabase?.api_url || '').trim(),
+          anonKey: String(draft.supabase?.anon_key || '').trim(),
+          email,
+          password,
+        },
+      });
+    } else {
+      status = await settingsFormRuntime.performSupabaseSignIn(currentSettingsFormState, {
+        ensureProfileSaved: ensureSupabaseProfileSaved,
+        signIn: (input) => invoke('supabase_sign_in', { input }),
+      });
+    }
     setSupabaseAuthFeedback({
       supabasePassword: '',
       supabaseAccountStatus: status,
+      storageProfileBindingFlowId: useDraftFlow
+        ? status.profileId
+        : currentSettingsFormState.storageProfileBindingFlowId,
       supabaseSpaces: [],
       supabaseSpacesLoading: false,
       supabaseSpacesMessage: '',
@@ -14393,7 +14672,11 @@ async function signInSupabase() {
       supabaseAuthMessage: 'Supabase 登录成功',
       supabaseAuthMessageKind: 'success',
     });
-    await loadSupabaseSpaces(status.profileId || currentSettingsFormState.supabaseProfileId);
+    await loadSupabaseSpaces(
+      useDraftFlow
+        ? ''
+        : status.profileId || currentSettingsFormState.supabaseProfileId,
+    );
     setSuccessStatus('Supabase 登录成功');
     showToast('Supabase 登录成功', 'success');
     return status;
@@ -14413,17 +14696,28 @@ async function signInSupabase() {
 async function logoutSupabase() {
   if (currentSettingsFormState.supabaseAuthBusy) return null;
   const profileId = currentSettingsFormState.supabaseProfileId;
-  if (!profileId) return null;
+  const bindingFlowId = currentSettingsFormState.storageProfileBindingFlowId;
+  if (!profileId && !bindingFlowId) return null;
   setSupabaseAuthFeedback({
     supabaseAuthBusy: true,
     supabaseAuthMessage: '正在退出 Supabase...',
     supabaseAuthMessageKind: 'info',
   });
   try {
-    const status = await invoke('supabase_logout', { profileId });
+    const status = bindingFlowId
+      ? (await invoke('cancel_supabase_binding_flow', { input: { flowId: bindingFlowId } }), {
+        profileId: bindingFlowId,
+        signedIn: false,
+        userId: null,
+        email: null,
+        expiresAt: null,
+      })
+      : await invoke('supabase_logout', { profileId });
     setSupabaseAuthFeedback({
       supabasePassword: '',
       supabaseAccountStatus: status,
+      storageProfileBindingFlowId: '',
+      storageProfileWizardStep: 'account',
       supabaseSpaces: [],
       supabaseSpacesLoading: false,
       supabaseSpacesMessage: '',
@@ -15607,6 +15901,15 @@ vueBridge?.setActions?.({
   signInSupabase: () => signInSupabase(),
   loadSupabaseSpaces: () => loadSupabaseSpaces(),
   useSupabaseSpace: (space) => useSupabaseSpace(space),
+  selectedSupabaseSpace: () => selectedSupabaseSpace(),
+  storageProfileWizardStepState: (step) => storageProfileWizardStepState(step),
+  storageProfileWizardCanContinue: () => storageProfileWizardCanContinue(),
+  setStorageProfileWizardStep: (step) => setStorageProfileWizardStep(step),
+  continueStorageProfileWizard: () => continueStorageProfileWizard(),
+  backStorageProfileWizard: () => backStorageProfileWizard(),
+  toggleSupabaseSpaceCreate: (open) => toggleSupabaseSpaceCreate(open),
+  createSupabaseSpaceFromWizard: () => createSupabaseSpaceFromWizard(),
+  completeStorageProfileWizard: () => completeStorageProfileWizard(),
   logoutSupabase: () => {
     logoutSupabase();
   },

@@ -37,8 +37,8 @@ use crate::telegram_bridge_runtime::{TelegramBridgeManager, TelegramBridgeStatus
 use crate::types::{
     AiProviderSettings, AiSettings, AiTextAction, BackupSettings, DownloadHistoryRecord,
     LocalHttpApiSettings, MarkedTag, Message, SendSettings, Settings, SpeechToTextSettings,
-    StorageProfile, StorageProviderKind, SyncStatus, TelegramBridgeSettings, UploadHistoryRecord,
-    WebDavConflict, WebDavEndpoint, DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS,
+    StorageProfile, StorageProviderKind, SupabaseStorageConfig, SyncStatus, TelegramBridgeSettings,
+    UploadHistoryRecord, WebDavConflict, WebDavEndpoint, DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS,
     DEFAULT_LOCAL_HTTP_API_BIND_PORT,
 };
 use crate::webdav_sync_runtime::WebDavSyncRuntimeAdapter;
@@ -121,6 +121,7 @@ struct AppState {
     default_download_dir: PathBuf,
     settings: Mutex<Settings>,
     supabase_sessions: Mutex<HashMap<String, supabase_auth::SupabaseSession>>,
+    supabase_binding_flows: Mutex<HashMap<String, SupabaseBindingFlow>>,
     supabase_auth_guard: AsyncMutex<()>,
     sync_status: Mutex<SyncStatus>,
     sync_guard: Arc<AsyncMutex<()>>,
@@ -138,6 +139,14 @@ struct AppState {
     system_dictation_hidden_main_position: Mutex<Option<PhysicalPosition<i32>>>,
     media_playback: media_playback::PlaybackRegistry,
     media_preview_jobs: AsyncMutex<HashMap<String, Arc<MediaPreviewJob>>>,
+}
+
+#[derive(Clone)]
+struct SupabaseBindingFlow {
+    api_url: String,
+    anon_key: String,
+    session: supabase_auth::SupabaseSession,
+    updated_at_ms: i64,
 }
 
 #[derive(Default)]
@@ -160,6 +169,39 @@ struct SupabaseDraftConnectionInput {
     profile_id: Option<String>,
     api_url: String,
     anon_key: String,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SupabaseDraftSignInInput {
+    flow_id: Option<String>,
+    api_url: String,
+    anon_key: String,
+    email: String,
+    password: String,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SupabaseBindingFlowInput {
+    flow_id: String,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateSupabaseSpaceInput {
+    flow_id: Option<String>,
+    profile_id: Option<String>,
+    name: String,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompleteSupabaseBindingInput {
+    flow_id: String,
+    original_profile_id: Option<String>,
+    profile: StorageProfile,
+    space_id: String,
 }
 
 #[derive(Serialize)]
@@ -4084,7 +4126,7 @@ async fn push_supabase_outbox(
         .supabase
         .as_ref()
         .ok_or_else(|| "Supabase 存储空间配置不完整".to_string())?;
-    supabase_sync::ensure_space(&state.http, config, session, &profile.name).await?;
+    supabase_sync::validate_space_access(&state.http, config, session).await?;
     let worker_id = uuid::Uuid::new_v4().to_string();
     let mut applied = 0;
     loop {
@@ -4913,6 +4955,243 @@ async fn test_supabase_draft_connection(
                 .map(|session| session.access_token.clone())
         });
     Ok(supabase_connection::check(&state.http, api_url, anon_key, access_token.as_deref()).await)
+}
+
+fn normalize_supabase_draft_config(
+    api_url: &str,
+    anon_key: &str,
+) -> Result<SupabaseStorageConfig, String> {
+    let api_url = api_url.trim().trim_end_matches('/').to_string();
+    let anon_key = anon_key.trim().to_string();
+    if api_url.is_empty() || anon_key.is_empty() {
+        return Err("请填写 Supabase API URL 和公开 Key".to_string());
+    }
+    Ok(SupabaseStorageConfig {
+        api_url,
+        anon_key,
+        space_id: String::new(),
+    })
+}
+
+fn binding_flow_status(flow_id: &str, flow: &SupabaseBindingFlow) -> SupabaseAccountStatus {
+    account_status(flow_id, Some(&flow.session))
+}
+
+#[tauri::command]
+async fn supabase_draft_sign_in(
+    state: State<'_, AppState>,
+    input: SupabaseDraftSignInInput,
+) -> Result<SupabaseAccountStatus, supabase_auth::SupabaseAuthError> {
+    let config =
+        normalize_supabase_draft_config(&input.api_url, &input.anon_key).map_err(|message| {
+            auth_error(
+                supabase_auth::SupabaseAuthErrorKind::InvalidResponse,
+                message,
+            )
+        })?;
+    if input.email.trim().is_empty() || input.password.is_empty() {
+        return Err(auth_error(
+            supabase_auth::SupabaseAuthErrorKind::InvalidCredentials,
+            "请输入 Supabase 登录邮箱和密码",
+        ));
+    }
+    let session = supabase_auth::sign_in(
+        &state.http,
+        &config.api_url,
+        &config.anon_key,
+        input.email.trim(),
+        &input.password,
+    )
+    .await?;
+    let flow_id = input
+        .flow_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let flow = SupabaseBindingFlow {
+        api_url: config.api_url,
+        anon_key: config.anon_key,
+        session,
+        updated_at_ms: now_ms(),
+    };
+    let status = binding_flow_status(&flow_id, &flow);
+    state
+        .supabase_binding_flows
+        .lock()
+        .map_err(|_| {
+            auth_error(
+                supabase_auth::SupabaseAuthErrorKind::Service,
+                "保存临时登录状态失败",
+            )
+        })?
+        .insert(flow_id, flow);
+    Ok(status)
+}
+
+fn binding_flow(state: &AppState, flow_id: &str) -> Result<SupabaseBindingFlow, String> {
+    let flow_id = flow_id.trim();
+    if flow_id.is_empty() {
+        return Err("Supabase 绑定流程已失效，请重新登录".to_string());
+    }
+    let mut flows = state
+        .supabase_binding_flows
+        .lock()
+        .map_err(|_| "读取临时登录状态失败".to_string())?;
+    flows.retain(|_, flow| now_ms().saturating_sub(flow.updated_at_ms) < 30 * 60 * 1000);
+    flows
+        .get_mut(flow_id)
+        .map(|flow| {
+            flow.updated_at_ms = now_ms();
+            flow.clone()
+        })
+        .ok_or_else(|| "Supabase 绑定流程已过期，请重新登录".to_string())
+}
+
+#[tauri::command]
+async fn list_supabase_draft_spaces(
+    state: State<'_, AppState>,
+    input: SupabaseBindingFlowInput,
+) -> Result<Vec<SupabaseSpaceOption>, String> {
+    let flow = binding_flow(&state, &input.flow_id)?;
+    let config = SupabaseStorageConfig {
+        api_url: flow.api_url,
+        anon_key: flow.anon_key,
+        space_id: String::new(),
+    };
+    let spaces = supabase_sync::list_spaces(&state.http, &config, &flow.session).await?;
+    Ok(spaces
+        .into_iter()
+        .map(|space| SupabaseSpaceOption {
+            id: space.id,
+            name: space.name,
+            message_count: space.message_count,
+            updated_at: space.updated_at,
+            local_profile_id: None,
+            current: false,
+        })
+        .collect())
+}
+
+#[tauri::command]
+fn cancel_supabase_binding_flow(
+    state: State<'_, AppState>,
+    input: SupabaseBindingFlowInput,
+) -> Result<(), String> {
+    state
+        .supabase_binding_flows
+        .lock()
+        .map_err(|_| "清理临时登录状态失败".to_string())?
+        .remove(input.flow_id.trim());
+    Ok(())
+}
+
+#[tauri::command]
+async fn create_supabase_space(
+    state: State<'_, AppState>,
+    input: CreateSupabaseSpaceInput,
+) -> Result<SupabaseSpaceOption, String> {
+    let name = input.name.trim();
+    if name.is_empty() {
+        return Err("请输入新空间名称".to_string());
+    }
+    let (mut config, session) = if let Some(flow_id) = input
+        .flow_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let flow = binding_flow(&state, flow_id)?;
+        (
+            SupabaseStorageConfig {
+                api_url: flow.api_url,
+                anon_key: flow.anon_key,
+                space_id: String::new(),
+            },
+            flow.session,
+        )
+    } else {
+        let profile_id = input.profile_id.as_deref().unwrap_or_default().trim();
+        let settings = current_settings(&state)?;
+        let config = supabase_profile_config(&settings, profile_id)?;
+        let session = verified_supabase_session(&state, profile_id)
+            .await
+            .map_err(|error| error.message)?
+            .ok_or_else(|| "请先登录当前 Supabase 账号".to_string())?;
+        (config, session)
+    };
+    config.space_id = uuid::Uuid::new_v4().to_string();
+    supabase_sync::create_space(&state.http, &config, &session, name).await?;
+    Ok(SupabaseSpaceOption {
+        id: config.space_id,
+        name: name.to_string(),
+        message_count: 0,
+        updated_at: None,
+        local_profile_id: None,
+        current: false,
+    })
+}
+
+#[tauri::command]
+async fn complete_supabase_binding(
+    state: State<'_, AppState>,
+    input: CompleteSupabaseBindingInput,
+) -> Result<Settings, String> {
+    let flow = binding_flow(&state, &input.flow_id)?;
+    let mut profile = input.profile;
+    if profile.provider_kind != StorageProviderKind::Supabase {
+        return Err("只能完成 Supabase 存储空间绑定".to_string());
+    }
+    let config = profile
+        .supabase
+        .as_mut()
+        .ok_or_else(|| "Supabase 存储空间配置不完整".to_string())?;
+    if config.api_url.trim().trim_end_matches('/') != flow.api_url
+        || config.anon_key.trim() != flow.anon_key
+    {
+        return Err("Supabase 连接配置已改变，请重新登录".to_string());
+    }
+    config.space_id = input.space_id.trim().to_string();
+    if uuid::Uuid::parse_str(&config.space_id).is_err() {
+        return Err("请选择有效的 Supabase 空间".to_string());
+    }
+    let available = supabase_sync::list_spaces(&state.http, config, &flow.session).await?;
+    if !available.iter().any(|space| space.id == config.space_id) {
+        return Err("所选 Supabase 空间不存在或当前账号无权访问".to_string());
+    }
+    let updated = save_storage_profile_impl(
+        &state,
+        SaveStorageProfileInput {
+            original_profile_id: input.original_profile_id.clone(),
+            profile: profile.clone(),
+        },
+    )?;
+    let saved_profile_id = input
+        .original_profile_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&profile.id)
+        .to_string();
+    if let Err(error) = credential_store::save_session(&saved_profile_id, &flow.session) {
+        if input.original_profile_id.is_none() {
+            let _ = remove_storage_profile_impl(&state, &saved_profile_id, true);
+        }
+        return Err(error);
+    }
+    state
+        .supabase_sessions
+        .lock()
+        .map_err(|_| "保存 Supabase 会话失败".to_string())?
+        .insert(saved_profile_id, flow.session);
+    state
+        .supabase_binding_flows
+        .lock()
+        .map_err(|_| "清理临时登录状态失败".to_string())?
+        .remove(input.flow_id.trim());
+    signal_sync_loop_reset(&state);
+    Ok(updated)
 }
 
 #[tauri::command]
@@ -13953,13 +14232,9 @@ fn normalize_settings(
                 supabase.api_url = supabase.api_url.trim().trim_end_matches('/').to_string();
                 supabase.anon_key = supabase.anon_key.trim().to_string();
                 supabase.space_id = supabase.space_id.trim().to_string();
-                if supabase.space_id.is_empty() {
-                    supabase.space_id = uuid::Uuid::new_v5(
-                        &STORAGE_IMPORT_NAMESPACE,
-                        format!("transfer-genie-space:{}", profile.id).as_bytes(),
-                    )
-                    .to_string();
-                } else if uuid::Uuid::parse_str(&supabase.space_id).is_err() {
+                if !supabase.space_id.is_empty()
+                    && uuid::Uuid::parse_str(&supabase.space_id).is_err()
+                {
                     supabase.space_id = uuid::Uuid::new_v5(
                         &STORAGE_IMPORT_NAMESPACE,
                         format!("transfer-genie-space:{}:{}", profile.id, supabase.space_id)
@@ -13970,6 +14245,9 @@ fn normalize_settings(
                 if profile.enabled && (supabase.api_url.is_empty() || supabase.anon_key.is_empty())
                 {
                     return Err("启用的 Supabase 存储空间必须填写 API URL 和公开 Key".to_string());
+                }
+                if supabase.space_id.is_empty() {
+                    profile.enabled = false;
                 }
                 profile.webdav = None;
             }
@@ -18594,6 +18872,7 @@ fn main() {
                 default_download_dir,
                 settings: Mutex::new(settings),
                 supabase_sessions: Mutex::new(restored_supabase_sessions),
+                supabase_binding_flows: Mutex::new(HashMap::new()),
                 supabase_auth_guard: AsyncMutex::new(()),
                 sync_status: Mutex::new(SyncStatus::idle()),
                 sync_guard: Arc::new(AsyncMutex::new(())),
@@ -18934,9 +19213,14 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             supabase_sign_in,
+            supabase_draft_sign_in,
             supabase_refresh_session,
             supabase_current_user,
             list_supabase_spaces,
+            list_supabase_draft_spaces,
+            create_supabase_space,
+            complete_supabase_binding,
+            cancel_supabase_binding_flow,
             switch_supabase_space,
             supabase_logout,
             test_supabase_connection,
@@ -20289,6 +20573,7 @@ mod tests {
             default_download_dir: temp_dir.join("downloads"),
             settings: Mutex::new(settings),
             supabase_sessions: Mutex::new(HashMap::new()),
+            supabase_binding_flows: Mutex::new(HashMap::new()),
             supabase_auth_guard: AsyncMutex::new(()),
             sync_status: Mutex::new(SyncStatus::idle()),
             sync_guard: Arc::new(AsyncMutex::new(())),
@@ -24346,13 +24631,13 @@ mod tests {
     }
 
     #[test]
-    fn normalize_settings_assigns_stable_uuid_to_empty_supabase_space() {
+    fn normalize_settings_keeps_unbound_supabase_space_empty() {
         let mut settings = test_settings();
         settings.storage_profiles = vec![StorageProfile {
             id: "supabase-empty-space".to_string(),
             name: "Cloud".to_string(),
             provider_kind: StorageProviderKind::Supabase,
-            enabled: true,
+            enabled: false,
             webdav: None,
             supabase: Some(crate::types::SupabaseStorageConfig {
                 api_url: "https://supabase.example.com".to_string(),
@@ -24360,25 +24645,16 @@ mod tests {
                 space_id: String::new(),
             }),
         }];
-        settings.active_storage_profile_id = Some("supabase-empty-space".to_string());
         let download_dir = std::env::temp_dir().join("transfer-genie-empty-space-id");
 
-        let first = normalize_settings(settings, &download_dir).expect("normalize settings");
-        let first_space_id = first.storage_profiles[0]
+        let normalized = normalize_settings(settings, &download_dir).expect("normalize settings");
+        let space_id = normalized.storage_profiles[0]
             .supabase
             .as_ref()
             .expect("supabase config")
             .space_id
             .clone();
-        let second = normalize_settings(first, &download_dir).expect("normalize again");
-        let second_space_id = &second.storage_profiles[0]
-            .supabase
-            .as_ref()
-            .expect("supabase config")
-            .space_id;
-
-        assert!(uuid::Uuid::parse_str(&first_space_id).is_ok());
-        assert_eq!(&first_space_id, second_space_id);
+        assert!(space_id.is_empty());
     }
 
     #[test]

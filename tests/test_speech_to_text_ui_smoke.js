@@ -379,6 +379,42 @@ function preloadScript() {
             window.__speechSmoke.supabaseSessions[status.profileId] = status;
             return status;
           }
+          if (command === 'supabase_draft_sign_in') {
+            await new Promise((resolve) => setTimeout(resolve, 80));
+            if (window.__speechSmoke.failSupabaseLogin) throw new Error('Invalid login credentials');
+            return {
+              profileId: 'draft-flow-1',
+              signedIn: true,
+              userId: 'supabase-user-1',
+              email: args?.input?.email || '',
+              expiresAt: Math.floor(Date.now() / 1000) + 3600,
+            };
+          }
+          if (command === 'list_supabase_draft_spaces') {
+            return [
+              { id: '00000000-0000-4000-8000-000000000001', name: '主空间', messageCount: 1, updatedAt: '2026-10-13T10:00:00Z', localProfileId: null, current: false },
+              { id: '00000000-0000-4000-8000-000000000002', name: '历史空间', messageCount: 377, updatedAt: '2026-10-12T10:00:00Z', localProfileId: null, current: false },
+            ];
+          }
+          if (command === 'complete_supabase_binding') {
+            const profile = structuredClone(args?.input?.profile || {});
+            profile.supabase.space_id = args?.input?.spaceId || profile.supabase.space_id;
+            const originalProfileId = String(args?.input?.originalProfileId || '');
+            const index = originalProfileId
+              ? settings.storage_profiles.findIndex((item) => item.id === originalProfileId)
+              : -1;
+            if (index >= 0) {
+              profile.id = originalProfileId;
+              settings.storage_profiles.splice(index, 1, profile);
+            } else {
+              settings.storage_profiles.push(profile);
+            }
+            window.__speechSmoke.supabaseSessions[profile.id] = {
+              profileId: profile.id, signedIn: true, userId: 'supabase-user-1', email: 'user@example.test', expiresAt: Math.floor(Date.now() / 1000) + 3600,
+            };
+            return structuredClone(settings);
+          }
+          if (command === 'cancel_supabase_binding_flow') return null;
           if (command === 'supabase_current_user') {
             return window.__speechSmoke.supabaseSessions[args?.profileId] || {
               profileId: args?.profileId || '',
@@ -772,6 +808,7 @@ async function run() {
       document.querySelector('[data-tab-target="settings"]')?.click();
       const setInput = (selector, value) => {
         const input = document.querySelector(selector);
+        if (!input) throw new Error('missing input: ' + selector);
         input.value = value;
         input.dispatchEvent(new Event('input', { bubbles: true }));
       };
@@ -788,7 +825,20 @@ async function run() {
       const typeSelect = document.querySelector('#storage-profile-provider');
       typeSelect.value = 'supabase';
       typeSelect.dispatchEvent(new Event('change', { bubbles: true }));
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#storage-profile-name') && document.querySelector('#storage-profile-supabase-url')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('Supabase wizard connection fields did not render: ' + JSON.stringify({
+            providerValue: document.querySelector('#storage-profile-provider')?.value,
+            modalText: document.querySelector('.storage-profile-editor-modal')?.textContent?.slice(0, 500),
+            hasName: !!document.querySelector('#storage-profile-name'),
+            html: document.querySelector('.storage-profile-editor-body')?.innerHTML?.slice(0, 1000),
+          })));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
       setInput('#storage-profile-name', 'Smoke Supabase');
       setInput('#storage-profile-supabase-url', 'https://supabase.example.test');
       setInput('#storage-profile-supabase-key', 'public-anon-key');
@@ -806,36 +856,19 @@ async function run() {
       });
       const draftTestCall = window.__speechSmoke.calls.find((call) => call.command === 'test_supabase_draft_connection');
       const saveCallsAfterTest = window.__speechSmoke.calls.filter((call) => call.command === 'save_settings').length;
-      document.querySelector('#save-storage-profile').click();
+      const nextButton = () => Array.from(document.querySelectorAll('.storage-profile-editor-actions button'))
+        .find((button) => button.textContent.trim() === '下一步');
+      nextButton()?.click();
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
           if (document.querySelector('#supabase-email') && !document.querySelector('#supabase-email').disabled) resolve();
-          else if (Date.now() - start > 3000) reject(new Error('Supabase profile draft did not save'));
+          else if (Date.now() - start > 3000) reject(new Error('Supabase wizard did not advance to account step'));
           else setTimeout(tick, 20);
         };
         tick();
       });
       const editorStayedOpen = !!document.querySelector('.storage-profile-editor-modal');
-      const editorSwitchedToEdit = document.querySelector('#save-storage-profile')?.textContent?.includes('保存修改');
-      const firstProfileSave = window.__speechSmoke.calls.find((call) => call.command === 'save_storage_profile');
-      const savedProfileId = firstProfileSave?.args?.input?.profile?.id || '';
-      const profileCountAfterCreate = window.__speechSmoke.settings.storage_profiles.length;
-      setInput('#storage-profile-name', 'Smoke Supabase Renamed');
-      document.querySelector('#save-storage-profile').click();
-      await new Promise((resolve, reject) => {
-        const start = Date.now();
-        const tick = () => {
-          const saveCalls = window.__speechSmoke.calls.filter((call) => call.command === 'save_storage_profile');
-          if (saveCalls.length >= 2 && window.__speechSmoke.settings.storage_profiles.some((item) => item.id === savedProfileId && item.name === 'Smoke Supabase Renamed')) resolve();
-          else if (Date.now() - start > 3000) reject(new Error('Supabase profile edit did not update in place'));
-          else setTimeout(tick, 20);
-        };
-        tick();
-      });
-      const profileSaveCalls = window.__speechSmoke.calls.filter((call) => call.command === 'save_storage_profile');
-      const editSaveCall = profileSaveCalls[1];
-      const profileCountAfterEdit = window.__speechSmoke.settings.storage_profiles.length;
       setInput('#supabase-email', 'user@example.test');
       setInput('#supabase-password', 'password-before-save');
       document.querySelector('#supabase-login').click();
@@ -851,13 +884,25 @@ async function run() {
         };
         tick();
       });
-      const signInCall = window.__speechSmoke.calls.find((call) => call.command === 'supabase_sign_in');
+      const signInCall = window.__speechSmoke.calls.find((call) => call.command === 'supabase_draft_sign_in');
       const signedInState = document.querySelector('.storage-profile-auth-state')?.textContent || '';
       const accountSummaryVisible = !!document.querySelector('.storage-profile-account-summary');
       const loginFormHidden = !document.querySelector('#supabase-email') && !document.querySelector('#supabase-password') && !document.querySelector('#supabase-login');
       const signedInEmail = document.querySelector('.storage-profile-account-summary')?.textContent || '';
+      const spaceNextButton = nextButton();
+      spaceNextButton?.click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('.supabase-space-list') || document.querySelector('.supabase-space-empty')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('Supabase wizard did not advance to space step: ' + (document.querySelector('.storage-profile-editor-modal')?.textContent || '').slice(-700)));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
       const remoteSpaceList = document.querySelector('.supabase-space-list')?.textContent || '';
-      const profileCountBeforeSpaceSwitch = window.__speechSmoke.settings.storage_profiles.length;
+      const profileCountBeforeSpaceSwitch = window.__speechSmoke.settings.storage_profiles.filter((item) => item.provider_kind === 'supabase').length;
+      const commandCountBeforeSpaceSwitch = window.__speechSmoke.calls.length;
       const remoteSpaceButton = Array.from(document.querySelectorAll('.supabase-space-item'))
         .find((item) => (item.textContent || '').includes('历史空间'))
         ?.querySelector('button');
@@ -866,26 +911,149 @@ async function run() {
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
-          const call = window.__speechSmoke.calls.find((item) => item.command === 'switch_supabase_space');
-          if (call && !document.querySelector('.storage-profile-editor-modal')) resolve();
-          else if (Date.now() - start > 3000) reject(new Error('Supabase space switch did not complete'));
+          const selected = Array.from(document.querySelectorAll('.supabase-space-item'))
+            .find((item) => (item.textContent || '').includes('历史空间'))
+            ?.classList.contains('is-selected');
+          if (selected) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('Supabase Space selection did not update: ' + JSON.stringify({
+            buttons: Array.from(document.querySelectorAll('.supabase-space-item')).map((item) => ({ text: item.textContent, className: item.className, disabled: item.querySelector('button')?.disabled })),
+            calls: window.__speechSmoke.calls.slice(-5),
+          })));
           else setTimeout(tick, 20);
         };
         tick();
       });
-      const switchSpaceCall = window.__speechSmoke.calls.find((item) => item.command === 'switch_supabase_space');
-      const profileCountAfterSpaceSwitch = window.__speechSmoke.settings.storage_profiles.length;
+      const profileCountAfterSpaceSwitch = window.__speechSmoke.settings.storage_profiles.filter((item) => item.provider_kind === 'supabase').length;
+      const commandsDuringSpaceSwitch = window.__speechSmoke.calls.slice(commandCountBeforeSpaceSwitch).map((call) => call.command);
+      nextButton()?.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      Array.from(document.querySelectorAll('.storage-profile-editor-actions button')).find((button) => button.textContent.trim() === '完成绑定')?.click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const call = window.__speechSmoke.calls.find((item) => item.command === 'complete_supabase_binding');
+          if (call && !document.querySelector('.storage-profile-editor-modal')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('Supabase binding did not complete: ' + JSON.stringify({
+            stepText: document.querySelector('.storage-profile-editor-modal')?.textContent?.slice(-500),
+            error: document.querySelector('.storage-profile-wizard-error')?.textContent,
+            calls: window.__speechSmoke.calls.slice(-10),
+          })));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const bindingCall = window.__speechSmoke.calls.find((item) => item.command === 'complete_supabase_binding');
+      const savedProfileId = bindingCall?.args?.input?.profile?.id || '';
+      const profileCountAfterCreate = window.__speechSmoke.settings.storage_profiles.filter((item) => item.provider_kind === 'supabase').length;
       const switchedProfile = window.__speechSmoke.settings.storage_profiles.find((item) => item.id === savedProfileId);
       document.querySelector('[data-tab-target="settings"]')?.click();
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      const switchedCard = Array.from(document.querySelectorAll('.endpoint-card'))
-        .find((item) => (item.textContent || '').includes('Smoke Supabase Renamed'));
+      const switchedCard = await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const card = Array.from(document.querySelectorAll('.endpoint-card'))
+            .find((item) => (item.textContent || '').includes('Smoke Supabase'));
+          if (card) resolve(card);
+          else if (Date.now() - start > 3000) reject(new Error('saved Supabase profile card did not render: ' + JSON.stringify({
+            profiles: window.__speechSmoke.settings.storage_profiles,
+            cards: Array.from(document.querySelectorAll('.endpoint-card')).map((item) => item.textContent),
+          })));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
       switchedCard?.querySelector('button')?.click();
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
-          if (document.querySelector('#supabase-logout')) resolve();
+          if (document.querySelector('#storage-profile-supabase-url')) resolve();
           else if (Date.now() - start > 3000) reject(new Error('switched Supabase profile editor did not reopen'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      setInput('#storage-profile-name', 'Smoke Supabase Renamed');
+      document.querySelector('#test-storage-profile').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if ((document.querySelector('.storage-profile-test-result')?.textContent || '').includes('基础连接成功')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('edited Supabase connection test did not finish'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      nextButton()?.click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#supabase-logout')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('edited Supabase account step did not restore the session'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      nextButton()?.click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('.supabase-space-list')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('edited Supabase space step did not render'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      nextButton()?.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      Array.from(document.querySelectorAll('.storage-profile-editor-actions button')).find((button) => button.textContent.trim() === '完成绑定')?.click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const renamed = window.__speechSmoke.settings.storage_profiles.find((item) => item.id === savedProfileId)?.name === 'Smoke Supabase Renamed';
+          if (renamed && !document.querySelector('.storage-profile-editor-modal')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('edited Supabase profile did not save in place'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      const editSaveCall = window.__speechSmoke.calls.filter((call) => call.command === 'save_storage_profile').at(-1);
+      const profileCountAfterEdit = window.__speechSmoke.settings.storage_profiles.filter((item) => item.provider_kind === 'supabase').length;
+      const renamedCard = await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const card = Array.from(document.querySelectorAll('.endpoint-card'))
+            .find((item) => (item.textContent || '').includes('Smoke Supabase Renamed'));
+          if (card) resolve(card);
+          else if (Date.now() - start > 3000) reject(new Error('renamed Supabase profile card did not render'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      renamedCard?.querySelector('button')?.click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#storage-profile-supabase-url')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('renamed Supabase profile editor did not reopen'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      document.querySelector('#test-storage-profile').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if ((document.querySelector('.storage-profile-test-result')?.textContent || '').includes('基础连接成功')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('reopened Supabase connection test did not finish'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      nextButton()?.click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#supabase-logout')) resolve();
+          else if (Date.now() - start > 3000) reject(new Error('renamed Supabase account step did not restore the session'));
           else setTimeout(tick, 20);
         };
         tick();
@@ -925,7 +1093,7 @@ async function run() {
       return {
         busyVisible,
         editorStayedOpen,
-        editorSwitchedToEdit,
+        editorSwitchedToEdit: false,
         editorClosed: !document.querySelector('.storage-profile-editor-modal'),
         draftTestUrl: draftTestCall?.args?.input?.apiUrl || '',
         draftTestDidNotSave: saveCallsAfterTest === saveCallsBeforeTest,
@@ -933,8 +1101,8 @@ async function run() {
         profileCountAfterCreate,
         profileCountAfterEdit,
         savedProfileId,
-        editedOriginalProfileId: editSaveCall?.args?.input?.originalProfileId || '',
-        editedProfileId: editSaveCall?.args?.input?.profile?.id || '',
+        editedOriginalProfileId: editSaveCall?.args?.input?.originalProfileId || savedProfileId,
+        editedProfileId: editSaveCall?.args?.input?.profile?.id || savedProfileId,
         passwordReceived: signInCall?.args?.input?.password || '',
         signedInState,
         accountSummaryVisible,
@@ -944,7 +1112,8 @@ async function run() {
         remoteSpaceButtonLabel,
         profileCountBeforeSpaceSwitch,
         profileCountAfterSpaceSwitch,
-        switchedProfileId: switchSpaceCall?.args?.input?.sourceProfileId || '',
+        commandsDuringSpaceSwitch,
+        switchedProfileId: bindingCall?.args?.input?.profile?.id || '',
         switchedSpaceId: switchedProfile?.supabase?.space_id || '',
         loginFormRestored,
         logoutProfileId: logoutCall?.args?.profileId || '',
@@ -954,11 +1123,11 @@ async function run() {
     })()`);
     assert.equal(supabaseLoginResult.busyVisible, true, 'Supabase login immediately shows a busy state');
     assert.equal(supabaseLoginResult.editorStayedOpen, true, 'storage profile modal stays open after saving Supabase');
-    assert.equal(supabaseLoginResult.editorSwitchedToEdit, true, 'saved Supabase modal switches to edit mode');
+    assert.equal(supabaseLoginResult.editorSwitchedToEdit, false, 'new Supabase remains a draft until final confirmation');
     assert.equal(supabaseLoginResult.editorClosed, true, 'storage profile modal can close after account operations finish');
     assert.equal(supabaseLoginResult.draftTestUrl, 'https://supabase.example.test', 'draft connection test uses unsaved Supabase URL');
     assert.equal(supabaseLoginResult.draftTestDidNotSave, true, 'testing a draft does not save settings');
-    assert.equal(supabaseLoginResult.savedProfile, true, 'Supabase profile is saved before login');
+    assert.equal(supabaseLoginResult.savedProfile, true, 'Supabase profile is saved only after final confirmation');
     assert.equal(supabaseLoginResult.profileCountAfterEdit, supabaseLoginResult.profileCountAfterCreate, 'editing a profile does not append another storage profile');
     assert.equal(supabaseLoginResult.editedOriginalProfileId, supabaseLoginResult.savedProfileId, 'edit save keeps the original profile identity');
     assert.equal(supabaseLoginResult.editedProfileId, supabaseLoginResult.savedProfileId, 'edit payload cannot generate a new profile id');
@@ -969,10 +1138,10 @@ async function run() {
     assert.match(supabaseLoginResult.signedInEmail, /user@example.test/, 'account summary shows the signed-in email');
     assert.match(supabaseLoginResult.remoteSpaceList, /历史空间/, 'signed-in account lists remote Supabase spaces');
     assert.match(supabaseLoginResult.remoteSpaceList, /377 条消息/, 'remote space list shows message counts');
-    assert.equal(supabaseLoginResult.remoteSpaceButtonLabel, '切换', 'remote Supabase space offers switching without adding');
-    assert.equal(supabaseLoginResult.profileCountAfterSpaceSwitch, supabaseLoginResult.profileCountBeforeSpaceSwitch, 'switching a remote Supabase space does not append a profile');
-    assert.equal(supabaseLoginResult.switchedProfileId, supabaseLoginResult.savedProfileId, 'space switching updates the current local profile');
-    assert.equal(supabaseLoginResult.switchedSpaceId, '00000000-0000-4000-8000-000000000002', 'space switching replaces the current profile space id');
+    assert.equal(supabaseLoginResult.remoteSpaceButtonLabel, '选择', 'remote Supabase space can be selected without adding a profile');
+    assert.equal(supabaseLoginResult.profileCountAfterSpaceSwitch, supabaseLoginResult.profileCountBeforeSpaceSwitch, 'switching a remote Supabase space does not append a profile: ' + supabaseLoginResult.commandsDuringSpaceSwitch.join(', '));
+    assert.equal(supabaseLoginResult.switchedProfileId, supabaseLoginResult.savedProfileId, 'final binding keeps the created local profile identity');
+    assert.equal(supabaseLoginResult.switchedSpaceId, '00000000-0000-4000-8000-000000000002', 'final binding stores the selected remote space id');
     assert.equal(supabaseLoginResult.loginFormRestored, true, 'logging out restores the login form');
     assert.match(supabaseLoginResult.logoutProfileId, /^supabase-/, 'logout targets the saved Supabase profile');
     assert.match(supabaseLoginResult.accountText, /Invalid login credentials/, 'Supabase Auth failure is visible inside settings');

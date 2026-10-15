@@ -1670,10 +1670,16 @@
           <div class="storage-profile-editor-header">
             <div>
               <div id="storage-profile-editor-title" class="dialog-title">{{ ui.settingsForm.storageProfileEditorMode === 'edit' ? '编辑存储空间' : '新增存储空间' }}</div>
-              <div class="dialog-text">配置只会在点击“保存此空间”后写入；可以先使用当前草稿测试连接。</div>
+              <div class="dialog-text">先连接服务，再登录账号并选择空间；只有最后确认后才会写入本地配置。</div>
             </div>
-            <button type="button" class="message-preview-close" :disabled="ui.settingsForm.storageProfileTestBusy || ui.settingsForm.supabaseAuthBusy" aria-label="关闭存储空间编辑弹框" @click="cancelStorageProfileEditor()">×</button>
+            <button type="button" class="message-preview-close" :disabled="ui.settingsForm.storageProfileTestBusy || ui.settingsForm.supabaseAuthBusy || ui.settingsForm.storageProfileWizardBusy" aria-label="关闭存储空间编辑弹框" @click="cancelStorageProfileEditor()">×</button>
           </div>
+          <ol v-if="ui.settingsForm.storageProfileDraft?.provider_kind === 'supabase'" class="storage-profile-wizard-steps" aria-label="Supabase 绑定步骤">
+            <li v-for="(step, stepIndex) in [{ id: 'connection', label: '连接服务', hint: '地址与 Key' }, { id: 'account', label: '登录账号', hint: '验证身份' }, { id: 'space', label: '选择空间', hint: '复用或新建' }, { id: 'confirm', label: '确认绑定', hint: '完成设置' }]" :key="step.id" :class="'is-' + storageProfileWizardStepState(step.id)" @click="storageProfileWizardStepState(step.id) === 'complete' && setStorageProfileWizardStep(step.id)">
+              <span class="storage-profile-wizard-step-index">{{ storageProfileWizardStepState(step.id) === 'complete' ? '✓' : stepIndex + 1 }}</span>
+              <span><strong>{{ step.label }}</strong><small>{{ step.hint }}</small></span>
+            </li>
+          </ol>
           <div class="storage-profile-editor-body">
             <div class="storage-profile-editor-grid">
               <label>
@@ -1694,22 +1700,23 @@
                 <label>密码<input id="storage-profile-webdav-password" type="password" :value="ui.settingsForm.storageProfileDraft?.webdav?.password || ''" @input="updateStorageProfileDraft('webdav.password', $event.target.value)" /></label>
               </template>
               <template v-if="ui.settingsForm.storageProfileDraft?.provider_kind === 'supabase'">
-                <label class="is-wide">Supabase API URL<input id="storage-profile-supabase-url" type="url" :value="ui.settingsForm.storageProfileDraft?.supabase?.api_url || ''" placeholder="https://your-supabase.example.com" @input="updateStorageProfileDraft('supabase.api_url', $event.target.value)" /></label>
-                <label class="is-wide">公开 Key（anon Key）<input id="storage-profile-supabase-key" type="password" autocomplete="off" :value="ui.settingsForm.storageProfileDraft?.supabase?.anon_key || ''" @input="updateStorageProfileDraft('supabase.anon_key', $event.target.value)" /></label>
-                <label class="is-wide">Space ID（高级设置，可留空；登录后可从空间列表选择）<input id="storage-profile-space-id" type="text" :value="ui.settingsForm.storageProfileDraft?.supabase?.space_id || ''" @input="updateStorageProfileDraft('supabase.space_id', $event.target.value)" /></label>
+                <template v-if="!['account', 'space', 'confirm'].includes(ui.settingsForm.storageProfileWizardStep)">
+                  <label class="is-wide">Supabase API URL<input id="storage-profile-supabase-url" type="url" :value="ui.settingsForm.storageProfileDraft?.supabase?.api_url || ''" placeholder="https://your-supabase.example.com" @input="updateStorageProfileDraft('supabase.api_url', $event.target.value)" /></label>
+                  <label class="is-wide">公开 Key（anon Key）<input id="storage-profile-supabase-key" type="password" autocomplete="off" :value="ui.settingsForm.storageProfileDraft?.supabase?.anon_key || ''" @input="updateStorageProfileDraft('supabase.anon_key', $event.target.value)" /></label>
+                </template>
               </template>
             </div>
-            <label v-if="ui.settingsForm.storageProfileDraft?.provider_kind" class="toggle storage-profile-enabled"><input type="checkbox" :checked="ui.settingsForm.storageProfileDraft?.enabled !== false" @change="updateStorageProfileDraft('enabled', $event.target.checked)" />启用这个存储空间</label>
-            <div v-if="ui.settingsForm.storageProfileTestMessage" class="storage-profile-test-result" :class="`is-${ui.settingsForm.storageProfileTestMessageKind || 'info'}`">
+            <label v-if="ui.settingsForm.storageProfileDraft?.provider_kind && (ui.settingsForm.storageProfileDraft?.provider_kind !== 'supabase' || ui.settingsForm.storageProfileWizardStep === 'confirm')" class="toggle storage-profile-enabled"><input type="checkbox" :checked="ui.settingsForm.storageProfileDraft?.enabled !== false" @change="updateStorageProfileDraft('enabled', $event.target.checked)" />启用这个存储空间</label>
+            <div v-if="ui.settingsForm.storageProfileTestMessage && (ui.settingsForm.storageProfileDraft?.provider_kind !== 'supabase' || ui.settingsForm.storageProfileWizardStep === 'connection')" class="storage-profile-test-result" :class="`is-${ui.settingsForm.storageProfileTestMessageKind || 'info'}`">
               <span class="storage-profile-test-dot" aria-hidden="true"></span>
               <span>{{ ui.settingsForm.storageProfileTestMessage }}</span>
             </div>
-            <span class="field-hint">测试连接只使用弹框里的草稿，不会自动保存或切换当前空间。</span>
-            <section v-if="ui.settingsForm.storageProfileDraft?.provider_kind === 'supabase'" class="storage-profile-auth-panel">
+            <span v-if="ui.settingsForm.storageProfileDraft?.provider_kind !== 'supabase' || ui.settingsForm.storageProfileWizardStep === 'connection'" class="field-hint">测试连接只使用弹框里的草稿，不会自动保存或切换当前空间。</span>
+            <section v-if="ui.settingsForm.storageProfileDraft?.provider_kind === 'supabase' && ['account', 'space'].includes(ui.settingsForm.storageProfileWizardStep)" class="storage-profile-auth-panel">
               <div class="storage-profile-auth-heading">
                 <div>
                   <strong>Supabase 账号</strong>
-                  <span v-if="ui.settingsForm.storageProfileEditorMode === 'create'">请先保存这个存储空间，再登录账号。</span>
+                  <span v-if="ui.settingsForm.storageProfileEditorMode === 'create'">登录只会暂存在当前向导，完成绑定后才保存。</span>
                   <span v-else-if="ui.settingsForm.supabaseAccountStatus?.signedIn">账号已连接，会话只属于这个存储空间。</span>
                   <span v-else>登录后可在多台设备上访问这个存储空间。</span>
                 </div>
@@ -1727,14 +1734,14 @@
                   </div>
                   <div class="storage-profile-account-item">
                     <span>Space ID</span>
-                    <strong>{{ ui.settingsForm.storageProfileDraft?.supabase?.space_id || '自动分配' }}</strong>
+                    <strong>{{ ui.settingsForm.storageProfileDraft?.supabase?.space_id || '尚未选择' }}</strong>
                   </div>
                   <div class="storage-profile-account-item is-wide">
                     <span>会话有效期</span>
                     <strong>{{ supabaseSessionExpiryLabel() }}</strong>
                   </div>
                 </div>
-                <section class="supabase-space-picker" aria-labelledby="supabase-space-picker-title">
+                <section v-if="ui.settingsForm.storageProfileWizardStep === 'space'" class="supabase-space-picker" aria-labelledby="supabase-space-picker-title">
                   <div class="supabase-space-picker-heading">
                     <div>
                       <strong id="supabase-space-picker-title">账号中的存储空间</strong>
@@ -1749,20 +1756,20 @@
                     正在读取远端空间...
                   </div>
                   <div v-else-if="ui.settingsForm.supabaseSpaces?.length" class="supabase-space-list">
-                    <article v-for="space in ui.settingsForm.supabaseSpaces" :key="space.id" class="supabase-space-item" :class="{ 'is-current': space.current }">
+                    <article v-for="space in ui.settingsForm.supabaseSpaces" :key="space.id" class="supabase-space-item" :class="{ 'is-current': space.current, 'is-selected': ui.settingsForm.storageProfileDraft?.supabase?.space_id === space.id }">
                       <div class="supabase-space-main">
                       <div class="supabase-space-title-row">
                         <strong>{{ space.name || 'Supabase 空间' }}</strong>
-                        <span v-if="space.current" class="supabase-space-state is-current">正在使用</span>
-                          <span v-else class="supabase-space-state is-remote">可切换</span>
+                        <span v-if="ui.settingsForm.storageProfileDraft?.supabase?.space_id === space.id" class="supabase-space-state is-current">已选择</span>
+                          <span v-else class="supabase-space-state is-remote">可选择</span>
                         </div>
                         <div class="supabase-space-meta">
                           <span><b>{{ space.messageCount || 0 }}</b> 条消息</span>
                           <span :title="space.id">ID {{ compactSupabaseAccountId(space.id) }}</span>
                         </div>
                       </div>
-                      <button class="button small" :class="space.current ? 'ghost' : 'primary'" type="button" :disabled="space.current || ui.settingsForm.supabaseAuthBusy" @click="useSupabaseSpace(space)">
-                        {{ space.current ? '正在使用' : '切换' }}
+                      <button class="button small" :class="ui.settingsForm.storageProfileDraft?.supabase?.space_id === space.id ? 'ghost' : 'primary'" type="button" :disabled="ui.settingsForm.storageProfileDraft?.supabase?.space_id === space.id || ui.settingsForm.supabaseAuthBusy" @click="useSupabaseSpace(space)">
+                        {{ ui.settingsForm.storageProfileDraft?.supabase?.space_id === space.id ? '已选择' : '选择' }}
                       </button>
                     </article>
                   </div>
@@ -1781,15 +1788,15 @@
                 <div class="storage-profile-editor-grid">
                   <label>
                     登录邮箱
-                    <input id="supabase-email" type="email" autocomplete="username" :disabled="ui.settingsForm.storageProfileEditorMode === 'create' || ui.settingsForm.supabaseAuthBusy" :value="ui.settingsForm.supabaseEmail" @input="updateSettingsFormField('supabaseEmail', $event.target.value)" />
+                    <input id="supabase-email" type="email" autocomplete="username" :disabled="ui.settingsForm.supabaseAuthBusy" :value="ui.settingsForm.supabaseEmail" @input="updateSettingsFormField('supabaseEmail', $event.target.value)" />
                   </label>
                   <label>
                     登录密码
-                    <input id="supabase-password" type="password" autocomplete="current-password" :disabled="ui.settingsForm.storageProfileEditorMode === 'create' || ui.settingsForm.supabaseAuthBusy" :value="ui.settingsForm.supabasePassword" @input="updateSettingsFormField('supabasePassword', $event.target.value)" />
+                    <input id="supabase-password" type="password" autocomplete="current-password" :disabled="ui.settingsForm.supabaseAuthBusy" :value="ui.settingsForm.supabasePassword" @input="updateSettingsFormField('supabasePassword', $event.target.value)" />
                   </label>
                 </div>
                 <div class="storage-profile-auth-actions">
-                  <button id="supabase-login" class="button primary small" :class="{ 'has-spinner': ui.settingsForm.supabaseAuthBusy }" type="button" :disabled="ui.settingsForm.storageProfileEditorMode === 'create' || ui.settingsForm.supabaseAuthBusy" @click="signInSupabase()">
+                  <button id="supabase-login" class="button primary small" :class="{ 'has-spinner': ui.settingsForm.supabaseAuthBusy }" type="button" :disabled="ui.settingsForm.supabaseAuthBusy" @click="signInSupabase()">
                     <span v-if="ui.settingsForm.supabaseAuthBusy" class="button-spinner" aria-hidden="true"></span>
                     {{ ui.settingsForm.supabaseAuthBusy ? '登录中...' : '登录' }}
                   </button>
@@ -1798,15 +1805,44 @@
               </template>
               <span v-if="ui.settingsForm.supabaseAuthMessage" class="supabase-auth-message" :class="`is-${ui.settingsForm.supabaseAuthMessageKind || 'info'}`">{{ ui.settingsForm.supabaseAuthMessage }}</span>
             </section>
+            <section v-if="ui.settingsForm.storageProfileDraft?.provider_kind === 'supabase' && ui.settingsForm.storageProfileWizardStep === 'space' && ui.settingsForm.supabaseAccountStatus?.signedIn" class="storage-profile-space-step-note">
+              <strong>选择这个账号要使用的空间</strong>
+              <span>选择已有空间不会创建新空间；只有点击“新建空间”并确认才会产生远端变化。</span>
+            </section>
+            <section v-if="ui.settingsForm.storageProfileDraft?.provider_kind === 'supabase' && ui.settingsForm.storageProfileWizardStep === 'confirm'" class="storage-profile-confirm-card">
+              <div class="storage-profile-confirm-kicker">准备完成</div>
+              <h3>确认绑定 Supabase 存储空间</h3>
+              <p>绑定完成后，消息、附件和实时同步会使用下面这组配置。</p>
+              <dl>
+                <div><dt>空间名称</dt><dd>{{ ui.settingsForm.storageProfileDraft?.name || 'Supabase' }}</dd></div>
+                <div><dt>Supabase 项目</dt><dd>{{ ui.settingsForm.storageProfileDraft?.supabase?.api_url || '未填写' }}</dd></div>
+                <div><dt>登录账号</dt><dd>{{ ui.settingsForm.supabaseAccountStatus?.email || '未登录' }}</dd></div>
+                <div><dt>账号空间</dt><dd>{{ selectedSupabaseSpace()?.name || ui.settingsForm.storageProfileDraft?.supabase?.space_id || '未选择' }}</dd></div>
+              </dl>
+            </section>
+            <div v-if="ui.settingsForm.storageProfileWizardError" class="storage-profile-wizard-error">{{ ui.settingsForm.storageProfileWizardError }}</div>
+            <div v-if="ui.settingsForm.storageProfileDraft?.provider_kind === 'supabase' && ui.settingsForm.storageProfileWizardStep === 'space' && ui.settingsForm.storageProfileSpaceCreateOpen" class="storage-profile-space-create">
+              <div><strong>新建账号空间</strong><span>只有确认创建后，远端才会新增 Space。</span></div>
+              <input type="text" placeholder="例如：我的主空间" :value="ui.settingsForm.storageProfileSpaceCreateName" @input="updateSettingsFormField('storageProfileSpaceCreateName', $event.target.value)" />
+              <div class="storage-profile-space-create-actions"><button class="button ghost small" type="button" @click="toggleSupabaseSpaceCreate(false)">取消</button><button class="button primary small" type="button" :disabled="ui.settingsForm.storageProfileWizardBusy" @click="createSupabaseSpaceFromWizard()">确认新建</button></div>
+            </div>
           </div>
           <div class="storage-profile-editor-actions">
-            <button id="test-storage-profile" class="button ghost small" type="button" :class="{ 'has-spinner': ui.settingsForm.storageProfileTestBusy }" :disabled="ui.settingsForm.storageProfileTestBusy || !ui.settingsForm.storageProfileDraft?.provider_kind" @click="testStorageProfileDraftConnection()">
+            <button v-if="ui.settingsForm.storageProfileDraft?.provider_kind !== 'supabase' || ui.settingsForm.storageProfileWizardStep === 'connection'" id="test-storage-profile" class="button ghost small" type="button" :class="{ 'has-spinner': ui.settingsForm.storageProfileTestBusy }" :disabled="ui.settingsForm.storageProfileTestBusy || !ui.settingsForm.storageProfileDraft?.provider_kind" @click="testStorageProfileDraftConnection()">
               <span v-if="ui.settingsForm.storageProfileTestBusy" class="button-spinner" aria-hidden="true"></span>
               {{ ui.settingsForm.storageProfileTestBusy ? '测试中...' : '测试连接' }}
             </button>
             <span class="storage-profile-editor-actions-spacer"></span>
-            <button class="button ghost small" type="button" :disabled="ui.settingsForm.storageProfileTestBusy || ui.settingsForm.supabaseAuthBusy" @click="cancelStorageProfileEditor()">{{ ui.settingsForm.storageProfileEditorMode === 'edit' ? '关闭' : '取消' }}</button>
-            <button id="save-storage-profile" class="button primary small" type="button" :disabled="ui.settingsForm.storageProfileTestBusy || ui.settingsForm.supabaseAuthBusy || !ui.settingsForm.storageProfileDraft?.provider_kind" @click="saveStorageProfileDraft()">{{ ui.settingsForm.storageProfileEditorMode === 'edit' ? '保存修改' : '保存此空间' }}</button>
+            <button class="button ghost small" type="button" :disabled="ui.settingsForm.storageProfileTestBusy || ui.settingsForm.supabaseAuthBusy || ui.settingsForm.storageProfileWizardBusy" @click="cancelStorageProfileEditor()">{{ ui.settingsForm.storageProfileEditorMode === 'edit' ? '关闭' : '取消' }}</button>
+            <template v-if="ui.settingsForm.storageProfileDraft?.provider_kind === 'supabase'">
+              <button v-if="ui.settingsForm.storageProfileWizardStep !== 'connection'" class="button ghost small" type="button" :disabled="ui.settingsForm.storageProfileWizardBusy" @click="backStorageProfileWizard()">上一步</button>
+              <button v-if="ui.settingsForm.storageProfileWizardStep === 'space'" class="button ghost small" type="button" :disabled="ui.settingsForm.storageProfileWizardBusy" @click="toggleSupabaseSpaceCreate(true)">新建空间</button>
+              <button class="button primary small" type="button" :disabled="ui.settingsForm.storageProfileWizardBusy || ui.settingsForm.storageProfileTestBusy" @click="continueStorageProfileWizard()">
+                <span v-if="ui.settingsForm.storageProfileWizardBusy" class="button-spinner" aria-hidden="true"></span>
+                {{ ui.settingsForm.storageProfileWizardStep === 'confirm' ? '完成绑定' : '下一步' }}
+              </button>
+            </template>
+            <button v-else id="save-storage-profile" class="button primary small" type="button" :disabled="ui.settingsForm.storageProfileTestBusy || ui.settingsForm.supabaseAuthBusy || !ui.settingsForm.storageProfileDraft?.provider_kind" @click="saveStorageProfileDraft()">{{ ui.settingsForm.storageProfileEditorMode === 'edit' ? '保存修改' : '保存此空间' }}</button>
           </div>
         </div>
       </div>
