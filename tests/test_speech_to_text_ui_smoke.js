@@ -1685,11 +1685,10 @@ async function run() {
       const audioInlineOpened = !!audioCard.querySelector('.message-inline-audio-player')
         && !document.querySelector('#message-preview')?.classList.contains('is-active')
         && window.__speechSmoke.mediaPlayCount > audioPlayBefore
-        && audioCard.querySelector('.bulk-audio-toggle')?.getAttribute('aria-label') === '暂停';
+        && !!audioCard.querySelector('.message-inline-audio-player audio[controls]');
       audioCard.querySelector('.message-inline-audio-element')?.dispatchEvent(new Event('ended'));
-      const messageAudioPersistsAfterEnded = !!audioCard.querySelector('.message-inline-audio-player')
-        && audioCard.querySelector('.bulk-audio-toggle')?.getAttribute('aria-label') === '播放';
-      audioCard.querySelector('.bulk-audio-close')?.click();
+      const messageAudioPersistsAfterEnded = !!audioCard.querySelector('.message-inline-audio-player');
+      audioCard.querySelector('.message-inline-audio-close')?.click();
       window.__speechSmoke.mediaResolveDelayMs = 80;
       const inlineCancelBefore = window.__speechSmoke.calls.filter((call) => call.command === 'cancel_media_playback_cache' && call.args?.input?.filename === 'audio-message.mp3').length;
       audioCard.querySelector('.message-media-play-button').click();
@@ -3056,8 +3055,8 @@ async function run() {
         tick();
       });
       const sourceAudioPlayerOpened = !!document.querySelector('.message-card .speech-source-audio-player .message-inline-audio-player')
-        && document.querySelector('.message-card .speech-source-audio-player .bulk-audio-toggle')?.getAttribute('aria-label') === '暂停';
-      document.querySelector('.message-card .speech-source-audio-player .bulk-audio-close')?.click();
+        && !!document.querySelector('.message-card .speech-source-audio-player audio[controls]');
+      document.querySelector('.message-card .speech-source-audio-player .message-inline-audio-close')?.click();
       const sourceAudioPlayerClosed = !document.querySelector('.message-card .speech-source-audio-player .message-inline-audio-player')
         && !document.querySelector('.message-card .speech-source-audio-player > button')?.hidden;
       document.querySelector('.message-card .message-actions .button.primary.small.icon-only')?.click();
