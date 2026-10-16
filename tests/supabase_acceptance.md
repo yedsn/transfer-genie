@@ -1,7 +1,7 @@
 # Supabase acceptance record
 
-Date: 2026-10-12  
-Application: Transfer Genie 0.4.46  
+Date: 2026-10-12; source-identity migration and probe rerun 2026-10-16
+Application: Transfer Genie 0.5.2
 Target: authorized self-hosted Supabase test environment  
 Schema: `transfer_genie`  
 Bucket: `transfer-genie-files`
@@ -18,6 +18,9 @@ This was a real target-environment protocol acceptance run, not a two-physical-c
 |---|---|---|
 | Auth sign-in and refresh | Two ordinary users signed in through Auth. User A refreshed its token and `/auth/v1/user` returned the same user ID. A second independent session for user A also signed in successfully. | Pass, real target |
 | Schema and RPC discovery | `cloud_status` returned schema version `001_transfer_genie_initial`, the authenticated user ID, the private bucket name, and the Realtime table. Direct authenticated writes to business tables were denied, preserving the RPC-only write boundary. | Pass, real target |
+| Telegram source identity migration | Before deployment, a non-empty Schema-only backup was created under the maintained environment backup directory and its SHA-256 was verified. `002_message_source_identity.sql` then applied in one transaction; all three nullable source columns, the scoped unique index, the updated `message_apply` function, the migration row, and PostgREST schema-cache reload were verified. | Pass, real target |
+| Telegram source identity round trip | A message created by an ordinary Auth user with the Telegram source tuple was read back with all three source fields intact. A legacy-style message without source fields remained readable with null source values. | Pass, real target |
+| Cross-device source idempotency | A second create using a different message/operation ID but the same Telegram source tuple returned the existing message with `idempotent: true`; the same deterministic message ID with a different operation ID behaved identically. | Pass, real target |
 | Same-person two-session sync | User A device/session 1 created a message. User A device/session 2 updated it with the expected base revision. Session 1 then read the resulting change through `pull_changes`. | Pass, real target |
 | Account and RLS isolation | User B used the same `space_id` value but could not read user A's message or Storage object. User A retained access. Direct table mutation was denied. | Pass, real target |
 | Offline local edit | Supabase message, tag, mark, pin, delete, and file commands committed to SQLite and outbox without network dependency. Cached preview opened without network. | Pass, Rust tests |
@@ -27,7 +30,7 @@ This was a real target-environment protocol acceptance run, not a two-physical-c
 | Response loss and idempotency | Replaying the same `operation_id` and payload returned the identical RPC result. Reusing the ID with a different payload was rejected. Local lease recovery preserved operation identity and immutable payload. | Pass, real target + Rust tests |
 | Process interruption and retry | Claimed outbox rows were recoverable without changing operation identity; retry/backoff and manual retry paths did not strand `sending` rows. | Pass, Rust tests |
 | Revision conflict | A stale base revision produced a server conflict with the current remote revision. Local tests verified both resolution paths: retain local by creating a new operation on the remote revision, and accept remote by applying its snapshot and superseding the old outbox operation. | Pass, real target + Rust tests |
-| Deletion tombstone | User A deleted the message at the expected revision. The second session pulled a `delete` change with revision 4, proving deletion propagation through the change log. | Pass, real target |
+| Deletion tombstone | User A deleted the message at the expected revision. The second session pulled the resulting `delete` change, proving deletion propagation through the change log. | Pass, real target |
 | Pull/checkpoint crash safety | SQLite business changes and checkpoint advancement rolled back together under injected failure, then replayed exactly once after recovery. | Pass, Rust tests |
 | Realtime delivery | An authenticated subscription to `transfer_genie.change_log` received the expected message change. | Pass, real target |
 | Realtime loss and reconnect | Session 1 disconnected its WebSocket; session 2 modified the message; session 1 reconnected and `pull_changes` after its previous checkpoint returned the missed revision. Realtime was used only as a wake-up signal. | Pass, real target |
@@ -42,16 +45,17 @@ This was a real target-environment protocol acceptance run, not a two-physical-c
 
 ## Suite evidence
 
-- `cargo test`: 39 Telegram Bridge tests and 242 main application tests passed after the final conflict-resolution test was added; the probe binary has no unit tests.
+- Latest `cargo test`: 43 Telegram Bridge tests and 352 main application tests passed; two explicitly authorized real-environment acceptance tests remained ignored. The probe binary has no unit tests.
 - All `tests/test_*.js` checks passed, including desktop media E2E and speech-to-text UI smoke tests.
 - `npm run typecheck`, `npm run build`, `npm run docs:build`, and `cargo fmt --check` passed.
-- `cargo run --bin supabase_probe` printed only: `Supabase probe passed: Auth, RPC, RLS, Realtime and Storage`.
+- After deployment of migration 002, `cargo run --bin supabase_probe` printed only: `Supabase probe passed: Auth, RPC, RLS, Realtime and Storage`. The probe created temporary users only through a management credential held in process environment variables; all business operations used ordinary Auth sessions, and cleanup removed the temporary users.
 
 ## Server-side post-run checks
 
 Read-only metadata checks observed:
 
-- migration version `001_transfer_genie_initial`: one row;
+- migration versions `001_transfer_genie_initial` and `002_message_source_identity`: one row each;
+- nullable `source_kind`, `source_channel_id`, and `source_message_id` columns plus `messages_external_source_idx`: present;
 - RLS enabled on all seven application tables;
 - seven application RLS policies present;
 - `transfer_genie.change_log` present once in `supabase_realtime`;

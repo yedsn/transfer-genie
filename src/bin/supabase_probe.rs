@@ -697,6 +697,12 @@ async fn run_contract(
         "same-id duplicate external source was not handled idempotently",
     )?;
 
+    let mut stale_payload = create_payload.clone();
+    if let Some(payload) = stale_payload.as_object_mut() {
+        payload.remove("sourceKind");
+        payload.remove("sourceChannelId");
+        payload.remove("sourceMessageId");
+    }
     let stale = rpc(
         client,
         config,
@@ -709,7 +715,7 @@ async fn run_contract(
             &message_id,
             "upsert",
             0,
-            create_payload.clone(),
+            stale_payload,
         ),
     )
     .await?;

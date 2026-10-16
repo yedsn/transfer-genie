@@ -5,7 +5,7 @@
 - [x] 1.1 Add backward-compatible optional Telegram source fields to the message domain and SQLite schema, enforce idempotency for the stable source tuple within a storage/account scope, and verify migration plus duplicate-ingest Rust tests pass for legacy and new databases.
 - [x] 1.2 Extend WebDAV history/manifest serialization and parsing with optional source fields, and verify round-trip tests preserve Telegram identity while old history without the fields still loads unchanged.
 - [x] 1.3 Add nullable source fields to the Supabase messages schema, RPC payloads and pull mapping without weakening RLS or revision checks, and verify SQL/probe tests cover insert, retry, incremental pull and old rows with null source fields.
-- [ ] 1.4 Document the additive source metadata contract in the Supabase setup/migration guidance and verify the documented migration applies cleanly to the maintained test environment.
+- [x] 1.4 Document the additive source metadata contract in the Supabase setup/migration guidance and verify the documented migration applies cleanly to the maintained test environment.
 
 ## 2. Provider-aware integration message service
 
