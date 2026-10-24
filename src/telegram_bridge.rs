@@ -76,6 +76,7 @@ pub enum ManagedInboundPayload {
     },
 }
 
+#[cfg(test)]
 pub fn managed_update_payload(update: &ManagedTelegramUpdate) -> Option<&ManagedInboundPayload> {
     update.payload.as_ref()
 }

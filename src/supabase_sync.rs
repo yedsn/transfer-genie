@@ -484,6 +484,7 @@ pub async fn push_operation(
     }
 }
 
+#[allow(dead_code)]
 pub async fn upload_storage_object(
     client: &Client,
     config: &SupabaseStorageConfig,

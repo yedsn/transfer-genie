@@ -227,6 +227,7 @@ pub struct StorageTransferProgress {
 }
 
 pub type StorageImportItem = StorageTransferItem;
+#[cfg(test)]
 pub type StorageImportProgress = StorageTransferProgress;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -253,6 +254,7 @@ pub struct NewStorageTransferBatch<'a> {
     pub now_ms: i64,
 }
 
+#[cfg(test)]
 pub type NewStorageImportBatch<'a> = NewStorageTransferBatch<'a>;
 
 fn parse_tag_ids(raw: String) -> Vec<String> {
@@ -1124,16 +1126,6 @@ const OUTBOX_SELECT: &str = "operation_id,endpoint_id,owner_scope,entity_type,en
   base_revision,payload_json,payload_hash,depends_on_operation_id,state,attempt_count,next_attempt_at_ms,lease_owner,
   lease_expires_at_ms,last_error,created_at_ms,updated_at_ms";
 
-pub fn recover_outbox_leases(path: &Path, now_ms: i64) -> rusqlite::Result<usize> {
-    Connection::open(path)?.execute(
-        "UPDATE sync_outbox
-         SET state='pending',lease_owner=NULL,lease_started_at_ms=NULL,lease_expires_at_ms=NULL,
-             updated_at_ms=?1,last_error=coalesce(last_error,'interrupted before acknowledgement')
-         WHERE state='sending' AND (lease_expires_at_ms IS NULL OR lease_expires_at_ms<=?1)",
-        params![now_ms],
-    )
-}
-
 pub fn recover_all_outbox_claims(path: &Path, now_ms: i64) -> rusqlite::Result<usize> {
     Connection::open(path)?.execute(
         "UPDATE sync_outbox
@@ -1464,6 +1456,7 @@ pub fn mark_storage_import_operation_error(
     tx.commit()
 }
 
+#[cfg(test)]
 pub fn acknowledge_outbox_operation(
     path: &Path,
     operation_id: &str,
@@ -1798,6 +1791,7 @@ pub fn record_outbox_conflict(
     Ok(true)
 }
 
+#[cfg(test)]
 pub fn get_outbox_operation(
     path: &Path,
     operation_id: &str,
@@ -2901,6 +2895,7 @@ pub fn save_message_with_marked_changes_and_enqueue(
     tx.commit()
 }
 
+#[cfg(test)]
 pub fn get_attachment_local_path(
     path: &Path,
     endpoint_id: &str,
@@ -3370,6 +3365,7 @@ pub fn create_or_resume_storage_transfer(
     get_storage_transfer_progress(path, batch.batch_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
 }
 
+#[cfg(test)]
 pub fn create_or_resume_storage_import(
     path: &Path,
     batch: &NewStorageImportBatch<'_>,
@@ -3415,6 +3411,7 @@ pub fn get_storage_transfer_progress(
         .optional()
 }
 
+#[cfg(test)]
 pub fn get_latest_storage_transfer_progress(
     path: &Path,
 ) -> rusqlite::Result<Option<StorageTransferProgress>> {
@@ -3595,6 +3592,7 @@ pub fn cancel_storage_transfer(path: &Path, batch_id: &str, now_ms: i64) -> rusq
     Ok(true)
 }
 
+#[cfg(test)]
 pub fn get_storage_import_progress(
     path: &Path,
     batch_id: &str,
@@ -3720,6 +3718,7 @@ pub fn delete_unconfirmed_tag(
     )? > 0)
 }
 
+#[cfg(test)]
 pub fn list_storage_import_items(
     path: &Path,
     batch_id: &str,
@@ -3840,6 +3839,7 @@ pub fn mark_storage_transfer_item_state(
     tx.commit()
 }
 
+#[cfg(test)]
 pub fn has_unfinished_storage_transfers(path: &Path, profile_id: &str) -> rusqlite::Result<bool> {
     Connection::open(path)?.query_row(
         "SELECT EXISTS(SELECT 1 FROM storage_import_batches
@@ -3970,29 +3970,6 @@ pub fn has_profile_business_data(path: &Path, profile_id: &str) -> rusqlite::Res
         params![profile_id],
         |row| row.get(0),
     )
-}
-
-pub fn mark_storage_import_item_error(
-    path: &Path,
-    batch_id: &str,
-    item_type: &str,
-    source_key: &str,
-    error: &str,
-    now_ms: i64,
-) -> rusqlite::Result<()> {
-    let mut conn = Connection::open(path)?;
-    let tx = conn.transaction()?;
-    tx.execute(
-        "UPDATE storage_import_items SET state='error',last_error=?4,updated_at_ms=?5
-      WHERE batch_id=?1 AND item_type=?2 AND source_key=?3",
-        params![batch_id, item_type, source_key, error, now_ms],
-    )?;
-    tx.execute(
-        "UPDATE storage_import_batches SET last_error=?2 WHERE batch_id=?1",
-        params![batch_id, error],
-    )?;
-    refresh_import_progress(&tx, batch_id, now_ms)?;
-    tx.commit()
 }
 
 pub fn apply_imported_tag(
