@@ -78,7 +78,9 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::Window;
-use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Emitter, Manager, PhysicalPosition, State, WebviewUrl, WebviewWindowBuilder,
+};
 #[cfg(desktop)]
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 use tauri_plugin_log::{Target, TargetKind};
@@ -138,7 +140,7 @@ struct AppState {
     auto_backup_guard: AsyncMutex<()>,
     pending_webdav_conflict: Mutex<Option<WebDavConflict>>,
     #[cfg(target_os = "macos")]
-    system_dictation_hidden_main_position: Mutex<Option<tauri::PhysicalPosition<i32>>>,
+    system_dictation_hidden_main_position: Mutex<Option<PhysicalPosition<i32>>>,
     media_playback: media_playback::PlaybackRegistry,
     media_preview_jobs: AsyncMutex<HashMap<String, Arc<MediaPreviewJob>>>,
 }
@@ -7753,7 +7755,7 @@ fn position_system_dictation_window(app: &AppHandle, window: &tauri::WebviewWind
     let y = monitor_position.y + monitor_size.height as i32
         - window_height
         - SYSTEM_DICTATION_WINDOW_BOTTOM_MARGIN;
-    let _ = window.set_position(tauri::PhysicalPosition::new(x.max(monitor_position.x), y));
+    let _ = window.set_position(PhysicalPosition::new(x.max(monitor_position.x), y));
     eprintln!("[system-dictation] positioned window x={x} y={y}");
 }
 
