@@ -140,9 +140,21 @@
                   <div class="message-header">
                     <span>{{ card.headerText }}</span>
                   </div>
-                  <div class="message-body">
+                  <div
+                    class="message-body"
+                    :class="{ 'is-collapsible': card.isCollapsible, 'is-collapsed': card.isCollapsible && card.isCollapsed }"
+                    :style="card.isCollapsible ? { '--message-collapse-height': card.collapseHeight + 'px' } : null"
+                  >
                     <span @click="card.isFile && !card.isUploading ? openMessageFile(card.message) : null">{{ card.bodyText }}</span>
                   </div>
+                  <button
+                    v-if="card.isCollapsible"
+                    type="button"
+                    class="message-expand-toggle"
+                    @click.stop.prevent="toggleHomeMessageExpanded(card)"
+                  >
+                    {{ card.expandLabel }}
+                  </button>
                   <div class="message-footer">
                     <div class="message-meta">{{ card.metaText }}</div>
                     <div class="message-actions">

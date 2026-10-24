@@ -727,7 +727,7 @@ body {
 
 .message-body.is-collapsible {
   position: relative;
-  --message-collapse-height: 260px;
+  --message-collapse-height: 130px;
 }
 
 .message-body.is-collapsible.is-collapsed {
@@ -5535,7 +5535,9 @@ body.is-capturing-system-shortcut {
   white-space: pre-wrap;
   word-break: break-word;
   flex: 1;
-  overflow: auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding-right: 4px;
 }
 
@@ -5544,6 +5546,7 @@ body.is-capturing-system-shortcut {
   border: none;
   background: transparent;
   max-width: none;
+  overflow: visible;
 }
 
 .message-preview-body .markdown-body pre {

@@ -14619,7 +14619,7 @@ fn current_settings(state: &AppState) -> Result<Settings, String> {
 
 fn signal_sync_loop_reset(state: &AppState) {
     let next = (*state.sync_loop_signal.borrow()).wrapping_add(1);
-    let _ = state.sync_loop_signal.send(next);
+    state.sync_loop_signal.send_replace(next);
 }
 
 fn supabase_sync_context_matches(
@@ -19612,7 +19612,24 @@ fn start_sync_loop(app_handle: AppHandle) {
                 let _ = run_sync(&state, REALTIME_SYNC_SOURCE, false).await;
                 initialized_scope = Some(scope);
             }
-            match supabase_sync::connect_realtime(&config, &session).await {
+            let connection = tokio::select! {
+                connection = supabase_sync::connect_realtime(&config, &session) => Some(connection),
+                changed = sync_signal.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    let state = app_handle.state::<AppState>();
+                    if supabase_sync_context_matches(&state, &profile, &session) {
+                        // Local writes must not wait for a Realtime connection attempt.
+                        let _ = run_sync(&state, REALTIME_SYNC_SOURCE, true).await;
+                    }
+                    None
+                }
+            };
+            let Some(connection) = connection else {
+                continue;
+            };
+            match connection {
                 Ok(mut subscription) => {
                     reconnect_attempt = 0;
                     {
@@ -27153,6 +27170,20 @@ mod tests {
         assert_eq!((synced.phase.as_str(), synced.pending_count), ("synced", 0));
         assert!(synced.transition_seq > pending.transition_seq);
         assert!(!sent.filename.is_empty());
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_sync_signal_is_retained_until_background_loop_subscribes() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-sync-signal-retained-{}", now_ms()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let state = test_app_state(&temp_dir, test_supabase_settings());
+
+        signal_sync_loop_reset(&state);
+
+        let signal = state.sync_loop_signal.subscribe();
+        assert_eq!(*signal.borrow(), 1);
         let _ = fs::remove_dir_all(temp_dir);
     }
 

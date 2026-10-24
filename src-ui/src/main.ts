@@ -401,6 +401,7 @@ const app = createApp({
     openMarkMessageModal: (...args: any[]) => callAction("openMarkMessageModal", ...args),
     toggleMarkedMessagePin: (...args: any[]) => callAction("toggleMarkedMessagePin", ...args),
     toggleMarkedMessageExpanded: (...args: any[]) => callAction("toggleMarkedMessageExpanded", ...args),
+    toggleHomeMessageExpanded: (...args: any[]) => callAction("toggleHomeMessageExpanded", ...args),
     changeTransferTaskPage: (...args: any[]) => callAction("changeTransferTaskPage", ...args),
     toggleTransferTaskSelection: (...args: any[]) => callAction("toggleTransferTaskSelection", ...args),
     saveDownloadHistoryAs: (...args: any[]) => callAction("saveDownloadHistoryAs", ...args),

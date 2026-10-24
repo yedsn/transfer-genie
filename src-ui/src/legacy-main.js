@@ -1320,8 +1320,7 @@ const expandedTextMessages = new Set();
 let currentPreviewMessage = null;
 let messageMediaOverlay = null;
 const inlineAudioLoads = new WeakMap();
-const MESSAGE_BODY_COLLAPSE_HEIGHT = 260;
-const MARKED_MESSAGE_BODY_COLLAPSE_HEIGHT = 130;
+const MESSAGE_BODY_COLLAPSE_HEIGHT = 130;
 const MESSAGE_BODY_PREVIEW_MAX_CHARS = 2000;
 let isRefreshRunning = false;
 let isLoadMessagesRunning = false;
@@ -7085,8 +7084,8 @@ function buildMarkedMessageViewModel(message) {
     selectionMode: markedSelectionMode,
     isCollapsible: !!estimatedCollapsible,
     isCollapsed,
-    collapseHeight: MARKED_MESSAGE_BODY_COLLAPSE_HEIGHT,
-    expandLabel: isCollapsed ? '展开全文' : '收起',
+    collapseHeight: MESSAGE_BODY_COLLAPSE_HEIGHT,
+    expandLabel: isCollapsed ? '查看全文' : '收起',
     message,
   };
 }
@@ -8672,7 +8671,7 @@ function applyMessageBodyCollapse(item, body, message, options = {}) {
   const toggle = document.createElement('button');
   toggle.type = 'button';
   toggle.className = 'message-expand-toggle';
-  toggle.textContent = isExpanded ? '收起' : '展开全文';
+  toggle.textContent = isExpanded ? '收起' : '查看全文';
   toggle.addEventListener('click', (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -8685,7 +8684,7 @@ function applyMessageBodyCollapse(item, body, message, options = {}) {
     }
     body.classList.add('is-collapsed');
     expandedTextMessages.delete(message.filename);
-    toggle.textContent = '展开全文';
+    toggle.textContent = '查看全文';
   });
 
   const footer = item.querySelector('.message-footer');
@@ -9968,7 +9967,21 @@ function buildHomeFeedViewState(options = {}) {
     typeof options.query === 'string' ? options.query : (searchInput ? searchInput.value.trim() : '');
   const visibleCount = Array.isArray(options.messages) ? options.messages.length : 0;
   const messageCards = Array.isArray(options.messages)
-    ? options.messages.map((message) => createMessageViewModel(message))
+    ? options.messages.map((message) => {
+      const card = createMessageViewModel(message);
+      const bodyText = card.isText ? String(card.bodyText || '') : '';
+      const isCollapsible = card.isText
+        && !card.exceedsPreviewLimit
+        && (bodyText.length > 240 || (bodyText.match(/\n/g) || []).length >= 5);
+      const isCollapsed = isCollapsible && !expandedTextMessages.has(card.filename);
+      return {
+        ...card,
+        isCollapsible,
+        isCollapsed,
+        collapseHeight: MESSAGE_BODY_COLLAPSE_HEIGHT,
+        expandLabel: isCollapsed ? '查看全文' : '收起',
+      };
+    })
     : [];
   const useVueList =
     hasVueAppShell &&
@@ -10095,7 +10108,10 @@ function renderMessages(messages, options = {}) {
           ? getMessageBodyPreviewText(viewModel.bodyText)
           : viewModel.bodyText;
       }
-      if (!isBodyTruncated) {
+      if (isBodyTruncated) {
+        body.classList.add('is-collapsible', 'is-collapsed');
+        body.style.setProperty('--message-collapse-height', `${MESSAGE_BODY_COLLAPSE_HEIGHT}px`);
+      } else {
         collapseQueue.push({ item, body, message });
       }
     } else {
@@ -16066,6 +16082,18 @@ vueBridge?.setActions?.({
       query: getAppliedMarkedSearchQuery(),
     });
   },
+  toggleHomeMessageExpanded: (message) => {
+    const filename = message?.filename;
+    if (!filename) {
+      return;
+    }
+    if (expandedTextMessages.has(filename)) {
+      expandedTextMessages.delete(filename);
+    } else {
+      expandedTextMessages.add(filename);
+    }
+    renderCurrentMessageView({ preserveScroll: true });
+  },
   changeTransferTaskPage: (view, nextPage) => {
     if (view === 'uploads') {
       uploadTasksPage = nextPage;
@@ -17050,6 +17078,10 @@ function renderMarkedMessages(messages = [], options = {}) {
     body.textContent = isBodyTruncated
       ? getMessageBodyPreviewText(fullBodyText)
       : fullBodyText;
+    if (isBodyTruncated) {
+      body.classList.add('is-collapsible', 'is-collapsed');
+      body.style.setProperty('--message-collapse-height', `${MESSAGE_BODY_COLLAPSE_HEIGHT}px`);
+    }
     const transcriptToggle = viewModel.isSpeechTranscript
       ? createSpeechTranscriptToggle(message, body)
       : null;
@@ -17284,7 +17316,7 @@ function renderMarkedMessages(messages = [], options = {}) {
     markedMessageList.appendChild(item);
     if (message.kind === 'text' && !isBodyTruncated) {
       applyMessageBodyCollapse(item, body, message, {
-        collapseHeight: MARKED_MESSAGE_BODY_COLLAPSE_HEIGHT,
+        collapseHeight: MESSAGE_BODY_COLLAPSE_HEIGHT,
       });
     }
   });
