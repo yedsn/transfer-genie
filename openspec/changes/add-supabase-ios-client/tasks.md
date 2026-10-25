@@ -1,0 +1,72 @@
+# Tasks
+
+## 1. iOS build foundation
+
+- [ ] 1.1 Align Cargo and npm Tauri/plugin versions, configure a reliable project-local crates.io source for iOS builds, and verify `cargo tauri --version`, `npx tauri --version`, and dependency resolution complete without the Aliyun timeout.
+- [ ] 1.2 Install and register the Xcode-matched official iOS Simulator runtime, create and boot a representative iPhone simulator, reconnect the target iPhone, enable Developer Mode and automatic signing, and verify both targets appear in `xcrun simctl list devices available` or `xcrun devicectl list devices`. The iOS 26.4 runtime and `Transfer Genie - iPhone 12` simulator are installed and boot-verified; the `Jam` reconnect, Developer Mode, and signing checks remain pending.
+- [ ] 1.3 Split the Rust application into a shared library `run()` entry with `#[cfg_attr(mobile, tauri::mobile_entry_point)]` and a minimal desktop `main()`, then verify the existing desktop app still compiles and its focused startup tests pass.
+- [ ] 1.4 Add compile-time platform boundaries for tray, shortcuts, updater, autostart, local HTTP API, Telegram Bridge subprocesses, FFmpeg processes, shell commands, and desktop dictation, then verify `cargo check --target aarch64-apple-ios` reaches the application code without desktop-only symbol errors.
+- [ ] 1.5 Add `tauri.ios.conf.json`, iOS bundle metadata, platform-specific capabilities, permission descriptions, and generated iOS icons, then verify `npx tauri ios init` or the equivalent regeneration creates a buildable Xcode project.
+- [ ] 1.6 Update Vite to honor `TAURI_DEV_HOST` and mobile HMR settings while preserving desktop loopback development, then verify the frontend loads in both `cargo tauri dev` and `npx tauri ios dev` on the simulator.
+- [ ] 1.7 Document the local iOS setup, simulator, signing, device, and troubleshooting commands in the developer documentation and verify each documented command matches the repository configuration.
+
+## 2. Swift mobile integration plugin
+
+- [ ] 2.1 Scaffold a project-owned Tauri mobile plugin with a Swift package and structured Rust/JavaScript bindings, then verify a diagnostic command returns successfully on simulator and physical device in debug and release builds.
+- [ ] 2.2 Implement active-scene native presentation and invocation cancellation/error handling, then verify every photo, file, preview, and share command resolves or rejects when the user cancels or when no presenter is available.
+- [ ] 2.3 Implement photo/video selection and copy selected resources into application-controlled sandbox paths, then verify local, iCloud-backed, cancelled, and network-unavailable selections produce the specified results.
+- [ ] 2.4 Implement document selection with security-scoped access limited to the copy operation, then verify the returned sandbox file remains readable after the picker closes and after the application restarts.
+- [ ] 2.5 Implement Quick Look presentation and system share sheet commands, then verify supported PDF/image/text/Office samples preview and unsupported files fall back to a non-hanging share path.
+- [ ] 2.6 Add Swift plugin unit or harness coverage for path validation, cancellation, structured errors, and main-thread presentation, and verify the plugin test/build command succeeds for iOS Simulator and device architectures.
+
+## 3. Native preview generation and Supabase interoperability
+
+- [ ] 3.1 Implement bounded, orientation-correct JPEG thumbnail generation with ImageIO and verify large JPEG, PNG, HEIC, GIF, corrupt, and unsupported samples stay within the configured dimensions and error safely.
+- [ ] 3.2 Implement asynchronous AVFoundation poster generation near 0.5 seconds with preferred track transform, maximum size, cancellation, and timeout, then verify portrait MOV, landscape MP4, short video, corrupt video, and unsupported codec cases.
+- [ ] 3.3 Add a platform-neutral Rust preview-generator interface that uses the current image/FFmpeg implementation on desktop and the Swift plugin on iOS, then verify desktop preview tests remain green and iOS never resolves or launches an FFmpeg executable.
+- [ ] 3.4 Wire iOS-generated JPEG files into the existing stable Supabase `preview.jpg` upload and `preview_object_path` metadata flow, then verify preview failure does not block original attachment upload and retry preserves attachment identity.
+- [ ] 3.5 Add cross-device acceptance coverage proving iOS can display desktop-generated previews and desktop can display iOS-generated previews without downloading the full original attachment.
+- [ ] 3.6 Implement explicit-demand historical preview completion on iOS, then verify list visibility never auto-downloads a historical full video while opening the item can generate and publish its poster.
+
+## 4. Supabase-only mobile core and lifecycle recovery
+
+- [ ] 4.1 Add platform capability reporting to the frontend and filter iOS storage profiles/settings to Supabase only while preserving hidden WebDAV and desktop fields, then verify an iOS save round-trip does not delete or reset desktop configuration.
+- [ ] 4.2 Verify and refine iOS Keychain Session persistence through the existing credential store, then test login, process termination, device restart, token refresh, logout, and account switching on a physical iPhone.
+- [ ] 4.3 Add iOS foreground/background lifecycle signaling and implement ordered recovery of claims, Session, Realtime, outbox, and checkpoint pull, then verify messages created during suspension appear after foreground recovery.
+- [ ] 4.4 Make Realtime foreground-scoped on iOS and refresh its authentication after Session changes, then verify repeated background/foreground and Wi-Fi/cellular transitions do not create duplicate subscriptions or lose incremental changes.
+- [ ] 4.5 Audit all iOS attachment send/download paths to persist sandbox source files, immutable snapshots, operation IDs, and honest completion states before network work, then verify termination and unknown-response tests do not duplicate attachments.
+- [ ] 4.6 Implement Phase 1 transfer continuation by pausing or abandoning non-durable network work on suspension and resuming from persisted state on foreground, then verify large interrupted uploads/downloads remain pending and recover without false success.
+- [ ] 4.7 Record real-device Phase 1 transfer timing and interruption results for representative text, image, short video, and large file cases; if the stable-use acceptance threshold is not met, create a separate approved change for file-backed background `URLSession` reconciliation before release.
+
+## 5. Mobile message feed and settings experience
+
+- [ ] 5.1 Add iOS-safe-area, dynamic viewport, and software-keyboard layout behavior to the shared Vue shell, then verify composer visibility and scrolling on the target iPhone in portrait and landscape.
+- [ ] 5.2 Replace iOS hover, double-click, right-click, drag, and rectangular-selection dependencies with tap, long-press, explicit actions, and touch-sized controls, then verify the mobile interaction smoke tests and physical-device gestures.
+- [ ] 5.3 Integrate native photo/video and document selection into the composer without changing desktop selection flows, then verify selected attachments can be previewed, removed, retried, and sent.
+- [ ] 5.4 Add iOS feed states for preview loading, offline cache, failed preview, unsupported format, attachment download, playback, Quick Look, and share actions, then verify each state with automated frontend tests and representative physical-device files.
+- [ ] 5.5 Build the Supabase-only iOS settings/profile experience, including login, logout, connection diagnostics, account status, cache controls, and application information, then verify desktop-only sections never render on iOS.
+- [ ] 5.6 Add mobile accessibility and motion checks for readable labels, focus order, dynamic text tolerance, touch target sizes, and reduced-motion behavior, then verify with automated checks plus VoiceOver smoke testing on the target iPhone.
+
+## 6. Technical probe gate and release-device acceptance
+
+- [ ] 6.1 Complete the vertical probe on the simulator: launch the Vue shell, sign in to Supabase, send text, pull changes, select image/video, generate previews, upload original plus preview, and open a downloaded document; capture the results in a probe report.
+- [ ] 6.2 Complete the same probe on the target physical iPhone in a development build and verify Safari Web Inspector, native plugin calls, local-network dev host, Keychain, camera-roll selection, and Supabase connectivity.
+- [ ] 6.3 Build and install a signed release configuration on the target iPhone and repeat all critical dialog, picker, preview, share, login, send, download, and lifecycle paths without relying on debug-only behavior.
+- [ ] 6.4 Run stability acceptance covering 20 cold starts, 50 foreground/background cycles, Wi-Fi/cellular/offline transitions, expired Session recovery, termination during transfer, low-storage/error paths, and repeated preview/playback sessions; record failures and resolve all release blockers.
+- [ ] 6.5 Run desktop regression verification including `npm run build`, targeted frontend tests, `cargo test`, desktop Tauri compilation, existing WebDAV workflows, Supabase workflows, tray/shortcut startup, and preview behavior.
+- [ ] 6.6 Run `cargo check --target aarch64-apple-ios`, simulator/device Xcode builds, relevant Swift tests, frontend mobile tests, Supabase acceptance tests, and `openspec validate add-supabase-ios-client --strict`, then attach the exact commands and results to the change notes.
+- [ ] 6.7 Document direct signed installation and optional TestFlight distribution, including certificate/profile requirements, supported iOS/device scope, known unsupported media formats, foreground-sync expectations, and rollback steps; verify a clean-machine reader can follow the instructions.
+
+## 7. Optional VPhone supplemental environment
+
+- [ ] 7.1 Record that VPhone is optional and obtain explicit owner approval before changing SIP debugging restrictions or enabling Research Guests in macOS Recovery; document the exact rollback commands before applying any host-policy change.
+- [ ] 7.2 Install a current notarized VPhone Launchpad and a matching pinned Core Bundle series from the upstream GitHub release, verify checksums/signatures and `host preflight`, and do not use the downloaded legacy 2.2.5 bundle as the project baseline.
+- [ ] 7.3 Create a dedicated APFS volume on storage with sufficient free space, configure the VPhone library there, and verify firmware downloads, temporary restore files, templates, snapshots, and VM disks do not consume the constrained system volume.
+- [ ] 7.4 Create a supported iOS/cloudOS VPhone guest and verify it appears in Xcode and `xcrun devicectl list devices`, accepts a development-signed Transfer Genie IPA, launches its WKWebView, connects to Supabase, and exposes logs/screenshots to the automation harness.
+- [ ] 7.5 Add an optional VPhone smoke suite for cold start, login restoration, text send/pull, attachment preview, Quick Look/share, process termination, snapshot reset, and repeated IPA installation; label results as supplemental and reproduce release-blocking failures in the official Simulator or on `Jam`.
+- [ ] 7.6 Keep all release-signing, Keychain, PhotosPicker/iCloud, security-scoped file, real suspension, Wi-Fi/cellular transition, media-performance, and final stability acceptance tasks on `Jam`; verify VPhone results cannot mark these tasks complete.
+
+## Workflow follow-up
+
+- After implementation review and physical-device acceptance, archive `add-supabase-ios-client` in a separate change/PR and verify the archived specs.
+- If durable background file transfer is required after Phase 1 measurements, create and approve a focused follow-up change for native background `URLSession` upload/download reconciliation.
