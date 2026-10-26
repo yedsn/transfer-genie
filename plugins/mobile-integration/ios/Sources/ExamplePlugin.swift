@@ -13,6 +13,39 @@ class MobileIntegrationPlugin: Plugin {
   private var previewCoordinators: [UUID: PreviewCoordinator] = [:]
   private var videoPosterRequests: [String: VideoPosterRequest] = [:]
   private let videoPosterLock = NSLock()
+  private var lifecycleObservers: [NSObjectProtocol] = []
+
+  override func load(webview: WKWebView) {
+    super.load(webview: webview)
+
+    let center = NotificationCenter.default
+    lifecycleObservers = [
+      center.addObserver(
+        forName: UIApplication.didEnterBackgroundNotification,
+        object: nil,
+        queue: .main
+      ) { [weak self] notification in
+        self?.emitLifecycleState(for: notification.name)
+      },
+      center.addObserver(
+        forName: UIApplication.didBecomeActiveNotification,
+        object: nil,
+        queue: .main
+      ) { [weak self] notification in
+        self?.emitLifecycleState(for: notification.name)
+      },
+    ]
+  }
+
+  deinit {
+    let center = NotificationCenter.default
+    lifecycleObservers.forEach(center.removeObserver)
+  }
+
+  private func emitLifecycleState(for notification: Notification.Name) {
+    guard let state = mobileLifecycleState(for: notification) else { return }
+    trigger("lifecycle", data: ["state": state])
+  }
 
   @objc public func diagnostic(_ invoke: Invoke) {
     let args: DiagnosticArgs
@@ -321,6 +354,17 @@ class MobileIntegrationPlugin: Plugin {
 
   func releasePreview(_ id: UUID) {
     previewCoordinators.removeValue(forKey: id)
+  }
+}
+
+func mobileLifecycleState(for notification: Notification.Name) -> String? {
+  switch notification {
+  case UIApplication.didEnterBackgroundNotification:
+    return "background"
+  case UIApplication.didBecomeActiveNotification:
+    return "foreground"
+  default:
+    return nil
   }
 }
 

@@ -14,6 +14,13 @@
   const convertFileSrc = (...args) => { const fn = _getTauri().path?.convertFileSrc; return fn?.(...args); };
 
   const mobileIntegrationApi = {
+    async listenLifecycle(callback) {
+      const addPluginListener = _getTauri().core?.addPluginListener;
+      if (typeof addPluginListener !== 'function') {
+        throw new Error('Tauri plugin event listener is unavailable');
+      }
+      return addPluginListener('mobile-integration', 'lifecycle', callback);
+    },
     async diagnostic(requestId) {
       return invoke('plugin:mobile-integration|diagnostic', {
         payload: { requestId },
@@ -58,6 +65,12 @@
 
   // Settings API
   const settingsApi = {
+    async setMobileLifecycleState(lifecycleState) {
+      return invoke('set_mobile_lifecycle_state', { lifecycleState });
+    },
+    async getPlatformCapabilities() {
+      return invoke('get_platform_capabilities');
+    },
     async getSettings() {
       return invoke('get_settings');
     },

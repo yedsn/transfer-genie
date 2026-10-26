@@ -5,6 +5,10 @@ import ComposerWorkspace from "./workspace/ComposerWorkspace.vue";
 import "./workspace/composer.css";
 import { composerStore } from "./workspace/composer-store";
 import "./services/tauri-api.js";
+import {
+  filterStorageProfilesForPlatform,
+  isIosPlatform as hasIosPlatformCapability,
+} from "./utils/platform-capabilities.js";
 
 
 function loadLegacyScript(src: string): Promise<void> {
@@ -36,8 +40,42 @@ async function loadLegacyEditorDeps() {
 
 installTransferGenieBridge();
 
+async function installIosLifecycleBridge(capabilities: any) {
+  if (!capabilities?.ios) return;
+
+  const api = (window as any).transferGenieApi;
+  const applyLifecycleState = async (state: unknown) => {
+    if (state !== "background" && state !== "foreground") return;
+    try {
+      await api?.settings?.setMobileLifecycleState(state);
+    } catch (error) {
+      console.warn(`[mobile-integration] ${state} recovery failed`, String(error));
+    }
+  };
+
+  const listener = await api?.mobileIntegration?.listenLifecycle((event: any) => {
+    void applyLifecycleState(event?.state);
+  });
+  (window as any).__TRANSFER_GENIE_MOBILE_LIFECYCLE_LISTENER__ = listener;
+
+  const applyDocumentState = () => {
+    void applyLifecycleState(document.visibilityState === "hidden" ? "background" : "foreground");
+  };
+  document.addEventListener("visibilitychange", applyDocumentState);
+  window.addEventListener("beforeunload", () => {
+    document.removeEventListener("visibilitychange", applyDocumentState);
+    void listener?.unregister?.();
+  }, { once: true });
+  applyDocumentState();
+}
+
 void (async () => {
   try {
+    const capabilities = await (window as any).transferGenieApi?.settings?.getPlatformCapabilities();
+    (window as any).__TRANSFER_GENIE_PLATFORM_CAPABILITIES__ = capabilities;
+    (window as any).transferGenieVue?.syncPlatformCapabilities?.(capabilities);
+    document.documentElement.classList.toggle("is-ios-platform", !!capabilities?.ios);
+    await installIosLifecycleBridge(capabilities);
     const requestId = `startup-${Date.now()}`;
     const diagnostic = await (window as any).transferGenieApi?.mobileIntegration?.diagnostic(requestId);
     (window as any).__TRANSFER_GENIE_MOBILE_DIAGNOSTIC__ = diagnostic;
@@ -193,7 +231,13 @@ const app = createApp({
     },
     allStorageProfiles(): any[] {
       const profiles = this.settingsFormState().storageProfiles;
-      return Array.isArray(profiles) ? profiles : [];
+      return filterStorageProfilesForPlatform(
+        profiles,
+        (this.ui as any).platformCapabilities,
+      );
+    },
+    isIosPlatform(): boolean {
+      return hasIosPlatformCapability((this.ui as any).platformCapabilities);
     },
     supabaseStorageProfiles(): any[] {
       return this.enabledStorageProfiles().filter((profile: any) => profile?.provider_kind === "supabase");

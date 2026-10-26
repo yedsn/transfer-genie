@@ -75,6 +75,8 @@ use std::path::{Path, PathBuf};
 use std::process::Child;
 #[cfg(test)]
 use std::process::Command;
+#[cfg(any(target_os = "ios", test))]
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::Window;
@@ -130,6 +132,14 @@ struct AppState {
     storage_transfer_targets: Mutex<HashSet<String>>,
     sync_cancel: Mutex<Option<oneshot::Sender<()>>>,
     sync_loop_signal: watch::Sender<u64>,
+    #[cfg(any(target_os = "ios", test))]
+    mobile_foreground: AtomicBool,
+    #[cfg(any(target_os = "ios", test))]
+    mobile_foreground_guard: AsyncMutex<()>,
+    #[cfg(any(target_os = "ios", test))]
+    mobile_last_recovery_ms: AtomicI64,
+    #[cfg(any(target_os = "ios", test))]
+    mobile_realtime_generation: AtomicU64,
     http: Client,
     #[cfg(desktop)]
     registered_hotkey: Mutex<Option<Shortcut>>,
@@ -372,6 +382,8 @@ const STORAGE_TRANSFER_PREVIEW_TIMEOUT_SECS: u64 = 45;
 const REFRESH_SYNC_SOURCE: &str = "正在刷新";
 const AUTO_SYNC_SOURCE: &str = "定时同步";
 const REALTIME_SYNC_SOURCE: &str = "实时同步";
+#[cfg(any(target_os = "ios", test))]
+const MOBILE_FOREGROUND_SYNC_SOURCE: &str = "前台恢复同步";
 const TELEGRAM_BRIDGE_ARG: &str = "--telegram-bridge";
 const DEFAULT_TELEGRAM_POLL_INTERVAL_SECS: u64 = 5;
 const LOCAL_HTTP_API_ROUTE: &str = "/api/send-file";
@@ -1181,7 +1193,115 @@ fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
         .settings
         .lock()
         .map_err(|_| "读取设置失败".to_string())?;
-    Ok(settings.clone())
+    Ok(platform_settings_view(&settings))
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlatformCapabilities {
+    platform: String,
+    mobile: bool,
+    ios: bool,
+    supported_storage_providers: Vec<String>,
+    desktop_integrations: bool,
+    native_file_selection: bool,
+    native_preview: bool,
+    native_share: bool,
+}
+
+#[tauri::command]
+fn get_platform_capabilities() -> PlatformCapabilities {
+    PlatformCapabilities {
+        platform: std::env::consts::OS.to_string(),
+        mobile: cfg!(mobile),
+        ios: cfg!(target_os = "ios"),
+        supported_storage_providers: if cfg!(target_os = "ios") {
+            vec!["supabase".to_string()]
+        } else {
+            vec!["webdav".to_string(), "supabase".to_string()]
+        },
+        desktop_integrations: cfg!(desktop),
+        native_file_selection: cfg!(target_os = "ios"),
+        native_preview: cfg!(target_os = "ios"),
+        native_share: cfg!(target_os = "ios"),
+    }
+}
+
+fn platform_settings_view(settings: &Settings) -> Settings {
+    #[cfg(target_os = "ios")]
+    {
+        return ios_settings_view(settings);
+    }
+    #[cfg(not(target_os = "ios"))]
+    settings.clone()
+}
+
+#[cfg(any(target_os = "ios", test))]
+fn ios_settings_view(settings: &Settings) -> Settings {
+    let mut view = settings.clone();
+    view.storage_profiles
+        .retain(|profile| profile.provider_kind == StorageProviderKind::Supabase);
+    if !view.storage_profiles.iter().any(|profile| {
+        view.active_storage_profile_id.as_deref() == Some(profile.id.as_str()) && profile.enabled
+    }) {
+        view.active_storage_profile_id = None;
+    }
+    view.webdav_endpoints.clear();
+    view.active_webdav_id = None;
+    view
+}
+
+#[cfg(any(target_os = "ios", test))]
+fn merge_ios_settings(previous: &Settings, submitted: Settings) -> Settings {
+    let mut merged = previous.clone();
+    merged.sender_name = submitted.sender_name;
+    merged.refresh_interval_secs = submitted.refresh_interval_secs;
+
+    let submitted_supabase = submitted
+        .storage_profiles
+        .into_iter()
+        .filter(|profile| profile.provider_kind == StorageProviderKind::Supabase)
+        .collect::<Vec<_>>();
+    let submitted_active = submitted.active_storage_profile_id.filter(|active_id| {
+        submitted_supabase
+            .iter()
+            .any(|profile| profile.id == *active_id && profile.enabled)
+    });
+    let mut profiles = previous
+        .storage_profiles
+        .iter()
+        .filter(|profile| profile.provider_kind == StorageProviderKind::Webdav)
+        .cloned()
+        .collect::<Vec<_>>();
+    profiles.extend(submitted_supabase);
+    merged.storage_profiles = profiles;
+    merged.active_storage_profile_id = submitted_active.or_else(|| {
+        previous
+            .active_storage_profile_id
+            .as_ref()
+            .and_then(|active_id| {
+                merged
+                    .storage_profiles
+                    .iter()
+                    .any(|profile| profile.id == *active_id && profile.enabled)
+                    .then(|| active_id.clone())
+            })
+    });
+    merged
+}
+
+#[cfg(any(target_os = "ios", test))]
+fn normalize_ios_settings_submission(
+    previous: &Settings,
+    submitted: Settings,
+    default_download_dir: &Path,
+) -> Result<Settings, String> {
+    let mut normalized = normalize_settings(
+        merge_ios_settings(previous, submitted),
+        default_download_dir,
+    )?;
+    normalized.active_webdav_id = previous.active_webdav_id.clone();
+    Ok(normalized)
 }
 
 fn supabase_profile_config(
@@ -1242,6 +1362,8 @@ fn remove_supabase_session(
     state: &AppState,
     profile_id: &str,
 ) -> Result<(), supabase_auth::SupabaseAuthError> {
+    credential_store::delete_session(profile_id)
+        .map_err(|message| auth_error(supabase_auth::SupabaseAuthErrorKind::Service, message))?;
     state
         .supabase_sessions
         .lock()
@@ -1252,8 +1374,7 @@ fn remove_supabase_session(
             )
         })?
         .remove(profile_id);
-    credential_store::delete_session(profile_id)
-        .map_err(|message| auth_error(supabase_auth::SupabaseAuthErrorKind::Service, message))
+    Ok(())
 }
 
 async fn valid_supabase_session(
@@ -6540,6 +6661,10 @@ async fn save_settings(
     settings: Settings,
 ) -> Result<Settings, String> {
     let previous = current_settings(&state)?;
+    #[cfg(target_os = "ios")]
+    let normalized =
+        normalize_ios_settings_submission(&previous, settings, &state.default_download_dir)?;
+    #[cfg(not(target_os = "ios"))]
     let normalized = normalize_settings(settings, &state.default_download_dir)?;
     for old_profile in &previous.storage_profiles {
         let Some(new_profile) = normalized
@@ -6621,7 +6746,7 @@ async fn save_settings(
     signal_sync_loop_reset(&state);
     let _ = persist_integration_module_statuses(&state);
 
-    Ok(normalized)
+    Ok(platform_settings_view(&normalized))
 }
 
 fn storage_profile_destination_changed(old: &StorageProfile, new: &StorageProfile) -> bool {
@@ -14736,6 +14861,86 @@ fn signal_sync_loop_reset(state: &AppState) {
     state.sync_loop_signal.send_replace(next);
 }
 
+#[cfg(any(target_os = "ios", test))]
+fn set_mobile_foreground(state: &AppState, foreground: bool) -> bool {
+    state.mobile_foreground.swap(foreground, Ordering::SeqCst) != foreground
+}
+
+#[cfg(any(target_os = "ios", test))]
+fn is_mobile_foreground(state: &AppState) -> bool {
+    state.mobile_foreground.load(Ordering::SeqCst)
+}
+
+#[cfg(any(target_os = "ios", test))]
+fn invalidate_mobile_realtime(state: &AppState) -> u64 {
+    state
+        .mobile_realtime_generation
+        .fetch_add(1, Ordering::SeqCst)
+        .wrapping_add(1)
+}
+
+#[cfg(any(target_os = "ios", test))]
+fn recover_mobile_persisted_work(state: &AppState) -> Result<(), String> {
+    db::recover_all_outbox_claims(&state.db_path, now_ms())
+        .map_err(|error| format!("恢复未确认同步任务失败: {error}"))?;
+    db::recover_storage_transfer_runs(&state.db_path, now_ms())
+        .map_err(|error| format!("恢复数据传输任务失败: {error}"))?;
+    Ok(())
+}
+
+#[cfg(any(target_os = "ios", test))]
+async fn recover_mobile_foreground(state: &AppState) -> Result<SyncStatus, String> {
+    let _guard = state.mobile_foreground_guard.lock().await;
+    let recovery_ms = now_ms();
+    let last_recovery_ms = state.mobile_last_recovery_ms.load(Ordering::SeqCst);
+    if is_mobile_foreground(state)
+        && last_recovery_ms > 0
+        && recovery_ms.saturating_sub(last_recovery_ms) < 1_000
+    {
+        return refresh_supabase_status(state, None);
+    }
+    recover_mobile_persisted_work(state)?;
+    set_mobile_foreground(state, true);
+    invalidate_mobile_realtime(state);
+    let result = run_sync(state, MOBILE_FOREGROUND_SYNC_SOURCE, true).await;
+    state
+        .mobile_last_recovery_ms
+        .store(recovery_ms, Ordering::SeqCst);
+    signal_sync_loop_reset(state);
+    result
+}
+
+#[cfg(any(target_os = "ios", test))]
+fn suspend_mobile_background(state: &AppState) -> Result<SyncStatus, String> {
+    if set_mobile_foreground(state, false) {
+        invalidate_mobile_realtime(state);
+        cancel_active_sync(state)?;
+        signal_sync_loop_reset(state);
+    }
+    refresh_supabase_status(state, None)
+}
+
+#[tauri::command]
+async fn set_mobile_lifecycle_state(
+    state: State<'_, AppState>,
+    lifecycle_state: String,
+) -> Result<SyncStatus, String> {
+    #[cfg(any(target_os = "ios", test))]
+    {
+        return match lifecycle_state.as_str() {
+            "background" => suspend_mobile_background(&state),
+            "foreground" => recover_mobile_foreground(&state).await,
+            _ => Err("未知的移动端生命周期状态".to_string()),
+        };
+    }
+
+    #[cfg(not(any(target_os = "ios", test)))]
+    {
+        let _ = lifecycle_state;
+        refresh_supabase_status(&state, None)
+    }
+}
+
 fn supabase_sync_context_matches(
     state: &AppState,
     profile: &StorageProfile,
@@ -19679,7 +19884,28 @@ fn start_sync_loop(app_handle: AppHandle) {
         };
         let mut reconnect_attempt = 0_u32;
         let mut initialized_scope: Option<(StorageProfile, String)> = None;
+        #[cfg(target_os = "ios")]
+        let mut mobile_realtime_generation = {
+            let state = app_handle.state::<AppState>();
+            state.mobile_realtime_generation.load(Ordering::SeqCst)
+        };
         loop {
+            #[cfg(target_os = "ios")]
+            {
+                let state = app_handle.state::<AppState>();
+                let current_generation = state.mobile_realtime_generation.load(Ordering::SeqCst);
+                if current_generation != mobile_realtime_generation {
+                    initialized_scope = None;
+                    mobile_realtime_generation = current_generation;
+                }
+                if !is_mobile_foreground(&state) {
+                    initialized_scope = None;
+                    if sync_signal.changed().await.is_err() {
+                        return;
+                    }
+                    continue;
+                }
+            }
             let active_profile = {
                 let state = app_handle.state::<AppState>();
                 current_settings(&state).ok().and_then(|settings| {
@@ -19778,7 +20004,16 @@ fn start_sync_loop(app_handle: AppHandle) {
                                     return;
                                 }
                                 let state = app_handle.state::<AppState>();
-                                if supabase_sync_context_matches(&state, &profile, &session) {
+                                #[cfg(target_os = "ios")]
+                                let lifecycle_matches = state
+                                    .mobile_realtime_generation
+                                    .load(Ordering::SeqCst)
+                                    == mobile_realtime_generation
+                                    && is_mobile_foreground(&state);
+                                #[cfg(not(target_os = "ios"))]
+                                let lifecycle_matches = true;
+                                if lifecycle_matches
+                                    && supabase_sync_context_matches(&state, &profile, &session) {
                                     // Local outbox work uses REST immediately while the
                                     // established Realtime subscription stays connected.
                                     let _ = run_sync(&state, REALTIME_SYNC_SOURCE, true).await;
@@ -19914,6 +20149,14 @@ pub fn run() {
                 storage_transfer_targets: Mutex::new(HashSet::new()),
                 sync_cancel: Mutex::new(None),
                 sync_loop_signal,
+                #[cfg(any(target_os = "ios", test))]
+                mobile_foreground: AtomicBool::new(true),
+                #[cfg(any(target_os = "ios", test))]
+                mobile_foreground_guard: AsyncMutex::new(()),
+                #[cfg(any(target_os = "ios", test))]
+                mobile_last_recovery_ms: AtomicI64::new(0),
+                #[cfg(any(target_os = "ios", test))]
+                mobile_realtime_generation: AtomicU64::new(0),
                 http: Client::builder()
                     .connect_timeout(Duration::from_secs(10))
                     .pool_idle_timeout(Duration::from_secs(30))
@@ -20255,6 +20498,8 @@ pub fn run() {
         .plugin(tauri_plugin_mobile_integration::init())
         .invoke_handler(tauri::generate_handler![
             get_settings,
+            get_platform_capabilities,
+            set_mobile_lifecycle_state,
             supabase_sign_in,
             supabase_draft_sign_in,
             supabase_refresh_session,
@@ -20390,6 +20635,17 @@ pub fn run() {
     }
 
     app.run(move |app_handle, event| {
+        #[cfg(target_os = "ios")]
+        if matches!(event, tauri::RunEvent::Resumed) {
+            let app_handle = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                let state = app_handle.state::<AppState>();
+                if let Err(error) = recover_mobile_foreground(&state).await {
+                    log::warn!("iOS foreground recovery failed: {error}");
+                }
+            });
+        }
+
         #[cfg(desktop)]
         if let tauri::RunEvent::Ready = event {
             let version = env!("CARGO_PKG_VERSION");
@@ -20704,6 +20960,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct TestSupabaseState {
         snapshots: Arc<Mutex<TestHashMap<String, serde_json::Value>>>,
+        remote_changes: Arc<Mutex<Vec<serde_json::Value>>>,
         objects: Arc<Mutex<TestHashMap<String, Vec<u8>>>>,
         storage_get_counts: Arc<Mutex<TestHashMap<String, usize>>>,
         storage_put_counts: Arc<Mutex<TestHashMap<String, usize>>>,
@@ -20880,7 +21137,18 @@ mod tests {
         Json(body): Json<serde_json::Value>,
     ) -> AxumResponse {
         if rpc == "pull_changes" {
-            return test_json_response(HttpStatusCode::OK, &serde_json::json!([]), None);
+            let after_seq = body["p_after_seq"].as_i64().unwrap_or(0);
+            let limit = body["p_limit"].as_u64().unwrap_or(200) as usize;
+            let changes = state
+                .remote_changes
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|change| change["change_seq"].as_i64().unwrap_or(0) > after_seq)
+                .take(limit)
+                .cloned()
+                .collect::<Vec<_>>();
+            return test_json_response(HttpStatusCode::OK, &serde_json::json!(changes), None);
         }
         if rpc == "space_upsert" {
             return test_json_response(
@@ -21292,6 +21560,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transient_auth_service_failure_preserves_saved_session() {
+        let _credential_guard = credential_store::credential_test_guard();
+        let profile_id = format!("supabase-session-service-{}", rand::random::<u64>());
+        let temp_dir = std::env::temp_dir().join(&profile_id);
+        fs::create_dir_all(&temp_dir).unwrap();
+        let mut settings = test_supabase_settings_with_url("http://127.0.0.1:1".into());
+        settings.storage_profiles[0].id = profile_id.clone();
+        settings.active_storage_profile_id = Some(profile_id.clone());
+        let saved = supabase_auth::SupabaseSession {
+            access_token: "expired-access-token".into(),
+            refresh_token: "saved-refresh-token".into(),
+            user_id: "user-a".into(),
+            email: "user@example.invalid".into(),
+            expires_at: 1,
+        };
+        credential_store::save_session(&profile_id, &saved).unwrap();
+        let state = test_app_state(&temp_dir, settings);
+        state
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .insert(profile_id.clone(), saved.clone());
+
+        let error = valid_supabase_session(&state, &profile_id, true)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, supabase_auth::SupabaseAuthErrorKind::Network);
+        assert_eq!(
+            state
+                .supabase_sessions
+                .lock()
+                .unwrap()
+                .get(&profile_id)
+                .unwrap()
+                .refresh_token,
+            saved.refresh_token
+        );
+        assert_eq!(
+            credential_store::load_session(&profile_id)
+                .unwrap()
+                .unwrap()
+                .refresh_token,
+            saved.refresh_token
+        );
+
+        credential_store::delete_session(&profile_id).unwrap();
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
     async fn local_logout_clears_saved_session_when_remote_is_unreachable() {
         let _credential_guard = credential_store::credential_test_guard();
         let profile_id = format!("supabase-local-logout-{}", rand::random::<u64>());
@@ -21646,6 +21964,14 @@ mod tests {
             storage_transfer_targets: Mutex::new(HashSet::new()),
             sync_cancel: Mutex::new(None),
             sync_loop_signal,
+            #[cfg(any(target_os = "ios", test))]
+            mobile_foreground: AtomicBool::new(true),
+            #[cfg(any(target_os = "ios", test))]
+            mobile_foreground_guard: AsyncMutex::new(()),
+            #[cfg(any(target_os = "ios", test))]
+            mobile_last_recovery_ms: AtomicI64::new(0),
+            #[cfg(any(target_os = "ios", test))]
+            mobile_realtime_generation: AtomicU64::new(0),
             http: Client::builder().build().expect("create http client"),
             registered_hotkey: Mutex::new(None),
             registered_system_dictation_hotkey: Mutex::new(None),
@@ -23829,6 +24155,113 @@ mod tests {
         assert_eq!(supabase.api_url, "https://supabase.example.com");
         assert_eq!(supabase.anon_key, "public-key");
         assert!(uuid::Uuid::parse_str(&supabase.space_id).is_ok());
+    }
+
+    #[test]
+    fn ios_settings_round_trip_preserves_hidden_desktop_configuration() {
+        let mut previous = test_settings();
+        previous.storage_profiles = vec![
+            StorageProfile::from_webdav(&previous.webdav_endpoints[0]),
+            StorageProfile {
+                id: "supabase-1".into(),
+                name: "Cloud".into(),
+                provider_kind: StorageProviderKind::Supabase,
+                enabled: true,
+                webdav: None,
+                supabase: Some(crate::types::SupabaseStorageConfig {
+                    api_url: "https://supabase.example.com".into(),
+                    anon_key: "public-key".into(),
+                    space_id: "00000000-0000-4000-8000-000000000001".into(),
+                }),
+            },
+        ];
+        previous.active_storage_profile_id = Some("endpoint-1".into());
+        previous.active_webdav_id = Some("endpoint-1".into());
+        previous.shortcuts_enabled = true;
+        previous.global_hotkey = "ctrl+alt+t".into();
+        previous.auto_start = true;
+        previous.local_http_api.enabled = true;
+        previous.telegram.bot_token = "desktop-bot-token".into();
+        previous.backup.enabled = true;
+        previous.ai.enabled = true;
+        previous.ai.provider.base_url = "https://ai.example.com/v1".into();
+        previous.ai.provider.api_key = "desktop-ai-key".into();
+        previous.ai.provider.model = "desktop-model".into();
+
+        let mut mobile = ios_settings_view(&previous);
+        assert_eq!(mobile.storage_profiles.len(), 1);
+        assert!(mobile
+            .storage_profiles
+            .iter()
+            .all(|profile| profile.provider_kind == StorageProviderKind::Supabase));
+        assert!(mobile.webdav_endpoints.is_empty());
+        assert!(mobile.active_webdav_id.is_none());
+        mobile.sender_name = "iPhone".into();
+        mobile.refresh_interval_secs = 12;
+        mobile.active_storage_profile_id = Some("supabase-1".into());
+        mobile.storage_profiles[0].name = "Mobile Cloud".into();
+        mobile.shortcuts_enabled = false;
+        mobile.global_hotkey.clear();
+        mobile.auto_start = false;
+        mobile.local_http_api.enabled = false;
+        mobile.telegram.bot_token.clear();
+        mobile.backup.enabled = false;
+        mobile.ai.enabled = false;
+
+        let sender_only = normalize_ios_settings_submission(
+            &previous,
+            {
+                let mut settings = mobile.clone();
+                settings.active_storage_profile_id = None;
+                settings
+            },
+            Path::new("downloads"),
+        )
+        .unwrap();
+        assert_eq!(
+            sender_only.active_storage_profile_id.as_deref(),
+            Some("endpoint-1")
+        );
+        assert_eq!(sender_only.active_webdav_id.as_deref(), Some("endpoint-1"));
+
+        let normalized =
+            normalize_ios_settings_submission(&previous, mobile, Path::new("downloads")).unwrap();
+
+        assert_eq!(normalized.sender_name, "iPhone");
+        assert_eq!(normalized.refresh_interval_secs, 12);
+        assert_eq!(
+            normalized.active_storage_profile_id.as_deref(),
+            Some("supabase-1")
+        );
+        assert_eq!(normalized.active_webdav_id.as_deref(), Some("endpoint-1"));
+        assert_eq!(normalized.webdav_endpoints, previous.webdav_endpoints);
+        assert_eq!(
+            normalized
+                .storage_profiles
+                .iter()
+                .find(|profile| profile.id == "endpoint-1"),
+            previous
+                .storage_profiles
+                .iter()
+                .find(|profile| profile.id == "endpoint-1")
+        );
+        assert_eq!(
+            normalized
+                .storage_profiles
+                .iter()
+                .find(|profile| profile.id == "supabase-1")
+                .unwrap()
+                .name,
+            "Mobile Cloud"
+        );
+        assert!(normalized.shortcuts_enabled);
+        assert_eq!(normalized.global_hotkey, "ctrl+alt+t");
+        assert!(normalized.auto_start);
+        assert!(normalized.local_http_api.enabled);
+        assert_eq!(normalized.telegram.bot_token, "desktop-bot-token");
+        assert!(normalized.backup.enabled);
+        assert!(normalized.ai.enabled);
+        assert_eq!(normalized.ai.provider.api_key, "desktop-ai-key");
     }
 
     #[test]
@@ -27321,6 +27754,190 @@ mod tests {
 
         let signal = state.sync_loop_signal.subscribe();
         assert_eq!(*signal.borrow(), 1);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn mobile_background_transition_is_idempotent_and_wakes_realtime_loop() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-mobile-background-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let state = test_app_state(&temp_dir, test_supabase_settings());
+        db::init_db(&state.db_path, Some("supabase-1")).expect("initialize database");
+        let initial_signal = *state.sync_loop_signal.borrow();
+
+        suspend_mobile_background(&state).expect("enter background");
+        assert!(!is_mobile_foreground(&state));
+        assert_eq!(*state.sync_loop_signal.borrow(), initial_signal + 1);
+        assert_eq!(state.mobile_realtime_generation.load(Ordering::SeqCst), 1);
+
+        suspend_mobile_background(&state).expect("repeat background");
+        assert_eq!(*state.sync_loop_signal.borrow(), initial_signal + 1);
+        assert_eq!(state.mobile_realtime_generation.load(Ordering::SeqCst), 1);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn mobile_persisted_recovery_requeues_claimed_operation_with_same_id() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-mobile-claim-recovery-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let state = test_app_state(&temp_dir, test_supabase_settings());
+        db::init_db(&state.db_path, Some("supabase-1")).expect("initialize database");
+        let mut message = test_db_message(
+            "supabase-1",
+            "mobile-recovery.txt",
+            "mobile-recovery.txt",
+            100,
+            10,
+        );
+        message.content = Some("persisted locally".into());
+        let operation = outbox_operation_with_id(
+            "mobile-operation-id",
+            "supabase-1",
+            "user-a",
+            "message",
+            "mobile-message-id",
+            "upsert",
+            0,
+            supabase_message_payload(&message),
+        )
+        .expect("build operation");
+        db::save_message_and_enqueue(&state.db_path, &message, &operation)
+            .expect("save durable work");
+        let claimed = db::claim_outbox_operations(
+            &state.db_path,
+            "supabase-1",
+            "user-a",
+            "mobile-worker",
+            1,
+            30_000,
+            1,
+            true,
+        )
+        .expect("claim operation");
+        assert_eq!(claimed[0].operation_id, operation.operation_id);
+
+        recover_mobile_persisted_work(&state).expect("recover persisted work");
+        let replay = db::claim_outbox_operations(
+            &state.db_path,
+            "supabase-1",
+            "user-a",
+            "foreground-worker",
+            2,
+            30_000,
+            1,
+            true,
+        )
+        .expect("reclaim operation");
+        assert_eq!(replay.len(), 1);
+        assert_eq!(replay[0].operation_id, operation.operation_id);
+        assert_eq!(replay[0].payload_hash, operation.payload_hash);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn duplicate_foreground_signal_does_not_repeat_recovery_side_effects() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-mobile-foreground-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let state = test_app_state(&temp_dir, test_supabase_settings());
+        db::init_db(&state.db_path, Some("supabase-1")).expect("initialize database");
+        set_mobile_foreground(&state, false);
+
+        let first = recover_mobile_foreground(&state).await;
+        assert!(first.is_err());
+        assert!(is_mobile_foreground(&state));
+        let signal_after_first = *state.sync_loop_signal.borrow();
+
+        let second = recover_mobile_foreground(&state)
+            .await
+            .expect("repeat foreground should only read status");
+        assert_eq!(*state.sync_loop_signal.borrow(), signal_after_first);
+        assert!(!second.running);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn mobile_foreground_recovery_pulls_message_created_while_suspended() {
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-mobile-suspended-pull-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let state = test_app_state(
+            &temp_dir,
+            test_supabase_settings_with_url(server.base_url.clone()),
+        );
+        db::init_db(&state.db_path, Some("supabase-1")).expect("initialize database");
+        install_test_supabase_session(&state);
+        suspend_mobile_background(&state).expect("enter background");
+
+        server.state.snapshots.lock().unwrap().insert(
+            "messages/background-message".into(),
+            serde_json::json!({
+                "id":"background-message",
+                "space_id":"00000000-0000-4000-8000-000000000001",
+                "sender":"desktop",
+                "timestamp_ms":1234,
+                "size":18,
+                "kind":"text",
+                "original_name":"background-message.txt",
+                "content":"arrived while suspended",
+                "format":"text",
+                "file_hash":null,
+                "legacy_filename":"background-message.txt",
+                "transcript_source":null,
+                "source_audio_mime_type":null,
+                "transcript_raw_text":null,
+                "source_kind":null,
+                "source_channel_id":null,
+                "source_message_id":null,
+                "marked":false,
+                "marked_tag_ids":[],
+                "marked_pinned":false,
+                "marked_due_date":null,
+                "revision":1,
+                "deleted_at":null
+            }),
+        );
+        server
+            .state
+            .remote_changes
+            .lock()
+            .unwrap()
+            .push(serde_json::json!({
+                "change_seq":1,
+                "entity_type":"message",
+                "entity_id":"background-message",
+                "change_type":"upsert",
+                "revision":1
+            }));
+
+        let status = recover_mobile_foreground(&state)
+            .await
+            .expect("recover foreground");
+        assert_eq!(status.phase, "synced");
+        let restored = db::get_message_for_scope(
+            &state.db_path,
+            "supabase-1",
+            "user-a",
+            "background-message.txt",
+        )
+        .expect("read restored message")
+        .expect("message should be restored");
+        assert_eq!(restored.content.as_deref(), Some("arrived while suspended"));
+        assert_eq!(
+            db::get_sync_checkpoint(&state.db_path, "supabase-1", "user-a").unwrap(),
+            1
+        );
         let _ = fs::remove_dir_all(temp_dir);
     }
 

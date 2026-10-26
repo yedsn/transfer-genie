@@ -5,6 +5,7 @@ export interface TransferGenieActions {
 }
 
 export interface TransferGenieState {
+  platformCapabilities?: Record<string, any> | null;
   activeTab: TransferGenieTab;
   settings: any;
   integrationModules: any[];
@@ -41,6 +42,7 @@ export interface TransferGenieBridge {
   syncSettingsOps: (settingsOpsState: Record<string, any>) => void;
   syncSettingsWebdav: (webdavState: Record<string, any>) => void;
   syncSettingsForm: (formState: Record<string, any>) => void;
+  syncPlatformCapabilities: (capabilities: Record<string, any>) => void;
   syncSettingsSnapshots: (snapshots: any[]) => void;
   syncSettingsSnapshotsLoading: (isLoading: boolean) => void;
   syncSettingsBackupArchives: (records: any[]) => void;

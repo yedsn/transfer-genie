@@ -93,4 +93,45 @@ mod tests {
             .expect("load deleted credential")
             .is_none());
     }
+
+    #[test]
+    fn profile_sessions_are_isolated_and_account_switch_replaces_only_target_profile() {
+        let _guard = credential_test_guard();
+        let first_profile = format!("credential-profile-a-{}", rand::random::<u64>());
+        let second_profile = format!("credential-profile-b-{}", rand::random::<u64>());
+        let session_a = SupabaseSession {
+            access_token: "access-a".into(),
+            refresh_token: "refresh-a".into(),
+            user_id: "user-a".into(),
+            email: "a@example.com".into(),
+            expires_at: 1234,
+        };
+        let session_b = SupabaseSession {
+            access_token: "access-b".into(),
+            refresh_token: "refresh-b".into(),
+            user_id: "user-b".into(),
+            email: "b@example.com".into(),
+            expires_at: 2345,
+        };
+        let switched = SupabaseSession {
+            access_token: "access-c".into(),
+            refresh_token: "refresh-c".into(),
+            user_id: "user-c".into(),
+            email: "c@example.com".into(),
+            expires_at: 3456,
+        };
+
+        save_session(&first_profile, &session_a).expect("save first profile");
+        save_session(&second_profile, &session_b).expect("save second profile");
+        save_session(&first_profile, &switched).expect("replace first profile account");
+
+        let restored = restore_sessions([first_profile.clone(), second_profile.clone()]);
+        assert_eq!(restored[&first_profile].user_id, "user-c");
+        assert_eq!(restored[&first_profile].refresh_token, "refresh-c");
+        assert_eq!(restored[&second_profile].user_id, "user-b");
+        assert_eq!(restored[&second_profile].refresh_token, "refresh-b");
+
+        delete_session(&first_profile).expect("delete first profile");
+        delete_session(&second_profile).expect("delete second profile");
+    }
 }

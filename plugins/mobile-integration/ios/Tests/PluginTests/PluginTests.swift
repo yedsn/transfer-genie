@@ -14,6 +14,18 @@ final class MobileIntegrationPluginTests: XCTestCase {
         XCTAssertNotNil(plugin)
     }
 
+    func testLifecycleNotificationsMapToStablePluginStates() throws {
+        XCTAssertEqual(
+            mobileLifecycleState(for: UIApplication.didEnterBackgroundNotification),
+            "background"
+        )
+        XCTAssertEqual(
+            mobileLifecycleState(for: UIApplication.didBecomeActiveNotification),
+            "foreground"
+        )
+        XCTAssertNil(mobileLifecycleState(for: UIApplication.didReceiveMemoryWarningNotification))
+    }
+
     func testTopViewControllerFollowsNavigationController() throws {
         let root = UIViewController()
         let navigation = UINavigationController(rootViewController: root)

@@ -1,4 +1,16 @@
-import { invoke } from '@tauri-apps/api/core'
+import { addPluginListener, invoke, type PluginListener } from '@tauri-apps/api/core'
+
+export type MobileLifecycleState = 'background' | 'foreground'
+
+export interface MobileLifecycleEvent {
+  state: MobileLifecycleState
+}
+
+export async function listenLifecycle(
+  callback: (event: MobileLifecycleEvent) => void,
+): Promise<PluginListener> {
+  return await addPluginListener<MobileLifecycleEvent>('mobile-integration', 'lifecycle', callback)
+}
 
 export interface MobileDiagnostic {
   requestId: string

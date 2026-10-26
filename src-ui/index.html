@@ -597,7 +597,7 @@
           <section class="settings" data-vue-page="settings">
             <div class="settings-header">
               <h2>设置</h2>
-              <p>配置 WebDAV 连接与本地同步偏好。</p>
+              <p>{{ isIosPlatform() ? '配置 Supabase 账号、空间与移动端同步偏好。' : '配置 WebDAV 连接与本地同步偏好。' }}</p>
               <p class="app-version">Version: <span id="app-version">{{ appVersionText() }}</span></p>
             </div>
             <section class="integration-overview" v-if="ui.integrationModules && ui.integrationModules.length">
@@ -704,16 +704,16 @@
                 <div class="endpoint-header">
                   <div>
                     <h3>存储空间</h3>
-                    <p>WebDAV 与 Supabase 都是彼此独立的存储空间，可配置多个并在首页切换。</p>
+                    <p>{{ isIosPlatform() ? 'iOS 仅使用 Supabase 存储空间，可配置多个并在首页切换。' : 'WebDAV 与 Supabase 都是彼此独立的存储空间，可配置多个并在首页切换。' }}</p>
                   </div>
                   <div class="endpoint-header-actions">
-                    <button id="storage-space-transfer" class="button ghost small" type="button" @click="openStorageTransferWizard()">
+                    <button v-if="!isIosPlatform()" id="storage-space-transfer" class="button ghost small" type="button" @click="openStorageTransferWizard()">
                       存储空间数据传输
                     </button>
-                    <button id="batch-speed-test" class="button ghost small" type="button">
+                    <button v-if="!isIosPlatform()" id="batch-speed-test" class="button ghost small" type="button">
                       批量测速
                     </button>
-                    <button id="add-storage-profile" class="button primary small" type="button" @click="openStorageProfileEditor()">
+                    <button id="add-storage-profile" class="button primary small" type="button" @click="openStorageProfileEditor(isIosPlatform() ? 'supabase' : '')">
                       新增存储空间
                     </button>
                   </div>
@@ -749,7 +749,7 @@
                   </div>
                 </div>
                 <span v-if="!allStorageProfiles().length" class="field-hint">暂无存储空间，请点击“新增存储空间”。</span>
-                <span class="field-hint">只有点击“保存此空间”才会写入配置；WebDAV 仅手动刷新。</span>
+                <span class="field-hint">{{ isIosPlatform() ? '只有点击“保存此空间”才会写入 Supabase 配置。' : '只有点击“保存此空间”才会写入配置；WebDAV 仅手动刷新。' }}</span>
               </div>
 
               <div class="settings-section-anchor" id="settings-section-basic" data-settings-section aria-hidden="true"></div>
@@ -1701,9 +1701,9 @@
             <div class="storage-profile-editor-grid">
               <label>
                 存储类型
-                <select id="storage-profile-provider" :disabled="ui.settingsForm.storageProfileEditorMode === 'edit'" :value="ui.settingsForm.storageProfileDraft?.provider_kind || ''" @change="updateStorageProfileDraft('provider_kind', $event.target.value)">
-                  <option value="">请选择 WebDAV 或 Supabase</option>
-                  <option value="webdav">WebDAV</option>
+                <select id="storage-profile-provider" :disabled="isIosPlatform() || ui.settingsForm.storageProfileEditorMode === 'edit'" :value="ui.settingsForm.storageProfileDraft?.provider_kind || ''" @change="updateStorageProfileDraft('provider_kind', $event.target.value)">
+                  <option value="">{{ isIosPlatform() ? '请选择 Supabase' : '请选择 WebDAV 或 Supabase' }}</option>
+                  <option v-if="!isIosPlatform()" value="webdav">WebDAV</option>
                   <option value="supabase">Supabase</option>
                 </select>
               </label>

@@ -16,6 +16,7 @@ function normalizeTab(tab: string): TransferGenieTab {
 export const transferGenieState = reactive<TransferGenieState>({
   activeTab: DEFAULT_TAB,
   settings: null,
+  platformCapabilities: null,
   integrationModules: [],
   telegramBridgeStatus: null,
   localHttpApiStatus: null,
@@ -238,6 +239,7 @@ export function installTransferGenieBridge() {
     syncSettingsOps: (settingsOpsState: Record<string, any>) => { transferGenieState.settingsOps = Object.assign({}, transferGenieState.settingsOps, cloneValue(settingsOpsState || {})); },
     syncSettingsWebdav: (webdavState: Record<string, any>) => { transferGenieState.settingsWebdav = Object.assign({}, transferGenieState.settingsWebdav, cloneValue(webdavState || {})); },
     syncSettingsForm: (formState: Record<string, any>) => { transferGenieState.settingsForm = Object.assign({}, transferGenieState.settingsForm, cloneValue(formState || {})); },
+    syncPlatformCapabilities: (capabilities: Record<string, any>) => { transferGenieState.platformCapabilities = cloneValue(capabilities || null); },
     syncSettingsSnapshots: (snapshots: any[]) => { transferGenieState.settingsSnapshots = Array.isArray(snapshots) ? cloneValue(snapshots) : []; },
     syncSettingsSnapshotsLoading: (isLoading: boolean) => { transferGenieState.settingsSnapshotsLoading = !!isLoading; },
     syncSettingsBackupArchives: (records: any[]) => { transferGenieState.settingsBackupArchives = Array.isArray(records) ? cloneValue(records) : []; },
