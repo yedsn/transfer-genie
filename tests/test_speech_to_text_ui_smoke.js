@@ -314,7 +314,7 @@ function preloadScript() {
           }
           if (command === 'set_active_media_playback_path' || command === 'cancel_media_playback_cache') return true;
           if (command === 'delete_messages') return { deleted: (args?.filenames || []).length, failed: [] };
-          if (command === 'get_thumbnail' || command === 'get_media_preview') {
+          if (command === 'get_thumbnail' || command === 'get_media_preview' || command === 'complete_media_preview') {
             window.__speechSmoke.thumbnailActive += 1;
             window.__speechSmoke.thumbnailPeak = Math.max(window.__speechSmoke.thumbnailPeak, window.__speechSmoke.thumbnailActive);
             await new Promise((resolve) => setTimeout(resolve, 10));

@@ -5,6 +5,7 @@ mod history;
 mod integration_runtime;
 mod media_playback;
 mod media_preview;
+mod preview_generator;
 mod storage_provider;
 mod supabase_auth;
 mod supabase_connection;
@@ -77,9 +78,9 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::Window;
-use tauri::{
-    AppHandle, Emitter, Manager, PhysicalPosition, State, WebviewUrl, WebviewWindowBuilder,
-};
+use tauri::{AppHandle, Emitter, Manager, State};
+#[cfg(desktop)]
+use tauri::{PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
 #[cfg(desktop)]
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 use tauri_plugin_log::{Target, TargetKind};
@@ -130,7 +131,9 @@ struct AppState {
     sync_cancel: Mutex<Option<oneshot::Sender<()>>>,
     sync_loop_signal: watch::Sender<u64>,
     http: Client,
+    #[cfg(desktop)]
     registered_hotkey: Mutex<Option<Shortcut>>,
+    #[cfg(desktop)]
     registered_system_dictation_hotkey: Mutex<Option<Shortcut>>,
     telegram_bridge: Mutex<TelegramBridgeManager>,
     telegram_bridge_generation: std::sync::atomic::AtomicU64,
@@ -1568,6 +1571,7 @@ fn supabase_attachment_payload(
 }
 
 async fn generate_preview_file(
+    state: &AppState,
     source_path: PathBuf,
     original_name: String,
     preview_path: PathBuf,
@@ -1576,11 +1580,13 @@ async fn generate_preview_file(
         .acquire_owned()
         .await
         .map_err(|_| "预览生成服务不可用".to_string())?;
-    let generated = tokio::task::spawn_blocking(move || {
-        media_preview::generate_media_preview(&source_path, &original_name, &preview_path)
-    })
-    .await
-    .map_err(|error| format!("预览生成任务失败: {error}"))?;
+    let generated = preview_generator::generate_preview(
+        state.app_handle.clone(),
+        source_path,
+        original_name,
+        preview_path,
+    )
+    .await;
     drop(permit);
     generated
 }
@@ -1684,6 +1690,7 @@ async fn complete_supabase_preview(
             }
         };
         let generated = generate_preview_file(
+            state,
             source_path,
             attachment.original_name.clone(),
             preview_path.clone(),
@@ -3610,6 +3617,7 @@ async fn import_storage_message_to_supabase(
                 &preview_object_path,
             );
             match generate_preview_file(
+                state,
                 local_path.clone(),
                 message.original_name.clone(),
                 preview_path,
@@ -4271,6 +4279,7 @@ async fn push_supabase_outbox(
                         Ok(true)
                     } else {
                         generate_preview_file(
+                            state,
                             PathBuf::from(
                                 local_path
                                     .as_deref()
@@ -6598,11 +6607,13 @@ async fn save_settings(
         *guard = normalized.clone();
     }
 
+    #[cfg(desktop)]
     if should_restart_telegram_bridge(&previous, &normalized) {
         TelegramBridgeRuntimeAdapter::new(&state)
             .restart_after_settings_change("settings update")
             .await;
     }
+    #[cfg(desktop)]
     if let Err(err) = ensure_local_http_api_state(&app, &state).await {
         eprintln!("Local HTTP API apply settings failed: {err}");
     }
@@ -6853,11 +6864,13 @@ async fn restore_settings_snapshot(
         *guard = restored.clone();
     }
 
+    #[cfg(desktop)]
     if should_restart_telegram_bridge(&previous, &restored) {
         TelegramBridgeRuntimeAdapter::new(&state)
             .restart_after_settings_change("settings snapshot restore")
             .await;
     }
+    #[cfg(desktop)]
     if let Err(err) = ensure_local_http_api_state(&app, &state).await {
         eprintln!("Local HTTP API apply restored settings failed: {err}");
     }
@@ -7056,6 +7069,7 @@ async fn transcribe_speech(
     transcribe_speech_impl(&settings, request).await
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 fn paste_dictation_text(text: String) -> Result<SystemDictationPasteResult, String> {
     let value = text.trim().to_string();
@@ -7077,6 +7091,7 @@ fn paste_dictation_text(text: String) -> Result<SystemDictationPasteResult, Stri
     paste_result.map(system_dictation_paste_result)
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 fn copy_dictation_text(text: String) -> Result<(), String> {
     let value = text.trim().to_string();
@@ -7099,6 +7114,7 @@ enum SystemPasteDispatchOutcome {
     NoFocusedInput,
 }
 
+#[cfg(desktop)]
 fn system_dictation_paste_result(
     outcome: SystemPasteDispatchOutcome,
 ) -> SystemDictationPasteResult {
@@ -7110,6 +7126,7 @@ fn system_dictation_paste_result(
     }
 }
 
+#[cfg(desktop)]
 fn write_system_clipboard(text: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
@@ -7224,6 +7241,7 @@ impl Drop for ClipboardCloseGuard {
     }
 }
 
+#[cfg(desktop)]
 fn dispatch_system_paste() -> Result<SystemPasteDispatchOutcome, String> {
     std::thread::sleep(Duration::from_millis(90));
     #[cfg(target_os = "windows")]
@@ -7253,6 +7271,18 @@ fn dispatch_system_paste() -> Result<SystemPasteDispatchOutcome, String> {
         }
         Ok(SystemPasteDispatchOutcome::Pasted)
     }
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn paste_dictation_text(_text: String) -> Result<SystemDictationPasteResult, String> {
+    Err("系统听写粘贴在 iOS 上不可用".to_string())
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn copy_dictation_text(_text: String) -> Result<(), String> {
+    mobile_desktop_feature_error("系统听写剪贴板")
 }
 
 #[cfg(target_os = "macos")]
@@ -7597,6 +7627,7 @@ fn dispatch_windows_paste_shortcut() -> Result<SystemPasteDispatchOutcome, Strin
     Ok(SystemPasteDispatchOutcome::Pasted)
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 fn show_system_dictation_window(app: AppHandle, request_id: Option<u64>) -> Result<(), String> {
     eprintln!("[system-dictation] show window command received");
@@ -7614,6 +7645,7 @@ fn show_system_dictation_window(app: AppHandle, request_id: Option<u64>) -> Resu
     .map_err(|err| format!("调度系统听写窗口显示失败: {err}"))
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 fn hide_system_dictation_window(app: AppHandle, request_id: Option<u64>) -> Result<(), String> {
     eprintln!("[system-dictation] hide window command received");
@@ -7629,6 +7661,7 @@ fn hide_system_dictation_window(app: AppHandle, request_id: Option<u64>) -> Resu
     .map_err(|err| format!("调度系统听写窗口隐藏失败: {err}"))
 }
 
+#[cfg(desktop)]
 fn register_system_dictation_overlay_request(request_id: Option<u64>) -> Option<u64> {
     request_id.map(|id| {
         SYSTEM_DICTATION_OVERLAY_REQUEST_ID.fetch_max(id, std::sync::atomic::Ordering::SeqCst);
@@ -7636,12 +7669,14 @@ fn register_system_dictation_overlay_request(request_id: Option<u64>) -> Option<
     })
 }
 
+#[cfg(desktop)]
 fn is_current_system_dictation_overlay_request(request_id: Option<u64>) -> bool {
     request_id.is_none_or(|id| {
         SYSTEM_DICTATION_OVERLAY_REQUEST_ID.load(std::sync::atomic::Ordering::SeqCst) == id
     })
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 fn set_system_dictation_level(app: AppHandle, level: f64) {
     let normalized = level.clamp(0.0, 1.0);
@@ -7651,6 +7686,7 @@ fn set_system_dictation_level(app: AppHandle, level: f64) {
     });
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 fn system_dictation_action(app: AppHandle, action: String) -> Result<(), String> {
     let normalized = action.trim().to_lowercase();
@@ -7667,10 +7703,12 @@ fn system_dictation_action(app: AppHandle, action: String) -> Result<(), String>
     }
 }
 
+#[cfg(desktop)]
 fn system_dictation_window_url() -> WebviewUrl {
     WebviewUrl::App("system-dictation.html".into())
 }
 
+#[cfg(desktop)]
 fn ensure_system_dictation_window_impl(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(SYSTEM_DICTATION_WINDOW_LABEL) {
         eprintln!("[system-dictation] ensure window existing");
@@ -7711,6 +7749,7 @@ fn ensure_system_dictation_window_impl(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(desktop)]
 fn show_system_dictation_window_impl(
     app: &AppHandle,
     request_id: Option<u64>,
@@ -7735,6 +7774,7 @@ fn show_system_dictation_window_impl(
     Ok(())
 }
 
+#[cfg(desktop)]
 fn position_system_dictation_window(app: &AppHandle, window: &tauri::WebviewWindow) {
     let monitor = window
         .current_monitor()
@@ -7758,6 +7798,7 @@ fn position_system_dictation_window(app: &AppHandle, window: &tauri::WebviewWind
     eprintln!("[system-dictation] positioned window x={x} y={y}");
 }
 
+#[cfg(desktop)]
 fn hide_system_dictation_window_impl(app: &AppHandle, request_id: Option<u64>) {
     eprintln!("[system-dictation] hide window start");
     if let Some(window) = app.get_webview_window(SYSTEM_DICTATION_WINDOW_LABEL) {
@@ -7788,6 +7829,7 @@ fn hide_system_dictation_window_impl(app: &AppHandle, request_id: Option<u64>) {
     eprintln!("[system-dictation] hide window done");
 }
 
+#[cfg(desktop)]
 fn emit_system_dictation_overlay_level(app: &AppHandle, level: f64) {
     if let Some(window) = app.get_webview_window(SYSTEM_DICTATION_WINDOW_LABEL) {
         let normalized = level.clamp(0.0, 1.0);
@@ -7798,6 +7840,7 @@ fn emit_system_dictation_overlay_level(app: &AppHandle, level: f64) {
     }
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 fn set_system_dictation_status(
     app: AppHandle,
@@ -7844,6 +7887,43 @@ fn set_system_dictation_status(
         }
     })
     .map_err(|err| format!("调度系统听写状态失败: {err}"))
+}
+
+#[cfg(mobile)]
+fn mobile_desktop_feature_error(feature: &str) -> Result<(), String> {
+    Err(format!("{feature} 在 iOS 上不可用"))
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn show_system_dictation_window(_request_id: Option<u64>) -> Result<(), String> {
+    mobile_desktop_feature_error("系统听写窗口")
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn hide_system_dictation_window(_request_id: Option<u64>) -> Result<(), String> {
+    mobile_desktop_feature_error("系统听写窗口")
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn set_system_dictation_level(_level: f64) {}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn set_system_dictation_status(
+    _text: String,
+    _copy_text: Option<String>,
+    _request_id: Option<u64>,
+) -> Result<(), String> {
+    mobile_desktop_feature_error("系统听写窗口")
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn system_dictation_action(_action: String) -> Result<(), String> {
+    mobile_desktop_feature_error("系统听写")
 }
 
 #[tauri::command]
@@ -7992,6 +8072,7 @@ async fn import_settings(
             .map_err(|_| "写入设置失败".to_string())?;
         *guard = normalized.clone();
     }
+    #[cfg(desktop)]
     if let Err(err) = ensure_local_http_api_state(&app, &state).await {
         eprintln!("Local HTTP API apply imported settings failed: {err}");
     }
@@ -11644,6 +11725,14 @@ async fn get_media_preview_impl(
     state: &AppState,
     input: MediaPreviewInput,
 ) -> Result<MediaPreviewResult, String> {
+    get_media_preview_impl_with_completion(state, input, true).await
+}
+
+async fn get_media_preview_impl_with_completion(
+    state: &AppState,
+    input: MediaPreviewInput,
+    complete_missing: bool,
+) -> Result<MediaPreviewResult, String> {
     let endpoint_id = input.endpoint_id.trim();
     let filename = input.filename.trim();
     if endpoint_id.is_empty()
@@ -11762,6 +11851,13 @@ async fn get_media_preview_impl(
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
             else {
+                if !complete_missing {
+                    return Ok(MediaPreviewResult::state(
+                        kind,
+                        "failed",
+                        Some("预览尚未生成".into()),
+                    ));
+                }
                 return Ok(run_media_preview_job(state, job_key, || async {
                     match complete_supabase_preview(state, &profile, &session, &attachment).await {
                         Ok(path) => MediaPreviewResult::ready(kind, path),
@@ -11838,6 +11934,14 @@ async fn get_media_preview_impl(
 
 #[tauri::command]
 async fn get_media_preview(
+    state: State<'_, AppState>,
+    input: MediaPreviewInput,
+) -> Result<MediaPreviewResult, String> {
+    get_media_preview_impl_with_completion(state.inner(), input, false).await
+}
+
+#[tauri::command]
+async fn complete_media_preview(
     state: State<'_, AppState>,
     input: MediaPreviewInput,
 ) -> Result<MediaPreviewResult, String> {
@@ -13027,6 +13131,7 @@ fn open_data_dir(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 fn minimize_window(app: AppHandle, window: Window) -> Result<(), String> {
     let _ = window.emit("trigger-hide", ());
@@ -13042,6 +13147,12 @@ fn minimize_window(app: AppHandle, window: Window) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     sync_dock_visibility_window(&app, &window);
     Ok(())
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn minimize_window() -> Result<(), String> {
+    mobile_desktop_feature_error("窗口最小化")
 }
 
 #[tauri::command]
@@ -18828,10 +18939,12 @@ fn collect_cleanup_candidates(messages: Vec<Message>, cutoff_ms: Option<i64>) ->
         .collect()
 }
 
+#[cfg(desktop)]
 fn show_main_window(app: &AppHandle) {
     show_main_window_with_event(app, None);
 }
 
+#[cfg(desktop)]
 fn show_main_window_with_event(app: &AppHandle, event_name: Option<&str>) {
     if let Some(window) = app.get_webview_window("main") {
         restore_system_dictation_hidden_main_window(app, &window);
@@ -18849,6 +18962,7 @@ fn show_main_window_with_event(app: &AppHandle, event_name: Option<&str>) {
     }
 }
 
+#[cfg(desktop)]
 fn toggle_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let is_visible = window.is_visible().unwrap_or(true);
@@ -18871,7 +18985,7 @@ fn toggle_main_window(app: &AppHandle) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(desktop, not(target_os = "macos")))]
 fn restore_system_dictation_hidden_main_window(_app: &AppHandle, _window: &tauri::WebviewWindow) {}
 
 #[cfg(target_os = "macos")]
@@ -19701,6 +19815,7 @@ fn start_sync_loop(app_handle: AppHandle) {
     });
 }
 
+#[cfg(desktop)]
 fn is_telegram_bridge_mode() -> bool {
     env::args_os()
         .nth(1)
@@ -19708,6 +19823,7 @@ fn is_telegram_bridge_mode() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(desktop)]
 fn run_telegram_bridge_mode() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -19721,9 +19837,12 @@ fn run_telegram_bridge_mode() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    if is_telegram_bridge_mode() {
-        run_telegram_bridge_mode();
-        return;
+    #[cfg(desktop)]
+    {
+        if is_telegram_bridge_mode() {
+            run_telegram_bridge_mode();
+            return;
+        }
     }
 
     let mut builder = tauri::Builder::default();
@@ -19800,7 +19919,9 @@ pub fn run() {
                     .pool_idle_timeout(Duration::from_secs(30))
                     .build()
                     .map_err(|err| format!("创建 HTTP 客户端失败: {err}"))?,
+                #[cfg(desktop)]
                 registered_hotkey: Mutex::new(None),
+                #[cfg(desktop)]
                 registered_system_dictation_hotkey: Mutex::new(None),
                 telegram_bridge: Mutex::new(TelegramBridgeManager::default()),
                 telegram_bridge_generation: std::sync::atomic::AtomicU64::new(0),
@@ -20059,6 +20180,7 @@ pub fn run() {
                 }
             }
 
+            #[cfg(desktop)]
             {
                 let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -20079,6 +20201,7 @@ pub fn run() {
                 });
             }
 
+            #[cfg(desktop)]
             {
                 let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -20089,6 +20212,7 @@ pub fn run() {
                 });
             }
 
+            #[cfg(desktop)]
             {
                 let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -20128,6 +20252,7 @@ pub fn run() {
         )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_mobile_integration::init())
         .invoke_handler(tauri::generate_handler![
             get_settings,
             supabase_sign_in,
@@ -20209,6 +20334,7 @@ pub fn run() {
             send_file_data,
             get_thumbnail,
             get_media_preview,
+            complete_media_preview,
             resolve_media_playback_source,
             cancel_media_playback_cache,
             set_active_media_playback_path,
@@ -20255,12 +20381,16 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    let version = env!("CARGO_PKG_VERSION");
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.set_title(&format!("Transfer Genie v{}", version));
+    #[cfg(desktop)]
+    {
+        let version = env!("CARGO_PKG_VERSION");
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.set_title(&format!("Transfer Genie v{}", version));
+        }
     }
 
     app.run(move |app_handle, event| {
+        #[cfg(desktop)]
         if let tauri::RunEvent::Ready = event {
             let version = env!("CARGO_PKG_VERSION");
             if let Some(window) = app_handle.get_webview_window("main") {
@@ -20268,6 +20398,7 @@ pub fn run() {
             }
         }
 
+        #[cfg(desktop)]
         if matches!(
             event,
             tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }
@@ -27714,6 +27845,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cross_device_preview_contract_reads_desktop_and_ios_jpegs_without_originals() {
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-cross-device-preview-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(
+            &temp_dir,
+            test_supabase_settings_with_url(server.base_url.clone()),
+        );
+        db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+        install_test_supabase_session(&state);
+
+        for (producer, color) in [
+            ("desktop", image::Rgb([30_u8, 120, 220])),
+            ("ios", image::Rgb([220_u8, 90, 40])),
+        ] {
+            let attachment_id = format!("attachment-{producer}-preview");
+            let filename = format!("{producer}-generated.png");
+            let object_path =
+                format!("user-a/00000000-0000-4000-8000-000000000001/{attachment_id}/original.png");
+            let preview_path =
+                format!("user-a/00000000-0000-4000-8000-000000000001/{attachment_id}/preview.jpg");
+            seed_supabase_preview_message(
+                &state,
+                &filename,
+                "original.png",
+                &attachment_id,
+                &object_path,
+                Some(&preview_path),
+                None,
+            );
+            let preview =
+                image::DynamicImage::ImageRgb8(image::ImageBuffer::from_pixel(48, 27, color));
+            let mut encoded = std::io::Cursor::new(Vec::new());
+            preview
+                .write_to(&mut encoded, image::ImageFormat::Jpeg)
+                .unwrap();
+            server
+                .state
+                .objects
+                .lock()
+                .unwrap()
+                .insert(preview_path.clone(), encoded.into_inner());
+            server.state.objects.lock().unwrap().insert(
+                object_path.clone(),
+                b"full-original-must-not-be-read".to_vec(),
+            );
+
+            let result = get_media_preview_impl(
+                &state,
+                MediaPreviewInput {
+                    endpoint_id: "supabase-1".into(),
+                    filename,
+                    original_name: "original.png".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(result.state, "ready");
+            assert_eq!(
+                image::guess_format(&fs::read(result.path.unwrap()).unwrap()).unwrap(),
+                image::ImageFormat::Jpeg
+            );
+            assert_eq!(server.state.storage_get_count(&preview_path), 1);
+            assert_eq!(server.state.storage_get_count(&object_path), 0);
+        }
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
     async fn supabase_cached_preview_is_available_when_remote_is_offline() {
         let temp_dir = std::env::temp_dir().join(format!(
             "transfer-genie-supabase-preview-offline-{}",
@@ -27995,6 +28200,61 @@ mod tests {
                 ["preview_object_path"],
             preview_path
         );
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn historical_video_preview_downloads_original_only_after_explicit_completion() {
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-explicit-video-preview-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(
+            &temp_dir,
+            test_supabase_settings_with_url(server.base_url.clone()),
+        );
+        db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+        install_test_supabase_session(&state);
+        let attachment_id = "attachment-history-video";
+        let object_path =
+            format!("user-a/00000000-0000-4000-8000-000000000001/{attachment_id}/history.mp4");
+        seed_supabase_preview_message(
+            &state,
+            "history-video.mp4",
+            "history.mp4",
+            attachment_id,
+            &object_path,
+            None,
+            None,
+        );
+        server
+            .state
+            .objects
+            .lock()
+            .unwrap()
+            .insert(object_path.clone(), b"invalid-video-fixture".to_vec());
+        let input = || MediaPreviewInput {
+            endpoint_id: "supabase-1".into(),
+            filename: "history-video.mp4".into(),
+            original_name: "history.mp4".into(),
+        };
+
+        let passive = get_media_preview_impl_with_completion(&state, input(), false)
+            .await
+            .unwrap();
+        assert_eq!(passive.state, "failed");
+        assert_eq!(passive.error.as_deref(), Some("预览尚未生成"));
+        assert_eq!(server.state.storage_get_count(&object_path), 0);
+
+        let explicit = get_media_preview_impl_with_completion(&state, input(), true)
+            .await
+            .unwrap();
+        assert_eq!(explicit.state, "failed");
+        assert_eq!(server.state.storage_get_count(&object_path), 1);
+        assert_eq!(db::count_download_history(&state.db_path).unwrap(), 0);
+
         let _ = fs::remove_dir_all(temp_dir);
     }
 

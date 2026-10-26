@@ -6,9 +6,11 @@ use crate::{
     TelegramBridgeSettings, WebDavEndpoint,
 };
 use serde::Serialize;
+#[cfg(desktop)]
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(desktop)]
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::oneshot;
@@ -24,6 +26,7 @@ pub struct TelegramBridgeStatus {
     pub generation: Option<u64>,
 }
 
+#[cfg(desktop)]
 pub struct ManagedTelegramBridgeProcess {
     pub child: Child,
     pub runtime_config_path: PathBuf,
@@ -31,6 +34,7 @@ pub struct ManagedTelegramBridgeProcess {
 
 #[derive(Default)]
 pub struct TelegramBridgeManager {
+    #[cfg(desktop)]
     pub process: Option<ManagedTelegramBridgeProcess>,
     pub managed_cancel: Option<oneshot::Sender<()>>,
     pub managed_running: bool,
@@ -46,6 +50,7 @@ struct PreparedTelegramBridgeLaunch {
     runtime_config_data: String,
 }
 
+#[cfg(desktop)]
 pub fn spawn_telegram_bridge_process(
     bridge_arg: &str,
     runtime_config_path: &Path,
@@ -71,12 +76,21 @@ pub fn telegram_bridge_status_from_manager(
     manager: &TelegramBridgeManager,
 ) -> TelegramBridgeStatus {
     TelegramBridgeStatus {
-        running: manager.process.is_some() || manager.managed_running,
-        pid: manager
-            .process
-            .as_ref()
-            .map(|process| process.child.id())
-            .or(manager.last_pid),
+        running: telegram_bridge_is_running(manager),
+        pid: {
+            #[cfg(desktop)]
+            {
+                manager
+                    .process
+                    .as_ref()
+                    .map(|process| process.child.id())
+                    .or(manager.last_pid)
+            }
+            #[cfg(mobile)]
+            {
+                manager.last_pid
+            }
+        },
         last_started_ms: manager.last_started_ms,
         last_stopped_ms: manager.last_stopped_ms,
         last_error: manager.last_error.clone(),
@@ -90,7 +104,7 @@ pub fn telegram_bridge_runtime_snapshot(
 ) -> ModuleRuntimeStateSnapshot {
     ModuleRuntimeStateSnapshot {
         enabled,
-        running: manager.process.is_some() || manager.managed_running,
+        running: telegram_bridge_is_running(manager),
         last_error: manager.last_error.clone(),
         last_started_ms: manager.last_started_ms,
         last_stopped_ms: manager.last_stopped_ms,
@@ -98,7 +112,14 @@ pub fn telegram_bridge_runtime_snapshot(
 }
 
 pub fn telegram_bridge_is_running(manager: &TelegramBridgeManager) -> bool {
-    manager.process.is_some() || manager.managed_running
+    #[cfg(desktop)]
+    {
+        manager.process.is_some() || manager.managed_running
+    }
+    #[cfg(mobile)]
+    {
+        manager.managed_running
+    }
 }
 
 pub fn attach_managed_task(
@@ -149,6 +170,7 @@ pub fn stop_managed_task(manager: &mut TelegramBridgeManager) -> bool {
     true
 }
 
+#[cfg(desktop)]
 pub fn finish_telegram_bridge_process(
     manager: &mut TelegramBridgeManager,
     mut process: ManagedTelegramBridgeProcess,
@@ -169,6 +191,7 @@ pub fn mark_start_failure(manager: &mut TelegramBridgeManager, err: String) {
     manager.last_stopped_ms = Some(now_ms());
 }
 
+#[cfg(desktop)]
 pub fn attach_started_process(
     manager: &mut TelegramBridgeManager,
     process: ManagedTelegramBridgeProcess,
@@ -180,35 +203,50 @@ pub fn attach_started_process(
 }
 
 pub fn stop_active_process(manager: &mut TelegramBridgeManager) -> bool {
-    if let Some(mut process) = manager.process.take() {
-        let _ = process.child.kill();
-        finish_telegram_bridge_process(manager, process, None);
-        true
-    } else {
+    #[cfg(desktop)]
+    {
+        if let Some(mut process) = manager.process.take() {
+            let _ = process.child.kill();
+            finish_telegram_bridge_process(manager, process, None);
+            true
+        } else {
+            stop_managed_task(manager)
+        }
+    }
+    #[cfg(mobile)]
+    {
         stop_managed_task(manager)
     }
 }
 
 pub fn refresh_telegram_bridge_manager(manager: &mut TelegramBridgeManager) {
-    let outcome = match manager.process.as_mut() {
-        Some(process) => match process.child.try_wait() {
-            Ok(Some(status)) => Some(Ok(status)),
-            Ok(None) => None,
-            Err(err) => Some(Err(format!("check telegram bridge status failed: {err}"))),
-        },
-        None => None,
-    };
-
-    let Some(outcome) = outcome else {
+    #[cfg(mobile)]
+    {
+        let _ = manager;
         return;
-    };
-
-    if let Some(process) = manager.process.take() {
-        let last_error = match outcome {
-            Ok(status) => telegram_bridge_exit_message(status),
-            Err(err) => Some(err),
+    }
+    #[cfg(desktop)]
+    {
+        let outcome = match manager.process.as_mut() {
+            Some(process) => match process.child.try_wait() {
+                Ok(Some(status)) => Some(Ok(status)),
+                Ok(None) => None,
+                Err(err) => Some(Err(format!("check telegram bridge status failed: {err}"))),
+            },
+            None => None,
         };
-        finish_telegram_bridge_process(manager, process, last_error);
+
+        let Some(outcome) = outcome else {
+            return;
+        };
+
+        if let Some(process) = manager.process.take() {
+            let last_error = match outcome {
+                Ok(status) => telegram_bridge_exit_message(status),
+                Err(err) => Some(err),
+            };
+            finish_telegram_bridge_process(manager, process, last_error);
+        }
     }
 }
 
@@ -307,6 +345,7 @@ pub fn telegram_bridge_status_for_state(state: &AppState) -> Result<TelegramBrid
     Ok(status)
 }
 
+#[cfg(desktop)]
 pub async fn start_telegram_bridge_for_state(
     state: &AppState,
     bridge_arg: &str,
@@ -347,6 +386,14 @@ pub async fn start_telegram_bridge_for_state(
     Ok(status)
 }
 
+#[cfg(mobile)]
+pub async fn start_telegram_bridge_for_state(
+    _state: &AppState,
+    _bridge_arg: &str,
+) -> Result<TelegramBridgeStatus, String> {
+    Err("Telegram Bridge 在 iOS 上不可用".to_string())
+}
+
 pub fn stop_telegram_bridge_for_state(state: &AppState) -> Result<TelegramBridgeStatus, String> {
     let mut manager = state
         .telegram_bridge
@@ -360,6 +407,7 @@ pub fn stop_telegram_bridge_for_state(state: &AppState) -> Result<TelegramBridge
     Ok(status)
 }
 
+#[cfg(desktop)]
 fn telegram_bridge_exit_message(status: ExitStatus) -> Option<String> {
     if status.success() {
         None

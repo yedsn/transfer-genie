@@ -1,0 +1,12 @@
+[default]
+description = "Allows the Transfer Genie mobile integration diagnostic command."
+permissions = [
+  "allow-diagnostic",
+  "allow-select-media",
+  "allow-select-documents",
+  "allow-preview-file",
+  "allow-share-file",
+  "allow-generate-image-thumbnail",
+  "allow-generate-video-poster",
+  "allow-cancel-video-poster",
+]

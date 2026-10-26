@@ -4,3 +4,6 @@ protocol = "sparse"
 [net]
 git-fetch-with-cli = true
 retry = 3
+
+[env]
+IPHONEOS_DEPLOYMENT_TARGET = "16.0"

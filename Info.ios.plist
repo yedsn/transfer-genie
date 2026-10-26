@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Transfer Genie 需要访问本地网络，以便开发版本连接到这台 Mac 上的调试服务器。</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Transfer Genie 需要访问麦克风，用于录制语音并转换为文字。</string>
+</dict>
+</plist>

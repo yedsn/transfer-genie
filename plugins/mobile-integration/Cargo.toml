@@ -1,0 +1,18 @@
+[package]
+name = "tauri-plugin-mobile-integration"
+version = "0.1.0"
+authors = [ "Transfer Genie Contributors" ]
+description = ""
+edition = "2021"
+rust-version = "1.77.2"
+exclude = ["/examples", "/dist-js", "/guest-js", "/node_modules"]
+links = "tauri-plugin-mobile-integration"
+
+[dependencies]
+tauri = { version = "=2.10.3" }
+serde = "1.0"
+thiserror = "2"
+log = "0.4"
+
+[build-dependencies]
+tauri-plugin = { version = "=2.5.2", features = ["build"] }

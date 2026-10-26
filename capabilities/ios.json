@@ -1,0 +1,13 @@
+{
+  "identifier": "ios-main-window",
+  "description": "iOS 主窗口权限，仅启用移动端可用的核心、日志与系统对话框能力。",
+  "windows": ["main"],
+  "platforms": ["iOS"],
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "log:default",
+    "mobile-integration:default",
+    "opener:allow-open-path"
+  ]
+}

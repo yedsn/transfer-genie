@@ -4472,8 +4472,9 @@ function normalizeMediaPreviewResult(result, originalName = '') {
   };
 }
 
-function requestMessagePreview(message) {
-  return invoke('get_media_preview', {
+function requestMessagePreview(message, options = {}) {
+  const command = options.completeMissing ? 'complete_media_preview' : 'get_media_preview';
+  return invoke(command, {
     input: {
       endpointId: message.endpoint_id || message.endpointId || activeEndpointId || '',
       filename: message.filename || '',
@@ -4589,6 +4590,7 @@ async function openMessageImagePreview(message, previewSrc = '') {
   image.alt = message.original_name || message.originalName || message.filename || '图片预览';
   if (previewSrc) image.src = previewSrc;
   stage.appendChild(image);
+  void requestMessagePreview(message, { completeMissing: true }).catch(() => {});
   try {
     const result = await resolveMessageMediaSource(message);
     if (messageMediaOverlay !== overlay) return;
@@ -4611,7 +4613,7 @@ async function openMessageVideoPlayer(message, posterSrc = '') {
   const video = createMediaElement('video', { className: 'message-media-overlay-video' });
   video.playsInline = true;
   if (posterSrc) video.poster = posterSrc;
-  requestMessagePreview(message)
+  requestMessagePreview(message, { completeMissing: true })
     .then((result) => {
       if (messageMediaOverlay === overlay && result.state === 'ready' && result.path) {
         video.poster = tauriAssetUrl(result.path);
@@ -9745,7 +9747,7 @@ function renderPreviewContent(message) {
         imageRetry.hidden = true;
         imageStatus.className = 'file-preview-status is-loading';
         imageStatus.textContent = '正在准备预览…';
-        return requestMessagePreview(message)
+        return requestMessagePreview(message, { completeMissing: true })
           .then(result => {
             if (result.state === 'ready' && result.path) {
               img.src = tauriConvert(result.path);
@@ -9844,7 +9846,7 @@ function renderPreviewContent(message) {
         invoke('cancel_media_playback_cache', { input: { endpointId: message.endpoint_id || activeEndpointId || '', filename: message.filename, originalName: message.original_name || '', variant: 'file' } }).catch(() => {});
       });
       if (mediaKind === 'video') {
-        requestMessagePreview(message)
+        requestMessagePreview(message, { completeMissing: true })
           .then((result) => { if (result.state === 'ready' && result.path) media.poster = tauriAssetUrl(result.path); })
           .catch(() => {});
       }

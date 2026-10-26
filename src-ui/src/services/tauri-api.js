@@ -13,6 +13,49 @@
   const listen = (...args) => { const fn = _getTauri().event?.listen; return fn?.(...args); };
   const convertFileSrc = (...args) => { const fn = _getTauri().path?.convertFileSrc; return fn?.(...args); };
 
+  const mobileIntegrationApi = {
+    async diagnostic(requestId) {
+      return invoke('plugin:mobile-integration|diagnostic', {
+        payload: { requestId },
+      });
+    },
+    async selectMedia(selectionLimit = 10) {
+      return invoke('plugin:mobile-integration|select_media', {
+        payload: { selectionLimit },
+      });
+    },
+    async selectDocuments(allowsMultipleSelection = true) {
+      return invoke('plugin:mobile-integration|select_documents', {
+        payload: { allowsMultipleSelection },
+      });
+    },
+    async previewFile(path) {
+      return invoke('plugin:mobile-integration|preview_file', {
+        payload: { path },
+      });
+    },
+    async shareFile(path) {
+      return invoke('plugin:mobile-integration|share_file', {
+        payload: { path },
+      });
+    },
+    async generateImageThumbnail(path, maxPixelSize = 1280) {
+      return invoke('plugin:mobile-integration|generate_image_thumbnail', {
+        payload: { path, maxPixelSize },
+      });
+    },
+    async generateVideoPoster(requestId, path, maxPixelSize = 1280, timeoutMilliseconds = 15000) {
+      return invoke('plugin:mobile-integration|generate_video_poster', {
+        payload: { requestId, path, maxPixelSize, timeoutMilliseconds },
+      });
+    },
+    async cancelVideoPoster(requestId) {
+      return invoke('plugin:mobile-integration|cancel_video_poster', {
+        payload: { requestId },
+      });
+    },
+  };
+
   // Settings API
   const settingsApi = {
     async getSettings() {
@@ -292,6 +335,7 @@
     event: eventApi,
     path: pathApi,
     integration: integrationApi,
+    mobileIntegration: mobileIntegrationApi,
   };
 
   globalScope.transferGenieApi = api;

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-generate-image-thumbnail"
+description = "Enables the generate_image_thumbnail command without any pre-configured scope."
+commands.allow = ["generate_image_thumbnail"]
+
+[[permission]]
+identifier = "deny-generate-image-thumbnail"
+description = "Denies the generate_image_thumbnail command without any pre-configured scope."
+commands.deny = ["generate_image_thumbnail"]

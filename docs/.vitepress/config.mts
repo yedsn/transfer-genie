@@ -61,6 +61,7 @@ const indexedPages = new Set([
   'reference/project-structure',
   'reference/code-architecture-flow',
   'develop/setup',
+  'develop/ios',
   'develop/build-and-release'
 ])
 const faqStructuredData = {
@@ -456,6 +457,7 @@ export default defineConfig({
           text: '开发说明',
           items: [
             { text: '开发环境', link: '/develop/setup' },
+            { text: 'iOS 开发', link: '/develop/ios' },
             { text: '构建与发布', link: '/develop/build-and-release' }
           ]
         }

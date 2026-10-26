@@ -1,0 +1,23 @@
+{
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Transfer Genie",
+        "fullscreen": false
+      }
+    ]
+  },
+  "bundle": {
+    "createUpdaterArtifacts": false,
+    "targets": ["app"],
+    "resources": [],
+    "iOS": {
+      "developmentTeam": "LW6QTNHNV4",
+      "infoPlist": "Info.ios.plist",
+      "minimumSystemVersion": "16.0"
+    }
+  },
+  "plugins": {}
+}

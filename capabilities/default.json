@@ -2,6 +2,7 @@
   "identifier": "main-window",
   "description": "主窗口权限，允许核心 IPC 与文件选择对话框。",
   "windows": ["main"],
+  "platforms": ["macOS", "windows", "linux"],
   "permissions": [
     "core:default",
     "dialog:default",

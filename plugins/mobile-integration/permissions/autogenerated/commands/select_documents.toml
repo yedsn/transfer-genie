@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-select-documents"
+description = "Enables the select_documents command without any pre-configured scope."
+commands.allow = ["select_documents"]
+
+[[permission]]
+identifier = "deny-select-documents"
+description = "Denies the select_documents command without any pre-configured scope."
+commands.deny = ["select_documents"]

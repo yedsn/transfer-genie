@@ -2463,6 +2463,108 @@
           "markdownDescription": "Denies the log command without any pre-configured scope."
         },
         {
+          "description": "Allows the Transfer Genie mobile integration diagnostic command.\n#### This default permission set includes:\n\n- `allow-diagnostic`\n- `allow-select-media`\n- `allow-select-documents`\n- `allow-preview-file`\n- `allow-share-file`\n- `allow-generate-image-thumbnail`\n- `allow-generate-video-poster`\n- `allow-cancel-video-poster`",
+          "type": "string",
+          "const": "mobile-integration:default",
+          "markdownDescription": "Allows the Transfer Genie mobile integration diagnostic command.\n#### This default permission set includes:\n\n- `allow-diagnostic`\n- `allow-select-media`\n- `allow-select-documents`\n- `allow-preview-file`\n- `allow-share-file`\n- `allow-generate-image-thumbnail`\n- `allow-generate-video-poster`\n- `allow-cancel-video-poster`"
+        },
+        {
+          "description": "Enables the cancel_video_poster command without any pre-configured scope.",
+          "type": "string",
+          "const": "mobile-integration:allow-cancel-video-poster",
+          "markdownDescription": "Enables the cancel_video_poster command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the diagnostic command without any pre-configured scope.",
+          "type": "string",
+          "const": "mobile-integration:allow-diagnostic",
+          "markdownDescription": "Enables the diagnostic command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the generate_image_thumbnail command without any pre-configured scope.",
+          "type": "string",
+          "const": "mobile-integration:allow-generate-image-thumbnail",
+          "markdownDescription": "Enables the generate_image_thumbnail command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the generate_video_poster command without any pre-configured scope.",
+          "type": "string",
+          "const": "mobile-integration:allow-generate-video-poster",
+          "markdownDescription": "Enables the generate_video_poster command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the preview_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "mobile-integration:allow-preview-file",
+          "markdownDescription": "Enables the preview_file command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the select_documents command without any pre-configured scope.",
+          "type": "string",
+          "const": "mobile-integration:allow-select-documents",
+          "markdownDescription": "Enables the select_documents command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the select_media command without any pre-configured scope.",
+          "type": "string",
+          "const": "mobile-integration:allow-select-media",
+          "markdownDescription": "Enables the select_media command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the share_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "mobile-integration:allow-share-file",
+          "markdownDescription": "Enables the share_file command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the cancel_video_poster command without any pre-configured scope.",
+          "type": "string",
+          "const": "mobile-integration:deny-cancel-video-poster",
+          "markdownDescription": "Denies the cancel_video_poster command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the diagnostic command without any pre-configured scope.",
+          "type": "string",
+          "const": "mobile-integration:deny-diagnostic",
+          "markdownDescription": "Denies the diagnostic command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the generate_image_thumbnail command without any pre-configured scope.",
+          "type": "string",
+          "const": "mobile-integration:deny-generate-image-thumbnail",
+          "markdownDescription": "Denies the generate_image_thumbnail command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the generate_video_poster command without any pre-configured scope.",
+          "type": "string",
+          "const": "mobile-integration:deny-generate-video-poster",
+          "markdownDescription": "Denies the generate_video_poster command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the preview_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "mobile-integration:deny-preview-file",
+          "markdownDescription": "Denies the preview_file command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the select_documents command without any pre-configured scope.",
+          "type": "string",
+          "const": "mobile-integration:deny-select-documents",
+          "markdownDescription": "Denies the select_documents command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the select_media command without any pre-configured scope.",
+          "type": "string",
+          "const": "mobile-integration:deny-select-media",
+          "markdownDescription": "Denies the select_media command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the share_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "mobile-integration:deny-share-file",
+          "markdownDescription": "Denies the share_file command without any pre-configured scope."
+        },
+        {
           "description": "This permission set allows opening `mailto:`, `tel:`, `https://` and `http://` urls using their default application\nas well as reveal file in directories using default file explorer\n#### This default permission set includes:\n\n- `allow-open-url`\n- `allow-reveal-item-in-dir`\n- `allow-default-urls`",
           "type": "string",
           "const": "opener:default",

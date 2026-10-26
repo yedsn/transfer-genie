@@ -1,17 +1,24 @@
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{Cursor, Read};
+use std::io::Cursor;
+#[cfg(desktop)]
+use std::io::Read;
 use std::path::{Path, PathBuf};
+#[cfg(desktop)]
 use std::process::{Command, Stdio};
 use std::sync::{Arc, OnceLock};
+#[cfg(desktop)]
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(desktop)]
+use std::time::Instant;
 
 pub const FFMPEG_BUNDLE_VERSION: &str = "6.1.1";
 pub const PREVIEW_MAX_EDGE: u32 = 480;
 pub const VIDEO_FRAME_TIMEOUT: Duration = Duration::from_secs(20);
 pub const PREVIEW_GENERATION_CONCURRENCY: usize = 2;
 pub const PREVIEW_DOWNLOAD_CONCURRENCY: usize = 4;
+#[cfg(desktop)]
 const FFMPEG_ERROR_LIMIT: u64 = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +97,7 @@ pub fn media_playback_cache_path(
     ))
 }
 
+#[cfg(desktop)]
 fn ffmpeg_candidates(current_exe: Option<&Path>, executable_name: &str) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(parent) = current_exe.and_then(Path::parent) {
@@ -120,6 +128,7 @@ fn ffmpeg_candidates(current_exe: Option<&Path>, executable_name: &str) -> Vec<P
     candidates
 }
 
+#[cfg(desktop)]
 pub fn resolve_ffmpeg_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("TRANSFER_GENIE_FFMPEG").map(PathBuf::from) {
         if path.is_file() {
@@ -169,6 +178,7 @@ pub fn generate_image_preview(source_path: &Path, output_path: &Path) -> Result<
     fs::write(output_path, encoded.into_inner()).map_err(|err| format!("写入图片预览失败: {err}"))
 }
 
+#[cfg(desktop)]
 pub fn generate_video_preview_with(
     ffmpeg_path: &Path,
     source_path: &Path,
@@ -287,11 +297,23 @@ pub fn generate_media_preview(
             Ok(true)
         }
         Some(MediaPreviewKind::Video) => {
-            let ffmpeg = resolve_ffmpeg_path().ok_or_else(|| {
-                format!("未找到 FFmpeg {FFMPEG_BUNDLE_VERSION}，视频已发送但无法生成预览图")
-            })?;
-            generate_video_preview_with(&ffmpeg, source_path, output_path, VIDEO_FRAME_TIMEOUT)?;
-            Ok(true)
+            #[cfg(desktop)]
+            {
+                let ffmpeg = resolve_ffmpeg_path().ok_or_else(|| {
+                    format!("未找到 FFmpeg {FFMPEG_BUNDLE_VERSION}，视频已发送但无法生成预览图")
+                })?;
+                generate_video_preview_with(
+                    &ffmpeg,
+                    source_path,
+                    output_path,
+                    VIDEO_FRAME_TIMEOUT,
+                )?;
+                Ok(true)
+            }
+            #[cfg(mobile)]
+            {
+                Err("iOS 视频预览必须通过原生 AVFoundation 插件生成".to_string())
+            }
         }
         None => Ok(false),
     }
@@ -404,17 +426,24 @@ mod tests {
 
     #[test]
     fn ffmpeg_candidates_cover_windows_and_macos_bundle_layouts() {
-        let windows_exe = Path::new(r"C:\Program Files\Transfer Genie\transfer-genie.exe");
-        let windows = ffmpeg_candidates(Some(windows_exe), "ffmpeg.exe");
-        assert!(windows.contains(&PathBuf::from(
-            r"C:\Program Files\Transfer Genie\tools\ffmpeg\ffmpeg.exe"
-        )));
+        #[cfg(windows)]
+        {
+            let windows_exe = Path::new(r"C:\Program Files\Transfer Genie\transfer-genie.exe");
+            let windows = ffmpeg_candidates(Some(windows_exe), "ffmpeg.exe");
+            assert!(windows.contains(&PathBuf::from(
+                r"C:\Program Files\Transfer Genie\tools\ffmpeg\ffmpeg.exe"
+            )));
+        }
 
-        let macos_exe = Path::new("/Applications/Transfer Genie.app/Contents/MacOS/transfer-genie");
-        let macos = ffmpeg_candidates(Some(macos_exe), "ffmpeg");
-        assert!(macos.contains(&PathBuf::from(
-            "/Applications/Transfer Genie.app/Contents/MacOS/../Resources/tools/ffmpeg/ffmpeg"
-        )));
+        #[cfg(target_os = "macos")]
+        {
+            let macos_exe =
+                Path::new("/Applications/Transfer Genie.app/Contents/MacOS/transfer-genie");
+            let macos = ffmpeg_candidates(Some(macos_exe), "ffmpeg");
+            assert!(macos.contains(&PathBuf::from(
+                "/Applications/Transfer Genie.app/Contents/MacOS/../Resources/tools/ffmpeg/ffmpeg"
+            )));
+        }
     }
 
     #[test]
