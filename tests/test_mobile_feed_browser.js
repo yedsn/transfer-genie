@@ -218,6 +218,19 @@ try {
   assert.equal(await page.locator('.mobile-attachment-strip > div').count(), 1, 'preview must not remove/send the draft');
   await removeButton.dispatchEvent('click');
   assert.equal(await page.locator('.mobile-attachment-strip > div').count(), 0);
+  await page.getByRole('textbox', { name: '消息内容', exact: true }).fill('导入中的草稿');
+  await page.evaluate(() => { window.__feedTest.ui.state.composer.selecting = true; });
+  assert.equal(await page.getByRole('status').innerText(), '正在准备所选附件…');
+  assert.equal(await page.getByRole('button', { name: '发送', exact: true }).isDisabled(), true);
+  assert.equal(await page.locator('.mobile-compose-tools button').nth(0).isDisabled(), true);
+  assert.equal(await page.locator('.mobile-compose-tools button').nth(1).isDisabled(), true);
+  assert.equal(await page.getByRole('button', { name: '关闭新消息', exact: true }).isDisabled(), true);
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('.mobile-composer-sheet').count(), 1, 'Escape cannot close a picker that is copying into the draft');
+  await page.evaluate(() => { window.__feedTest.ui.state.composer.selecting = false; });
+  assert.equal(await page.getByRole('button', { name: '发送', exact: true }).isEnabled(), true);
+  assert.equal(await page.getByRole('textbox', { name: '消息内容', exact: true }).inputValue(), '导入中的草稿');
+  await page.getByRole('textbox', { name: '消息内容', exact: true }).fill('');
   await page.getByRole('button', { name: '关闭新消息', exact: true }).click();
   await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === '新消息');
   assert.equal(await page.getByRole('button', { name: '新消息', exact: true }).evaluate((el) => document.activeElement === el), true, 'closing restores focus to the opener');
@@ -299,7 +312,9 @@ try {
     };
   });
   await page.locator('.mobile-selection-toolbar').getByRole('button', { name: '标记', exact: true }).dispatchEvent('click');
+  await page.locator('.mobile-marked-edit-sheet .mobile-primary-button').dispatchEvent('click');
   await page.waitForFunction(() => document.querySelectorAll('.mobile-message-select[aria-pressed="true"]').length === 1);
+  await page.getByRole('button', { name: '关闭编辑标记', exact: true }).dispatchEvent('click');
   assert.equal(await page.evaluate(() => window.__feedTest.batch.action), 'mark');
   assert.equal(await page.evaluate(() => window.__feedTest.batch.filenames.length), 2);
   await page.locator('.mobile-selection-toolbar').getByRole('button', { name: '删除', exact: true }).dispatchEvent('click');
@@ -321,6 +336,7 @@ try {
     const ui = window.__feedTest.ui;
     window.__feedTest.singleActions = [];
     ui.controller.toggleMark = async () => { ui.state.error = 'fixture mark failure'; return false; };
+    ui.controller.updateMarkedMetadata = async () => { ui.state.error = 'fixture mark failure'; return false; };
     ui.controller.copyMessage = async () => { ui.state.error = 'fixture clipboard failure'; return false; };
     ui.controller.deleteMessage = async (message, remote) => {
       window.__feedTest.singleActions.push({ filename: message.filename, remote });
@@ -331,6 +347,9 @@ try {
   await page.locator('.mobile-card-more').last().dispatchEvent('click');
   const actionSheet = page.locator('.mobile-action-sheet');
   await actionSheet.getByRole('button', { name: '标记', exact: false }).dispatchEvent('click');
+  await page.locator('.mobile-marked-edit-sheet .mobile-primary-button').dispatchEvent('click');
+  assert.match(await page.locator('.mobile-marked-edit-sheet [role="alert"]').innerText(), /fixture mark failure/);
+  await page.getByRole('button', { name: '关闭编辑标记', exact: true }).dispatchEvent('click');
   assert.equal(await actionSheet.count(), 1);
   assert.match(await actionSheet.locator('[role="alert"]').innerText(), /fixture mark failure/);
   await actionSheet.getByRole('button', { name: '复制', exact: false }).dispatchEvent('click');
@@ -353,8 +372,10 @@ try {
     const ui = window.__feedTest.ui;
     ui.state.busy = false;
     ui.controller.toggleMark = async () => { ui.state.error = ''; return true; };
+    ui.controller.updateMarkedMetadata = async () => { ui.state.error = ''; return true; };
   });
   await actionSheet.getByRole('button', { name: '标记', exact: false }).dispatchEvent('click');
+  await page.locator('.mobile-marked-edit-sheet .mobile-primary-button').dispatchEvent('click');
   await page.waitForSelector('.mobile-action-sheet', { state: 'detached' });
   await page.evaluate(() => {
     const ui = window.__feedTest.ui;
@@ -405,7 +426,122 @@ try {
   await page.getByRole('button', { name: '加载更多标记', exact: true }).dispatchEvent('click');
   await page.waitForFunction(() => document.querySelectorAll('.mobile-task-list > article').length === 125);
   await page.getByRole('button', { name: '消息', exact: true }).dispatchEvent('click');
-  console.log('mobile feed browser tests passed: ownership, order, upward anchor, latest-follow, loaded-history refresh, attachment layout, expansion, compact sync status, message multi-selection, search pagination, marked pagination');
+  // Rich text, mark dialogs and full-screen details: local fixtures only.
+  await page.evaluate(() => {
+    const ui = window.__feedTest.ui;
+    const text = '# Markdown 标题\n\n**粗体** 与 `code`\n\n[安全链接](https://example.com) [危险链接](javascript:alert(1))\n\n<script>window.__markdownInjected = true</script><img src=x onerror="window.__markdownInjected=true">\n\n' + '完整的多行消息正文，需要保留。\n'.repeat(100);
+    const message = { ...ui.state.messages[0], filename: 'markdown-fixture', title: 'Markdown 标题', body: text, format: 'markdown', marked: true, tagIds: ['work', 'personal'], dueDate: '2026-10-29' };
+    ui.state.messages = [message];
+    ui.state.markedView.messages = [message];
+    ui.state.markedView.hasMore = false;
+    window.__feedTest.markWrites = [];
+    window.__feedTest.createdTags = [];
+    window.__feedTest.openedLinks = [];
+    ui.controller.updateMarkedMetadata = async (item, ids, date) => {
+      window.__feedTest.markWrites.push({ filename: item.filename, ids: [...ids], date });
+      ui.state.error = ''; return true;
+    };
+    ui.controller.toggleMark = async (item) => {
+      window.__feedTest.markWrites.push({ unmark: item.filename });
+      ui.state.error = ''; return true;
+    };
+    ui.controller.createMarkedTag = async (name) => {
+      window.__feedTest.createdTags.push(name);
+      const tag = { id: 'tag-' + name, name }; ui.state.tags.push(tag); return tag;
+    };
+    window.transferGenieApi.settings.openUrl = async (url) => { window.__feedTest.openedLinks.push(url); };
+  });
+  const markdown = page.locator('.mobile-message-content .mobile-markdown');
+  assert.equal(await markdown.locator('h1').innerText(), 'Markdown 标题');
+  assert.equal(await markdown.locator('strong').innerText(), '粗体');
+  assert.equal(await markdown.locator('code').innerText(), 'code');
+  assert.equal(await markdown.locator('script, img, [onerror]').count(), 0);
+  assert.equal(await page.evaluate(() => window.__markdownInjected), undefined);
+  await markdown.getByText('安全链接', { exact: true }).dispatchEvent('click');
+  assert.deepEqual(await page.evaluate(() => window.__feedTest.openedLinks), ['https://example.com']);
+  assert.equal(await page.locator('.mobile-detail-sheet').count(), 0, 'link clicks must not open message details');
+  await markdown.getByText('危险链接', { exact: true }).dispatchEvent('click');
+  assert.equal(await page.evaluate(() => window.__feedTest.openedLinks.length), 1);
+  await markdown.locator('h1').dispatchEvent('click');
+  await page.waitForSelector('.mobile-detail-sheet');
+  assert.equal(await page.locator('.mobile-detail-copy h1').innerText(), 'Markdown 标题');
+  for (const viewport of [{ width: 390, height: 844 }, { width: 320, height: 568 }, { width: 844, height: 390 }]) {
+    await page.setViewportSize(viewport);
+    await page.waitForFunction(({ height }) => Math.abs(document.querySelector('.mobile-detail-sheet').getBoundingClientRect().height - height) < 2, viewport);
+    const geometry = await page.evaluate(() => {
+      const sheet = document.querySelector('.mobile-detail-sheet').getBoundingClientRect();
+      const scroll = document.querySelector('.mobile-detail-scroll');
+      const more = document.querySelector('.mobile-detail-more').getBoundingClientRect();
+      const actions = document.querySelector('.mobile-detail-actions').getBoundingClientRect();
+      scroll.scrollTop = scroll.scrollHeight;
+      return { top: sheet.top, height: sheet.height, scroll: scroll.scrollHeight > scroll.clientHeight, scrolled: scroll.scrollTop > 0, moreWidth: more.width, actionsWidth: actions.width, bottom: more.bottom, viewport: innerHeight };
+    });
+    assert.equal(geometry.top, 0);
+    assert.ok(geometry.scroll && geometry.scrolled);
+    assert.ok(Math.abs(geometry.moreWidth - geometry.actionsWidth) < 2);
+    assert.ok(geometry.bottom <= geometry.viewport);
+  }
+  await page.evaluate(() => document.documentElement.setAttribute('data-mobile-accessibility-text', 'true'));
+  assert.ok((await page.locator('.mobile-detail-more').boundingBox()).height >= 44);
+  await page.evaluate(() => document.documentElement.removeAttribute('data-mobile-accessibility-text'));
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('button', { name: '关闭详情', exact: true }).dispatchEvent('click');
+  await page.locator('.mobile-tabbar button').filter({ hasText: '标记' }).dispatchEvent('click');
+  assert.equal(await page.locator('.mobile-task-check').count(), 0);
+  assert.equal(await page.locator('.mobile-task-pin').count(), 1);
+  assert.equal(await page.locator('.mobile-task-body .mobile-markdown h1').innerText(), 'Markdown 标题');
+  assert.match(await page.locator('.mobile-task-body small').innerText(), /工作.*个人.*2026-10-29/s);
+  const bounded = await page.locator('.mobile-task-body .mobile-markdown').evaluate(el => ({ client: el.clientHeight, full: el.scrollHeight }));
+  assert.ok(bounded.client < bounded.full, 'marked rows bound long text while showing more than a title');
+  await page.locator('.mobile-task-pin').dispatchEvent('click');
+  assert.equal(await page.locator('.mobile-unmark-sheet').count(), 1);
+  assert.equal(await page.evaluate(() => window.__feedTest.markWrites.length), 0);
+  await page.getByRole('button', { name: '保留标记', exact: true }).dispatchEvent('click');
+  assert.equal(await page.evaluate(() => window.__feedTest.markWrites.length), 0);
+  await page.locator('.mobile-task-pin').dispatchEvent('click');
+  await page.getByRole('button', { name: '确认取消标记', exact: true }).dispatchEvent('click');
+  assert.deepEqual(await page.evaluate(() => window.__feedTest.markWrites), [{ unmark: 'markdown-fixture' }]);
+  await page.getByRole('button', { name: '消息', exact: true }).dispatchEvent('click');
+  await page.getByRole('button', { name: '新消息', exact: true }).dispatchEvent('click');
+  const editor = page.getByRole('textbox', { name: '消息内容', exact: true });
+  await editor.fill('# 草稿\n\n**保留原文**');
+  await page.getByRole('button', { name: 'Markdown', exact: true }).dispatchEvent('click');
+  await page.getByRole('button', { name: '预览', exact: true }).dispatchEvent('click');
+  assert.equal(await page.locator('.mobile-compose-preview h1').innerText(), '草稿');
+  assert.equal(await page.locator('.mobile-compose-preview strong').innerText(), '保留原文');
+  await page.getByRole('button', { name: '继续编辑', exact: true }).dispatchEvent('click');
+  assert.equal(await editor.inputValue(), '# 草稿\n\n**保留原文**');
+  await page.locator('.mobile-compose-tools button').filter({ hasText: '标记' }).dispatchEvent('click');
+  await page.getByRole('textbox', { name: '新标签名称', exact: true }).fill('不保存标签');
+  await page.getByRole('button', { name: '添加', exact: true }).dispatchEvent('click');
+  assert.equal(await page.evaluate(() => window.__feedTest.createdTags.length), 0);
+  await page.getByRole('button', { name: '关闭编辑标记', exact: true }).dispatchEvent('click');
+  assert.equal(await page.evaluate(() => window.__feedTest.ui.state.composer.marked), false);
+  assert.equal(await page.evaluate(() => window.__feedTest.createdTags.length), 0);
+  assert.equal(await editor.inputValue(), '# 草稿\n\n**保留原文**');
+  await page.locator('.mobile-compose-tools button').filter({ hasText: '标记' }).dispatchEvent('click');
+  await page.locator('.mobile-marked-tag-options button').filter({ hasText: '工作' }).dispatchEvent('click');
+  await page.getByRole('textbox', { name: '新标签名称', exact: true }).fill('紧急发送');
+  await page.getByRole('button', { name: '添加', exact: true }).dispatchEvent('click');
+  await page.getByLabel('截止日期', { exact: true }).fill('2026-10-30');
+  await page.locator('.mobile-marked-edit-sheet .mobile-primary-button').dispatchEvent('click');
+  assert.deepEqual(await page.evaluate(() => window.__feedTest.createdTags), ['紧急发送']);
+  assert.deepEqual(await page.evaluate(() => window.__feedTest.ui.state.composer.tagIds), ['work', 'tag-紧急发送']);
+  assert.equal(await page.evaluate(() => window.__feedTest.ui.state.composer.dueDate), '2026-10-30');
+  assert.match(await page.locator('.mobile-composer-mark-summary').innerText(), /工作.*紧急发送.*2026-10-30/s);
+  await page.locator('.mobile-compose-tools button').filter({ hasText: '标记' }).dispatchEvent('click');
+  await page.getByLabel('截止日期', { exact: true }).fill('2026-11-01');
+  await page.keyboard.press('Escape');
+  assert.equal(await page.evaluate(() => window.__feedTest.ui.state.composer.dueDate), '2026-10-30', 'cancel preserves saved composer metadata');
+  await page.getByRole('button', { name: '关闭新消息', exact: true }).dispatchEvent('click');
+  // An unmarked message opens settings without writing; save carries detailed metadata.
+  await page.evaluate(() => { window.__feedTest.ui.state.messages[0].marked = false; });
+  await page.locator('.mobile-card-more').dispatchEvent('click');
+  await page.locator('.mobile-action-sheet .mobile-action-grid button').filter({ hasText: '标记' }).dispatchEvent('click');
+  assert.equal(await page.evaluate(() => window.__feedTest.markWrites.length), 1);
+  await page.locator('.mobile-marked-edit-sheet .mobile-primary-button').dispatchEvent('click');
+  assert.deepEqual(await page.evaluate(() => window.__feedTest.markWrites[1]), { filename: 'markdown-fixture', ids: ['work', 'personal'], date: '2026-10-29' });
+  console.log('mobile feed browser tests passed: existing feed/search/paging regressions; safe Markdown, editing/preview, bounded marked rows, unmark confirmation, no-write cancellation, detailed draft/message marks, full-screen details and full-width actions');
 } finally {
   await browser.close();
 }

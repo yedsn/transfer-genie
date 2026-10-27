@@ -250,6 +250,94 @@ final class MobileIntegrationPluginTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: firstURL), bytes)
     }
 
+    func testDocumentBatchFailureRollsBackOnlyItsOwnImports() throws {
+        let source = temporaryURL(extension: "txt")
+        let missing = temporaryURL(extension: "txt")
+        let bytes = Data("batch document fixture".utf8)
+        try bytes.write(to: source)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let existing = try DocumentPickerCoordinator.copyIntoSandbox(source)
+        let existingURL = URL(fileURLWithPath: try XCTUnwrap(existing["path"] as? String))
+        defer { MobileImportBatch.discard([existing]) }
+        let before = try importDirectories()
+
+        XCTAssertThrowsError(try DocumentPickerCoordinator.copySelections([source, missing])) { error in
+            XCTAssertEqual((error as? MobileIntegrationError)?.code, .resourceUnavailable)
+        }
+        XCTAssertEqual(try importDirectories(), before)
+        XCTAssertEqual(try Data(contentsOf: source), bytes)
+        XCTAssertEqual(try Data(contentsOf: existingURL), bytes, "An older successful import must survive rollback")
+    }
+
+    func testDocumentBatchSuccessKeepsOrderedSandboxCopies() throws {
+        let first = temporaryURL(extension: "txt")
+        let second = temporaryURL(extension: "txt")
+        try Data("first".utf8).write(to: first)
+        try Data("second".utf8).write(to: second)
+        defer {
+            try? FileManager.default.removeItem(at: first)
+            try? FileManager.default.removeItem(at: second)
+        }
+        let items = try DocumentPickerCoordinator.copySelections([first, second])
+        defer { MobileImportBatch.discard(items) }
+        XCTAssertEqual(items.count, 2)
+        for (item, source) in zip(items, [first, second]) {
+            let copy = URL(fileURLWithPath: try XCTUnwrap(item["path"] as? String))
+            XCTAssertEqual(try Data(contentsOf: copy), try Data(contentsOf: source))
+            XCTAssertEqual(copy.lastPathComponent, source.lastPathComponent)
+        }
+    }
+
+    func testMediaBatchFailureDiscardsCopiesAndPreservesError() throws {
+        let source = temporaryURL(extension: "jpg")
+        let bytes = Data("batch media fixture".utf8)
+        try bytes.write(to: source)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let before = try importDirectories()
+        let copies = try (0..<2).map { index in
+            try MediaPickerCoordinator.copyIntoSandbox(
+                source: source, originalName: "batch-\(index).jpg", contentType: .jpeg
+            )
+        }
+        let items: [JsonObject] = copies.map { ["path": $0.path] }
+        defer { MobileImportBatch.discard(items) }
+        let error = MobileIntegrationError(code: .resourceUnavailable, message: "iCloud unavailable")
+        XCTAssertThrowsError(try MobileImportBatch.finish(items, error: error).get()) { result in
+            XCTAssertEqual((result as? MobileIntegrationError)?.code, error.code)
+            XCTAssertEqual((result as? MobileIntegrationError)?.message, error.message)
+        }
+        XCTAssertEqual(try importDirectories(), before)
+        XCTAssertTrue(copies.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
+        XCTAssertEqual(try Data(contentsOf: source), bytes)
+    }
+
+    func testMediaBatchSuccessAndCleanupCannotRemoveExternalFiles() throws {
+        let source = temporaryURL(extension: "jpg")
+        let bytes = Data("successful media fixture".utf8)
+        try bytes.write(to: source)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let copy = try MediaPickerCoordinator.copyIntoSandbox(
+            source: source, originalName: "batch.jpg", contentType: .jpeg
+        )
+        let items: [JsonObject] = [["path": copy.path]]
+        defer { MobileImportBatch.discard(items) }
+        let result = try MobileImportBatch.finish(items, error: nil).get()
+        XCTAssertEqual(result.first?["path"] as? String, copy.path)
+        XCTAssertEqual(try Data(contentsOf: copy), bytes)
+        MobileImportBatch.discard([["path": source.path]])
+        XCTAssertEqual(try Data(contentsOf: source), bytes, "Cleanup must never follow an external source path")
+    }
+
+    private func importDirectories() throws -> Set<URL> {
+        let support = try FileManager.default.url(
+            for: .applicationSupportDirectory, in: .userDomainMask,
+            appropriateFor: nil, create: true
+        )
+        let imports = support.appendingPathComponent("TransferGenie/MobileImports", isDirectory: true)
+        try FileManager.default.createDirectory(at: imports, withIntermediateDirectories: true)
+        return Set(try FileManager.default.contentsOfDirectory(at: imports, includingPropertiesForKeys: nil))
+    }
+
     func testSimulatorLowStorageImportFailsWithoutPublishingAFile() throws {
         #if DEBUG && targetEnvironment(simulator)
         let source = temporaryURL(extension: "txt")

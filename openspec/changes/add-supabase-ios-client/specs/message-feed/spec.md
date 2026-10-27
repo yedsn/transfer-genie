@@ -2,6 +2,34 @@
 
 ## ADDED Requirements
 
+### Requirement: Mobile Markdown composition and reading
+iOS SHALL offer plain-text and Markdown editing with a rendered preview. Markdown messages SHALL retain their format and original source in the existing send contract, and SHALL render safely in feed, marked rows and details. Message HTML MUST NOT execute scripts or load remote images during passive reading.
+
+#### Scenario: Compose and read Markdown
+- **WHEN** the user writes Markdown and selects preview
+- **THEN** headings, lists, links, code and tables render without changing the source
+- **AND** sending preserves format=markdown and the original content
+
+### Requirement: Mobile detailed marking and confirmed removal
+iOS composer and message mark actions SHALL open tag and optional due-date settings before applying a mark. Marked rows SHALL show multiline content, all labels and due date, without a left completion checkbox. A pin control SHALL request explicit confirmation before unmarking; cancellation MUST NOT mutate the message.
+
+#### Scenario: Configure a mark
+- **WHEN** the user opens mark settings from a draft or message
+- **THEN** tags and due date can be selected before confirmation
+- **AND** draft settings apply to both text and attachments when sent
+
+#### Scenario: Cancel unmark confirmation
+- **WHEN** the user taps a marked row pin and cancels confirmation
+- **THEN** the mark and metadata remain unchanged locally and remotely
+
+### Requirement: Full-screen bounded mobile detail
+iOS message detail SHALL occupy the full visible viewport, respect safe areas, and keep long message content in a bounded scroll region. More actions SHALL occupy a separate full-width row below primary actions.
+
+#### Scenario: Read a long message detail
+- **WHEN** the user opens a message longer than the available viewport
+- **THEN** the content scrolls while close and more-actions controls remain reachable
+- **AND** content does not overflow horizontally
+
 ### Requirement: Chat-ordered mobile history
 iOS 消息流 SHALL 从上到下按时间由旧到新排列，最新消息位于底部。首次进入空间 SHALL 定位到最新消息，用户向上滚动 SHALL 加载更早消息并保持正在阅读的消息位置。用户正在阅读历史内容时，新消息或同步刷新 MUST NOT 强制滚到底部或丢弃已加载历史。用户发送成功后 SHALL 定位到新发送内容。桌面消息列表行为 MUST 保持不变。
 

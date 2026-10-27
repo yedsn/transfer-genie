@@ -16,6 +16,78 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         app = nil
     }
 
+    func testMarkdownDraftPreviewAndMarkSettingsCancelWithoutSending() throws {
+        app.buttons["新消息"].tap()
+        let editor = composerEditor()
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        let original = editor.value as? String ?? ""
+        guard (original.isEmpty || original.hasPrefix("输入文字")), app.buttons.matching(identifier: "移除附件").count == 0 else {
+            throw XCTSkip("Preserve an existing unsent draft")
+        }
+        let draft = "# TG Markdown UI\n\n**bold fixture** and `code`"
+        defer {
+            if app.buttons["关闭编辑标记"].exists { app.buttons["关闭编辑标记"].tap() }
+            if app.buttons["继续编辑"].exists { app.buttons["继续编辑"].tap() }
+            if editor.exists {
+                editor.tap()
+                if let value = editor.value as? String, value == draft {
+                    editor.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: draft.count))
+                }
+            }
+            if app.buttons["文字"].exists { app.buttons["文字"].tap() }
+            if app.buttons["关闭新消息"].exists { app.buttons["关闭新消息"].tap() }
+        }
+        editor.tap()
+        editor.typeText(draft)
+        dismissKeyboardIfNeeded()
+        app.buttons["Markdown"].tap()
+        app.buttons["预览"].tap()
+        XCTAssertTrue(app.staticTexts["TG Markdown UI"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["继续编辑"].exists)
+        attachScreenshot(named: "markdown-draft-preview")
+        app.buttons["继续编辑"].tap()
+        XCTAssertEqual(editor.value as? String, draft)
+        button(containing: "标记").tap()
+        XCTAssertTrue(app.staticTexts["标记设置"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["保存标记"].exists)
+        XCTAssertTrue(app.textFields["新标签名称"].exists)
+        attachScreenshot(named: "detailed-mark-settings")
+        app.buttons["关闭编辑标记"].tap()
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        XCTAssertEqual(editor.value as? String, draft)
+        XCTAssertTrue(app.buttons["发送"].exists)
+        // No send/save/confirm action is taken: all user messages stay unchanged.
+    }
+
+    func testMessageDetailHasPinnedFullWidthMoreActions() throws {
+        app.buttons["搜索消息"].tap()
+        let search = app.searchFields["搜索文本、文件名"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap()
+        search.typeText("TG-IOS-PROBE-20261027-document")
+        let document = app.staticTexts["TG-IOS-PROBE-20261027-document.txt"]
+        XCTAssertTrue(document.waitForExistence(timeout: 15))
+        dismissSearchKeyboard()
+        document.tap()
+        defer {
+            XCUIDevice.shared.orientation = .portrait
+            if app.buttons["关闭详情"].exists { app.buttons["关闭详情"].tap() }
+            if app.buttons["清除"].exists { app.buttons["清除"].tap() }
+        }
+        let more = app.buttons["更多"]
+        XCTAssertTrue(more.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["关闭详情"].exists)
+        for orientation: UIDeviceOrientation in [.portrait, .landscapeLeft] {
+            XCUIDevice.shared.orientation = orientation
+            let aligned = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                let frame = more.frame
+                return frame.width > self.app.frame.width - 65 && frame.height >= 44 && frame.maxY <= self.app.frame.maxY && more.isHittable
+            }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [aligned], timeout: 5), .completed)
+            attachScreenshot(named: "fullscreen-detail-\(orientation.rawValue)")
+        }
+    }
+
     func testComposerCanBeOpenedByTouch() {
         let launcher = app.buttons["新消息"]
         XCTAssertTrue(launcher.waitForExistence(timeout: 10))
@@ -750,6 +822,25 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         attachScreenshot(named: "message-multi-selection")
         app.buttons["取消"].tap()
         XCTAssertTrue(app.buttons["新消息"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["删除"].exists)
+    }
+
+    func testLongPressEntersSelectionAndCanBeCancelledWithoutMutation() {
+        app.buttons["搜索消息"].tap()
+        let search = app.searchFields["搜索文本、文件名"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap()
+        search.typeText("TG-IOS-PROBE-20261027-document")
+        let document = app.staticTexts["TG-IOS-PROBE-20261027-document.txt"]
+        XCTAssertTrue(document.waitForExistence(timeout: 15))
+        document.press(forDuration: 0.7)
+        XCTAssertTrue(app.staticTexts["已选择 1 条"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["删除"].exists)
+        XCTAssertFalse(app.buttons["新消息"].exists)
+        attachScreenshot(named: "physical-long-press-selection")
+        app.buttons["取消"].tap()
+        XCTAssertTrue(app.buttons["新消息"].waitForExistence(timeout: 5))
+        XCTAssertTrue(document.exists)
         XCTAssertFalse(app.buttons["删除"].exists)
     }
 

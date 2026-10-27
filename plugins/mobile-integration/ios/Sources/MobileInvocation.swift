@@ -55,6 +55,34 @@ enum MobileImportTestHooks {
   }
 }
 
+enum MobileImportBatch {
+  static func discard(_ items: [JsonObject]) {
+    guard let support = try? FileManager.default.url(
+      for: .applicationSupportDirectory, in: .userDomainMask,
+      appropriateFor: nil, create: false
+    ) else { return }
+    let imports = support.appendingPathComponent("TransferGenie/MobileImports", isDirectory: true)
+      .standardizedFileURL
+    for item in items {
+      guard let path = item["path"] as? String else { continue }
+      let directory = URL(fileURLWithPath: path).standardizedFileURL.deletingLastPathComponent()
+      guard directory.deletingLastPathComponent() == imports,
+            UUID(uuidString: directory.lastPathComponent) != nil else { continue }
+      try? FileManager.default.removeItem(at: directory)
+    }
+  }
+
+  static func finish(
+    _ items: [JsonObject], error: MobileIntegrationError?
+  ) -> Result<[JsonObject], MobileIntegrationError> {
+    if let error {
+      discard(items)
+      return .failure(error)
+    }
+    return .success(items)
+  }
+}
+
 final class MobileInvocation {
   private let invoke: Invoke
   private let lock = NSLock()

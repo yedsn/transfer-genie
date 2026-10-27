@@ -12,6 +12,7 @@ export interface MobileMessage {
   time: string;
   title: string;
   body?: string;
+  format?: "text" | "markdown";
   meta?: string;
   marked: boolean;
   tagIds: string[];
@@ -95,6 +96,7 @@ function mapMessage(message: any): MobileMessage {
     time: formatTime(timestampMs),
     title: kind === "text" ? (String(message?.content || "文本消息").split(/\r?\n/)[0].slice(0, 52) || "文本消息") : originalName,
     body: kind === "text" ? String(message?.content || "") : undefined,
+    format: message?.format === "markdown" ? "markdown" : "text",
     meta: kind === "text" ? undefined : [originalName.split(".").pop()?.toUpperCase(), formatBytes(Number(message?.size || 0))].filter(Boolean).join(" · "),
     marked: !!message?.marked,
     tagIds: Array.isArray(message?.marked_tag_ids) ? message.marked_tag_ids : [],
@@ -171,7 +173,10 @@ export function useMobileController() {
       text: "",
       format: "text",
       marked: false,
+      tagIds: [] as string[],
+      dueDate: "",
       attachments: [] as DraftAttachment[],
+      selecting: false,
       sending: false,
       savedLocally: false,
       error: "",
@@ -219,6 +224,11 @@ export function useMobileController() {
     state.activeProfile = null;
     state.composer.attachments = [];
     state.composer.text = "";
+    state.composer.marked = false;
+    state.composer.tagIds = [];
+    state.composer.dueDate = "";
+    state.composer.selecting = false;
+    state.composer.error = "";
     clearFeedback();
     state.boot = "loading";
     if (previewMode) {
@@ -636,8 +646,10 @@ export function useMobileController() {
   }
 
   async function selectMedia() {
-    if (state.composer.sending) return;
+    if (state.boot !== "ready" || state.busy || state.composer.sending || state.composer.selecting) return;
     const generation = viewGeneration;
+    state.composer.selecting = true;
+    state.composer.error = "";
     clearFeedback();
     try {
       const result = await api().mobileIntegration.selectMedia(10);
@@ -657,12 +669,14 @@ export function useMobileController() {
         state.composer.error = errorText(error);
         setError(error);
       }
-    }
+    } finally { if (generation === viewGeneration) state.composer.selecting = false; }
   }
 
   async function selectDocuments() {
-    if (state.composer.sending) return;
+    if (state.boot !== "ready" || state.busy || state.composer.sending || state.composer.selecting) return;
     const generation = viewGeneration;
+    state.composer.selecting = true;
+    state.composer.error = "";
     clearFeedback();
     try {
       const result = await api().mobileIntegration.selectDocuments(true);
@@ -681,11 +695,11 @@ export function useMobileController() {
         state.composer.error = errorText(error);
         setError(error);
       }
-    }
+    } finally { if (generation === viewGeneration) state.composer.selecting = false; }
   }
 
   async function previewDraftAttachment(id: string) {
-    if (state.busy || state.composer.sending) return;
+    if (state.busy || state.composer.sending || state.composer.selecting) return;
     const attachment = state.composer.attachments.find((item) => item.id === id);
     if (!attachment) return;
     if (previewMode) { state.notice = "浏览器预览不调用 iOS 系统文件操作"; return; }
@@ -740,7 +754,7 @@ export function useMobileController() {
   }
 
   async function sendDraft() {
-    if (state.composer.sending) return false;
+    if (state.boot !== "ready" || state.busy || state.composer.sending || state.composer.selecting) return false;
     const generation = viewGeneration;
     const text = state.composer.text.trim();
     if (!text && !state.composer.attachments.length) return false;
@@ -750,7 +764,13 @@ export function useMobileController() {
     clearFeedback();
     let failed = false;
     let localSaveCount = 0;
-    const markedOptions = { marked: state.composer.marked, selectedTagIds: [], dueDate: null, createdTags: [], deletedTagIds: [] };
+    const markedOptions = {
+      marked: state.composer.marked,
+      selectedTagIds: state.composer.marked ? [...state.composer.tagIds] : [],
+      dueDate: state.composer.marked ? state.composer.dueDate || null : null,
+      createdTags: [],
+      deletedTagIds: [],
+    };
     try {
       if (text) {
         await api().message.sendText({ text, format: state.composer.format, markedOptions });
@@ -772,6 +792,11 @@ export function useMobileController() {
       }
       if (text && localSaveCount > 0) state.composer.text = "";
       state.composer.attachments = remaining;
+      if (!failed) {
+        state.composer.marked = false;
+        state.composer.tagIds = [];
+        state.composer.dueDate = "";
+      }
       state.composer.savedLocally = localSaveCount > 0;
       state.notice = failed ? "部分内容未保存，请重试失败附件" : "已保存到本机，正在等待云端确认";
       await Promise.all([refreshMessages(), refreshMarked(), refreshStatus(), refreshTransfers()]);
@@ -822,7 +847,7 @@ export function useMobileController() {
   }
 
   async function updateMarkedMetadata(message: MobileMessage, tagIds: string[], dueDate: string | null) {
-    if (!message.marked || state.busy) return false;
+    if (state.boot !== "ready" || state.busy || state.composer.sending) return false;
     const generation = viewGeneration;
     state.busy = true;
     clearFeedback();
@@ -878,7 +903,7 @@ export function useMobileController() {
     } finally { if (generation === viewGeneration) state.busy = false; }
   }
 
-  async function applyMessageSelection(messages: MobileMessage[], action: "mark" | "unmark" | "delete") {
+  async function applyMessageSelection(messages: MobileMessage[], action: "mark" | "unmark" | "delete", metadata?: { tagIds: string[]; dueDate: string | null }) {
     if (state.busy || state.boot !== "ready" || !messages.length) return null;
     const generation = viewGeneration;
     const targets = [...new Map(messages.map((message) => [message.filename, message])).values()];
@@ -897,7 +922,7 @@ export function useMobileController() {
         for (const message of targets) {
           if (generation !== viewGeneration) return null;
           try {
-            if (action === "mark" && !message.marked) await api().message.mark(message.filename, message.tagIds, message.dueDate || null);
+            if (action === "mark" && (metadata || !message.marked)) await api().message.mark(message.filename, metadata?.tagIds || message.tagIds, metadata ? metadata.dueDate : message.dueDate || null);
             if (action === "unmark" && message.marked) await api().message.unmark(message.filename);
             if (generation !== viewGeneration) return null;
             succeeded.push(message.filename);
@@ -1002,7 +1027,7 @@ export function useMobileController() {
   }
 
   async function chooseProfile(profile: any) {
-    if (state.busy || state.composer.sending || state.sender.saving) return;
+    if (state.busy || state.composer.sending || state.composer.selecting || state.sender.saving) return;
     state.busy = true;
     clearFeedback();
     try {
@@ -1012,7 +1037,7 @@ export function useMobileController() {
   }
 
   async function logout() {
-    if (!state.activeProfile || state.busy || state.composer.sending || state.sender.saving) return;
+    if (!state.activeProfile || state.busy || state.composer.sending || state.composer.selecting || state.sender.saving) return;
     state.busy = true;
     clearFeedback();
     try { await api().settings.supabaseLogout(state.activeProfile.id); await initialize(); }
@@ -1020,7 +1045,7 @@ export function useMobileController() {
   }
 
   async function switchSpace(space: any) {
-    if (!state.activeProfile || space.current || state.busy || state.composer.sending || state.sender.saving) return;
+    if (!state.activeProfile || space.current || state.busy || state.composer.sending || state.composer.selecting || state.sender.saving) return;
     state.busy = true;
     clearFeedback();
     try { await api().settings.switchSupabaseSpace({ sourceProfileId: state.activeProfile.id, spaceId: space.id }); await initialize(); }

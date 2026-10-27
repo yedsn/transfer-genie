@@ -52,7 +52,7 @@ final class DocumentPickerCoordinator: NSObject, UIDocumentPickerDelegate {
     DispatchQueue.global(qos: .userInitiated).async { [weak self] in
       guard let self else { return }
       do {
-        let items = try urls.map(Self.copyIntoSandbox)
+        let items = try Self.copySelections(urls)
         DispatchQueue.main.async {
           self.reply.resolve(["items": items])
           self.finish()
@@ -71,6 +71,19 @@ final class DocumentPickerCoordinator: NSObject, UIDocumentPickerDelegate {
           self.finish()
         }
       }
+    }
+  }
+
+  static func copySelections(_ sources: [URL]) throws -> [JsonObject] {
+    var items: [JsonObject] = []
+    do {
+      for source in sources {
+        items.append(try copyIntoSandbox(source))
+      }
+      return items
+    } catch {
+      MobileImportBatch.discard(items)
+      throw error
     }
   }
 

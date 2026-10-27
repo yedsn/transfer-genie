@@ -63,10 +63,11 @@ final class MediaPickerCoordinator: NSObject, PHPickerViewControllerDelegate {
 
     group.notify(queue: .main) { [weak self] in
       guard let self else { return }
-      if let error = firstError {
+      switch MobileImportBatch.finish(selected.compactMap { $0 }, error: firstError) {
+      case .failure(let error):
         self.reply.reject(error)
-      } else {
-        self.reply.resolve(["items": selected.compactMap { $0 }])
+      case .success(let items):
+        self.reply.resolve(["items": items])
       }
       self.finish()
     }
@@ -95,6 +96,7 @@ final class MediaPickerCoordinator: NSObject, PHPickerViewControllerDelegate {
         return
       }
 
+      var copiedURL: URL?
       do {
         let originalName = provider.suggestedName?.trimmingCharacters(in: .whitespacesAndNewlines)
         let destination = try Self.copyIntoSandbox(
@@ -102,6 +104,7 @@ final class MediaPickerCoordinator: NSObject, PHPickerViewControllerDelegate {
           originalName: originalName,
           contentType: contentType
         )
+        copiedURL = destination
         let values = try destination.resourceValues(forKeys: [.fileSizeKey])
         completion(.success([
           "path": destination.path,
@@ -111,8 +114,10 @@ final class MediaPickerCoordinator: NSObject, PHPickerViewControllerDelegate {
           "sizeBytes": values.fileSize ?? 0,
         ]))
       } catch let error as MobileIntegrationError {
+        if let copiedURL { MobileImportBatch.discard([["path": copiedURL.path]]) }
         completion(.failure(error))
       } catch {
+        if let copiedURL { MobileImportBatch.discard([["path": copiedURL.path]]) }
         completion(.failure(MobileIntegrationError(
           code: .copyFailed,
           message: "Failed to copy the selected Photos item into the app sandbox: \(error.localizedDescription)"

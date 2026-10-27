@@ -143,6 +143,8 @@ Draft attachments participate in that same horizontal action strip at accessibil
 
 ### 9. Gate implementation with a vertical technical probe
 
+The 2026-10-27 mobile refinements reuse existing `format`, tag IDs and day-precision due-date fields. A mobile Markdown renderer sanitizes generated HTML and disables passive remote images. Composer mark settings remain local until sending; message mark settings call the existing mark command only on save. All unmark entry points require an in-app confirmation. Marked rows replace the left completion checkbox with a right-side pin and show bounded multiline body plus complete tag metadata. Details occupy the visible safe-area viewport with a scrollable body and a separate full-width More action. The iOS asset catalog uses the existing project folder/arrow brand, not Tauri's generated placeholder.
+
 Before full mobile UI adaptation, the implementation SHALL prove:
 
 - iOS target compilation and generated Xcode project;

@@ -84,7 +84,7 @@ Safety gates:
   VPHONE_ALLOW_SNAPSHOT_REVERT=1 is required with --snapshot-reset.
 
 This suite is supplemental only. Passing never replaces the official Simulator
-or the Jam iPhone 12 release, Keychain, Photos/iCloud, lifecycle, cellular, media,
+or the Jam physical-iPhone release, Keychain, Photos/iCloud, lifecycle, cellular, media,
 performance, or stability acceptance gates.`;
 }
 
