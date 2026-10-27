@@ -19,6 +19,8 @@ class MobileIntegrationPlugin: Plugin {
 
   override func load(webview: WKWebView) {
     super.load(webview: webview)
+    // Keep app layout fixed; Dynamic Type is handled independently below.
+    webview.scrollView.pinchGestureRecognizer?.isEnabled = false
     #if DEBUG && targetEnvironment(simulator)
     if ProcessInfo.processInfo.environment["TRANSFER_GENIE_IOS_LAYOUT_PROBE"] == "1" {
       SimulatorLayoutProbe().install(in: webview)
@@ -64,6 +66,7 @@ class MobileIntegrationPlugin: Plugin {
   }
 
   private func refreshAccessibility() {
+    accessibilityWebview?.scrollView.pinchGestureRecognizer?.isEnabled = false
     accessibilityWebview?.evaluateJavaScript(MobileAccessibility.currentScript(), completionHandler: nil)
   }
 

@@ -1062,6 +1062,60 @@ struct SendMessageResult {
     transcript_raw_text: Option<String>,
 }
 
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MobileComposerDraftAttachment {
+    client_id: String,
+    path: String,
+    original_name: String,
+    media_type: String,
+    #[serde(default)]
+    content_type: Option<String>,
+    #[serde(default)]
+    size_bytes: u64,
+    #[serde(default, skip_deserializing)]
+    available: bool,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MobileComposerDraftPayload {
+    #[serde(default)]
+    text_client_id: String,
+    #[serde(default)]
+    text: String,
+    #[serde(default = "default_text_format")]
+    format: String,
+    #[serde(default)]
+    marked: bool,
+    #[serde(default)]
+    tag_ids: Vec<String>,
+    #[serde(default)]
+    due_date: Option<String>,
+    #[serde(default)]
+    attachments: Vec<MobileComposerDraftAttachment>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MobileComposerDraftResult {
+    #[serde(flatten)]
+    payload: MobileComposerDraftPayload,
+    updated_at_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MobileComposerDraftScope {
+    profile_id: String,
+    user_id: String,
+    space_id: String,
+}
+
+fn default_text_format() -> String {
+    "text".to_string()
+}
+
 #[derive(Serialize)]
 struct DeleteSummary {
     deleted: usize,
@@ -10357,8 +10411,9 @@ async fn send_text(
     text: String,
     format: Option<String>,
     marked_options: Option<SendMarkedOptionsInput>,
+    client_id: Option<String>,
 ) -> Result<SendMessageResult, String> {
-    send_text_impl(&state, text, format, marked_options).await
+    send_text_with_client_id_impl(&state, text, format, marked_options, client_id).await
 }
 
 fn normalize_send_text_format(format: Option<String>) -> Result<String, String> {
@@ -10488,6 +10543,16 @@ async fn send_text_impl(
     format: Option<String>,
     marked_options: Option<SendMarkedOptionsInput>,
 ) -> Result<SendMessageResult, String> {
+    send_text_with_client_id_impl(state, text, format, marked_options, None).await
+}
+
+async fn send_text_with_client_id_impl(
+    state: &AppState,
+    text: String,
+    format: Option<String>,
+    marked_options: Option<SendMarkedOptionsInput>,
+    client_id: Option<String>,
+) -> Result<SendMessageResult, String> {
     let settings = current_settings(&state)?;
     let context = resolve_send_target_context(state, &settings)?;
     let format = normalize_send_text_format(format)?;
@@ -10498,6 +10563,7 @@ async fn send_text_impl(
         text,
         format,
         marked_options,
+        client_id,
     )
     .await
 }
@@ -10509,6 +10575,7 @@ async fn send_text_to_context(
     text: String,
     format: String,
     marked_options: Option<SendMarkedOptionsInput>,
+    client_id: Option<String>,
 ) -> Result<SendMessageResult, String> {
     ensure_integration_context(state, context)?;
     let is_markdown = format == "markdown";
@@ -10528,7 +10595,20 @@ async fn send_text_to_context(
     {
         let _guard = state.sync_guard.lock().await;
         ensure_integration_context(state, context)?;
-        let message_id = uuid::Uuid::new_v4().to_string();
+        let stable_ids = client_id.as_deref().map(str::trim).filter(|value| !value.is_empty())
+            .map(|value| supabase_client_send_ids(&profile.id, &session.user_id, value));
+        let message_id = stable_ids.as_ref().map(|ids| ids.message_id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        if stable_ids.is_some() {
+            if let Some((existing, _)) = db::get_message_by_id_for_scope(
+                &state.db_path, &profile.id, &session.user_id, &message_id,
+            ).map_err(|error| format!("读取已有文本发送记录失败: {error}"))? {
+                if existing.kind == "text" && existing.content.as_deref() == Some(text.as_str()) && existing.format == format {
+                    return Ok(supabase_send_result(&profile.id, &existing));
+                }
+                return Err("该文本发送请求已用于其他内容，请重新编辑后发送".into());
+            }
+        }
         let mut message = DbMessage {
             endpoint_id: profile.id.clone(),
             filename: filename.clone(),
@@ -10562,7 +10642,12 @@ async fn send_text_to_context(
             &mut message,
             marked_options.unwrap_or_default(),
         )?;
-        let operation = outbox_operation(
+        let operation = if let Some(ids) = stable_ids.as_ref() {
+            outbox_operation_with_id(
+                &ids.message_operation_id, &profile.id, &session.user_id, "message",
+                &message_id, "upsert", 0, supabase_message_payload(&message),
+            )?
+        } else { outbox_operation(
             &profile.id,
             &session.user_id,
             "message",
@@ -10570,7 +10655,7 @@ async fn send_text_to_context(
             "upsert",
             0,
             supabase_message_payload(&message),
-        )?;
+        )? };
         db::save_message_with_marked_changes_and_enqueue(
             &state.db_path,
             &message,
@@ -10888,6 +10973,211 @@ fn get_mobile_cache_summary(state: State<'_, AppState>) -> Result<MobileCacheSum
         return Err("此操作仅适用于 iOS 缓存".into());
     }
     mobile_cache_inventory(&state).map(|(summary, _)| summary)
+}
+
+fn normalize_mobile_composer_draft(
+    mut payload: MobileComposerDraftPayload,
+) -> Result<MobileComposerDraftPayload, String> {
+    if payload.text.len() > 1_000_000 {
+        return Err("草稿文字过长，无法自动保存".into());
+    }
+    payload.format = match payload.format.trim().to_ascii_lowercase().as_str() {
+        "markdown" => "markdown".into(),
+        "text" | "" => "text".into(),
+        _ => return Err("草稿格式无效".into()),
+    };
+    payload.tag_ids.retain(|value| !value.trim().is_empty());
+    payload.tag_ids.sort();
+    payload.tag_ids.dedup();
+    payload.due_date = payload
+        .due_date
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if payload.attachments.len() > 50 {
+        return Err("草稿附件数量过多".into());
+    }
+    let mut client_ids = HashSet::new();
+    for attachment in &mut payload.attachments {
+        attachment.client_id = attachment.client_id.trim().to_string();
+        attachment.path = attachment.path.trim().to_string();
+        attachment.original_name = attachment.original_name.trim().to_string();
+        attachment.media_type = match attachment.media_type.trim().to_ascii_lowercase().as_str() {
+            "image" => "image".into(),
+            "video" => "video".into(),
+            "file" => "file".into(),
+            _ => return Err("草稿附件类型无效".into()),
+        };
+        attachment.available = false;
+        if attachment.client_id.is_empty()
+            || attachment.path.is_empty()
+            || attachment.original_name.is_empty()
+            || !client_ids.insert(attachment.client_id.clone())
+        {
+            return Err("草稿附件信息不完整或重复".into());
+        }
+    }
+    Ok(payload)
+}
+
+fn mobile_composer_draft_is_empty(payload: &MobileComposerDraftPayload) -> bool {
+    payload.text.is_empty()
+        && payload.attachments.is_empty()
+        && !payload.marked
+        && payload.tag_ids.is_empty()
+        && payload.due_date.is_none()
+}
+
+#[cfg(any(target_os = "ios", test))]
+fn mobile_draft_import_path(root: &Path, raw: &str) -> Result<PathBuf, String> {
+    let path = Path::new(raw);
+    let relative = if path.is_absolute() {
+        path.strip_prefix(root).map_err(|_| "草稿附件不在应用导入沙盒中")?
+    } else {
+        path
+    };
+    let parts: Vec<_> = relative.components().collect();
+    if parts.len() != 2
+        || parts.iter().any(|part| !matches!(part, std::path::Component::Normal(_)))
+        || uuid::Uuid::parse_str(&parts[0].as_os_str().to_string_lossy()).is_err()
+    {
+        return Err("草稿附件路径无效".into());
+    }
+    let resolved = root.join(relative);
+    if resolved.exists() && !is_within_dir(&resolved, root) {
+        return Err("草稿附件路径超出应用导入沙盒".into());
+    }
+    Ok(resolved)
+}
+
+#[cfg(target_os = "ios")]
+fn mobile_draft_import_root(state: &AppState) -> Result<PathBuf, String> {
+    // Tauri app_data_dir is Application Support/<bundle id>; Swift uses
+    // Application Support/TransferGenie/MobileImports. Store paths relative
+    // to this root so a replacement installation can relocate its container.
+    state.settings_path.parent().and_then(Path::parent)
+        .map(|support| support.join("TransferGenie/MobileImports"))
+        .ok_or_else(|| "无法定位移动端导入沙盒".into())
+}
+
+fn mobile_composer_scope(
+    state: &AppState,
+) -> Result<(StorageProfile, supabase_auth::SupabaseSession, String), String> {
+    let (profile, session) = active_supabase_scope(state)?;
+    let space_id = profile
+        .supabase
+        .as_ref()
+        .map(|config| config.space_id.trim())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "请先选择 Supabase Space".to_string())?
+        .to_string();
+    Ok((profile, session, space_id))
+}
+
+fn get_mobile_composer_draft_impl(
+    state: &AppState,
+) -> Result<MobileComposerDraftResult, String> {
+    let (profile, session, space_id) = mobile_composer_scope(state)?;
+    let Some(record) = db::get_mobile_composer_draft(
+        &state.db_path,
+        &profile.id,
+        &session.user_id,
+        &space_id,
+    )
+    .map_err(|error| format!("读取移动端草稿失败: {error}"))?
+    else {
+        return Ok(MobileComposerDraftResult {
+            payload: MobileComposerDraftPayload::default(),
+            updated_at_ms: None,
+        });
+    };
+    let mut payload: MobileComposerDraftPayload = serde_json::from_str(&record.payload_json)
+        .map_err(|error| format!("移动端草稿数据损坏: {error}"))?;
+    payload = normalize_mobile_composer_draft(payload)?;
+    for attachment in &mut payload.attachments {
+        #[cfg(target_os = "ios")]
+        {
+            match mobile_draft_import_path(&mobile_draft_import_root(state)?, &attachment.path) {
+                Ok(path) => attachment.path = path.to_string_lossy().into_owned(),
+                Err(_) => { attachment.available = false; continue; }
+            }
+        }
+        attachment.available = Path::new(&attachment.path).is_file();
+    }
+    Ok(MobileComposerDraftResult {
+        payload,
+        updated_at_ms: Some(record.updated_at_ms),
+    })
+}
+
+fn save_mobile_composer_draft_impl(
+    state: &AppState,
+    payload: MobileComposerDraftPayload,
+) -> Result<MobileComposerDraftResult, String> {
+    let (profile, session, space_id) = mobile_composer_scope(state)?;
+    #[allow(unused_mut)] // Relative sandbox paths are normalized only on iOS.
+    let mut payload = normalize_mobile_composer_draft(payload)?;
+    #[cfg(target_os = "ios")]
+    {
+        let root = mobile_draft_import_root(state)?;
+        for attachment in &mut payload.attachments {
+            let path = mobile_draft_import_path(&root, &attachment.path)?;
+            attachment.path = path.strip_prefix(&root).unwrap().to_string_lossy().into_owned();
+        }
+    }
+    if mobile_composer_draft_is_empty(&payload) {
+        db::delete_mobile_composer_draft(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            &space_id,
+        )
+        .map_err(|error| format!("清除移动端草稿失败: {error}"))?;
+        return Ok(MobileComposerDraftResult { payload, updated_at_ms: None });
+    }
+    let updated_at_ms = now_ms();
+    let payload_json = serde_json::to_string(&payload)
+        .map_err(|error| format!("序列化移动端草稿失败: {error}"))?;
+    db::upsert_mobile_composer_draft(
+        &state.db_path,
+        &db::MobileComposerDraftRecord {
+            endpoint_id: profile.id,
+            owner_scope: session.user_id,
+            space_id,
+            payload_json,
+            updated_at_ms,
+        },
+    )
+    .map_err(|error| format!("保存移动端草稿失败: {error}"))?;
+    Ok(MobileComposerDraftResult {
+        payload,
+        updated_at_ms: Some(updated_at_ms),
+    })
+}
+
+#[tauri::command]
+fn get_mobile_composer_draft(
+    state: State<'_, AppState>,
+) -> Result<MobileComposerDraftResult, String> {
+    if !cfg!(target_os = "ios") {
+        return Err("此操作仅适用于 iOS 草稿".into());
+    }
+    get_mobile_composer_draft_impl(&state)
+}
+
+#[tauri::command]
+fn save_mobile_composer_draft(
+    state: State<'_, AppState>,
+    payload: MobileComposerDraftPayload,
+    scope: MobileComposerDraftScope,
+) -> Result<MobileComposerDraftResult, String> {
+    if !cfg!(target_os = "ios") {
+        return Err("此操作仅适用于 iOS 草稿".into());
+    }
+    let (profile, session, space_id) = mobile_composer_scope(&state)?;
+    if profile.id != scope.profile_id || session.user_id != scope.user_id || space_id != scope.space_id {
+        return Err("账号或空间已切换，旧草稿保存已取消".into());
+    }
+    save_mobile_composer_draft_impl(&state, payload)
 }
 
 async fn clear_mobile_cache_impl(state: &AppState) -> Result<MobileCacheSummary, String> {
@@ -22003,6 +22293,8 @@ pub fn run() {
             get_sync_status,
             get_mobile_cache_summary,
             clear_mobile_cache,
+            get_mobile_composer_draft,
+            save_mobile_composer_draft,
             start_telegram_bridge,
             stop_telegram_bridge,
             mark_message,
@@ -23676,6 +23968,66 @@ mod tests {
                 .download_exists
         );
         let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn mobile_composer_draft_restores_files_and_preserves_account_isolation() {
+        let temp_dir = std::env::temp_dir().join(format!("tg-mobile-draft-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(&temp_dir, test_supabase_settings());
+        install_test_supabase_session(&state);
+        db::init_db(&state.db_path, None).unwrap();
+        let file = temp_dir.join("fixture.pdf");
+        fs::write(&file, b"fixture").unwrap();
+        let payload = MobileComposerDraftPayload {
+            text_client_id: "stable-text".into(), text: "# fixture".into(), format: "markdown".into(),
+            marked: true, tag_ids: vec!["work".into()], due_date: Some("2026-11-01".into()),
+            attachments: vec![MobileComposerDraftAttachment {
+                client_id: "stable-file".into(), path: file.to_string_lossy().into_owned(),
+                original_name: "fixture.pdf".into(), media_type: "file".into(), size_bytes: 7,
+                ..Default::default()
+            }],
+        };
+        save_mobile_composer_draft_impl(&state, payload).unwrap();
+        let draft = get_mobile_composer_draft_impl(&state).unwrap();
+        assert_eq!(draft.payload.text_client_id, "stable-text");
+        assert_eq!(draft.payload.text, "# fixture");
+        assert!(draft.payload.attachments[0].available);
+        fs::remove_file(file).unwrap();
+        assert!(!get_mobile_composer_draft_impl(&state).unwrap().payload.attachments[0].available);
+        state.supabase_sessions.lock().unwrap().get_mut("supabase-1").unwrap().user_id = "user-b".into();
+        assert!(get_mobile_composer_draft_impl(&state).unwrap().updated_at_ms.is_none());
+        state.supabase_sessions.lock().unwrap().get_mut("supabase-1").unwrap().user_id = "user-a".into();
+        state.settings.lock().unwrap().storage_profiles[0].supabase.as_mut().unwrap().space_id = "space-b".into();
+        assert!(get_mobile_composer_draft_impl(&state).unwrap().updated_at_ms.is_none());
+        state.settings.lock().unwrap().storage_profiles[0].supabase.as_mut().unwrap().space_id = "00000000-0000-4000-8000-000000000001".into();
+        save_mobile_composer_draft_impl(&state, MobileComposerDraftPayload::default()).unwrap();
+        assert!(get_mobile_composer_draft_impl(&state).unwrap().updated_at_ms.is_none());
+    }
+
+    #[test]
+    fn mobile_composer_draft_paths_reject_escape_and_support_container_relocation() {
+        let root = std::env::temp_dir().join(format!("tg-mobile-imports-{}", uuid::Uuid::new_v4()));
+        let relative = format!("{}/fixture.pdf", uuid::Uuid::new_v4());
+        assert_eq!(mobile_draft_import_path(&root, &relative).unwrap(), root.join(&relative));
+        assert_eq!(mobile_draft_import_path(&root, &root.join(&relative).to_string_lossy()).unwrap(), root.join(&relative));
+        for invalid in ["../fixture.pdf", "../../secret", "/etc/passwd", "bad/fixture.pdf"] {
+            assert!(mobile_draft_import_path(&root, invalid).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn mobile_composer_text_retry_returns_same_local_message() {
+        let temp_dir = std::env::temp_dir().join(format!("tg-mobile-text-id-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(&temp_dir, test_supabase_settings());
+        install_test_supabase_session(&state);
+        db::init_db(&state.db_path, None).unwrap();
+        let first = send_text_with_client_id_impl(&state, "fixture".into(), Some("markdown".into()), None, Some("stable-text".into())).await.unwrap();
+        let retried = send_text_with_client_id_impl(&state, "fixture".into(), Some("markdown".into()), None, Some("stable-text".into())).await.unwrap();
+        assert_eq!(first.filename, retried.filename);
+        assert_eq!(db::count_pending_outbox(&state.db_path, "supabase-1", "user-a").unwrap(), 1);
+        assert!(send_text_with_client_id_impl(&state, "different".into(), Some("markdown".into()), None, Some("stable-text".into())).await.is_err());
     }
 
     fn seed_mobile_cache_attachment(

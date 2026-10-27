@@ -606,3 +606,30 @@ xcodebuild -project tests/ios-ui/TransferGenieSimulatorUITests.xcodeproj \
 - 用户确认信任后只读复核：`Jam` iPhone 17 Pro Max 已有线连接、配对，开发者模式开启且 DDI 可用；旧 iPhone 12 不在设备列表。本轮未安装或测试 `Jam`。VPhone 解锁检查后仍为首次 Supabase 配置页面，当前签名安装的认证同步和附件测试仍须用户登录；7.4 和其他真机任务保持未完成。
 - 同一源码以 `APPLE_DEVELOPMENT_TEAM=9RV293JR6V CARGO_HOME="$PWD/.cargo-ios" CARGO_NET_OFFLINE=true npx tauri ios build --archive-only --ci --export-method debugging` 构建 Release iPhoneOS 包，strict codesign 和含 VPhone/Jam 的 provisioning profile 通过；日志 `/Volumes/VPhone/installers/tg-ios-selection-lock-vphone-20261027-build.log`。仅在 VPhone 上经 installd 两次覆盖安装、两次冷启动，基础 smoke 12/12、无新增 crash，报告 `/Volumes/VPhone/installers/vphone-smoke/20261027-selection-lock-release/report.json`。未登录认证标记 `skipped-not-signed-in`，同步、附件和快照场景未运行；未对真实消息进行写入。
 - 重新执行 `cargo fmt --all -- --check`、`git diff --check` 和 `openspec validate add-supabase-ios-client --strict` 均通过。VPhone 测试脚本帮助文本将旧的 `Jam iPhone 12` 表述改为 `Jam physical-iPhone`，以免误导新的验收目标；`node --check` 通过。整体仍 37/48。
+# 2026-10-27 移动端图标、Markdown、标记与详情后续
+
+- iOS 图标：18 个 `icons/ios` 源 PNG 均按资产清单检查像素尺寸并复制到 Xcode AppIcon；官方 Simulator archive 的 120×120 图标经实际解码确认为绿色文件夹/白色箭头。
+- Markdown 使用第三方 `marked` 解析、`DOMPurify` 白名单净化；浏览器 fixture 覆盖标题、加粗、代码、链接、脚本/图片拦截、草稿预览和列表/详情渲染。控制器测试验证 Markdown 格式、标签日期透传、附件部分失败重试复用标签 ID。
+- 标记与详情：浏览器覆盖多行标记内容、全部标签、取消标记确认、取消不写入，详情 320×568、390×844、横屏和大字体，以及同一详情节点/滚动位置保留、底层 inert、Tab 焦点和嵌套取消；未修改真实消息。
+- 官方 Simulator Release 使用原模拟签名组 `LW6QTNHNV4.com.transfergenie` 覆盖安装，保留原登录。真实 WKWebView 执行 1.8 倍双指手势后输入框尺寸未改变；详情横竖屏全宽“更多”、打开菜单并取消回到详情通过。2/2，日志 `/Volumes/VPhone/installers/tg-zoom-detail-simulator-ui-final-20261027.log`。此前 Markdown 草稿预览及标记设置取消 1/1、无写入通过；日志 `/Volumes/VPhone/installers/tg-richtext-final-native-20261027.ydfXFW/ui.log`。Swift 插件 34/34，日志 `/Volumes/VPhone/installers/tg-zoom-swift-final-20261027.log`。
+- 浏览器 `tests/test_mobile_feed_browser.js`、`tests/test_mobile_keyboard_browser.js`、`tests/test_mobile_accessibility_browser.js`、`tests/test_mobile_ui_shell.js` 和 `npm run build` 通过。官方 Simulator 无障碍字体与正常滚动仍可使用；系统级辅助缩放和原生媒体预览不受页面限制。
+- VPhone 最新签名包两次覆盖安装、冷启动和登录恢复共 14/14，无新增 crash；报告 `/Volumes/VPhone/installers/vphone-smoke/20261027-zoom-detail-final/report.json`。截图和认证 UI 只确认登录恢复；发送/拉取及本轮新增交互尚未在 VPhone 完整验收，详见各未完成设备验收任务。
+
+## 2026-10-27 标记设置保留来源弹框
+
+- 标记设置与取消标记确认保留来源 composer/actions 的真实 DOM，详情→更多→标记按层叠加。下层使用 inert/aria-hidden，只有顶层可触摸与辅助导航；保存或取消回到来源弹框，焦点恢复到入口。Composer 文字、附件、选区与 Markdown 预览不因打开标记设置而重建；详情阅读位置保留。
+- `npm run build`、消息流/键盘/辅助功能浏览器测试、`node tests/test_mobile_ui_shell.js` 和 strict OpenSpec 校验通过。新增 fixture 检查原 composer、textarea、preview 和 actions 节点身份，附件/选区保留、三层 z-index、Tab 焦点与遮罩返回；所有写入均为本地 stub。修复测试发现的三层 CSS specificity 冲突，最终截图确认标记设置位于原消息弹框上方。
+- 以 `LW6QTNHNV4` 构建官方 Simulator Release，strict codesign、iPhoneSimulator 平台和模拟 Keychain group 核验通过；覆盖安装保留原登录。真实触摸 Markdown→标记→取消与详情→更多→标记→取消→详情 2/2、0失败/0跳过。日志 `/Volumes/VPhone/installers/tg-mark-layer-native-20261027.bI8AIO/ui.log`，xcresult `/Volumes/VPhone/installers/tg-mark-layer-native-20261027.bI8AIO/Logs/Test/Test-TransferGenieSimulatorUITests-2026.10.27_20-01-42-+0800.xcresult`；截图导出到同目录 `screenshots/`。测试未发送消息或保存标记。
+- 同源码 `9RV293JR6V` iPhoneOS Release archive 构建及 strict codesign 通过；生成工程 Team 恢复构建前值。VPhone 原运行应用停在非空未发送草稿，只检查是否为空、不输出正文，未终止进程、覆盖安装、清空草稿或写入标记。本次 VPhone 新交互仍待验；未操作 Jam，不声明完整虚拟机或真机验收完成。
+
+## 2026-10-27 自动化保护与最新标记流程
+
+- VPhone smoke 在安装和结束进程前检查当前页面与草稿：打开的编辑器、非空草稿、无法验证的草稿或其他不确定页面会停止。只检查是否为空，不记录草稿正文；纯函数测试通过，VPhone 上真实非空草稿触发保护且进程未终止。
+- 更新过时的 Simulator 测试以适应标记设置及取消标记确认，搜索后先收起键盘并区分导航与批量按钮；此前两次尝试由于菜单点击与按钮定位问题失败，均记录在 `/Volumes/VPhone/installers/tg-mark-cancel-native-20261027.rj2rlZ/ui.log` 和 `/Volumes/VPhone/installers/tg-mark-functional-native-20261027.UvW6ED/ui.log`。失败时创建的两个专用 fixture 已在后续限定精确名称的流程清理。单消息标记/删除取消通过，标记编辑入口通过；批量标记、取消标记和删除独立 fixture 及清理回归 2/2 通过，日志 `/Volumes/VPhone/installers/tg-mark-functional-retry-20261027.sAphjQ/ui.log`。测试不触碰普通用户消息。
+
+## 2026-10-27 Markdown 移动编辑交互
+
+- 移动端 Markdown 模式新增紧凑的横向触控工具栏：粗体、斜体、二级标题、无序/有序列表、引用、行内或围栏代码及链接。工具对选中文字或当前光标操作；空选区插入标记并把光标放入内容位置，链接选中 URL 供直接覆盖，多行代码生成 fenced block。`execCommand(insertText)` 优先接入 WKWebView 原生撤销栈，失败时使用 setRangeText 回退。
+- 预览按钮作为右侧独立动作，进入预览时保存编辑器滚动位置，返回编辑恢复焦点、选区、源码和阅读位置；切回文字模式不改写 Markdown 源码。编辑区采用等宽字体并提供场景提示。工具栏为横向滚动，不挤压正文；普通、320px、横屏键盘和最大辅助字体下触控目标均至少 44pt。
+- `tests/test_mobile_markdown_browser.js` 覆盖 8 个工具、选区/空光标、撤销、链接 URL、围栏代码、预览返回和多尺寸；消息流、键盘、辅助功能、UI shell、构建、diff 和 strict OpenSpec 校验通过。截图 `/tmp/tg-markdown-editor-20261027.png`。
+- 以原 Simulator Team `LW6QTNHNV4` 构建 Release、strict codesign 和 iPhoneSimulator 平台核验后覆盖安装，保留登录。真实软件键盘下点“标题”后正文格式更新且键盘保持；Markdown 预览、标记取消及照片/文件选择器键盘回归 2/2、0失败/0跳过，日志 `/Volumes/VPhone/installers/tg-markdown-toolbar-native-20261027.bVZ4Eh/ui.log`，xcresult 位于同目录 `Logs/Test/`。测试未发送草稿。VPhone 仍保留既有非空草稿，未安装本版；Jam 未操作。

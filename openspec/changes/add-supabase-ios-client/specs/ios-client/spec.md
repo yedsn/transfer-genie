@@ -67,6 +67,14 @@ iOS 客户端 SHALL 在冷启动、登录成功、恢复前台、网络恢复、
 - **THEN** 已持久化的本地附件和 outbox 操作在下一次启动后仍存在
 - **AND** 客户端使用原 operation ID 安全重试
 
+### Requirement: Fixed mobile app viewport
+iOS 应用界面 SHALL 禁用双指与双击页面缩放以保持布局稳定。此限制 MUST NOT 禁用正常滚动、文本选择或通过系统 Dynamic Type 调整文字大小；系统级辅助缩放与原生媒体预览不属于页面缩放限制。
+
+#### Scenario: Pinch on an app page
+- **WHEN** 用户在 iOS 消息页或编辑界面双指缩放
+- **THEN** WebView 的页面比例保持不变
+- **AND** 正常滚动、编辑和系统大字体仍然可用
+
 ### Requirement: Physical-device stability gate
 iOS 客户端 SHALL 在声明可供日常使用前通过物理 iPhone 的开发版与发布版验收。验收 MUST 覆盖会话恢复、离线重试、前后台恢复、网络切换、媒体预览、跨设备预览和重复启动，并 MUST 记录失败场景。
 

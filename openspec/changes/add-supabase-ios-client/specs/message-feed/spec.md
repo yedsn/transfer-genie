@@ -2,6 +2,14 @@
 
 ## ADDED Requirements
 
+### Requirement: Preserve mobile detail beneath more actions
+移动端消息详情中的“更多” SHALL 在现有详情上叠加操作菜单，而不是销毁详情。菜单关闭 MUST 返回同一消息详情并保留正文滚动位置。顶层菜单显示时，下层详情 MUST 不可交互并从辅助功能导航中隐藏。确认删除消息后 MAY 关闭全部相关弹框。
+
+#### Scenario: Return from more actions
+- **WHEN** 用户阅读消息详情后打开“更多”并取消、点击遮罩或按 Escape
+- **THEN** 同一详情与原阅读位置恢复
+- **AND** 标记设置与删除确认的取消路径逐层返回，未确认前不修改消息
+
 ### Requirement: Mobile Markdown composition and reading
 iOS SHALL offer plain-text and Markdown editing with a rendered preview. Markdown messages SHALL retain their format and original source in the existing send contract, and SHALL render safely in feed, marked rows and details. Message HTML MUST NOT execute scripts or load remote images during passive reading.
 
@@ -10,6 +18,34 @@ iOS SHALL offer plain-text and Markdown editing with a rendered preview. Markdow
 - **THEN** headings, lists, links, code and tables render without changing the source
 - **AND** sending preserves format=markdown and the original content
 
+#### Scenario: Insert formatting while composing
+- **WHEN** the user selects text or positions the caret and taps a Markdown formatting action
+- **THEN** the action inserts or wraps the appropriate syntax without losing the remaining draft
+- **AND** the editor remains usable with the iOS keyboard, while preview and edit retain the original source
+
+### Requirement: Account-scoped durable mobile drafts
+iOS composer drafts SHALL be persisted in the local business store by storage Profile, authenticated Supabase user and Space. A draft SHALL retain text, format, mark metadata and stable sandbox attachment identity across composer dismissal, process termination and application restart, and MUST NOT be placed in ordinary WebView local storage. Restoring a draft MUST NOT send it automatically.
+
+#### Scenario: Restore an unsent draft after restart
+- **WHEN** the user terminates and reopens the application with an unsent text, Markdown, marking or attachment draft
+- **THEN** the matching account and Space restores the draft without sending it
+- **AND** the composer gives a quiet restored or automatically-saved status
+
+#### Scenario: Switch account or Space with a draft
+- **WHEN** the user changes the active Profile, Auth account or Space
+- **THEN** the previous scope is saved before the transition and the destination scope restores only its own draft
+- **AND** private draft content and attachment paths from another scope are not exposed
+
+#### Scenario: Restore a missing sandbox attachment
+- **WHEN** a persisted attachment path no longer exists after restart
+- **THEN** the attachment remains visible with a recoverable unavailable warning
+- **AND** the client does not silently send the invalid path or discard the remaining draft
+
+#### Scenario: Complete a draft send
+- **WHEN** all text and attachments are committed to the local message/outbox flow
+- **THEN** the persisted draft for that scope is cleared
+- **AND** a partially failed attachment send retains only the unsent attachments with their stable client IDs for retry
+
 ### Requirement: Mobile detailed marking and confirmed removal
 iOS composer and message mark actions SHALL open tag and optional due-date settings before applying a mark. Marked rows SHALL show multiline content, all labels and due date, without a left completion checkbox. A pin control SHALL request explicit confirmation before unmarking; cancellation MUST NOT mutate the message.
 
@@ -17,6 +53,11 @@ iOS composer and message mark actions SHALL open tag and optional due-date setti
 - **WHEN** the user opens mark settings from a draft or message
 - **THEN** tags and due date can be selected before confirmation
 - **AND** draft settings apply to both text and attachments when sent
+
+#### Scenario: Keep the source dialog beneath mark settings
+- **WHEN** the user opens mark settings or unmark confirmation from a composer or message action menu
+- **THEN** the existing source dialog remains underneath, preserving draft contents, attachments and reading position
+- **AND** only the top dialog is interactive and exposed to accessibility, and closing it restores the source dialog and focus
 
 #### Scenario: Cancel unmark confirmation
 - **WHEN** the user taps a marked row pin and cancels confirmation

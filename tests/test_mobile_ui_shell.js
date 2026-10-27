@@ -17,6 +17,9 @@ assert.match(accessibilityNative, /--mobile-text-scale/);
 assert.match(pluginNative, /UIContentSizeCategory.didChangeNotification/);
 assert.match(pluginNative, /reduceMotionStatusDidChangeNotification/);
 assert.match(pluginNative, /atDocumentEnd/);
+assert.ok(pluginNative.includes('pinchGestureRecognizer?.isEnabled = false'));
+assert.match(main, /user-scalable=no/);
+assert.match(styles, /touch-action: pan-x pan-y/);
 assert.ok(styles.includes('font-size: calc(15px * var(--mobile-text-scale, 1))'));
 assert.match(styles, /data-mobile-reduced-motion/);
 assert.ok(shell.includes('window.visualViewport?.addEventListener("resize", updateViewport)'));
@@ -105,6 +108,11 @@ for (const command of [
 ]) {
   assert.ok(tauriApi.includes(command), `Tauri API should expose ${command}`);
 }
+assert.ok(tauriApi.includes('get_mobile_composer_draft'));
+assert.ok(tauriApi.includes('save_mobile_composer_draft'));
+assert.match(shell, /transfer-genie-mobile-backgrounding/);
+assert.match(shell, /已恢复上次未发送的草稿/);
+assert.match(shell, /草稿已自动保存/);
 
 assert.ok(controller.includes('listWindow({ limit: 50 })'));
 assert.match(controller, /mobileIntegration.selectMedia/);
@@ -145,13 +153,17 @@ const runtimeApi = {
     getSummary: async () => ({ reclaimableBytes: 2048, fileCount: 2, protectedTasks: 1, removedBytes: 0, removedFiles: 0 }),
     clear: async () => ({ reclaimableBytes: 0, fileCount: 0, protectedTasks: 1, removedBytes: 2048, removedFiles: 2 }),
   },
+  mobileDraft: {
+    get: async () => ({ text: '', format: 'text', marked: false, tagIds: [], dueDate: null, attachments: [], updatedAtMs: null }),
+    save: async (payload) => ({ ...payload, updatedAtMs: Date.now() }),
+  },
   app: { getAppVersion: async () => 'test' },
 };
 const runtimeModule = { exports: {} };
 const runtimeClipboard = { writeText: async () => {} };
 vm.runInNewContext(ts.transpileModule(controller, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, {
   module: runtimeModule, exports: runtimeModule.exports, require: createRequire(import.meta.url),
-  window: { location: { search: '' }, transferGenieApi: runtimeApi }, URLSearchParams, crypto: globalThis.crypto,
+  window: { location: { search: '' }, transferGenieApi: runtimeApi, setTimeout, clearTimeout }, URLSearchParams, crypto: globalThis.crypto,
   navigator: { clipboard: runtimeClipboard },
 });
 const runtime = runtimeModule.exports.useMobileController();

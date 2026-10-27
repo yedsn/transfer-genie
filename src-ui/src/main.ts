@@ -49,6 +49,7 @@ let mobileShellMounted = false;
 function mountMobileShell() {
   if (mobileShellMounted) return;
   mobileShellMounted = true;
+  document.querySelector('meta[name="viewport"]')?.setAttribute("content", "width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover");
   document.documentElement.classList.add("is-ios-platform");
   createApp(MobileShell).mount("#mobile-app-shell");
   document.getElementById("app-boot-screen")?.remove();
@@ -63,6 +64,13 @@ async function installIosLifecycleBridge(capabilities: any) {
   const applyLifecycleState = async (state: unknown) => {
     if (state !== "background" && state !== "foreground") return;
     try {
+      if (state === "background") {
+        const pending: Promise<unknown>[] = [];
+        window.dispatchEvent(new CustomEvent("transfer-genie-mobile-backgrounding", {
+          detail: { waitUntil: (promise: Promise<unknown>) => pending.push(Promise.resolve(promise)) },
+        }));
+        await Promise.allSettled(pending);
+      }
       await api?.settings?.setMobileLifecycleState(state);
     } catch (error) {
       console.warn(`[mobile-integration] ${state} recovery failed`, String(error));

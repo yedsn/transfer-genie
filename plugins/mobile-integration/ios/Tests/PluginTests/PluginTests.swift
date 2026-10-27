@@ -16,6 +16,19 @@ final class MobileIntegrationPluginTests: XCTestCase {
         XCTAssertNotNil(plugin)
     }
 
+    func testAppWebViewDisablesPinchWithoutDisablingScrolling() {
+        let webview = WKWebView()
+        let plugin = MobileIntegrationPlugin()
+        plugin.load(webview: webview)
+        // An unattached WebView can have no pinch recognizer yet.
+        XCTAssertNotEqual(webview.scrollView.pinchGestureRecognizer?.isEnabled, true)
+        XCTAssertTrue(webview.scrollView.isScrollEnabled)
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        XCTAssertNotEqual(webview.scrollView.pinchGestureRecognizer?.isEnabled, true)
+        XCTAssertGreaterThan(MobileAccessibility.textScale(for: .accessibilityExtraExtraExtraLarge), 3)
+        withExtendedLifetime(plugin) {}
+    }
+
     func testSystemTextScaleCoversStandardAndAccessibilityCategories() {
         XCTAssertEqual(MobileAccessibility.textScale(for: .large), 1, accuracy: 0.001)
         XCTAssertLessThan(MobileAccessibility.textScale(for: .small), 1)

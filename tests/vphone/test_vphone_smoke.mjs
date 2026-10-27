@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, extname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { assertEmptyComposer, assertNoActiveEditing } from "./draft-safety.mjs";
 
 const DEFAULT_CLI = "/Applications/vphone-launchpad.app/Contents/MacOS/vphone-launchpad-cli";
 const DEFAULT_ROOT = "/Volumes/VPhone/machines";
@@ -80,6 +81,7 @@ Options:
   --snapshot-reset <name>        Revert an existing stopped-VM snapshot and retest
 
 Safety gates:
+  Open editors or nonempty/unverifiable drafts block installation and termination.
   VPHONE_ALLOW_SUPABASE_WRITES=1 is required with --send-text.
   VPHONE_ALLOW_SNAPSHOT_REVERT=1 is required with --snapshot-reset.
 
@@ -370,6 +372,21 @@ try {
   const coreDevice = coreDevices.find((item) => item.hardwareProperties?.udid === machine.udid || item.deviceProperties?.name === options.machine);
   assert(coreDevice && coreDevice.connectionProperties?.pairingState === "paired" && coreDevice.deviceProperties?.bootState === "booted", "VPhone guest is not booted and paired in CoreDevice");
   record("CoreDevice/Xcode visibility", { identifier: coreDevice.identifier, reality: coreDevice.hardwareProperties?.reality });
+
+  const existingApp = guestRpc("apps.search", { query: "Transfer Genie" });
+  if (existingApp.apps?.some((app) => app.bundle_id === BUNDLE_ID)) {
+    // Launching an already-running app preserves its process and draft.
+    guestRpc("apps.launch", { bundle_id: BUNDLE_ID });
+    const currentUI = tree();
+    assertNoActiveEditing(currentUI);
+    if (hasLabel(currentUI, "新消息")) {
+      tapText("新消息", "exact");
+      waitText("关闭新消息");
+      assertEmptyComposer(tree());
+      tapText("关闭新消息", "exact");
+    }
+    record("idle app and empty draft verified before installation or termination");
+  }
 
   const ipa = makeIpa(options.app);
   temporaryIpaRoot = ipa.temporaryRoot;

@@ -16,6 +16,7 @@ import {
 } from "./mobile-controller";
 import MobileMessageBody from "./MobileMessageBody.vue";
 import MobileText from "./MobileText.vue";
+import { formatMarkdown, type MarkdownAction } from "./markdown-edit";
 
 type MobileTab = "feed" | "marked" | "profile";
 type MobileDiagnostic = {
@@ -30,6 +31,7 @@ const controller = useMobileController();
 const { state, currentSpace, pendingCount, activeTransfers } = controller;
 const activeTab = ref<MobileTab>("feed");
 const activeSheet = ref<SheetName>(null);
+const detailUnderlay = ref(false);
 const viewportHeight = ref(window.visualViewport?.height || window.innerHeight);
 const viewportTop = ref(window.visualViewport?.offsetTop || 0);
 const keyboardVisible = ref(false);
@@ -52,7 +54,7 @@ async function refreshMobileDiagnostic() {
 function updateViewport() {
   const viewport = window.visualViewport;
   // Pin the shell to the visible area, not the layout viewport behind the keyboard.
-  // Ignore pinch zoom: it must remain an accessibility action, not a keyboard signal.
+  // Ignore unexpected browser scale changes; Dynamic Type is applied separately.
   if (viewport && Math.abs(viewport.scale - 1) > 0.01) return;
   viewportHeight.value = viewport?.height || window.innerHeight;
   viewportTop.value = viewport?.offsetTop || 0;
@@ -77,7 +79,49 @@ const markEditorSource = ref<"message" | "composer" | "selection">("message");
 const markedEnabledDraft = ref(true);
 const savingMark = ref(false);
 const composerPreview = ref(false);
-let markReturnSheet: SheetName = null;
+const composerEditor = ref<HTMLTextAreaElement | null>(null);
+let editorReadingPosition = 0;
+function toggleComposerPreview() {
+  if (state.composer.sending) return;
+  const editor = composerEditor.value;
+  if (!composerPreview.value) {
+    editorReadingPosition = editor?.scrollTop || 0;
+    editor?.blur();
+    composerPreview.value = true;
+  } else {
+    composerPreview.value = false;
+    void nextTick(() => {
+      editor?.focus({ preventScroll: true });
+      if (editor) editor.scrollTop = editorReadingPosition;
+    });
+  }
+}
+const markdownTools: { action: MarkdownAction; label: string; glyph: string }[] = [
+  { action: "bold", label: "粗体", glyph: "B" },
+  { action: "italic", label: "斜体", glyph: "I" },
+  { action: "heading", label: "标题", glyph: "H₂" },
+  { action: "bullets", label: "无序列表", glyph: "• ≡" },
+  { action: "numbered", label: "有序列表", glyph: "1. ≡" },
+  { action: "quote", label: "引用", glyph: "❝" },
+  { action: "code", label: "代码", glyph: "</>" },
+  { action: "link", label: "链接", glyph: "↗" },
+];
+function insertMarkdown(action: MarkdownAction) {
+  const editor = composerEditor.value;
+  if (!editor || state.composer.sending || composerPreview.value) return;
+  const edit = formatMarkdown(editor.value, editor.selectionStart, editor.selectionEnd, action);
+  editor.focus({ preventScroll: true });
+  editor.setSelectionRange(edit.from, edit.to);
+  // WebKit's native edit command participates in the keyboard undo stack.
+  if (!document.execCommand("insertText", false, edit.insertion)) {
+    editor.setRangeText(edit.insertion, edit.from, edit.to, "end");
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  editor.setSelectionRange(edit.selectionStart, edit.selectionEnd);
+}
+const markReturnSheet = ref<SheetName>(null);
+const composerUnderlay = computed(() => ["marked-edit", "unmark-confirm"].includes(activeSheet.value || "") && markReturnSheet.value === "composer");
+const actionsUnderlay = computed(() => ["marked-edit", "unmark-confirm"].includes(activeSheet.value || "") && markReturnSheet.value === "actions");
 let markOpener: HTMLElement | null = null;
 let unmarkSelection = false;
 const markedTagOptions = computed(() => [...state.tags, ...pendingTags.value]);
@@ -107,6 +151,11 @@ let statusTimer: number | undefined;
 let removeTransferListeners: undefined | (() => void);
 let sheetOpener: HTMLElement | null = null;
 let composerCloseTimer: number | undefined;
+let draftStatusTimer: number | undefined;
+function persistDraftBeforeBackground(event: Event) {
+  const waitUntil = (event as CustomEvent<{ waitUntil?: (promise: Promise<unknown>) => void }>).detail?.waitUntil;
+  waitUntil?.(controller.persistComposerDraft(true));
+}
 watch(
   () => [state.composer.text, state.composer.attachments.length],
   () => {
@@ -117,6 +166,14 @@ watch(
   },
   { flush: "sync" },
 );
+watch(() => state.composer.draftStatus, (status) => {
+  window.clearTimeout(draftStatusTimer);
+  if (status === "restored") {
+    draftStatusTimer = window.setTimeout(() => {
+      if (state.composer.draftStatus === "restored") state.composer.draftStatus = "saved";
+    }, 2400);
+  }
+});
 
 const visibleMessages = computed(() => searchQuery.value.trim() ? state.search.messages : state.messages);
 const selectedMessages = computed(() => visibleMessages.value.filter((message) => selectedFilenames.value.includes(message.filename)));
@@ -231,11 +288,12 @@ const cacheSize = computed(() => {
 
 function openSheet(name: SheetName) {
   window.clearTimeout(composerCloseTimer);
+  window.clearTimeout(draftStatusTimer);
   if (name === "composer" && !state.composer.sending) {
     state.composer.savedLocally = false;
     state.composer.error = "";
   }
-  if (name !== "marked-edit" && name !== "unmark-confirm") {
+  if (name !== "marked-edit" && name !== "unmark-confirm" && !detailUnderlay.value) {
     sheetOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   }
   activeSheet.value = name;
@@ -255,7 +313,7 @@ function openSheet(name: SheetName) {
     void refreshMobileDiagnostic();
   void nextTick(() => {
     const sheet = document.querySelector<HTMLElement>(
-      ".mobile-sheet-layer .mobile-sheet",
+      ".mobile-sheet-layer .mobile-sheet:not([aria-hidden='true'])",
     );
     const preferred =
       sheet?.querySelector<HTMLElement>("[autofocus]") ||
@@ -266,13 +324,30 @@ function openSheet(name: SheetName) {
   });
 }
 function closeSheet() {
+  if (state.boot === "ready" && activeSheet.value === "delete-confirm" && detailUnderlay.value) {
+    cancelDeletion();
+    return;
+  }
   if (state.boot === "ready" && ["marked-edit", "unmark-confirm"].includes(activeSheet.value || "")) {
     if (!state.busy && !savingMark.value) returnFromMarkSettings();
     return;
   }
+  if (state.boot === "ready" && activeSheet.value === "actions" && detailUnderlay.value) {
+    detailUnderlay.value = false;
+    activeSheet.value = "detail";
+    void nextTick(() => document.querySelector<HTMLElement>(".mobile-detail-more")?.focus({ preventScroll: true }));
+    return;
+  }
+  dismissSheets();
+}
+function dismissSheets() {
   if (activeSheet.value === "composer" && state.composer.selecting) return;
+  if (activeSheet.value === "composer" && !state.composer.sending) void controller.persistComposerDraft(true);
   window.clearTimeout(composerCloseTimer);
   activeSheet.value = null;
+  detailUnderlay.value = false;
+  markReturnSheet.value = null;
+  markOpener = null;
   deleteConfirmation.value = null;
   cacheConfirmation.value = false;
   selectedMessage.value = null;
@@ -282,7 +357,7 @@ function closeSheet() {
 }
 function trapSheetFocus(event: KeyboardEvent) {
   const sheet = document.querySelector<HTMLElement>(
-    ".mobile-sheet-layer .mobile-sheet",
+    ".mobile-sheet-layer .mobile-sheet:not([aria-hidden='true'])",
   );
   if (!sheet) return;
   const focusable = Array.from(
@@ -315,7 +390,7 @@ watch(
   () => state.boot,
   (boot) => {
     if (boot !== "ready") {
-      closeSheet();
+      dismissSheets();
       searchQuery.value = "";
       activeTag.value = "";
       markedFilter.value = "pending";
@@ -329,9 +404,13 @@ function selectTab(tab: MobileTab) {
   activeTab.value = tab;
   searchOpen.value = false;
   searchQuery.value = "";
-  closeSheet();
+  dismissSheets();
 }
 function openMessage(message: MobileMessage) {
+  if (detailUnderlay.value && selectedMessage.value?.filename === message.filename) {
+    closeSheet();
+    return;
+  }
   if (longPressTriggered) { longPressTriggered = false; return; }
   if (selectionMode.value) { toggleMessageSelection(message); return; }
   selectedMessage.value = message;
@@ -354,9 +433,13 @@ function openActions(message: MobileMessage) {
   selectedMessage.value = message;
   openSheet("actions");
 }
+function openDetailActions() {
+  detailUnderlay.value = true;
+  openSheet("actions");
+}
 function startSelection(message: MobileMessage) {
   if (state.busy || state.composer.sending) return;
-  closeSheet();
+  dismissSheets();
   selectionMode.value = true;
   selectedFilenames.value = [message.filename];
 }
@@ -404,7 +487,7 @@ function toggleSelectedMark() {
   else openMarkedEditor(message);
 }
 function rememberMarkSource() {
-  markReturnSheet = activeSheet.value;
+  markReturnSheet.value = activeSheet.value;
   markOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   state.error = "";
 }
@@ -420,14 +503,14 @@ function openMarkSettings(source: "message" | "composer" | "selection") {
   openSheet("marked-edit");
 }
 function returnFromMarkSettings() {
-  activeSheet.value = markReturnSheet;
-  if (!markReturnSheet) selectedMessage.value = null;
+  activeSheet.value = markReturnSheet.value;
+  if (!markReturnSheet.value) selectedMessage.value = null;
   const opener = markOpener;
-  markReturnSheet = null;
+  markReturnSheet.value = null;
   markOpener = null;
   void nextTick(() => {
     if (opener?.isConnected) opener.focus({ preventScroll: true });
-    else document.querySelector<HTMLElement>(".mobile-sheet header button, .mobile-sheet button")?.focus({ preventScroll: true });
+    else document.querySelector<HTMLElement>(".mobile-sheet:not([aria-hidden='true']) button")?.focus({ preventScroll: true });
   });
 }
 function openUnmarkConfirmation(message: MobileMessage | null, selection = false) {
@@ -443,7 +526,7 @@ async function confirmUnmark() {
     await applySelection("unmark", true);
     if (!state.error) returnFromMarkSettings();
   } else if (selectedMessage.value && await controller.toggleMark(selectedMessage.value)) {
-    if (markReturnSheet === "actions") markReturnSheet = null;
+    selectedMessage.value = { ...selectedMessage.value, marked: false };
     returnFromMarkSettings();
   }
 }
@@ -455,7 +538,10 @@ async function deleteSelectedMessage(deleteRemote: boolean, confirmed = false) {
     openSheet("delete-confirm");
     return;
   }
-  if (await controller.deleteMessage(message, deleteRemote) && selectedMessage.value === message && ["actions", "delete-confirm"].includes(activeSheet.value || "")) closeSheet();
+  if (await controller.deleteMessage(message, deleteRemote) && selectedMessage.value === message && ["actions", "delete-confirm"].includes(activeSheet.value || "")) {
+    if (deleteRemote) dismissSheets();
+    else closeSheet();
+  }
 }
 function cancelDeletion() {
   if (state.busy) return;
@@ -529,7 +615,7 @@ async function saveMarkedMetadata() {
       selectedFilenames.value = result.failed;
       if (!result.failed.length) { endSelection(); returnFromMarkSettings(); }
     } else if (selectedMessage.value && await controller.updateMarkedMetadata(selectedMessage.value, markedTagDraft.value, markedDueDraft.value || null)) {
-      if (markReturnSheet === "actions") markReturnSheet = null;
+      selectedMessage.value = { ...selectedMessage.value, marked: true, tagIds: [...markedTagDraft.value], dueDate: markedDueDraft.value || null };
       returnFromMarkSettings();
     }
   } finally { savingMark.value = false; }
@@ -567,6 +653,7 @@ onMounted(async () => {
     controller.refreshAfterForeground,
   );
   window.addEventListener("keydown", handleGlobalKeydown);
+  window.addEventListener("transfer-genie-mobile-backgrounding", persistDraftBeforeBackground);
   await controller.initialize();
   removeTransferListeners = await controller.installTransferListeners();
   statusTimer = window.setInterval(() => {
@@ -575,6 +662,7 @@ onMounted(async () => {
   }, 30000);
 });
 onBeforeUnmount(() => {
+  void controller.deactivateComposerPersistence();
   window.visualViewport?.removeEventListener("resize", updateViewport);
   window.visualViewport?.removeEventListener("scroll", updateViewport);
   window.removeEventListener("resize", updateViewport);
@@ -588,6 +676,7 @@ onBeforeUnmount(() => {
     controller.refreshAfterForeground,
   );
   window.removeEventListener("keydown", handleGlobalKeydown);
+  window.removeEventListener("transfer-genie-mobile-backgrounding", persistDraftBeforeBackground);
   window.clearTimeout(longPressTimer);
   window.clearTimeout(composerCloseTimer);
   window.clearInterval(statusTimer);
@@ -1197,14 +1286,19 @@ onBeforeUnmount(() => {
       <div
         v-if="activeSheet"
         class="mobile-sheet-layer"
+        :class="{ 'has-detail-underlay': detailUnderlay, 'has-mark-underlay': composerUnderlay || actionsUnderlay }"
         role="presentation"
         @click.self="closeSheet"
       >
+        <div v-if="detailUnderlay" class="mobile-detail-overlay-backdrop" aria-hidden="true" @click="closeSheet"></div>
+        <div v-if="composerUnderlay || actionsUnderlay" class="mobile-mark-overlay-backdrop" aria-hidden="true" @click="closeSheet"></div>
         <section
-          v-if="activeSheet === 'composer'"
+          v-if="activeSheet === 'composer' || composerUnderlay"
           class="mobile-sheet mobile-composer-sheet"
           role="dialog"
-          aria-modal="true"
+          :aria-modal="!composerUnderlay"
+          :aria-hidden="composerUnderlay ? 'true' : undefined"
+          :inert="composerUnderlay"
           aria-labelledby="mobile-composer-title"
           tabindex="-1"
         >
@@ -1217,21 +1311,28 @@ onBeforeUnmount(() => {
             <button type="button" aria-label="关闭新消息" :disabled="state.composer.selecting" @click="closeSheet">×</button>
           </header>
           <div class="mobile-composer-content" role="region" aria-label="消息编辑与附件">
+          <div class="mobile-compose-editor">
           <div class="mobile-composer-format" aria-label="消息格式">
             <button type="button" :aria-pressed="state.composer.format === 'text'" :disabled="state.composer.sending" @click="state.composer.format = 'text'; composerPreview = false">文字</button>
             <button type="button" :aria-pressed="state.composer.format === 'markdown'" :disabled="state.composer.sending" @click="state.composer.format = 'markdown'">Markdown</button>
-            <button v-if="state.composer.format === 'markdown'" type="button" :aria-pressed="composerPreview" @click="composerPreview = !composerPreview">{{ composerPreview ? '继续编辑' : '预览' }}</button>
+            <button v-if="state.composer.format === 'markdown'" class="mobile-preview-toggle" type="button" :aria-pressed="composerPreview" :disabled="state.composer.sending" @click="toggleComposerPreview"><svg v-if="!composerPreview" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>{{ composerPreview ? '继续编辑' : '预览' }}</button>
+          </div>
+          <div v-if="state.composer.format === 'markdown' && !composerPreview" class="mobile-markdown-toolbar" role="toolbar" aria-label="Markdown 格式工具">
+            <button v-for="tool in markdownTools" :key="tool.action" type="button" :aria-label="tool.label" :title="tool.label" :class="`is-${tool.action}`" :disabled="state.composer.sending" @pointerdown.prevent @click="insertMarkdown(tool.action)"><span aria-hidden="true">{{ tool.glyph }}</span></button>
           </div>
           <textarea
+            ref="composerEditor"
+            :class="{ 'is-markdown-editor': state.composer.format === 'markdown' }"
             v-show="!composerPreview || state.composer.format !== 'markdown'"
             v-model="state.composer.text"
-            :disabled="state.composer.sending"
+            :disabled="state.composer.sending || !state.composer.persistenceReady"
             rows="6"
             aria-label="消息内容"
-            placeholder="输入文字，或加入照片和文件…"
+            :placeholder="state.composer.format === 'markdown' ? '写下你的想法…\n选中文字，用上方工具添加格式。' : '输入文字，或加入照片和文件…'"
             autofocus
           ></textarea>
           <div v-if="composerPreview && state.composer.format === 'markdown'" class="mobile-compose-preview" aria-label="Markdown 预览"><MobileText v-if="state.composer.text" :text="state.composer.text" format="markdown" /><span v-else>输入内容后可在这里预览。</span></div>
+          </div>
           <div class="mobile-compose-actions">
           <div
             v-if="state.composer.attachments.length"
@@ -1306,6 +1407,12 @@ onBeforeUnmount(() => {
             </button>
           </div>
           <p v-if="state.composer.marked" class="mobile-composer-mark-summary">已标记 · {{ state.tags.filter((tag) => state.composer.tagIds.includes(tag.id)).map((tag) => tag.name).join('、') || '未分类' }} · {{ state.composer.dueDate || '无截止日期' }}</p>
+          <p
+            v-if="['saving', 'saved', 'restored', 'error'].includes(state.composer.draftStatus)"
+            class="mobile-draft-save-status"
+            :class="{ 'is-error': state.composer.draftStatus === 'error' }"
+            role="status"
+          >{{ state.composer.draftStatus === 'saving' ? '正在自动保存草稿…' : state.composer.draftStatus === 'restored' ? '已恢复上次未发送的草稿' : state.composer.draftStatus === 'error' ? '草稿自动保存失败' : '草稿已自动保存' }}</p>
           <p v-if="state.composer.selecting" class="mobile-draft-preview-status" role="status">正在准备所选附件…</p>
           <p v-if="state.composer.error" class="mobile-inline-error" role="alert">
             {{ state.composer.error }}
@@ -1335,10 +1442,12 @@ onBeforeUnmount(() => {
           </div>
         </section>
         <section
-          v-else-if="activeSheet === 'actions'"
+          v-if="activeSheet === 'actions' || actionsUnderlay"
           class="mobile-sheet mobile-action-sheet"
           role="dialog"
-          aria-modal="true"
+          :aria-modal="!actionsUnderlay"
+          :aria-hidden="actionsUnderlay ? 'true' : undefined"
+          :inert="actionsUnderlay"
           aria-label="消息操作"
           tabindex="-1"
         >
@@ -1397,7 +1506,7 @@ onBeforeUnmount(() => {
             取消
           </button>
         </section>
-        <section v-else-if="activeSheet === 'delete-confirm'" class="mobile-sheet mobile-delete-sheet" role="dialog" aria-modal="true" aria-labelledby="mobile-delete-title" tabindex="-1">
+        <section v-if="activeSheet === 'delete-confirm'" class="mobile-sheet mobile-delete-sheet" role="dialog" aria-modal="true" aria-labelledby="mobile-delete-title" tabindex="-1">
           <div class="mobile-sheet-grabber"></div>
           <header><div><small>请确认</small><h2 id="mobile-delete-title">删除消息</h2></div><button type="button" aria-label="取消删除" :disabled="state.busy" @click="cancelDeletion">×</button></header>
           <p>{{ deleteConfirmation === 'selection' ? '删除选中的 ' + selectedMessages.length + ' 条消息？' : '删除这条消息？' }} 删除将同步到云端，其他设备也会移除这些消息。</p>
@@ -1649,10 +1758,12 @@ onBeforeUnmount(() => {
           <p class="mobile-sheet-footnote">消息先保存到本机，再同步到云端。未完成的传输会在回到前台后继续处理；离线时可以查看已经缓存的内容。</p>
         </section>
         <section
-          v-else
+          v-if="activeSheet === 'detail' || detailUnderlay"
           class="mobile-sheet mobile-detail-sheet"
           role="dialog"
-          aria-modal="true"
+          :aria-modal="!detailUnderlay"
+          :aria-hidden="detailUnderlay ? 'true' : undefined"
+          :inert="detailUnderlay"
           aria-labelledby="mobile-detail-title"
           tabindex="-1"
         >
@@ -1772,7 +1883,7 @@ onBeforeUnmount(() => {
             ><button
               class="mobile-detail-more" type="button"
               :disabled="state.busy"
-              @click="activeSheet = 'actions'"
+              @click="openDetailActions"
             >
               更多
             </button>

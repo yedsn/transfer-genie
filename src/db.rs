@@ -78,6 +78,15 @@ pub struct DbUploadHistory {
     pub updated_at_ms: i64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MobileComposerDraftRecord {
+    pub endpoint_id: String,
+    pub owner_scope: String,
+    pub space_id: String,
+    pub payload_json: String,
+    pub updated_at_ms: i64,
+}
+
 #[derive(Clone)]
 pub struct DbPartialDownload {
     pub endpoint_id: String,
@@ -473,6 +482,17 @@ fn ensure_local_first_sync_schema(conn: &Connection) -> rusqlite::Result<()> {
          );
          CREATE INDEX IF NOT EXISTS idx_attachment_sync_message
             ON attachment_sync(endpoint_id, owner_scope, message_id);
+
+         CREATE TABLE IF NOT EXISTS mobile_composer_drafts (
+           endpoint_id TEXT NOT NULL,
+           owner_scope TEXT NOT NULL,
+           space_id TEXT NOT NULL,
+           payload_json TEXT NOT NULL,
+           updated_at_ms INTEGER NOT NULL,
+           PRIMARY KEY(endpoint_id, owner_scope, space_id)
+         );
+         CREATE INDEX IF NOT EXISTS idx_mobile_composer_drafts_updated
+           ON mobile_composer_drafts(updated_at_ms);
 
          CREATE TABLE IF NOT EXISTS telegram_bridge_bindings (
            binding_key TEXT PRIMARY KEY,
@@ -6039,6 +6059,67 @@ pub fn upsert_partial_download(path: &Path, entry: &DbPartialDownload) -> rusqli
     Ok(())
 }
 
+pub fn get_mobile_composer_draft(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    space_id: &str,
+) -> rusqlite::Result<Option<MobileComposerDraftRecord>> {
+    let conn = Connection::open(path)?;
+    conn.query_row(
+        "SELECT endpoint_id, owner_scope, space_id, payload_json, updated_at_ms
+         FROM mobile_composer_drafts
+         WHERE endpoint_id=?1 AND owner_scope=?2 AND space_id=?3",
+        params![endpoint_id, owner_scope, space_id],
+        |row| {
+            Ok(MobileComposerDraftRecord {
+                endpoint_id: row.get(0)?,
+                owner_scope: row.get(1)?,
+                space_id: row.get(2)?,
+                payload_json: row.get(3)?,
+                updated_at_ms: row.get(4)?,
+            })
+        },
+    )
+    .optional()
+}
+
+pub fn upsert_mobile_composer_draft(
+    path: &Path,
+    draft: &MobileComposerDraftRecord,
+) -> rusqlite::Result<()> {
+    let conn = Connection::open(path)?;
+    conn.execute(
+        "INSERT INTO mobile_composer_drafts
+         (endpoint_id, owner_scope, space_id, payload_json, updated_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(endpoint_id, owner_scope, space_id) DO UPDATE SET
+           payload_json=excluded.payload_json, updated_at_ms=excluded.updated_at_ms",
+        params![
+            draft.endpoint_id,
+            draft.owner_scope,
+            draft.space_id,
+            draft.payload_json,
+            draft.updated_at_ms,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn delete_mobile_composer_draft(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    space_id: &str,
+) -> rusqlite::Result<usize> {
+    let conn = Connection::open(path)?;
+    conn.execute(
+        "DELETE FROM mobile_composer_drafts
+         WHERE endpoint_id=?1 AND owner_scope=?2 AND space_id=?3",
+        params![endpoint_id, owner_scope, space_id],
+    )
+}
+
 #[cfg(any(target_os = "ios", test))]
 pub fn list_partial_downloads_for_scope(
     path: &Path,
@@ -10714,6 +10795,54 @@ mod tests {
             .expect("list after clear")
             .is_empty());
 
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn mobile_composer_drafts_are_profile_account_and_space_scoped() {
+        let path = temp_db_path("mobile-composer-drafts");
+        init_db(&path, None).expect("initialize database");
+        let draft = MobileComposerDraftRecord {
+            endpoint_id: "profile-a".into(),
+            owner_scope: "user-a".into(),
+            space_id: "space-a".into(),
+            payload_json: r#"{\"text\":\"private\"}"#.into(),
+            updated_at_ms: 10,
+        };
+        upsert_mobile_composer_draft(&path, &draft).expect("save draft");
+        assert_eq!(
+            get_mobile_composer_draft(&path, "profile-a", "user-a", "space-a")
+                .expect("read draft"),
+            Some(draft.clone())
+        );
+        for (profile, user, space) in [
+            ("profile-b", "user-a", "space-a"),
+            ("profile-a", "user-b", "space-a"),
+            ("profile-a", "user-a", "space-b"),
+        ] {
+            assert!(get_mobile_composer_draft(&path, profile, user, space)
+                .expect("read isolated scope")
+                .is_none());
+        }
+        let replacement = MobileComposerDraftRecord {
+            payload_json: r#"{\"text\":\"updated\"}"#.into(),
+            updated_at_ms: 20,
+            ..draft
+        };
+        upsert_mobile_composer_draft(&path, &replacement).expect("replace draft");
+        assert_eq!(
+            get_mobile_composer_draft(&path, "profile-a", "user-a", "space-a")
+                .expect("read replacement"),
+            Some(replacement)
+        );
+        assert_eq!(
+            delete_mobile_composer_draft(&path, "profile-a", "user-a", "space-a")
+                .expect("delete draft"),
+            1
+        );
+        assert!(get_mobile_composer_draft(&path, "profile-a", "user-a", "space-a")
+            .expect("read deleted draft")
+            .is_none());
         let _ = std::fs::remove_file(path);
     }
 }

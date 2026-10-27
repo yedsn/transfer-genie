@@ -72,6 +72,15 @@
     },
   };
 
+  const mobileDraftApi = {
+    async get() {
+      return invoke('get_mobile_composer_draft');
+    },
+    async save(payload, scope) {
+      return invoke('save_mobile_composer_draft', { payload, scope });
+    },
+  };
+
   // Settings API
   const settingsApi = {
     async setMobileLifecycleState(lifecycleState) {
@@ -413,6 +422,7 @@
     integration: integrationApi,
     mobileIntegration: mobileIntegrationApi,
     mobileCache: mobileCacheApi,
+    mobileDraft: mobileDraftApi,
   };
 
   globalScope.transferGenieApi = api;

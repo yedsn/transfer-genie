@@ -1,4 +1,4 @@
-import { computed, reactive } from "vue";
+import { computed, reactive, watch } from "vue";
 
 type MobileApi = Record<string, any>;
 
@@ -39,6 +39,7 @@ interface DraftAttachment {
   previewError?: string;
   previewRequestId?: string;
   error?: string;
+  available?: boolean;
 }
 
 const previewMode = new URLSearchParams(window.location.search).get("mobile-preview") === "1";
@@ -171,6 +172,7 @@ export function useMobileController() {
     setup: { apiUrl: "", anonKey: "", profileName: "我的 Supabase", email: "", password: "", flowId: "", tested: false, sending: false },
     composer: {
       text: "",
+      textClientId: `mobile-text-${crypto.randomUUID()}`,
       format: "text",
       marked: false,
       tagIds: [] as string[],
@@ -179,6 +181,9 @@ export function useMobileController() {
       selecting: false,
       sending: false,
       savedLocally: false,
+      persistenceReady: false,
+      draftStatus: "idle" as "idle" | "saving" | "saved" | "restored" | "error",
+      draftUpdatedAt: 0,
       error: "",
     },
   });
@@ -201,7 +206,154 @@ export function useMobileController() {
     state.notice = "";
   }
 
+  let draftWrite: Promise<boolean> = Promise.resolve(true);
+  let draftSaveTimer: number | undefined;
+  let restoringComposerDraft = false;
+  let composerMutationVersion = 0;
+
+  function composerDraftPayload() {
+    return {
+      text: state.composer.text,
+      textClientId: state.composer.textClientId,
+      format: state.composer.format,
+      marked: state.composer.marked,
+      tagIds: [...state.composer.tagIds],
+      dueDate: state.composer.dueDate || null,
+      attachments: state.composer.attachments.map((attachment) => ({
+        clientId: attachment.clientId,
+        path: attachment.path,
+        originalName: attachment.originalName,
+        mediaType: attachment.mediaType,
+        contentType: attachment.contentType || null,
+        sizeBytes: attachment.sizeBytes,
+      })),
+    };
+  }
+
+  async function persistComposerDraft(force = false) {
+    if (!state.composer.persistenceReady || (!force && (state.composer.sending || state.composer.selecting))) return false;
+    if (force) window.clearTimeout(draftSaveTimer);
+    const generation = viewGeneration;
+    const mutationVersion = composerMutationVersion;
+    const payload = composerDraftPayload();
+    const scope = { profileId: state.activeProfile?.id, userId: state.account?.userId, spaceId: state.activeProfile?.supabase?.space_id };
+    const write = async () => {
+      if (generation !== viewGeneration || mutationVersion !== composerMutationVersion) return false;
+      state.composer.draftStatus = "saving";
+      try {
+        if (previewMode) {
+          state.composer.draftUpdatedAt = Date.now();
+        } else {
+          const result = await api().mobileDraft.save(payload, scope);
+          if (generation !== viewGeneration || mutationVersion !== composerMutationVersion) return false;
+          state.composer.draftUpdatedAt = Number(result?.updatedAtMs || 0);
+        }
+        if (generation === viewGeneration && mutationVersion === composerMutationVersion) state.composer.draftStatus = state.composer.draftUpdatedAt ? "saved" : "idle";
+        return generation === viewGeneration && mutationVersion === composerMutationVersion;
+      } catch (error) {
+        if (generation === viewGeneration) {
+          state.composer.draftStatus = "error";
+          state.composer.error = `草稿自动保存失败：${errorText(error)}`;
+        }
+        return false;
+      }
+    };
+    draftWrite = draftWrite.then(write, write);
+    return draftWrite;
+  }
+
+  async function restoreComposerDraft() {
+    const generation = viewGeneration;
+    state.composer.persistenceReady = false;
+    state.composer.draftStatus = "idle";
+    state.composer.draftUpdatedAt = 0;
+    if (previewMode) {
+      state.composer.persistenceReady = true;
+      return;
+    }
+    try {
+      const draft = await api().mobileDraft.get();
+      if (generation !== viewGeneration) return;
+      restoringComposerDraft = true;
+      state.composer.text = String(draft?.text || "");
+      state.composer.textClientId = String(draft?.textClientId || `mobile-text-${crypto.randomUUID()}`);
+      state.composer.format = draft?.format === "markdown" ? "markdown" : "text";
+      state.composer.marked = !!draft?.marked;
+      state.composer.tagIds = Array.isArray(draft?.tagIds) ? [...draft.tagIds] : [];
+      state.composer.dueDate = String(draft?.dueDate || "");
+      state.composer.attachments = (Array.isArray(draft?.attachments) ? draft.attachments : []).map((item: any) => {
+        const available = item?.available !== false;
+        return {
+          id: crypto.randomUUID(),
+          clientId: String(item?.clientId || `mobile-${crypto.randomUUID()}`),
+          path: String(item?.path || ""),
+          originalName: String(item?.originalName || "附件"),
+          mediaType: ["image", "video"].includes(item?.mediaType) ? item.mediaType : "file",
+          contentType: item?.contentType || undefined,
+          sizeBytes: Number(item?.sizeBytes || 0),
+          available,
+          previewState: available && ["image", "video"].includes(item?.mediaType) ? "loading" : available ? "unsupported" : "failed",
+          previewError: available ? undefined : "原文件已不可用，请移除后重新选择",
+          error: available ? undefined : "原文件已不可用，无法发送",
+        } as DraftAttachment;
+      });
+      state.composer.draftUpdatedAt = Number(draft?.updatedAtMs || 0);
+      const restored = !!draft?.updatedAtMs;
+      state.composer.draftStatus = restored ? "restored" : "idle";
+      state.composer.persistenceReady = true;
+      restoringComposerDraft = false;
+      for (const attachment of state.composer.attachments) {
+        if (attachment.available !== false && ["image", "video"].includes(attachment.mediaType)) void loadDraftAttachmentPreview(attachment);
+      }
+    } catch (error) {
+      if (generation === viewGeneration) {
+        restoringComposerDraft = false;
+        // Do not overwrite an unreadable persisted draft with an empty editor.
+        state.composer.persistenceReady = false;
+        state.composer.draftStatus = "error";
+        state.composer.error = `草稿恢复失败：${errorText(error)}`;
+      }
+    }
+  }
+
+  async function deactivateComposerPersistence() {
+    window.clearTimeout(draftSaveTimer);
+    state.composer.persistenceReady = false;
+    composerMutationVersion += 1;
+    await draftWrite;
+  }
+
+  watch(
+    () => [state.composer.text, state.composer.format],
+    () => {
+      if (state.composer.persistenceReady && !restoringComposerDraft && !state.composer.sending)
+        state.composer.textClientId = `mobile-text-${crypto.randomUUID()}`;
+    },
+    { flush: "sync" },
+  );
+
+  watch(
+    () => [
+      state.composer.text,
+      state.composer.format,
+      state.composer.marked,
+      state.composer.tagIds.join("\u0000"),
+      state.composer.dueDate,
+      state.composer.attachments.map((item) => `${item.clientId}\u0000${item.path}\u0000${item.available !== false}`).join("\u0001"),
+    ],
+    () => {
+      if (restoringComposerDraft || !state.composer.persistenceReady || state.composer.sending || state.composer.selecting) return;
+      window.clearTimeout(draftSaveTimer);
+      state.composer.draftStatus = "idle";
+      draftSaveTimer = window.setTimeout(() => void persistComposerDraft(), 350);
+    },
+    { flush: "sync" },
+  );
+
   async function initialize() {
+    window.clearTimeout(draftSaveTimer);
+    state.composer.persistenceReady = false;
+    composerMutationVersion += 1;
     viewGeneration += 1;
     state.busy = false;
     searchGeneration += 1;
@@ -224,10 +376,16 @@ export function useMobileController() {
     state.activeProfile = null;
     state.composer.attachments = [];
     state.composer.text = "";
+    state.composer.textClientId = `mobile-text-${crypto.randomUUID()}`;
+    state.composer.format = "text";
     state.composer.marked = false;
     state.composer.tagIds = [];
     state.composer.dueDate = "";
     state.composer.selecting = false;
+    state.composer.sending = false;
+    state.composer.persistenceReady = false;
+    state.composer.draftStatus = "idle";
+    state.composer.draftUpdatedAt = 0;
     state.composer.error = "";
     clearFeedback();
     state.boot = "loading";
@@ -247,6 +405,7 @@ export function useMobileController() {
       state.transfers = [{ id: "preview-upload", name: "产品录屏.mov", detail: "等待云端确认", progress: 64, state: "progress" }];
       state.appVersion = "preview";
       state.boot = "ready";
+      state.composer.persistenceReady = true;
       return;
     }
 
@@ -279,6 +438,7 @@ export function useMobileController() {
         state.boot = "needs-space";
         return;
       }
+      await restoreComposerDraft();
       state.boot = "ready";
       const results = await Promise.allSettled([refreshMessages(), refreshMarked(), refreshStatus(), refreshTransfers(), refreshCache(), loadAppVersion()]);
       const failure = results.find((result) => result.status === "rejected") as PromiseRejectedResult | undefined;
@@ -660,10 +820,12 @@ export function useMobileController() {
           id: crypto.randomUUID(),
           clientId: `mobile-${crypto.randomUUID()}`,
           previewState: "loading",
+          available: true,
         };
         state.composer.attachments.push(attachment);
         void loadDraftAttachmentPreview(attachment);
       }
+      await persistComposerDraft(true);
     } catch (error) {
       if (generation === viewGeneration && !/cancel/i.test(errorText(error))) {
         state.composer.error = errorText(error);
@@ -688,8 +850,10 @@ export function useMobileController() {
           clientId: `mobile-${crypto.randomUUID()}`,
           mediaType: "file",
           previewState: "unsupported",
+          available: true,
         });
       }
+      await persistComposerDraft(true);
     } catch (error) {
       if (generation === viewGeneration && !/cancel/i.test(errorText(error))) {
         state.composer.error = errorText(error);
@@ -702,6 +866,10 @@ export function useMobileController() {
     if (state.busy || state.composer.sending || state.composer.selecting) return;
     const attachment = state.composer.attachments.find((item) => item.id === id);
     if (!attachment) return;
+    if (attachment.available === false) {
+      attachment.error = "原文件已不可用，请移除后重新选择";
+      return;
+    }
     if (previewMode) { state.notice = "浏览器预览不调用 iOS 系统文件操作"; return; }
     const generation = viewGeneration;
     state.busy = true;
@@ -751,6 +919,7 @@ export function useMobileController() {
       void api().mobileIntegration.cancelVideoPoster(attachment.previewRequestId).catch(() => undefined);
     }
     state.composer.attachments = state.composer.attachments.filter((item) => item.id !== id);
+    void persistComposerDraft();
   }
 
   async function sendDraft() {
@@ -758,7 +927,17 @@ export function useMobileController() {
     const generation = viewGeneration;
     const text = state.composer.text.trim();
     if (!text && !state.composer.attachments.length) return false;
+    const missing = state.composer.attachments.filter((attachment) => attachment.available === false);
+    if (missing.length) {
+      state.composer.error = `${missing.length} 个草稿附件的原文件已不可用，请移除后重新选择`;
+      return false;
+    }
     state.composer.sending = true;
+    if (!await persistComposerDraft(true)) {
+      if (generation === viewGeneration) state.composer.sending = false;
+      return false;
+    }
+    if (generation !== viewGeneration) return false;
     state.composer.savedLocally = false;
     state.composer.error = "";
     clearFeedback();
@@ -773,9 +952,12 @@ export function useMobileController() {
     };
     try {
       if (text) {
-        await api().message.sendText({ text, format: state.composer.format, markedOptions });
+        await api().message.sendText({ text, format: state.composer.format, markedOptions, clientId: state.composer.textClientId });
         if (generation !== viewGeneration) return false;
         localSaveCount += 1;
+        state.composer.text = "";
+        state.composer.textClientId = `mobile-text-${crypto.randomUUID()}`;
+        if (!await persistComposerDraft(true)) return false;
       }
       const remaining: DraftAttachment[] = [];
       for (const attachment of state.composer.attachments) {
@@ -790,7 +972,6 @@ export function useMobileController() {
           remaining.push({ ...attachment, error: errorText(error) });
         }
       }
-      if (text && localSaveCount > 0) state.composer.text = "";
       state.composer.attachments = remaining;
       if (!failed) {
         state.composer.marked = false;
@@ -798,6 +979,10 @@ export function useMobileController() {
         state.composer.dueDate = "";
       }
       state.composer.savedLocally = localSaveCount > 0;
+      if (!await persistComposerDraft(true)) {
+        state.notice = "内容已保存到本机，但草稿状态更新失败；请勿重启，稍后重试保存";
+        return false;
+      }
       state.notice = failed ? "部分内容未保存，请重试失败附件" : "已保存到本机，正在等待云端确认";
       await Promise.all([refreshMessages(), refreshMarked(), refreshStatus(), refreshTransfers()]);
       return !failed;
@@ -806,7 +991,7 @@ export function useMobileController() {
       state.composer.error = errorText(error);
       setError(error);
       return false;
-    } finally { state.composer.sending = false; }
+    } finally { if (generation === viewGeneration) state.composer.sending = false; }
   }
 
   async function toggleMark(message: MobileMessage) {
@@ -1031,6 +1216,7 @@ export function useMobileController() {
     state.busy = true;
     clearFeedback();
     try {
+      if (state.boot === "ready" && !await persistComposerDraft(true)) return;
       state.settings = await api().settings.saveSettings({ ...state.settings, active_storage_profile_id: profile.id });
       await initialize();
     } catch (error) { setError(error); } finally { state.busy = false; }
@@ -1040,7 +1226,7 @@ export function useMobileController() {
     if (!state.activeProfile || state.busy || state.composer.sending || state.composer.selecting || state.sender.saving) return;
     state.busy = true;
     clearFeedback();
-    try { await api().settings.supabaseLogout(state.activeProfile.id); await initialize(); }
+    try { if (!await persistComposerDraft(true)) return; await api().settings.supabaseLogout(state.activeProfile.id); await initialize(); }
     catch (error) { setError(error); } finally { state.busy = false; }
   }
 
@@ -1048,7 +1234,7 @@ export function useMobileController() {
     if (!state.activeProfile || space.current || state.busy || state.composer.sending || state.composer.selecting || state.sender.saving) return;
     state.busy = true;
     clearFeedback();
-    try { await api().settings.switchSupabaseSpace({ sourceProfileId: state.activeProfile.id, spaceId: space.id }); await initialize(); }
+    try { if (!await persistComposerDraft(true)) return; await api().settings.switchSupabaseSpace({ sourceProfileId: state.activeProfile.id, spaceId: space.id }); await initialize(); }
     catch (error) { setError(error); } finally { state.busy = false; }
   }
 
@@ -1124,7 +1310,7 @@ export function useMobileController() {
 
   return {
     state, currentSpace, pendingCount, activeTransfers, signedIn, initialize, refreshAll, refreshRuntimeState, refreshAfterForeground, refreshMessages, loadOlderMessages, searchMessages, loadMoreSearch, setMarkedFilter, loadMoreMarked, loadConflicts, resolveConflict, retryTransfer,
-    selectMedia, selectDocuments, removeAttachment, sendDraft, toggleMark, copyMessage, updateMarkedMetadata, createMarkedTag, deleteMessage, applyMessageSelection, previewMessage, shareMessage, retryPreview, previewImageFailed, previewDraftAttachment,
+    selectMedia, selectDocuments, removeAttachment, sendDraft, persistComposerDraft, deactivateComposerPersistence, toggleMark, copyMessage, updateMarkedMetadata, createMarkedTag, deleteMessage, applyMessageSelection, previewMessage, shareMessage, retryPreview, previewImageFailed, previewDraftAttachment,
     signIn, logout, chooseProfile, loadSpaces, switchSpace, testSetupConnection, setupSignIn, completeSetup, installTransferListeners, refreshCache, clearCache, clearFeedback, saveSenderName,
   };
 }

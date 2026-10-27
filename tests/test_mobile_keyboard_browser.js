@@ -95,14 +95,29 @@ try {
       assert.ok(hit.correct, 'attachment action must be physically hittable: ' + JSON.stringify({ accessibilityText, width, height, visibleHeight, ...hit }));
     }
     await mark.click();
+    assert.equal(await page.locator('.mobile-marked-edit-sheet').count(), 1);
+    await page.locator('.mobile-marked-edit-sheet .mobile-primary-button').dispatchEvent('click');
     assert.equal(await mark.evaluate((el) => el.classList.contains('is-selected')), true);
     await mark.click();
+    await page.getByLabel('发送时标记', { exact: true }).uncheck();
+    await page.locator('.mobile-marked-edit-sheet .mobile-primary-button').dispatchEvent('click');
     assert.equal(await mark.evaluate((el) => el.classList.contains('is-selected')), false);
     await removals.nth(1).click();
     assert.equal(await previews.count(), 1);
     assert.match(await previews.first().getAttribute('aria-label'), /first/);
     await removals.first().click();
     assert.equal(await sheet.locator('.mobile-attachment-strip').count(), 0);
+    await sheet.getByRole('button', { name: 'Markdown', exact: true }).dispatchEvent('click');
+    const markdownTools = sheet.getByRole('toolbar', { name: 'Markdown 格式工具' });
+    for (const label of ['粗体', '链接']) {
+      const tool = markdownTools.getByRole('button', { name: label, exact: true });
+      await tool.scrollIntoViewIfNeeded();
+      const box = await tool.boundingBox();
+      assert.ok(box.width >= 44 && box.height >= 44);
+      assert.ok(box.y >= shell.y && box.y + box.height <= shell.y + visibleHeight + 1, `Markdown ${label} remains reachable above the keyboard`);
+      assert.ok(await tool.evaluate(el => { const r = el.getBoundingClientRect(); return document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)?.closest('button') === el; }));
+    }
+    await sheet.getByRole('button', { name: '文字', exact: true }).dispatchEvent('click');
     await visibleViewport(100, 20, 2);
     assert.equal((await page.locator('.mobile-shell').boundingBox()).height, visibleHeight, 'pinch zoom must not be mistaken for a keyboard resize');
   }
