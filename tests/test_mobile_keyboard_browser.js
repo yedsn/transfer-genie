@@ -75,6 +75,10 @@ try {
       const ui = document.querySelector('.mobile-shell').__vueParentComponent.setupState;
       ui.state.composer.attachments = ['first', 'second'].map((id) => ({ id, clientId: id, path: '/fixture/' + id + '.txt', originalName: '键盘附件测试-' + id + '.txt', mediaType: 'file', sizeBytes: 100, previewState: 'unsupported' }));
     });
+    if (accessibilityText && width > height) {
+      const cards = await sheet.locator('.mobile-attachment-strip > div').evaluateAll((elements) => elements.map((el) => el.getBoundingClientRect().width));
+      assert.ok(cards.every((cardWidth) => cardWidth <= 160), 'long file names must not enlarge the horizontal attachment cards');
+    }
     const mark = sheet.locator('.mobile-compose-tools button').filter({ hasText: '标记' });
     const previews = sheet.locator('.mobile-draft-open');
     const removals = sheet.getByRole('button', { name: '移除附件', exact: true });

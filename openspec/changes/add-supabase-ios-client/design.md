@@ -139,6 +139,8 @@ At accessibility text sizes with the full software keyboard open, composer conte
 
 The shortest landscape accessibility-keyboard layout separates the editor from a horizontally scrolling action strip, with Send ordered first. This prevents caret-reveal scrolling from pulling vertically scrolled actions back out of view. Picker-return keyboard detection accounts for WKWebView layout scrolling in addition to innerHeight; scale-changing pinch zoom remains ignored. Explicit Simulator Debug diagnostics expose layout geometry only, without text or credentials, so UI tests can reject buttons clipped by their DOM scroll container even when WebKit accessibility reports them as hittable. Device and Release builds exclude this probe.
 
+Draft attachments participate in that same horizontal action strip at accessibility sizes; their 160px cards do not expand with long filenames, and each preview/removal remains separately touchable. At normal text sizes in landscape with the keyboard open, attachment cards are reduced to 54px so they can scroll fully into even the shortest observed visible viewport while retaining 44pt removal targets. These changes affect only the mobile composer and do not change attachment storage or sending.
+
 ### 9. Gate implementation with a vertical technical probe
 
 Before full mobile UI adaptation, the implementation SHALL prove:
@@ -162,7 +164,7 @@ The official Xcode iOS Simulator is the primary day-to-day development environme
 
 VPhone MAY be configured as an optional second environment on the Apple Silicon development Mac. It provides a patched full-iOS guest for IPA installation, Xcode/CoreDevice attachment, WebKit and system-framework smoke testing, snapshots, cloning, and automated regression. VPhone SHALL NOT be a release gate and SHALL NOT replace the official Simulator or physical-device checks because it changes the guest boot chain, code-signing policy, system services, and host security configuration. Its virtual-machine library SHOULD live on a dedicated APFS volume with sufficient free space rather than the constrained system disk.
 
-The target iPhone 12 named `Jam` remains authoritative for development-signing, release-signing, Keychain, PhotosPicker/iCloud, security-scoped files, real lifecycle suspension, Wi-Fi/cellular transitions, media behavior, performance, and stability acceptance. A failure observed only in VPhone must be reproduced in the official Simulator or on `Jam` before it is treated as a product release blocker; a pass in VPhone never waives a failed or missing `Jam` check.
+The currently designated physical iPhone named `Jam` remains authoritative for development-signing, release-signing, Keychain, PhotosPicker/iCloud, security-scoped files, real lifecycle suspension, Wi-Fi/cellular transitions, media behavior, performance, and stability acceptance. As of 2026-10-27 this is the paired iPhone 17 Pro Max (`iPhone18,2`, iOS 27.0); the retired iPhone 12 pairing was removed. A failure observed only in VPhone must be reproduced in the official Simulator or on `Jam` before it is treated as a product release blocker; a pass in VPhone never waives a failed or missing `Jam` check.
 
 Alternative considered: use VPhone as the primary simulator because it runs a fuller iOS system. This would make routine development depend on Recovery-mode host security changes, large patched firmware images, and upstream research-VM compatibility, while still failing to reproduce important physical-device behavior.
 

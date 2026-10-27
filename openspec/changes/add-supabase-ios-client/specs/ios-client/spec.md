@@ -81,7 +81,7 @@ iOS 客户端 SHALL 在声明可供日常使用前通过物理 iPhone 的开发�
 - **AND** 网络恢复后能够继续同步或显示明确的可重试失败
 
 ### Requirement: Tiered iOS test environments
-项目 SHALL 使用 Xcode 官方 iOS Simulator 作为日常开发和自动化测试的主要虚拟环境，MAY 使用 VPhone 作为经过明确授权的补充完整 iOS 环境，并 MUST 使用目标 iPhone 12 `Jam` 作为发布稳定性验收的权威环境。VPhone 的通过结果 MUST NOT 替代 Simulator 或 `Jam` 的必需检查。
+项目 SHALL 使用 Xcode 官方 iOS Simulator 作为日常开发和自动化测试的主要虚拟环境，MAY 使用 VPhone 作为经过明确授权的补充完整 iOS 环境，并 MUST 使用当前目标真机 `Jam` 作为发布稳定性验收的权威环境。VPhone 的通过结果 MUST NOT 替代 Simulator 或 `Jam` 的必需检查。
 
 #### Scenario: Run routine mobile development
 - **WHEN** 开发者验证 Tauri 启动、Vue 布局、Swift 插件契约、SQLite 或 Supabase 基础流程

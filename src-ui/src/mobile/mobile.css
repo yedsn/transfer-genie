@@ -260,7 +260,8 @@ html.is-ios-platform #mobile-app-shell { display: block; }
   .is-keyboard-visible .mobile-composer-sheet textarea { grid-column: 1; grid-row: 1 / 3; height: 96px; max-height: none; padding: 10px; }
   .is-keyboard-visible .mobile-composer-sheet .mobile-compose-tools { grid-column: 2; grid-row: 1; margin: 0; }
   .is-keyboard-visible .mobile-composer-sheet .mobile-primary-button { grid-column: 2 / 4; grid-row: 2; height: 44px; }
-  .is-keyboard-visible .mobile-composer-sheet .mobile-attachment-strip { grid-column: 1 / -1; grid-row: 3; margin-top: 0; }
+  .is-keyboard-visible .mobile-composer-sheet .mobile-attachment-strip { grid-column: 1 / -1; grid-row: 3; min-height: 0; margin-top: 0; }
+  .is-keyboard-visible .mobile-composer-sheet .mobile-attachment-strip > div { height: 54px; }
   .is-keyboard-visible .mobile-composer-sheet .mobile-inline-error { grid-column: 1 / -1; grid-row: 4; }
 }
 
@@ -334,8 +335,8 @@ html[data-mobile-accessibility-text="true"] .is-keyboard-visible .mobile-compose
   html[data-mobile-accessibility-text="true"] .is-keyboard-visible .mobile-compose-tools { display: contents; }
   html[data-mobile-accessibility-text="true"] .is-keyboard-visible .mobile-compose-tools button { flex: 0 0 148px; min-height: 44px; padding: 4px 6px; }
   html[data-mobile-accessibility-text="true"] .is-keyboard-visible .mobile-composer-sheet .mobile-primary-button { position: static; order: -1; flex: 0 0 160px; width: 160px; min-height: 54px; margin: 0; padding: 4px 6px; }
-  html[data-mobile-accessibility-text="true"] .is-keyboard-visible .mobile-composer-sheet .mobile-attachment-strip { order: 0; flex: 0 0 auto; height: 100%; margin: 0; padding: 0; overflow: visible; }
-  html[data-mobile-accessibility-text="true"] .is-keyboard-visible .mobile-attachment-strip > div { flex: 0 0 160px; height: 100%; }
+  html[data-mobile-accessibility-text="true"] .is-keyboard-visible .mobile-composer-sheet .mobile-attachment-strip { order: 0; flex: 0 0 auto; width: max-content; height: 100%; margin: 0; padding: 0; overflow: visible; }
+  html[data-mobile-accessibility-text="true"] .is-keyboard-visible .mobile-attachment-strip > div { flex: 0 0 160px; min-width: 0; width: 160px; height: 100%; }
   html[data-mobile-accessibility-text="true"] .is-keyboard-visible .mobile-composer-sheet .mobile-inline-error { flex: 0 0 240px; margin: 0; }
 }
 

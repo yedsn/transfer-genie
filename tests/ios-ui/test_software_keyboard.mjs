@@ -72,7 +72,7 @@ try {
   function consume(chunk) {
     output += chunk.toString();
     if (!outputError) process.stdout.write(chunk);
-    for (const orientation of [1, 3]) for (const stage of ['READY', 'FAILURE', 'SEND']) {
+    for (const orientation of [1, 3]) for (const stage of ['READY', 'FAILURE', 'SEND', 'ATTACHMENT']) {
       const key = stage + '_' + orientation;
       if (captured.has(key) || !output.includes('SOFTWARE_KEYBOARD_CAPTURE_' + key)) continue;
       captured.add(key);
@@ -93,6 +93,7 @@ try {
   assert.ok(!output.includes('Test skipped') && !output.includes('1 test skipped'), 'Skipped keyboard coverage is not a pass');
   assert.equal(captureError, undefined);
   assert.ok(captured.has('READY_1') && captured.has('READY_3'), 'Capture both actual Simulator orientations');
+  if (process.env.KEYBOARD_ATTACHMENT) assert.ok(captured.has('ATTACHMENT_1') && captured.has('ATTACHMENT_3'), 'Capture enabled send with the actual attachment in both orientations');
 } finally {
   clearTimeout(timeout);
   const container = spawnSync('xcrun', ['simctl', 'get_app_container', simulator, 'com.transfergenie', 'data'], { encoding: 'utf8' });

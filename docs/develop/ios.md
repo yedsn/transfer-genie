@@ -109,7 +109,7 @@ CARGO_HOME="$PWD/.cargo-ios" \
 
 如果 Mac 使用有线网络或其他网卡，请把 `en0` 换成实际接口。Vite 会读取 `TAURI_DEV_HOST`，监听该地址并让 HMR 使用同一主机。首次启动时允许 iPhone 的“本地网络”权限，并确认 Mac 防火墙允许 Node/Vite 接收入站连接。
 
-当前 `Jam`（iPhone 12）若显示 `unavailable`，先完成解锁、重新插线、信任和开发者模式检查，再继续真机验收。
+当前 `Jam`（iPhone 17 Pro Max）若显示 `unavailable`，先完成解锁、重新插线、信任和开发者模式检查，再继续真机验收。
 
 ## 5. 编译与回归检查
 
@@ -169,7 +169,7 @@ Simulator 的 Rust 架构是 Apple Silicon `aarch64-apple-ios-sim`；真实设�
 
 - 官方 Xcode Simulator：日常 Tauri、Vue、Rust 和 Swift 插件开发的主环境。
 - VPhone：可选第二环境，用于完整 iOS/IPA 和补充自动化，不作为发布结论。VM 库位于外置 `VPhone` APFS 卷。
-- `Jam` iPhone 12：签名、Keychain、照片/iCloud、文件权限、真实后台生命周期、蜂窝网络和最终稳定性验收的唯一权威设备。
+- `Jam` iPhone 17 Pro Max：签名、Keychain、照片/iCloud、文件权限、真实后台生命周期、蜂窝网络和最终稳定性验收的唯一权威设备。
 
 ## 8. VPhone 可选环境
 
@@ -314,7 +314,7 @@ CARGO_HOME="$PWD/.cargo-ios" \
 
 ### 支持范围与回滚
 
-- 最低系统版本为 iOS 16.0，正式验收设备为 iPhone 12 `Jam`。
+- 最低系统版本为 iOS 16.0，当前正式验收设备为运行 iOS 27.0 的 iPhone 17 Pro Max `Jam`。官方日常 Simulator 仍保留 iPhone 12 / iOS 26.4 配置。
 - 图片使用 ImageIO，系统可解码音视频使用 AVFoundation/AVPlayer，PDF、文本和系统支持的 Office 文档使用 Quick Look。MKV、部分 WebM、旧编码或损坏媒体可能只能显示文件卡并通过系统分享导出。
 - 同步以本地 SQLite/outbox 为准；Realtime 只在前台作为唤醒信号。进入后台后普通传输可能暂停，回到前台或下次冷启动后恢复，首版不承诺后台持续传输。
 - 回滚应用版本时，先保留现有本机数据并确认待同步数量为 0。优先覆盖安装上一个已签名版本；不要卸载应用，因为卸载会删除应用沙盒和本机缓存。若旧版本数据库不兼容，停止回滚并从当前版本同步完成后再处理。

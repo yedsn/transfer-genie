@@ -26,6 +26,51 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         app.buttons["关闭新消息"].tap()
     }
 
+    func testReleaseBuildExcludesSimulatorDebugHooks() throws {
+        app.terminate()
+        app.launchEnvironment["TRANSFER_GENIE_IOS_LAYOUT_PROBE"] = "1"
+        app.launchEnvironment["TRANSFER_GENIE_IOS_SIMULATOR_AUTH_TEST"] = "expire-active-session"
+        app.launchEnvironment["TRANSFER_GENIE_IOS_SIMULATOR_IMPORT_TEST"] = "no-space"
+        defer {
+            app.launchEnvironment.removeValue(forKey: "TRANSFER_GENIE_IOS_LAYOUT_PROBE")
+            app.launchEnvironment.removeValue(forKey: "TRANSFER_GENIE_IOS_SIMULATOR_AUTH_TEST")
+            app.launchEnvironment.removeValue(forKey: "TRANSFER_GENIE_IOS_SIMULATOR_IMPORT_TEST")
+            app.terminate()
+            app.launch()
+        }
+        app.launch()
+        XCTAssertTrue(app.buttons["消息"].waitForExistence(timeout: 30))
+        XCTAssertTrue(button(containing: "存储空间，已同步").waitForExistence(timeout: 45))
+        app.buttons["新消息"].tap()
+        XCTAssertTrue(composerEditor().waitForExistence(timeout: 5))
+        let original = composerEditor().value as? String ?? ""
+        guard (original.isEmpty || original.hasPrefix("输入文字")), app.buttons.matching(identifier: "移除附件").count == 0 else {
+            throw XCTSkip("Preserve the existing draft before checking Release debug-hook exclusion")
+        }
+        XCTAssertFalse(app.staticTexts["Simulator layout geometry"].exists, "Release must exclude the Debug-only layout probe even when explicitly requested")
+        dismissKeyboardIfNeeded()
+        button(containing: "文件").tap()
+        var fixture = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", "TG-IOS-PROBE-20261027-document"))
+            .firstMatch
+        if !fixture.waitForExistence(timeout: 3), let browse = firstExistingButton(labels: ["浏览", "Browse"], timeout: 5) {
+            browse.tap()
+            fixture = app.descendants(matching: .any)
+                .matching(NSPredicate(format: "label CONTAINS %@", "TG-IOS-PROBE-20261027-document"))
+                .firstMatch
+        }
+        XCTAssertTrue(fixture.waitForExistence(timeout: 15))
+        fixture.tap()
+        let open = firstExistingButton(labels: ["打开", "Open"], timeout: 5)
+        XCTAssertNotNil(open)
+        open?.tap()
+        XCTAssertTrue(button(containing: "预览附件 TG-IOS-PROBE-20261027-document.txt").waitForExistence(timeout: 15), "Release must exclude the Debug-only no-space import hook")
+        XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "存储空间不足")).firstMatch.exists)
+        app.buttons["移除附件"].tap()
+        XCTAssertFalse(app.buttons["移除附件"].exists)
+        app.buttons["关闭新消息"].tap()
+    }
+
     func testSystemReduceMotionToggleAndForegroundRecovery() throws {
         #if !targetEnvironment(simulator)
         throw XCTSkip("This test changes preferences only in the official Simulator")
@@ -138,9 +183,13 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         app.buttons["关闭新消息"].tap()
     }
 
-    func testDraftDocumentPreviewAndRemoval() {
+    func testDraftDocumentPreviewAndRemoval() throws {
         app.buttons["新消息"].tap()
         XCTAssertTrue(composerEditor().waitForExistence(timeout: 5))
+        let original = composerEditor().value as? String ?? ""
+        guard (original.isEmpty || original.hasPrefix("输入文字")), app.buttons.matching(identifier: "移除附件").count == 0 else {
+            throw XCTSkip("Preserve the existing draft before selecting the dedicated document fixture")
+        }
         dismissKeyboardIfNeeded()
         button(containing: "文件").tap()
         var fixture = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "TG-IOS-PROBE-20261027-document")).firstMatch
@@ -814,10 +863,10 @@ final class TransferGenieSimulatorUITests: XCTestCase {
                           let data = value.data(using: .utf8),
                           let snapshot = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                           let rects = snapshot["rects"] as? [String: [String: Any]],
-                          let content = rects[".mobile-compose-actions"].flatMap({ ($0["display"] as? String) != "contents" ? $0 : nil }) ?? rects[".mobile-composer-content"],
+                          let content = rects[".mobile-compose-actions"].flatMap({ ($0["display"] as? String) != "contents" ? $0 : nil }) ?? rects[".mobile-composer-content"].flatMap({ ($0["display"] as? String) != "contents" ? $0 : nil }) ?? rects[".mobile-composer-sheet"],
                           let top = content["y"] as? Double, let height = content["height"] as? Double,
                           let left = content["x"] as? Double, let width = content["width"] as? Double,
-                          let target = rects[control.label == "发送" ? ".mobile-composer-sheet .mobile-primary-button" : control.label.contains("照片") ? ".mobile-compose-tools button:nth-child(1)" : control.label.contains("文件") ? ".mobile-compose-tools button:nth-child(2)" : control.label.contains("标记") ? ".mobile-compose-tools button:nth-child(3)" : control.label == "移除附件" ? ".mobile-attachment-strip button[aria-label=\"移除附件\"]".replacingOccurrences(of: "\\", with: "") : ".mobile-attachment-strip .mobile-draft-open"],
+                          let target = rects[control.label == "发送" ? ".mobile-composer-sheet .mobile-primary-button" : control.label.contains("照片") ? ".mobile-compose-tools button:nth-child(1)" : control.label.contains("文件") ? ".mobile-compose-tools button:nth-child(2)" : control.label.contains("标记") ? ".mobile-compose-tools button:nth-child(3)" : control.label == "移除附件" ? ".mobile-attachment-strip button[aria-label=\"移除附件\"]" : ".mobile-attachment-strip .mobile-draft-open"],
                           let targetTop = target["y"] as? Double, let targetHeight = target["height"] as? Double,
                           let targetLeft = target["x"] as? Double, let targetWidth = target["width"] as? Double else {
                         XCTFail("Simulator layout probe must expose actual DOM clipping bounds")
@@ -834,7 +883,7 @@ final class TransferGenieSimulatorUITests: XCTestCase {
                 let visibleBottom = keyboardTop
                 print("KEYBOARD_ACTION_FRAME \(orientation.rawValue) \(control.label) \(control.frame) keyboardTop=\(keyboardTop) enabled=\(control.isEnabled)")
                 if scrollForActions {
-                    for _ in 0..<8 {
+                    for _ in 0..<20 {
                         let frame = control.frame
                         XCTAssertTrue(keyboard.exists, "Scrolling actions must not dismiss the software keyboard")
                         print("KEYBOARD_ACTION_FRAME \(control.label) \(frame)")
@@ -843,7 +892,8 @@ final class TransferGenieSimulatorUITests: XCTestCase {
                         let surface = app.coordinate(withNormalizedOffset: .zero)
                         let landscape = self.app.windows.firstMatch.frame.width > self.app.windows.firstMatch.frame.height
                         let startY = landscape ? min(keyboardTop - 70, self.app.buttons["关闭新消息"].frame.maxY + 44) : max(70, keyboardTop - 130)
-                        let endY = frame.maxY <= keyboardTop && frame.minY < 55 ? startY + 65 : max(20, startY - (landscape ? 65 : 35))
+                        let needsDown = displacement.vertical < -1 || (abs(displacement.vertical) <= 1 && frame.minY < 55)
+                        let endY = needsDown ? min(keyboardTop - 20, startY + 100) : max(20, startY - (landscape ? 65 : 100))
                         // Stay inside the scroll region and away from the fixed close
                         // button and keyboard accessory bar.
                         let gutterX = landscape ? self.app.buttons["关闭新消息"].frame.minX - 45 : self.app.windows.firstMatch.frame.width * 0.7
@@ -901,8 +951,12 @@ final class TransferGenieSimulatorUITests: XCTestCase {
                 }
                 let mark = button(containing: "标记")
                 mark.tap()
+                if !keyboard.exists { editor.tap() }
+                XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
                 verifyReachable(mark)
                 mark.tap()
+                if !keyboard.exists { editor.tap() }
+                XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
                 verifyReachable(preview)
                 preview.tap()
                 let done = firstExistingButton(labels: ["完成", "Done"], timeout: 15)
@@ -912,6 +966,10 @@ final class TransferGenieSimulatorUITests: XCTestCase {
                 if !keyboard.exists { editor.tap() }
                 XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
                 verifyReachable(app.buttons["发送"])
+                print("SOFTWARE_KEYBOARD_CAPTURE_ATTACHMENT_\(orientation.rawValue)")
+                let attachmentCapture = XCTestExpectation(description: "Capture enabled Send with the actual attachment draft")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { attachmentCapture.fulfill() }
+                XCTAssertEqual(XCTWaiter.wait(for: [attachmentCapture], timeout: 4), .completed)
                 let remove = app.buttons["移除附件"]
                 verifyReachable(remove)
                 remove.tap()
@@ -1523,5 +1581,77 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+}
+
+final class TransferGeniePhysicalDeviceSmokeTests: XCTestCase {
+    private var app: XCUIApplication!
+
+    override func setUpWithError() throws {
+        continueAfterFailure = false
+        app = XCUIApplication(bundleIdentifier: "com.transfergenie")
+        app.launch()
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 20))
+    }
+
+    func testReadOnlyStartupState() {
+        let ready = app.buttons["消息"]
+        let noProfile = app.staticTexts["连接你的云端空间"]
+        let chooseProfile = app.staticTexts["选择 Supabase 配置"]
+        let signedOut = app.staticTexts["登录 Supabase"]
+        let needsSpace = app.staticTexts["选择存储空间"]
+        let failed = app.staticTexts["暂时无法打开"]
+        let deadline = Date().addingTimeInterval(45)
+        while Date() < deadline && ![ready, noProfile, chooseProfile, signedOut, needsSpace, failed].contains(where: \.exists) {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        XCTAssertTrue([ready, noProfile, chooseProfile, signedOut, needsSpace].contains(where: \.exists), "The physical-device mobile shell did not reach a usable startup state")
+        XCTAssertFalse(failed.exists, "The physical-device mobile shell reported an initialization failure")
+        let state = ready.exists ? "ready" : noProfile.exists ? "no-profile" : chooseProfile.exists ? "choose-profile" : signedOut.exists ? "signed-out" : "needs-space"
+        print("PHYSICAL_DEVICE_STARTUP_STATE=\(state)")
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "physical-device-startup-\(state)"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    func testComposerPickerCancellationWithKeyboard() {
+        XCTAssertTrue(app.buttons["消息"].waitForExistence(timeout: 30))
+        app.buttons["新消息"].tap()
+        let editor = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", "消息内容", "输入文字"))
+            .firstMatch
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        editor.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+
+        let photo = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "照片")).firstMatch
+        XCTAssertTrue(photo.isHittable)
+        photo.tap()
+        let photoCancel = firstExistingButton(labels: ["取消", "Cancel"], timeout: 15)
+        XCTAssertNotNil(photoCancel)
+        photoCancel?.tap()
+        XCTAssertTrue(editor.waitForExistence(timeout: 10))
+
+        let file = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "文件")).firstMatch
+        XCTAssertTrue(file.isHittable)
+        file.tap()
+        let fileCancel = firstExistingButton(labels: ["取消", "Cancel"], timeout: 15)
+        XCTAssertNotNil(fileCancel)
+        fileCancel?.tap()
+        XCTAssertTrue(editor.waitForExistence(timeout: 10))
+        app.buttons["关闭新消息"].tap()
+    }
+
+    private func firstExistingButton(labels: [String], timeout: TimeInterval) -> XCUIElement? {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            for label in labels {
+                let element = app.buttons[label]
+                if element.exists { return element }
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        } while Date() < deadline
+        return nil
     }
 }
