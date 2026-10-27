@@ -33,7 +33,8 @@
         "docs:build": "vitepress build docs",
         "docs:preview": "vitepress preview docs",
         "docs:verify-seo": "DOCS_BASE=/transfer-genie/ vitepress build docs && node scripts/verify_docs_seo.mjs",
-        "docs:verify-live-seo": "node scripts/verify_docs_live_seo.mjs"
+        "docs:verify-live-seo": "node scripts/verify_docs_live_seo.mjs",
+        "test:vphone": "node tests/vphone/test_vphone_smoke.mjs"
     },
     "engines": {
         "node": ">=20"

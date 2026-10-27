@@ -63,6 +63,15 @@
     },
   };
 
+  const mobileCacheApi = {
+    async getSummary() {
+      return invoke('get_mobile_cache_summary');
+    },
+    async clear() {
+      return invoke('clear_mobile_cache');
+    },
+  };
+
   // Settings API
   const settingsApi = {
     async setMobileLifecycleState(lifecycleState) {
@@ -98,8 +107,26 @@
     async supabaseSignIn(input) {
       return invoke('supabase_sign_in', { input });
     },
+    async supabaseDraftSignIn(input) {
+      return invoke('supabase_draft_sign_in', { input });
+    },
+    async testSupabaseDraftConnection(input) {
+      return invoke('test_supabase_draft_connection', { input });
+    },
+    async listSupabaseDraftSpaces(flowId) {
+      return invoke('list_supabase_draft_spaces', { input: { flowId } });
+    },
+    async completeSupabaseBinding(input) {
+      return invoke('complete_supabase_binding', { input });
+    },
+    async cancelSupabaseBindingFlow(flowId) {
+      return invoke('cancel_supabase_binding_flow', { input: { flowId } });
+    },
     async supabaseCurrentUser(profileId) {
       return invoke('supabase_current_user', { profileId });
+    },
+    async refreshSupabaseSession(profileId) {
+      return invoke('supabase_refresh_session', { profileId });
     },
     async supabaseLogout(profileId) {
       return invoke('supabase_logout', { profileId });
@@ -107,12 +134,33 @@
     async testSupabaseConnection(profileId) {
       return invoke('test_supabase_connection', { profileId });
     },
+    async listSupabaseSpaces(profileId) {
+      return invoke('list_supabase_spaces', { profileId });
+    },
+    async switchSupabaseSpace(input) {
+      return invoke('switch_supabase_space', { input });
+    },
   };
 
   // Sync/WebDAV API
   const syncApi = {
+    async listPendingOperations() {
+      return invoke('list_pending_operations');
+    },
+    async retryPendingOperation(operationId) {
+      return invoke('retry_pending_operation', { operationId });
+    },
+    async listConflicts() {
+      return invoke('list_sync_conflicts');
+    },
+    async resolveConflict(conflictId, resolution) {
+      return invoke('resolve_sync_conflict', { input: { conflictId, resolution } });
+    },
     async getSyncStatus() {
       return invoke('get_sync_status');
+    },
+    async refresh() {
+      return invoke('refresh');
     },
     async testWebdavSpeed(endpointId, url, username, password) {
       return invoke('test_webdav_speed', { endpointId, url, username, password });
@@ -127,6 +175,12 @@
     async getMessages(params) {
       return invoke('get_messages', params);
     },
+    async listWindow(input) {
+      return invoke('list_messages_window', { input });
+    },
+    async searchMessages(params) {
+      return invoke('list_messages', params);
+    },
     async sendText(params) {
       return invoke('send_text', params);
     },
@@ -139,20 +193,29 @@
     async deleteMessages(filenames, deleteRemote) {
       return invoke('delete_messages', { filenames, deleteRemote });
     },
-    async toggleMessageMarked(filename, marked) {
-      return invoke('toggle_message_marked', { filename, marked });
+    async mark(filename, tagIds = [], dueDate = null) {
+      return invoke('mark_message', { filename, tagIds, dueDate });
+    },
+    async unmark(filename) {
+      return invoke('unmark_message', { filename });
     },
     async openMessageFile(filename, originalName = '', endpointId = null) {
       return invoke('open_message_file', { filename, originalName, endpointId });
     },
-    async downloadMessageFile(filename, endpointId) {
-      return invoke('download_message_file', { filename, endpointId });
+    async downloadMessageFile(filename, originalName = '', conflictAction = 'overwrite', endpointId = null) {
+      return invoke('download_message_file', { filename, originalName, conflictAction, endpointId });
     },
     async saveMessageFileAs(filename, targetPath, endpointId) {
       return invoke('save_message_file_as', { filename, targetPath, endpointId });
     },
     async getThumbnail(filename) {
       return invoke('get_thumbnail', { filename });
+    },
+    async getMediaPreview(input) {
+      return invoke('get_media_preview', { input });
+    },
+    async completeMediaPreview(input) {
+      return invoke('complete_media_preview', { input });
     },
     async getMessageSourceAudioFile(filename, endpointId = null) {
       return invoke('get_message_source_audio_file', { filename, endpointId });
@@ -171,7 +234,7 @@
   // Marked messages API
   const markedApi = {
     async getMarkedMessages(params) {
-      return invoke('get_marked_messages', params);
+      return invoke('list_marked_messages', params);
     },
     async toggleMarkedPin(filename) {
       return invoke('toggle_marked_message_pin', { filename });
@@ -349,6 +412,7 @@
     path: pathApi,
     integration: integrationApi,
     mobileIntegration: mobileIntegrationApi,
+    mobileCache: mobileCacheApi,
   };
 
   globalScope.transferGenieApi = api;

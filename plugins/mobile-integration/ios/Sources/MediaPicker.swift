@@ -105,11 +105,13 @@ final class MediaPickerCoordinator: NSObject, PHPickerViewControllerDelegate {
         let values = try destination.resourceValues(forKeys: [.fileSizeKey])
         completion(.success([
           "path": destination.path,
-          "originalName": originalName ?? destination.lastPathComponent,
+          "originalName": destination.lastPathComponent,
           "mediaType": contentType.conforms(to: .movie) ? "video" : "image",
           "contentType": contentType.preferredMIMEType as Any,
           "sizeBytes": values.fileSize ?? 0,
         ]))
+      } catch let error as MobileIntegrationError {
+        completion(.failure(error))
       } catch {
         completion(.failure(MobileIntegrationError(
           code: .copyFailed,
@@ -150,10 +152,22 @@ final class MediaPickerCoordinator: NSObject, PHPickerViewControllerDelegate {
     let sourceExtension = source.pathExtension
     let fileExtension = [suppliedExtension, sourceExtension, contentType.preferredFilenameExtension ?? ""]
       .first { !$0.isEmpty } ?? "bin"
-    let destination = importDirectory
-      .appendingPathComponent(UUID().uuidString)
-      .appendingPathExtension(fileExtension)
+    // Keep the user-visible basename: Rust sends the name from this sandbox path.
+    // A unique directory isolates two selections with the same original filename.
+    let rawName = originalName?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let basename = URL(fileURLWithPath: rawName.flatMap { $0.isEmpty ? nil : $0 } ?? source.lastPathComponent).lastPathComponent
+    let filename = URL(fileURLWithPath: basename).pathExtension.isEmpty
+      ? basename + "." + fileExtension : basename
+    let selectionDirectory = importDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try fileManager.createDirectory(at: selectionDirectory, withIntermediateDirectories: true)
+    let destination = selectionDirectory.appendingPathComponent(filename)
+    var imported = false
+    defer {
+      if !imported { try? fileManager.removeItem(at: selectionDirectory) }
+    }
+    try MobileImportTestHooks.checkWritableStorage()
     try fileManager.copyItem(at: source, to: destination)
+    imported = true
     return destination
   }
 

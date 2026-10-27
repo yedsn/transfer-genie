@@ -4515,12 +4515,30 @@ function createMediaElement(kind, options = {}) {
   return element;
 }
 
+function isMediaAutoplayBlocked(error) {
+  const name = String(error?.name || '');
+  const message = String(error?.message || error || '').toLowerCase();
+  if (name === 'NotSupportedError' || message.includes('not supported') || message.includes('不支持')) {
+    return false;
+  }
+  return name === 'NotAllowedError'
+    || name === 'AbortError'
+    || message.includes('user gesture')
+    || message.includes('user interaction')
+    || message.includes('not allowed by the user agent')
+    || message.includes('operation was aborted');
+}
+
 async function loadAndPlayMediaElement(element, message, owner, variant = 'file', options = {}) {
   const result = await loadMediaElementSource(element, message, owner, variant, options);
   if (!result) return null;
   try {
     await element.play();
   } catch (error) {
+    if (isMediaAutoplayBlocked(error)) {
+      element.dataset.autoplayBlocked = 'true';
+      return { ...result, autoplayBlocked: true };
+    }
     mediaSession?.stopOwner(owner);
     throw new Error('当前格式不支持应用内播放，请下载后使用系统程序打开');
   }
@@ -4622,9 +4640,9 @@ async function openMessageVideoPlayer(message, posterSrc = '') {
     .catch(() => {});
   stage.appendChild(video);
   try {
-    await loadAndPlayMediaElement(video, message, 'message-list-video');
+    const result = await loadAndPlayMediaElement(video, message, 'message-list-video');
     if (messageMediaOverlay !== overlay) return;
-    status.textContent = '';
+    status.textContent = result?.autoplayBlocked ? '视频已准备，请点击播放器开始播放' : '';
   } catch (error) {
     if (messageMediaOverlay !== overlay) return;
     status.textContent = `视频预览失败：${error?.message || error}`;
@@ -4811,8 +4829,12 @@ async function playMessageAudioInline(message, body, button) {
         button.textContent = idleButtonText;
       },
     });
-    await media.play();
     if (inlineAudioLoads.get(body) === loadState) inlineAudioLoads.delete(body);
+    void media.play().catch((error) => {
+      if (!player.isConnected) return;
+      player.classList.add('is-awaiting-play');
+      player.dataset.playError = String(error?.message || error || '');
+    });
   } catch (error) {
     if (loadState.cancelled || inlineAudioLoads.get(body) !== loadState) return;
     mediaSession?.stopOwner(owner);

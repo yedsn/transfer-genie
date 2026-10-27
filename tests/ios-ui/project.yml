@@ -1,0 +1,26 @@
+name: TransferGenieSimulatorUITests
+options:
+  bundleIdPrefix: com.transfergenie.tests
+  deploymentTarget:
+    iOS: "16.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+targets:
+  TransferGenieSimulatorUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: Tests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.transfergenie.tests.simulator-ui
+        CODE_SIGNING_ALLOWED: NO
+schemes:
+  TransferGenieSimulatorUITests:
+    build:
+      targets:
+        TransferGenieSimulatorUITests: [test]
+    test:
+      targets:
+        - TransferGenieSimulatorUITests

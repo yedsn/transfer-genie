@@ -155,6 +155,27 @@ struct AppState {
     system_dictation_hidden_main_position: Mutex<Option<PhysicalPosition<i32>>>,
     media_playback: media_playback::PlaybackRegistry,
     media_preview_jobs: AsyncMutex<HashMap<String, Arc<MediaPreviewJob>>>,
+    #[cfg(any(target_os = "ios", test))]
+    supabase_download_guard: AsyncMutex<()>,
+}
+
+#[cfg(all(desktop, debug_assertions))]
+static DEBUG_WEBVIEW_E2E_PENDING: std::sync::OnceLock<
+    Mutex<HashMap<String, oneshot::Sender<Result<String, String>>>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(all(desktop, debug_assertions))]
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DebugWebviewEvalRequest {
+    expression: String,
+}
+
+#[cfg(all(desktop, debug_assertions))]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DebugWebviewEvalResponse {
+    value: serde_json::Value,
 }
 
 #[derive(Clone)]
@@ -1358,6 +1379,59 @@ fn auth_error(
     }
 }
 
+#[cfg(all(target_os = "ios", target_abi = "sim", debug_assertions))]
+const IOS_SIMULATOR_AUTH_TEST_ENV: &str = "TRANSFER_GENIE_IOS_SIMULATOR_AUTH_TEST";
+
+#[cfg(all(target_os = "ios", target_abi = "sim", debug_assertions))]
+const IOS_SIMULATOR_AUTH_TEST_MARKER: &str = "ios-simulator-auth-refresh-test.json";
+
+#[cfg(all(target_os = "ios", target_abi = "sim", debug_assertions))]
+fn ios_simulator_expired_session_test_enabled() -> bool {
+    env::var(IOS_SIMULATOR_AUTH_TEST_ENV).ok().as_deref() == Some("expire-active-session")
+}
+
+#[cfg(all(target_os = "ios", target_abi = "sim", debug_assertions))]
+fn write_ios_simulator_auth_test_marker(
+    settings_path: &Path,
+    state: &str,
+    expires_at: Option<i64>,
+) -> Result<(), String> {
+    let parent = settings_path
+        .parent()
+        .ok_or_else(|| "无法定位 Simulator Auth 测试标记目录".to_string())?;
+    let payload = serde_json::json!({
+        "state": state,
+        "expiresAt": expires_at,
+    });
+    fs::write(
+        parent.join(IOS_SIMULATOR_AUTH_TEST_MARKER),
+        serde_json::to_vec_pretty(&payload)
+            .map_err(|error| format!("序列化 Simulator Auth 测试标记失败: {error}"))?,
+    )
+    .map_err(|error| format!("写入 Simulator Auth 测试标记失败: {error}"))
+}
+
+#[cfg(all(target_os = "ios", target_abi = "sim", debug_assertions))]
+fn arm_ios_simulator_expired_session_test(
+    settings_path: &Path,
+    settings: &Settings,
+    sessions: &mut HashMap<String, supabase_auth::SupabaseSession>,
+) -> Result<(), String> {
+    if !ios_simulator_expired_session_test_enabled() {
+        return Ok(());
+    }
+    let profile_id = settings
+        .active_storage_profile_id
+        .as_deref()
+        .ok_or_else(|| "Simulator Auth 测试需要活动 Supabase Profile".to_string())?;
+    let session = sessions
+        .get_mut(profile_id)
+        .ok_or_else(|| "Simulator Auth 测试需要已保存 Session".to_string())?;
+    session.expires_at = 1;
+    credential_store::save_session(profile_id, session)?;
+    write_ios_simulator_auth_test_marker(settings_path, "armed", Some(session.expires_at))
+}
+
 fn remove_supabase_session(
     state: &AppState,
     profile_id: &str,
@@ -1438,6 +1512,17 @@ async fn valid_supabase_session(
                     )
                 })?
                 .insert(profile_id.to_string(), refreshed.clone());
+            #[cfg(all(target_os = "ios", target_abi = "sim", debug_assertions))]
+            if ios_simulator_expired_session_test_enabled() {
+                write_ios_simulator_auth_test_marker(
+                    &state.settings_path,
+                    "refreshed",
+                    Some(refreshed.expires_at),
+                )
+                .map_err(|message| {
+                    auth_error(supabase_auth::SupabaseAuthErrorKind::Service, message)
+                })?;
+            }
             Ok(Some(refreshed))
         }
         Err(error) if error.kind == supabase_auth::SupabaseAuthErrorKind::Network => {
@@ -1529,6 +1614,8 @@ fn refresh_supabase_status(state: &AppState, phase: Option<&str>) -> Result<Sync
                     "syncing".into()
                 } else if pending > 0 {
                     "pending".into()
+                } else if status.last_error.is_some() {
+                    "error".into()
                 } else {
                     "synced".into()
                 }
@@ -1733,7 +1820,8 @@ async fn complete_supabase_preview(
         &attachment.attachment_id,
         &preview_object_path,
     );
-    let mut temporary_source = None;
+    #[allow(unused_mut)]
+    let mut temporary_source: Option<PathBuf> = None;
     if !preview_path.is_file() {
         let source_path = attachment
             .local_path
@@ -1748,66 +1836,100 @@ async fn complete_supabase_preview(
                     .as_deref()
                     .filter(|value| !value.trim().is_empty())
                     .ok_or_else(|| "附件尚未上传，无法补全预览".to_string())?;
-                let temp_dir = endpoint_files_dir(state, &profile.id)
-                    .join(&session.user_id)
-                    .join("preview-temp");
-                fs::create_dir_all(&temp_dir)
-                    .map_err(|error| format!("创建预览临时目录失败: {error}"))?;
-                let temp_path = temp_dir.join(format!(
-                    "{}-{}",
-                    attachment.attachment_id,
-                    sanitize_filename(&attachment.original_name)
-                ));
-                let mut response = supabase_sync::download_storage_object_stream(
-                    &state.http,
-                    config,
-                    session,
-                    object_path,
-                )
-                .await?;
-                let temp_file = fs::File::create(&temp_path)
-                    .map_err(|error| format!("创建预览临时原件失败: {error}"))?;
-                let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel(4);
-                let writer = tokio::task::spawn_blocking(move || {
-                    use std::io::Write as _;
-                    let mut file = temp_file;
-                    while let Some(chunk) = chunk_rx.blocking_recv() {
-                        let chunk: bytes::Bytes = chunk;
-                        file.write_all(&chunk)
-                            .map_err(|error| format!("保存预览临时原件失败: {error}"))?;
-                    }
-                    file.flush()
-                        .map_err(|error| format!("保存预览临时原件失败: {error}"))
-                });
-                let mut stream_error = None;
-                while let Some(chunk) = response.stream.next().await {
-                    match chunk {
-                        Ok(chunk) => {
-                            if chunk_tx.send(chunk).await.is_err() {
-                                stream_error = Some("保存预览临时原件任务已停止".to_string());
+                #[cfg(target_os = "ios")]
+                {
+                    let (message, _) = db::get_message_by_id_for_scope(
+                        &state.db_path,
+                        &profile.id,
+                        &session.user_id,
+                        &attachment.message_id,
+                    )
+                    .map_err(|error| error.to_string())?
+                    .ok_or("媒体消息不存在")?;
+                    let cache_path = endpoint_files_dir(state, &profile.id)
+                        .join(&session.user_id)
+                        .join("downloads")
+                        .join(&message.filename);
+                    ensure_parent_dir(&cache_path)?;
+                    stream_supabase_attachment_download(
+                        None,
+                        state,
+                        profile,
+                        session,
+                        config,
+                        &message.filename,
+                        &attachment.original_name,
+                        object_path,
+                        attachment.size,
+                        attachment.sha256.as_deref(),
+                        &cache_path,
+                    )
+                    .await?;
+                    cache_path
+                }
+                #[cfg(not(target_os = "ios"))]
+                {
+                    let temp_dir = endpoint_files_dir(state, &profile.id)
+                        .join(&session.user_id)
+                        .join("preview-temp");
+                    fs::create_dir_all(&temp_dir)
+                        .map_err(|error| format!("创建预览临时目录失败: {error}"))?;
+                    let temp_path = temp_dir.join(format!(
+                        "{}-{}",
+                        attachment.attachment_id,
+                        sanitize_filename(&attachment.original_name)
+                    ));
+                    let mut response = supabase_sync::download_storage_object_stream(
+                        &state.http,
+                        config,
+                        session,
+                        object_path,
+                    )
+                    .await?;
+                    let temp_file = fs::File::create(&temp_path)
+                        .map_err(|error| format!("创建预览临时原件失败: {error}"))?;
+                    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel(4);
+                    let writer = tokio::task::spawn_blocking(move || {
+                        use std::io::Write as _;
+                        let mut file = temp_file;
+                        while let Some(chunk) = chunk_rx.blocking_recv() {
+                            let chunk: bytes::Bytes = chunk;
+                            file.write_all(&chunk)
+                                .map_err(|error| format!("保存预览临时原件失败: {error}"))?;
+                        }
+                        file.flush()
+                            .map_err(|error| format!("保存预览临时原件失败: {error}"))
+                    });
+                    let mut stream_error = None;
+                    while let Some(chunk) = response.stream.next().await {
+                        match chunk {
+                            Ok(chunk) => {
+                                if chunk_tx.send(chunk).await.is_err() {
+                                    stream_error = Some("保存预览临时原件任务已停止".to_string());
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                stream_error = Some(format!("读取预览临时原件失败: {error}"));
                                 break;
                             }
                         }
-                        Err(error) => {
-                            stream_error = Some(format!("读取预览临时原件失败: {error}"));
-                            break;
-                        }
                     }
+                    drop(chunk_tx);
+                    let write_result = writer
+                        .await
+                        .map_err(|error| format!("保存预览临时原件任务失败: {error}"))?;
+                    if let Some(error) = stream_error {
+                        let _ = fs::remove_file(&temp_path);
+                        return Err(error);
+                    }
+                    if let Err(error) = write_result {
+                        let _ = fs::remove_file(&temp_path);
+                        return Err(error);
+                    }
+                    temporary_source = Some(temp_path.clone());
+                    temp_path
                 }
-                drop(chunk_tx);
-                let write_result = writer
-                    .await
-                    .map_err(|error| format!("保存预览临时原件任务失败: {error}"))?;
-                if let Some(error) = stream_error {
-                    let _ = fs::remove_file(&temp_path);
-                    return Err(error);
-                }
-                if let Err(error) = write_result {
-                    let _ = fs::remove_file(&temp_path);
-                    return Err(error);
-                }
-                temporary_source = Some(temp_path.clone());
-                temp_path
             }
         };
         let generated = generate_preview_file(
@@ -1869,6 +1991,36 @@ async fn complete_supabase_preview(
 
 const STORAGE_IMPORT_NAMESPACE: uuid::Uuid =
     uuid::Uuid::from_u128(0x8a1095ec_687e_5a71_986f_66fd96e3a2d0);
+const SUPABASE_CLIENT_SEND_NAMESPACE: uuid::Uuid =
+    uuid::Uuid::from_u128(0x9c4ea568_6418_527d_aee9_d75902e64b6e);
+
+struct SupabaseClientSendIds {
+    message_id: String,
+    attachment_id: String,
+    message_operation_id: String,
+    attachment_operation_id: String,
+}
+
+fn supabase_client_send_ids(
+    profile_id: &str,
+    owner_scope: &str,
+    client_id: &str,
+) -> SupabaseClientSendIds {
+    let uuid = |kind: &str| {
+        uuid::Uuid::new_v5(
+            &SUPABASE_CLIENT_SEND_NAMESPACE,
+            format!("transfer-genie-supabase-send:{profile_id}:{owner_scope}:{client_id}:{kind}")
+                .as_bytes(),
+        )
+        .to_string()
+    };
+    SupabaseClientSendIds {
+        message_id: uuid("message"),
+        attachment_id: uuid("attachment"),
+        message_operation_id: uuid("message-operation"),
+        attachment_operation_id: uuid("attachment-operation"),
+    }
+}
 
 fn storage_import_uuid(kind: &str, source_profile_id: &str, source_key: &str) -> String {
     uuid::Uuid::new_v5(
@@ -1981,6 +2133,8 @@ struct PendingOperationResult {
     attempt_count: i64,
     last_error: Option<String>,
     created_at_ms: i64,
+    original_name: Option<String>,
+    size: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -4044,6 +4198,12 @@ fn list_pending_operations(
                     attempt_count: item.attempt_count,
                     last_error: item.last_error,
                     created_at_ms: item.created_at_ms,
+                    original_name: serde_json::from_str::<serde_json::Value>(&item.payload_json)
+                        .ok()
+                        .and_then(|payload| payload["originalName"].as_str().map(str::to_string)),
+                    size: serde_json::from_str::<serde_json::Value>(&item.payload_json)
+                        .ok()
+                        .and_then(|payload| payload["size"].as_i64()),
                 })
                 .collect()
         })
@@ -6033,6 +6193,13 @@ async fn complete_supabase_binding(
     state: State<'_, AppState>,
     input: CompleteSupabaseBindingInput,
 ) -> Result<Settings, String> {
+    complete_supabase_binding_impl(&state, input).await
+}
+
+async fn complete_supabase_binding_impl(
+    state: &AppState,
+    input: CompleteSupabaseBindingInput,
+) -> Result<Settings, String> {
     let flow = binding_flow(&state, &input.flow_id)?;
     let mut profile = input.profile;
     if profile.provider_kind != StorageProviderKind::Supabase {
@@ -6055,22 +6222,47 @@ async fn complete_supabase_binding(
     if !available.iter().any(|space| space.id == config.space_id) {
         return Err("所选 Supabase 空间不存在或当前账号无权访问".to_string());
     }
+    // A retry after profile creation must reuse the same destination, never duplicate it.
+    let settings = current_settings(state)?;
+    let existing = settings
+        .storage_profiles
+        .iter()
+        .find(|candidate| same_supabase_destination(candidate, &profile));
+    let original_profile_id = input
+        .original_profile_id
+        .clone()
+        .or_else(|| existing.map(|candidate| candidate.id.clone()));
+    if let Some(existing) = existing {
+        let saved_session = credential_store::load_session(&existing.id)?;
+        if saved_session
+            .as_ref()
+            .is_some_and(|session| session.user_id != flow.session.user_id)
+            && db::has_pending_profile_work(&state.db_path, &existing.id)
+                .map_err(|error| error.to_string())?
+        {
+            return Err("该存储空间的原账号仍有未完成任务，请先处理后再登录其他账号".into());
+        }
+        if original_profile_id.as_deref() != Some(existing.id.as_str()) {
+            return Err("该 Supabase Space 已有配置，请使用已有存储空间".into());
+        }
+        profile = existing.clone();
+        profile.enabled = true;
+    }
     let updated = save_storage_profile_impl(
         &state,
         SaveStorageProfileInput {
-            original_profile_id: input.original_profile_id.clone(),
+            original_profile_id: original_profile_id.clone(),
             profile: profile.clone(),
         },
     )?;
-    let saved_profile_id = input
-        .original_profile_id
+    let saved_profile_id = original_profile_id
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(&profile.id)
         .to_string();
     if let Err(error) = credential_store::save_session(&saved_profile_id, &flow.session) {
-        if input.original_profile_id.is_none() {
+        if original_profile_id.is_none() {
             let _ = remove_storage_profile_impl(&state, &saved_profile_id, true);
         }
         return Err(error);
@@ -9427,6 +9619,38 @@ async fn toggle_marked_message_pin_impl(
     Ok(pinned)
 }
 
+fn with_mobile_attachment_cache_state(
+    state: &AppState,
+    profile_id: &str,
+    owner_scope: &str,
+    mut messages: Vec<Message>,
+) -> Vec<Message> {
+    #[cfg(any(target_os = "ios", test))]
+    {
+        let root = endpoint_files_dir(state, profile_id)
+            .join(owner_scope)
+            .canonicalize()
+            .ok();
+        for message in &mut messages {
+            message.download_exists = message.kind != MessageKind::Text.as_str()
+                && message.local_path.as_deref().is_some_and(|local| {
+                    let path = Path::new(local);
+                    !local.ends_with(".part")
+                        && root.as_ref().is_some_and(|root| {
+                            path.canonicalize()
+                                .is_ok_and(|resolved| resolved.starts_with(root))
+                        })
+                        && fs::metadata(path).is_ok_and(|metadata| {
+                            metadata.is_file() && metadata.len() as i64 == message.size
+                        })
+                });
+        }
+    }
+    #[cfg(not(any(target_os = "ios", test)))]
+    let _ = (state, profile_id, owner_scope, &mut messages);
+    messages
+}
+
 #[tauri::command]
 fn list_marked_messages(
     state: State<'_, AppState>,
@@ -9467,6 +9691,8 @@ fn list_marked_messages(
             pending_due_date,
         )
         .map_err(|error| error.to_string())?;
+        let messages =
+            with_mobile_attachment_cache_state(&state, &profile.id, &session.user_id, messages);
         let current_offset = offset.unwrap_or(0).max(0);
         let current_limit = limit.unwrap_or(total).max(0);
         return Ok(MessagesResult {
@@ -9536,6 +9762,8 @@ fn list_messages(
             search_query.as_deref(),
         )
         .map_err(|error| error.to_string())?;
+        let messages =
+            with_mobile_attachment_cache_state(&state, &profile.id, &session.user_id, messages);
         let current_offset = offset.unwrap_or(0);
         let current_limit = limit.unwrap_or(total);
         return Ok(MessagesResult {
@@ -10110,6 +10338,11 @@ async fn list_messages_window(
         false
     };
 
+    let messages = if let Some(owner_scope) = owner_scope.as_deref() {
+        with_mobile_attachment_cache_state(&state, &profile_id, owner_scope, messages)
+    } else {
+        messages
+    };
     Ok(MessagesWindowResult {
         messages,
         total,
@@ -10511,6 +10744,219 @@ fn delete_supabase_attachment_cache(
     Ok(())
 }
 
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MobileCacheSummary {
+    reclaimable_bytes: u64,
+    file_count: usize,
+    protected_tasks: i64,
+    removed_bytes: u64,
+    removed_files: usize,
+}
+
+fn collect_mobile_cache_files(
+    root: &Path,
+    path: &Path,
+    files: &mut HashMap<PathBuf, u64>,
+) -> Result<(), String> {
+    if !path.starts_with(root) {
+        return Ok(());
+    }
+    // Do not follow symlinks, including an ancestor swapped underneath a known cache path.
+    let mut ancestor = Some(path);
+    while let Some(current) = ancestor {
+        if let Ok(metadata) = fs::symlink_metadata(current) {
+            if metadata.file_type().is_symlink() {
+                return Ok(());
+            }
+        }
+        if current == root {
+            break;
+        }
+        ancestor = current.parent();
+    }
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("读取缓存文件失败: {error}")),
+    };
+    if metadata.is_file() {
+        if is_within_dir(path, root) {
+            files.insert(path.to_path_buf(), metadata.len());
+        }
+    } else if metadata.is_dir() {
+        for entry in fs::read_dir(path).map_err(|error| format!("读取缓存目录失败: {error}"))?
+        {
+            let entry = entry.map_err(|error| error.to_string())?;
+            collect_mobile_cache_files(root, &entry.path(), files)?;
+        }
+    }
+    Ok(())
+}
+
+fn mobile_cache_inventory(
+    state: &AppState,
+) -> Result<
+    (
+        MobileCacheSummary,
+        Vec<(String, db::AttachmentSyncRecord, HashMap<PathBuf, u64>)>,
+    ),
+    String,
+> {
+    let (profile, session) = active_supabase_scope(state)?;
+    let root = endpoint_files_dir(state, &profile.id);
+    let owner_root = root.join(&session.user_id);
+    let mut summary = MobileCacheSummary {
+        protected_tasks: db::count_pending_outbox(&state.db_path, &profile.id, &session.user_id)
+            .map_err(|error| error.to_string())?
+            + db::count_open_conflicts(&state.db_path, &profile.id, &session.user_id)
+                .map_err(|error| error.to_string())?,
+        ..Default::default()
+    };
+    let candidates =
+        db::list_evictable_attachment_messages(&state.db_path, &profile.id, &session.user_id)
+            .map_err(|error| error.to_string())?;
+    let mut inventory = Vec::new();
+    let mut unique = HashSet::new();
+    for (filename, attachment) in candidates {
+        if filename.is_empty()
+            || filename == "."
+            || filename == ".."
+            || filename.contains('/')
+            || filename.contains('\\')
+        {
+            continue;
+        }
+        let mut files = HashMap::new();
+        for path in [
+            owner_root.join("downloads").join(&filename),
+            owner_root.join("previews").join(&filename),
+            owner_root.join("exports").join(&filename),
+        ] {
+            collect_mobile_cache_files(&root, &path, &mut files)?;
+        }
+        if let Some(path) = attachment
+            .local_path
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|path| path.starts_with(owner_root.join("attachments")))
+        {
+            collect_mobile_cache_files(&root, &path, &mut files)?;
+        }
+        if attachment
+            .preview_object_path
+            .as_deref()
+            .is_some_and(|path| !path.is_empty())
+        {
+            collect_mobile_cache_files(
+                &root,
+                &media_preview::isolated_preview_attachment_dir(
+                    &root,
+                    &session.user_id,
+                    &attachment.attachment_id,
+                ),
+                &mut files,
+            )?;
+        }
+        for variant in ["file", "speech-audio"] {
+            collect_mobile_cache_files(
+                &root,
+                &media_preview::media_playback_cache_path(
+                    &owner_root,
+                    &format!("{}\0{}", profile.id, session.user_id),
+                    &filename,
+                    &attachment.original_name,
+                    variant,
+                ),
+                &mut files,
+            )?;
+        }
+        for (path, size) in &files {
+            if unique.insert(path.clone()) {
+                summary.reclaimable_bytes += size;
+                summary.file_count += 1;
+            }
+        }
+        inventory.push((filename, attachment, files));
+    }
+    Ok((summary, inventory))
+}
+
+#[tauri::command]
+fn get_mobile_cache_summary(state: State<'_, AppState>) -> Result<MobileCacheSummary, String> {
+    if !cfg!(target_os = "ios") {
+        return Err("此操作仅适用于 iOS 缓存".into());
+    }
+    mobile_cache_inventory(&state).map(|(summary, _)| summary)
+}
+
+async fn clear_mobile_cache_impl(state: &AppState) -> Result<MobileCacheSummary, String> {
+    let _sync = state
+        .sync_guard
+        .try_lock()
+        .map_err(|_| "正在同步，请完成后再清理缓存")?;
+    #[cfg(any(target_os = "ios", test))]
+    let _downloads = state
+        .supabase_download_guard
+        .try_lock()
+        .map_err(|_| "正在下载，请完成后再清理缓存")?;
+    let previews = state
+        .media_preview_jobs
+        .try_lock()
+        .map_err(|_| "正在生成预览，请稍后重试")?;
+    if !previews.is_empty() || !state.media_playback.active_paths().is_empty() {
+        return Err("正在使用媒体缓存，请关闭预览后重试".into());
+    }
+    let (profile, session) = active_supabase_scope(state)?;
+    let root = endpoint_files_dir(state, &profile.id);
+    let (mut summary, inventory) = mobile_cache_inventory(state)?;
+    let mut removed = HashSet::new();
+    for (filename, attachment, files) in inventory {
+        for (path, size) in files {
+            if removed.contains(&path) {
+                continue;
+            }
+            let mut validated = HashMap::new();
+            collect_mobile_cache_files(&root, &path, &mut validated)?;
+            if !validated.contains_key(&path) {
+                continue;
+            }
+            fs::remove_file(&path).map_err(|error| format!("清理缓存失败: {error}"))?;
+            removed.insert(path);
+            summary.removed_bytes += size;
+            summary.removed_files += 1;
+        }
+        db::clear_uploaded_attachment_local_path(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            &attachment.attachment_id,
+            now_ms(),
+        )
+        .map_err(|error| error.to_string())?;
+        db::clear_cached_download_metadata(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            &filename,
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    summary.reclaimable_bytes = summary
+        .reclaimable_bytes
+        .saturating_sub(summary.removed_bytes);
+    summary.file_count = summary.file_count.saturating_sub(summary.removed_files);
+    Ok(summary)
+}
+
+#[tauri::command]
+async fn clear_mobile_cache(state: State<'_, AppState>) -> Result<MobileCacheSummary, String> {
+    if !cfg!(target_os = "ios") {
+        return Err("此操作仅适用于 iOS 缓存".into());
+    }
+    clear_mobile_cache_impl(&state).await
+}
+
 async fn delete_remote_media_previews(
     state: &AppState,
     endpoint: &WebDavEndpoint,
@@ -10681,20 +11127,76 @@ async fn send_file_path_to_context(
     {
         let _guard = state.sync_guard.lock().await;
         ensure_integration_context(state, context)?;
-        let message_id = uuid::Uuid::new_v4().to_string();
-        let attachment_id = uuid::Uuid::new_v4().to_string();
+        let stable_ids = client_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| supabase_client_send_ids(&profile.id, &session.user_id, value));
+        let message_id = stable_ids
+            .as_ref()
+            .map(|ids| ids.message_id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let attachment_id = stable_ids
+            .as_ref()
+            .map(|ids| ids.attachment_id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let hash_path = source_path.clone();
+        let file_hash =
+            tokio::task::spawn_blocking(move || compute_file_hash_from_path(&hash_path))
+                .await
+                .map_err(|error| format!("计算附件摘要失败: {error}"))??;
+        if stable_ids.is_some() {
+            let existing_message = db::get_message_by_id_for_scope(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                &message_id,
+            )
+            .map_err(|error| format!("读取附件消息失败: {error}"))?;
+            let existing_attachment = db::get_attachment_sync_record(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                &attachment_id,
+            )
+            .map_err(|error| format!("读取附件记录失败: {error}"))?;
+            match (existing_message, existing_attachment) {
+                (Some((message, _)), Some(attachment))
+                    if attachment.message_id == message_id
+                        && message.original_name == original_name
+                        && message.size == total_bytes as i64
+                        && message.file_hash.as_deref() == Some(file_hash.as_str())
+                        && attachment.original_name == original_name
+                        && attachment.size == total_bytes as i64
+                        && attachment.sha256.as_deref() == Some(file_hash.as_str()) =>
+                {
+                    return Ok(supabase_send_result(&profile.id, &message));
+                }
+                (None, None) => {}
+                (Some(_), Some(_)) => {
+                    return Err("该发送请求已用于其他附件，请重新选择附件后发送".to_string());
+                }
+                _ => {
+                    return Err(
+                        "该发送请求的本地附件记录不完整，请保留原文件并检查本地数据".to_string()
+                    );
+                }
+            }
+        }
         let local_dir = endpoint_files_dir(state, &profile.id)
             .join(&session.user_id)
             .join("attachments")
             .join(&attachment_id);
         fs::create_dir_all(&local_dir).map_err(|error| format!("创建附件缓存目录失败: {error}"))?;
-        let local_path = local_dir.join(&original_name);
+        let local_path = local_dir.join(sanitize_filename(&original_name));
         cache_uploaded_file(&source_path, &local_path)?;
-        let hash_path = local_path.clone();
-        let file_hash =
-            tokio::task::spawn_blocking(move || compute_file_hash_from_path(&hash_path))
-                .await
-                .map_err(|error| format!("计算附件摘要失败: {error}"))??;
+        let snapshot_hash = compute_file_hash_from_path(&local_path)?;
+        let snapshot_size = fs::metadata(&local_path)
+            .map_err(|error| format!("读取附件快照失败: {error}"))?
+            .len();
+        if snapshot_hash != file_hash || snapshot_size != total_bytes {
+            return Err("附件在准备发送时发生变化，请重新选择后发送".to_string());
+        }
         let object_path = supabase_attachment_object_path(
             &session.user_id,
             profile
@@ -10738,28 +11240,54 @@ async fn send_file_path_to_context(
             &mut message,
             marked_options.unwrap_or_default(),
         )?;
-        let message_operation = outbox_operation(
-            &profile.id,
-            &session.user_id,
-            "message",
-            &message_id,
-            "upsert",
-            0,
-            supabase_message_payload(&message),
-        )?;
+        let message_operation = if let Some(ids) = stable_ids.as_ref() {
+            outbox_operation_with_id(
+                &ids.message_operation_id,
+                &profile.id,
+                &session.user_id,
+                "message",
+                &message_id,
+                "upsert",
+                0,
+                supabase_message_payload(&message),
+            )?
+        } else {
+            outbox_operation(
+                &profile.id,
+                &session.user_id,
+                "message",
+                &message_id,
+                "upsert",
+                0,
+                supabase_message_payload(&message),
+            )?
+        };
         let mime_type = attachment_mime_type(&original_name).to_string();
         let attachment_payload = serde_json::json!({"messageId":message_id,"originalName":original_name,
             "objectPath":object_path,"previewObjectPath":null,"mimeType":mime_type,
             "size":total_bytes,"sha256":file_hash,"uploadStatus":"uploaded"});
-        let attachment_operation = outbox_operation(
-            &profile.id,
-            &session.user_id,
-            "attachment",
-            &attachment_id,
-            "upsert",
-            0,
-            attachment_payload,
-        )?;
+        let attachment_operation = if let Some(ids) = stable_ids.as_ref() {
+            outbox_operation_with_id(
+                &ids.attachment_operation_id,
+                &profile.id,
+                &session.user_id,
+                "attachment",
+                &attachment_id,
+                "upsert",
+                0,
+                attachment_payload,
+            )?
+        } else {
+            outbox_operation(
+                &profile.id,
+                &session.user_id,
+                "attachment",
+                &attachment_id,
+                "upsert",
+                0,
+                attachment_payload,
+            )?
+        };
         db::save_message_with_marked_changes_and_enqueue(
             &state.db_path,
             &message,
@@ -11268,7 +11796,9 @@ where
         }
     };
     if is_owner {
-        let result = work().await;
+        let result = mobile_foreground_work(state, async { Ok(work().await) })
+            .await
+            .unwrap_or_else(|error| MediaPreviewResult::state("file", "failed", Some(error)));
         *job.result.lock().await = Some(result.clone());
         job.notify.notify_waiters();
         let mut jobs = state.media_preview_jobs.lock().await;
@@ -11371,6 +11901,7 @@ fn existing_media_playback_source(
         if let Some(record) = db::find_download_history_by_key(
             &state.db_path,
             &message.endpoint_id,
+            "",
             &message.filename,
         )
         .map_err(|err| format!("读取下载历史失败: {err}"))?
@@ -11538,82 +12069,113 @@ async fn cache_supabase_media_for_playback(
     resource_key: &str,
     job: &media_playback::PlaybackJob,
 ) -> Result<media_playback::MediaPlaybackResult, String> {
+    #[cfg(not(target_os = "ios"))]
     use std::fs::OpenOptions;
+    #[cfg(target_os = "ios")]
+    let _ = progress_sink;
 
     let config = profile
         .supabase
         .as_ref()
         .ok_or_else(|| "Supabase 存储空间配置不完整".to_string())?;
-    ensure_parent_dir(cache_path)?;
-    let temp_path = cache_path.with_file_name(format!(
-        "{}.part",
-        cache_path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("media")
-    ));
-    let _ = fs::remove_file(&temp_path);
-    let mut response =
-        supabase_sync::download_storage_object_stream(&state.http, config, session, object_path)
-            .await?;
-    let total = (message.size > 0).then_some(message.size as u64);
-    let mut file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&temp_path)
-        .map_err(|err| format!("创建媒体预览缓存失败: {err}"))?;
-    let mut received = 0_u64;
-    report_media_playback_progress(
-        progress_sink,
-        &profile.id,
-        &message.filename,
-        resource_key,
-        0,
-        total,
-        "progress",
-        None,
-    );
-    let result = async {
-        loop {
-            let chunk = tokio::select! {
-                _ = job.cancelled() => return Err("媒体缓存已取消".to_string()),
-                chunk = response.stream.next() => chunk,
-            };
-            let Some(chunk) = chunk else {
-                break;
-            };
-            let chunk = chunk.map_err(|err| format!("读取媒体内容失败: {err}"))?;
-            file.write_all(&chunk)
-                .map_err(|err| format!("写入媒体缓存失败: {err}"))?;
-            received += chunk.len() as u64;
-            report_media_playback_progress(
-                progress_sink,
-                &profile.id,
-                &message.filename,
-                resource_key,
-                received,
-                total,
-                "progress",
-                None,
-            );
+    #[cfg(target_os = "ios")]
+    {
+        let canonical_path = endpoint_files_dir(state, &profile.id)
+            .join(&session.user_id)
+            .join("downloads")
+            .join(&message.filename);
+        ensure_parent_dir(&canonical_path)?;
+        tokio::select! {
+            biased;
+            _ = job.cancelled() => return Err("媒体缓存已取消".to_string()),
+            result = stream_supabase_attachment_download(
+                None, state, profile, session, config, &message.filename,
+                &message.original_name, object_path, message.size,
+                message.file_hash.as_deref(), &canonical_path,
+            ) => { result?; }
         }
-        file.flush()
-            .map_err(|err| format!("完成媒体缓存失败: {err}"))?;
-        if job.is_cancelled() {
-            return Err("媒体缓存已取消".to_string());
-        }
-        if cache_path.exists() {
-            fs::remove_file(cache_path).map_err(|err| format!("替换媒体缓存失败: {err}"))?;
-        }
-        fs::rename(&temp_path, cache_path).map_err(|err| format!("完成媒体缓存失败: {err}"))?;
-        Ok(playback_result(cache_path, "remoteCache", resource_key))
+        ensure_parent_dir(cache_path)?;
+        fs::copy(&canonical_path, cache_path)
+            .map_err(|error| format!("保存媒体播放缓存失败: {error}"))?;
+        return Ok(playback_result(cache_path, "remoteCache", resource_key));
     }
-    .await;
-    if result.is_err() {
+    #[cfg(not(target_os = "ios"))]
+    {
+        ensure_parent_dir(cache_path)?;
+        let temp_path = cache_path.with_file_name(format!(
+            "{}.part",
+            cache_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("media")
+        ));
         let _ = fs::remove_file(&temp_path);
+        let mut response = supabase_sync::download_storage_object_stream(
+            &state.http,
+            config,
+            session,
+            object_path,
+        )
+        .await?;
+        let total = (message.size > 0).then_some(message.size as u64);
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&temp_path)
+            .map_err(|err| format!("创建媒体预览缓存失败: {err}"))?;
+        let mut received = 0_u64;
+        report_media_playback_progress(
+            progress_sink,
+            &profile.id,
+            &message.filename,
+            resource_key,
+            0,
+            total,
+            "progress",
+            None,
+        );
+        let result = async {
+            loop {
+                let chunk = tokio::select! {
+                    _ = job.cancelled() => return Err("媒体缓存已取消".to_string()),
+                    chunk = response.stream.next() => chunk,
+                };
+                let Some(chunk) = chunk else {
+                    break;
+                };
+                let chunk = chunk.map_err(|err| format!("读取媒体内容失败: {err}"))?;
+                file.write_all(&chunk)
+                    .map_err(|err| format!("写入媒体缓存失败: {err}"))?;
+                received += chunk.len() as u64;
+                report_media_playback_progress(
+                    progress_sink,
+                    &profile.id,
+                    &message.filename,
+                    resource_key,
+                    received,
+                    total,
+                    "progress",
+                    None,
+                );
+            }
+            file.flush()
+                .map_err(|err| format!("完成媒体缓存失败: {err}"))?;
+            if job.is_cancelled() {
+                return Err("媒体缓存已取消".to_string());
+            }
+            if cache_path.exists() {
+                fs::remove_file(cache_path).map_err(|err| format!("替换媒体缓存失败: {err}"))?;
+            }
+            fs::rename(&temp_path, cache_path).map_err(|err| format!("完成媒体缓存失败: {err}"))?;
+            Ok(playback_result(cache_path, "remoteCache", resource_key))
+        }
+        .await;
+        if result.is_err() {
+            let _ = fs::remove_file(&temp_path);
+        }
+        result
     }
-    result
 }
 
 async fn resolve_media_playback_source_impl(
@@ -12101,6 +12663,9 @@ async fn download_message_file_impl(
     conflict_action: Option<String>,
     endpoint_id: Option<&str>,
 ) -> Result<DownloadResult, String> {
+    if filename.trim().is_empty() || filename.contains('/') || filename.contains('\\') {
+        return Err("非法附件文件名".to_string());
+    }
     let settings = current_settings(state)?;
     if let Some((profile, session)) = active_supabase_context(state, &settings)? {
         if endpoint_id
@@ -12116,8 +12681,15 @@ async fn download_message_file_impl(
                 .ok_or_else(|| "未找到附件消息".to_string())?;
         let base_dir = resolve_download_dir(state, &settings);
         fs::create_dir_all(&base_dir).map_err(|error| format!("创建下载目录失败: {error}"))?;
-        let target =
-            build_download_target_path(state, &settings, original_name, message.timestamp_ms);
+        let target = if cfg!(target_os = "ios") {
+            endpoint_files_dir(state, &profile.id)
+                .join(&session.user_id)
+                .join("exports")
+                .join(filename)
+                .join(sanitize_filename(original_name))
+        } else {
+            build_download_target_path(state, &settings, original_name, message.timestamp_ms)
+        };
         let final_path =
             match resolve_download_target(&target, parse_conflict_action(conflict_action))? {
                 DownloadDecision::Conflict { suggested } => {
@@ -12167,17 +12739,27 @@ async fn download_message_file_impl(
                 .supabase
                 .as_ref()
                 .ok_or_else(|| "Supabase 配置不完整".to_string())?;
-            let bytes =
-                supabase_sync::download_storage_object(&state.http, config, &session, object_path)
-                    .await?;
             let cache_dir = endpoint_files_dir(state, &profile.id)
                 .join(&session.user_id)
                 .join("downloads");
             fs::create_dir_all(&cache_dir)
                 .map_err(|error| format!("创建附件缓存目录失败: {error}"))?;
             let cache_path = cache_dir.join(filename);
-            fs::write(&cache_path, &bytes).map_err(|error| format!("缓存附件失败: {error}"))?;
-            fs::write(&final_path, &bytes).map_err(|error| format!("保存附件失败: {error}"))?;
+            stream_supabase_attachment_download(
+                Some(window),
+                state,
+                &profile,
+                &session,
+                config,
+                filename,
+                original_name,
+                object_path,
+                message.size,
+                message.file_hash.as_deref(),
+                &cache_path,
+            )
+            .await?;
+            fs::copy(&cache_path, &final_path).map_err(|error| format!("保存附件失败: {error}"))?;
             db::set_message_local_path_for_scope(
                 &state.db_path,
                 &profile.id,
@@ -12187,6 +12769,20 @@ async fn download_message_file_impl(
             )
             .map_err(|error| error.to_string())?;
         }
+        let saved_size = fs::metadata(&final_path)
+            .map(|metadata| metadata.len() as i64)
+            .unwrap_or(message.size.max(0));
+        persist_download_history(
+            state,
+            &profile.id,
+            &session.user_id,
+            filename,
+            original_name,
+            Some(&final_path),
+            "complete",
+            None,
+            saved_size,
+        )?;
         return Ok(DownloadResult {
             status: "saved".into(),
             path: Some(final_path.to_string_lossy().to_string()),
@@ -12255,6 +12851,7 @@ async fn download_message_file_impl(
             let _ = persist_download_history(
                 &state,
                 &endpoint.id,
+                "",
                 filename,
                 original_name,
                 None,
@@ -12269,6 +12866,7 @@ async fn download_message_file_impl(
     persist_download_history(
         state,
         &endpoint.id,
+        "",
         filename,
         original_name,
         Some(&download.final_path),
@@ -12283,6 +12881,314 @@ async fn download_message_file_impl(
         suggested_path: None,
         transfer_mode: Some(download.transfer_mode.as_str().to_string()),
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stream_supabase_attachment_download(
+    window: Option<&Window>,
+    state: &AppState,
+    profile: &StorageProfile,
+    session: &supabase_auth::SupabaseSession,
+    config: &SupabaseStorageConfig,
+    filename: &str,
+    original_name: &str,
+    object_path: &str,
+    expected_size: i64,
+    expected_sha256: Option<&str>,
+    cache_path: &Path,
+) -> Result<i64, String> {
+    // One writer owns the canonical file and durable partial at a time, including recovery.
+    #[cfg(any(target_os = "ios", test))]
+    let _guard = state.supabase_download_guard.lock().await;
+    ensure_integration_context(
+        state,
+        &IntegrationTargetContext {
+            generation: None,
+            provider: storage_provider::ProviderConfig::Supabase(profile.clone()),
+            owner_scope: session.user_id.clone(),
+            session: Some(session.clone()),
+        },
+    )?;
+    #[cfg(any(target_os = "ios", test))]
+    if db::get_message_for_scope(&state.db_path, &profile.id, &session.user_id, filename)
+        .map_err(|error| error.to_string())?
+        .is_some_and(|message| message.local_path.as_deref() == cache_path.to_str())
+        && cache_path.is_file()
+        && fs::metadata(cache_path)
+            .map(|metadata| metadata.len() as i64 == expected_size)
+            .unwrap_or(false)
+        && expected_sha256
+            .map(|expected| {
+                compute_file_hash_from_path(cache_path).map(|actual| actual == expected)
+            })
+            .transpose()?
+            .unwrap_or(true)
+    {
+        return Ok(expected_size);
+    }
+    let result = stream_supabase_attachment_download_inner(
+        window,
+        state,
+        profile,
+        session,
+        config,
+        filename,
+        original_name,
+        object_path,
+        expected_size,
+        expected_sha256,
+        cache_path,
+    );
+    let result = mobile_foreground_work(state, result).await;
+    if let Err(error) = &result {
+        #[cfg(not(any(target_os = "ios", test)))]
+        let _ = error;
+        if let Some(mut partial) =
+            db::get_partial_download(&state.db_path, &profile.id, &session.user_id, filename)
+                .map_err(|error| error.to_string())?
+        {
+            partial.downloaded_bytes = fs::metadata(&partial.temp_path)
+                .map(|metadata| metadata.len() as i64)
+                .unwrap_or(partial.downloaded_bytes);
+            partial.updated_at_ms = now_ms();
+            persist_partial_download(state, &partial)?;
+        }
+        #[cfg(any(target_os = "ios", test))]
+        persist_download_history(
+            state,
+            &profile.id,
+            &session.user_id,
+            filename,
+            original_name,
+            None,
+            if error == MOBILE_TRANSFER_PAUSED {
+                "paused"
+            } else {
+                "error"
+            },
+            Some(error.clone()),
+            expected_size,
+        )?;
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stream_supabase_attachment_download_inner(
+    window: Option<&Window>,
+    state: &AppState,
+    profile: &StorageProfile,
+    session: &supabase_auth::SupabaseSession,
+    config: &SupabaseStorageConfig,
+    filename: &str,
+    original_name: &str,
+    object_path: &str,
+    expected_size: i64,
+    expected_sha256: Option<&str>,
+    cache_path: &Path,
+) -> Result<i64, String> {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    let context = IntegrationTargetContext {
+        generation: None,
+        provider: storage_provider::ProviderConfig::Supabase(profile.clone()),
+        owner_scope: session.user_id.clone(),
+        session: Some(session.clone()),
+    };
+    ensure_integration_context(state, &context)?;
+    let temp_path = build_partial_download_path(cache_path);
+    let cache_path_string = cache_path.to_string_lossy().to_string();
+    let temp_path_string = temp_path.to_string_lossy().to_string();
+    let existing =
+        db::get_partial_download(&state.db_path, &profile.id, &session.user_id, filename)
+            .map_err(|error| format!("读取 Supabase 下载进度失败: {error}"))?;
+    let mut transfer_mode = DownloadTransferMode::Fresh;
+    if let Some(partial) = existing.as_ref() {
+        if partial.final_path != cache_path_string || partial.temp_path != temp_path_string {
+            discard_partial_download(state, partial)?;
+        } else {
+            transfer_mode = DownloadTransferMode::Restarted;
+        }
+    }
+
+    let mut partial = DbPartialDownload {
+        endpoint_id: profile.id.clone(),
+        owner_scope: session.user_id.clone(),
+        filename: filename.to_string(),
+        original_name: original_name.to_string(),
+        final_path: cache_path_string,
+        temp_path: temp_path_string,
+        downloaded_bytes: existing
+            .as_ref()
+            .map(|entry| entry.downloaded_bytes)
+            .unwrap_or(0),
+        total_bytes: expected_size.max(0),
+        etag: Some(object_path.to_string()),
+        mtime: None,
+        updated_at_ms: now_ms(),
+    };
+    persist_partial_download(state, &partial)?;
+    #[cfg(any(target_os = "ios", test))]
+    persist_download_history(
+        state,
+        &profile.id,
+        &session.user_id,
+        filename,
+        original_name,
+        None,
+        "downloading",
+        None,
+        expected_size,
+    )?;
+    let mut response =
+        supabase_sync::download_storage_object_stream(&state.http, config, session, object_path)
+            .await?;
+    ensure_integration_context(state, &context)?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&temp_path)
+        .map_err(|error| format!("创建 Supabase 下载临时文件失败: {error}"))?;
+    partial.downloaded_bytes = 0;
+    persist_partial_download(state, &partial)?;
+    let mut received = 0_u64;
+    let total = (expected_size > 0).then_some(expected_size as u64);
+    if let Some(window) = window {
+        emit_download_progress(
+            window,
+            &profile.id,
+            filename,
+            0,
+            total,
+            Some(transfer_mode),
+            Some(0),
+            total.and_then(|value| value.checked_sub(1)),
+            "progress",
+            None,
+        );
+    }
+    let mut last_persisted = 0_u64;
+    while let Some(chunk) = response.stream.next().await {
+        ensure_integration_context(state, &context)?;
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                let error = format!("读取 Supabase 附件失败: {error}");
+                partial.downloaded_bytes = received as i64;
+                partial.updated_at_ms = now_ms();
+                let _ = file.flush();
+                let _ = persist_partial_download(state, &partial);
+                if let Some(window) = window {
+                    emit_download_progress(
+                        window,
+                        &profile.id,
+                        filename,
+                        received,
+                        total,
+                        Some(transfer_mode),
+                        Some(0),
+                        total.and_then(|value| value.checked_sub(1)),
+                        "error",
+                        Some(error.clone()),
+                    );
+                }
+                return Err(error);
+            }
+        };
+        if let Err(error) = file.write_all(&chunk) {
+            partial.downloaded_bytes = received as i64;
+            partial.updated_at_ms = now_ms();
+            let _ = persist_partial_download(state, &partial);
+            return Err(format!("写入 Supabase 下载临时文件失败: {error}"));
+        }
+        received += chunk.len() as u64;
+        if let Some(window) = window {
+            emit_download_progress(
+                window,
+                &profile.id,
+                filename,
+                received,
+                total,
+                Some(transfer_mode),
+                Some(0),
+                total.and_then(|value| value.checked_sub(1)),
+                "progress",
+                None,
+            );
+        }
+        if received.saturating_sub(last_persisted) >= 1024 * 1024 {
+            partial.downloaded_bytes = received as i64;
+            partial.updated_at_ms = now_ms();
+            persist_partial_download(state, &partial)?;
+            last_persisted = received;
+        }
+    }
+    file.flush()
+        .map_err(|error| format!("完成 Supabase 下载临时文件失败: {error}"))?;
+    file.sync_all()
+        .map_err(|error| format!("持久化 Supabase 下载临时文件失败: {error}"))?;
+    drop(file);
+    partial.downloaded_bytes = received as i64;
+    partial.total_bytes = total.unwrap_or(received) as i64;
+    partial.updated_at_ms = now_ms();
+    persist_partial_download(state, &partial)?;
+    if expected_size > 0 && received != expected_size as u64 {
+        return Err(format!(
+            "Supabase 附件大小不一致: {received}/{expected_size}"
+        ));
+    }
+    if let Some(expected_sha256) = expected_sha256 {
+        let actual_sha256 = compute_file_hash_from_path(&temp_path)?;
+        if actual_sha256 != expected_sha256 {
+            return Err("Supabase 附件摘要不一致".to_string());
+        }
+    }
+    ensure_integration_context(state, &context)?;
+    #[cfg(target_os = "windows")]
+    if cache_path.exists() {
+        fs::remove_file(cache_path).map_err(|error| format!("替换附件缓存失败: {error}"))?;
+    }
+    fs::rename(&temp_path, cache_path).map_err(|error| format!("完成附件缓存失败: {error}"))?;
+    #[cfg(any(target_os = "ios", test))]
+    {
+        db::set_message_local_path_for_scope(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            filename,
+            &cache_path.to_string_lossy(),
+        )
+        .map_err(|error| error.to_string())?;
+        persist_download_history(
+            state,
+            &profile.id,
+            &session.user_id,
+            filename,
+            original_name,
+            Some(cache_path),
+            "complete",
+            None,
+            received as i64,
+        )?;
+    }
+    clear_partial_download(state, &profile.id, &session.user_id, filename)?;
+    if let Some(window) = window {
+        emit_download_progress(
+            window,
+            &profile.id,
+            filename,
+            received,
+            Some(received),
+            Some(transfer_mode),
+            Some(0),
+            received.checked_sub(1),
+            "complete",
+            None,
+        );
+    }
+    Ok(received as i64)
 }
 
 #[tauri::command]
@@ -12330,6 +13236,7 @@ async fn save_message_file_as(
             let _ = persist_download_history(
                 &state,
                 &endpoint.id,
+                "",
                 &filename,
                 &original_name,
                 None,
@@ -12344,6 +13251,7 @@ async fn save_message_file_as(
     persist_download_history(
         &state,
         &endpoint.id,
+        "",
         &filename,
         &original_name,
         Some(&download.final_path),
@@ -12363,6 +13271,7 @@ async fn save_message_file_as(
 fn persist_download_history(
     state: &AppState,
     endpoint_id: &str,
+    owner_scope: &str,
     filename: &str,
     original_name: &str,
     saved_path: Option<&Path>,
@@ -12374,6 +13283,7 @@ fn persist_download_history(
     let entry = DbDownloadHistory {
         id: 0,
         endpoint_id: endpoint_id.to_string(),
+        owner_scope: owner_scope.to_string(),
         filename: filename.to_string(),
         original_name: original_name.to_string(),
         saved_path: saved_path.map(|path| path.to_string_lossy().to_string()),
@@ -12417,9 +13327,27 @@ fn persist_upload_history(
 }
 
 fn require_download_history(state: &AppState, record_id: i64) -> Result<DbDownloadHistory, String> {
-    db::get_download_history(&state.db_path, record_id)
+    let record = db::get_download_history(&state.db_path, record_id)
         .map_err(|err| format!("读取下载记录失败: {err}"))?
-        .ok_or_else(|| "下载记录不存在".to_string())
+        .ok_or_else(|| "下载记录不存在".to_string())?;
+    validate_download_history_access(state, &record, cfg!(target_os = "ios"))?;
+    Ok(record)
+}
+
+fn validate_download_history_access(
+    state: &AppState,
+    record: &DbDownloadHistory,
+    ios: bool,
+) -> Result<(), String> {
+    if ios {
+        let settings = current_settings(state)?;
+        let (profile, session) = active_supabase_context(state, &settings)?
+            .ok_or_else(|| "iOS 仅支持当前 Supabase 账号的下载记录".to_string())?;
+        if record.endpoint_id != profile.id || record.owner_scope != session.user_id {
+            return Err("当前登录账号不能访问这条下载记录".to_string());
+        }
+    }
+    Ok(())
 }
 
 fn build_partial_download_path(final_path: &Path) -> PathBuf {
@@ -12450,9 +13378,10 @@ fn persist_partial_download(state: &AppState, entry: &DbPartialDownload) -> Resu
 fn clear_partial_download(
     state: &AppState,
     endpoint_id: &str,
+    owner_scope: &str,
     filename: &str,
 ) -> Result<(), String> {
-    db::delete_partial_download(&state.db_path, endpoint_id, filename)
+    db::delete_partial_download(&state.db_path, endpoint_id, owner_scope, filename)
         .map(|_| ())
         .map_err(|err| format!("娓呯悊涓嬭浇杩涘害澶辫触: {err}"))
 }
@@ -12461,7 +13390,12 @@ fn discard_partial_download(state: &AppState, partial: &DbPartialDownload) -> Re
     if !partial.temp_path.trim().is_empty() {
         let _ = fs::remove_file(&partial.temp_path);
     }
-    clear_partial_download(state, &partial.endpoint_id, &partial.filename)
+    clear_partial_download(
+        state,
+        &partial.endpoint_id,
+        &partial.owner_scope,
+        &partial.filename,
+    )
 }
 
 fn should_restart_after_range_error(error: &str) -> bool {
@@ -12591,7 +13525,7 @@ async fn execute_streamed_download(
     let (expected_etag, expected_mtime, expected_size) =
         load_message_remote_metadata(&state.db_path, &endpoint.id, filename)?;
 
-    let existing_partial = db::get_partial_download(&state.db_path, &endpoint.id, filename)
+    let existing_partial = db::get_partial_download(&state.db_path, &endpoint.id, "", filename)
         .map_err(|err| err.to_string())?;
     let transfer_mode = if existing_partial.is_some() {
         DownloadTransferMode::Restarted
@@ -12629,6 +13563,7 @@ async fn execute_streamed_download(
                         filename,
                         DbPartialDownload {
                             endpoint_id: endpoint.id.clone(),
+                            owner_scope: String::new(),
                             filename: filename.to_string(),
                             original_name: original_name.to_string(),
                             final_path: final_path_string.clone(),
@@ -12661,7 +13596,7 @@ async fn execute_streamed_download(
                     }
                     fs::rename(&temp_path, final_path)
                         .map_err(|err| format!("Failed to complete download file: {}", err))?;
-                    clear_partial_download(state, &endpoint.id, filename)?;
+                    clear_partial_download(state, &endpoint.id, "", filename)?;
                     let file_hash = compute_file_hash_from_path(final_path)?;
                     let _ = update_message_local_path(
                         &state.db_path,
@@ -12732,6 +13667,7 @@ async fn execute_streamed_download(
         filename,
         DbPartialDownload {
             endpoint_id: endpoint.id.clone(),
+            owner_scope: String::new(),
             filename: filename.to_string(),
             original_name: original_name.to_string(),
             final_path: final_path_string,
@@ -12762,7 +13698,7 @@ async fn execute_streamed_download(
     }
     fs::rename(&temp_path, final_path)
         .map_err(|err| format!("Failed to finalize downloaded file: {err}"))?;
-    clear_partial_download(state, &endpoint.id, filename)?;
+    clear_partial_download(state, &endpoint.id, "", filename)?;
     let file_hash = compute_file_hash_from_path(final_path)?;
     let _ = update_message_local_path(
         &state.db_path,
@@ -12798,10 +13734,66 @@ fn list_download_history(
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> Result<DownloadHistoryResult, String> {
-    let total = db::count_download_history(&state.db_path)
-        .map_err(|err| format!("读取下载历史失败: {err}"))?;
-    let records = db::list_download_history_paged(&state.db_path, limit, offset)
-        .map_err(|err| format!("读取下载历史失败: {err}"))?;
+    list_download_history_for_platform(&state, limit, offset, cfg!(target_os = "ios"))
+}
+
+fn list_download_history_for_platform(
+    state: &AppState,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    ios: bool,
+) -> Result<DownloadHistoryResult, String> {
+    let scope = if ios {
+        let settings = current_settings(state)?;
+        let profile_id = settings
+            .active_storage_profile_id
+            .as_deref()
+            .unwrap_or_default();
+        let session = state
+            .supabase_sessions
+            .lock()
+            .map_err(|_| "读取 Supabase 会话失败".to_string())?
+            .get(profile_id)
+            .cloned();
+        match session {
+            Some(session) => Some((profile_id.to_string(), session.user_id)),
+            None => {
+                return Ok(DownloadHistoryResult {
+                    records: Vec::new(),
+                    total: 0,
+                    has_more: false,
+                })
+            }
+        }
+    } else {
+        None
+    };
+    let total = match scope.as_ref() {
+        Some((profile_id, owner_scope)) => {
+            db::count_download_history_for_scope(&state.db_path, profile_id, owner_scope)
+        }
+        None => db::count_download_history(&state.db_path),
+    }
+    .map_err(|err| format!("读取下载历史失败: {err}"))?;
+    let mut records = match scope.as_ref() {
+        Some((profile_id, owner_scope)) => db::list_download_history_paged_for_scope(
+            &state.db_path,
+            profile_id,
+            owner_scope,
+            limit,
+            offset,
+        ),
+        None => db::list_download_history_paged(&state.db_path, limit, offset),
+    }
+    .map_err(|err| format!("读取下载历史失败: {err}"))?;
+    if let Some((profile_id, owner_scope)) = scope.as_ref() {
+        for record in &mut records {
+            record.received =
+                db::get_partial_download(&state.db_path, profile_id, owner_scope, &record.filename)
+                    .map_err(|error| error.to_string())?
+                    .map(|partial| partial.downloaded_bytes);
+        }
+    }
     let current_offset = offset.unwrap_or(0).max(0);
     let current_limit = limit.unwrap_or(total).max(0);
     Ok(DownloadHistoryResult {
@@ -12950,6 +13942,7 @@ async fn redownload_download_history(
             let _ = persist_download_history(
                 &state,
                 &record.endpoint_id,
+                &record.owner_scope,
                 &record.filename,
                 &record.original_name,
                 None,
@@ -12964,6 +13957,7 @@ async fn redownload_download_history(
     persist_download_history(
         &state,
         &record.endpoint_id,
+        &record.owner_scope,
         &record.filename,
         &record.original_name,
         Some(&download.final_path),
@@ -12989,7 +13983,9 @@ fn delete_download_history(
     let record = require_download_history(&state, record_id)?;
     if delete_local_file {
         delete_recorded_download_file(record.saved_path.as_deref())?;
-        clear_message_local_path(&state.db_path, &record.endpoint_id, &record.filename)?;
+        if record.owner_scope.is_empty() {
+            clear_message_local_path(&state.db_path, &record.endpoint_id, &record.filename)?;
+        }
     }
     db::delete_download_history(&state.db_path, record_id)
         .map_err(|err| format!("删除下载记录失败: {err}"))?;
@@ -13001,6 +13997,11 @@ fn clear_download_history_records(
     state: State<'_, AppState>,
     record_ids: Vec<i64>,
 ) -> Result<usize, String> {
+    if cfg!(target_os = "ios") {
+        for record_id in &record_ids {
+            require_download_history(&state, *record_id)?;
+        }
+    }
     db::delete_download_history_many(&state.db_path, &record_ids)
         .map_err(|err| format!("清空下载记录失败: {err}"))
 }
@@ -13325,15 +14326,25 @@ async fn fetch_image_preview(
             .supabase
             .as_ref()
             .ok_or_else(|| "Supabase 配置不完整".to_string())?;
-        let bytes =
-            supabase_sync::download_storage_object(&state.http, config, &session, object_path)
-                .await?;
         let preview_dir = endpoint_files_dir(&state, &profile.id)
             .join(&session.user_id)
             .join("previews");
         fs::create_dir_all(&preview_dir).map_err(|error| format!("创建预览目录失败: {error}"))?;
         let path = preview_dir.join(&filename);
-        fs::write(&path, bytes).map_err(|error| format!("保存预览失败: {error}"))?;
+        stream_supabase_attachment_download(
+            None,
+            &state,
+            &profile,
+            &session,
+            config,
+            &filename,
+            &message.original_name,
+            object_path,
+            message.size,
+            message.file_hash.as_deref(),
+            &path,
+        )
+        .await?;
         db::set_message_local_path_for_scope(
             &state.db_path,
             &profile.id,
@@ -14861,6 +15872,41 @@ fn signal_sync_loop_reset(state: &AppState) {
     state.sync_loop_signal.send_replace(next);
 }
 
+const MOBILE_TRANSFER_PAUSED: &str = "传输已暂停，回到前台后重试";
+
+async fn mobile_foreground_work<T>(
+    state: &AppState,
+    work: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    #[cfg(any(target_os = "ios", test))]
+    {
+        let mut signal = state.sync_loop_signal.subscribe();
+        let generation = state.mobile_realtime_generation.load(Ordering::SeqCst);
+        if !is_mobile_foreground(state) {
+            return Err(MOBILE_TRANSFER_PAUSED.to_string());
+        }
+        tokio::pin!(work);
+        loop {
+            tokio::select! {
+                biased;
+                _ = signal.changed() => {
+                    if !is_mobile_foreground(state)
+                        || state.mobile_realtime_generation.load(Ordering::SeqCst) != generation
+                    {
+                        return Err(MOBILE_TRANSFER_PAUSED.to_string());
+                    }
+                }
+                result = &mut work => return result,
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "ios", test)))]
+    {
+        let _ = state;
+        work.await
+    }
+}
+
 #[cfg(any(target_os = "ios", test))]
 fn set_mobile_foreground(state: &AppState, foreground: bool) -> bool {
     state.mobile_foreground.swap(foreground, Ordering::SeqCst) != foreground
@@ -14889,8 +15935,92 @@ fn recover_mobile_persisted_work(state: &AppState) -> Result<(), String> {
 }
 
 #[cfg(any(target_os = "ios", test))]
+async fn resume_mobile_partial_downloads(
+    state: &AppState,
+    profile: &StorageProfile,
+    session: &supabase_auth::SupabaseSession,
+) -> Result<(), String> {
+    let config = profile.supabase.as_ref().ok_or("Supabase 配置不完整")?;
+    let partials =
+        db::list_partial_downloads_for_scope(&state.db_path, &profile.id, &session.user_id)
+            .map_err(|error| format!("读取未完成下载失败: {error}"))?;
+    let endpoint_dir = endpoint_files_dir(state, &profile.id).join(&session.user_id);
+    for partial in partials {
+        let Some(message) = db::get_message_for_scope(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            &partial.filename,
+        )
+        .map_err(|error| error.to_string())?
+        else {
+            continue;
+        };
+        if partial.filename.is_empty()
+            || partial.filename.contains('/')
+            || partial.filename.contains('\\')
+        {
+            continue;
+        }
+        // Never trust a persisted destination or old object identity after a scope change.
+        let cache_path = PathBuf::from(&partial.final_path);
+        if cache_path != endpoint_dir.join("downloads").join(&partial.filename)
+            && cache_path != endpoint_dir.join("previews").join(&partial.filename)
+        {
+            continue;
+        }
+        let attachment_path = match db::get_message_sync_identity(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            &partial.filename,
+        )
+        .map_err(|error| error.to_string())?
+        {
+            Some((id, _)) => db::get_attachment_object_path_for_message(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                &id,
+            )
+            .map_err(|error| error.to_string())?,
+            None => None,
+        };
+        let Some(object_path) = message
+            .remote_path
+            .as_deref()
+            .or(attachment_path.as_deref())
+        else {
+            continue;
+        };
+        if partial.etag.as_deref() != Some(object_path)
+            || !object_path.starts_with(&format!("{}/{}/", session.user_id, config.space_id))
+        {
+            continue;
+        }
+        ensure_parent_dir(&cache_path)?;
+        stream_supabase_attachment_download(
+            None,
+            state,
+            profile,
+            session,
+            config,
+            &partial.filename,
+            &partial.original_name,
+            object_path,
+            message.size,
+            message.file_hash.as_deref(),
+            &cache_path,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "ios", test))]
 async fn recover_mobile_foreground(state: &AppState) -> Result<SyncStatus, String> {
     let _guard = state.mobile_foreground_guard.lock().await;
+    let recovery_generation = state.mobile_realtime_generation.load(Ordering::SeqCst);
     let recovery_ms = now_ms();
     let last_recovery_ms = state.mobile_last_recovery_ms.load(Ordering::SeqCst);
     if is_mobile_foreground(state)
@@ -14899,9 +16029,16 @@ async fn recover_mobile_foreground(state: &AppState) -> Result<SyncStatus, Strin
     {
         return refresh_supabase_status(state, None);
     }
-    recover_mobile_persisted_work(state)?;
-    set_mobile_foreground(state, true);
-    invalidate_mobile_realtime(state);
+    {
+        let _sync_guard = state.sync_guard.lock().await;
+        recover_mobile_persisted_work(state)?;
+    }
+    if state.mobile_realtime_generation.load(Ordering::SeqCst) != recovery_generation {
+        return Err(MOBILE_TRANSFER_PAUSED.to_string());
+    }
+    if set_mobile_foreground(state, true) {
+        invalidate_mobile_realtime(state);
+    }
     let result = run_sync(state, MOBILE_FOREGROUND_SYNC_SOURCE, true).await;
     state
         .mobile_last_recovery_ms
@@ -14916,6 +16053,29 @@ fn suspend_mobile_background(state: &AppState) -> Result<SyncStatus, String> {
         invalidate_mobile_realtime(state);
         cancel_active_sync(state)?;
         signal_sync_loop_reset(state);
+        if let Ok((profile, session)) = active_supabase_scope(state) {
+            for mut partial in
+                db::list_partial_downloads_for_scope(&state.db_path, &profile.id, &session.user_id)
+                    .map_err(|error| error.to_string())?
+            {
+                partial.downloaded_bytes = fs::metadata(&partial.temp_path)
+                    .map(|metadata| metadata.len() as i64)
+                    .unwrap_or(partial.downloaded_bytes);
+                partial.updated_at_ms = now_ms();
+                persist_partial_download(state, &partial)?;
+                persist_download_history(
+                    state,
+                    &profile.id,
+                    &session.user_id,
+                    &partial.filename,
+                    &partial.original_name,
+                    None,
+                    "paused",
+                    Some(MOBILE_TRANSFER_PAUSED.into()),
+                    partial.total_bytes,
+                )?;
+            }
+        }
     }
     refresh_supabase_status(state, None)
 }
@@ -18733,15 +19893,24 @@ async fn run_sync(
         *sync_cancel = Some(cancel_tx);
     }
 
-    let result = tokio::select! {
+    #[allow(unused_mut)]
+    let mut result = tokio::select! {
       _ = cancel_rx => Err(SYNC_CANCELLED_SENTINEL.to_string()),
-      timed = tokio::time::timeout(Duration::from_secs(SYNC_TIMEOUT_SECS), sync_once(state, source != REALTIME_SYNC_SOURCE)) => {
+      timed = tokio::time::timeout(Duration::from_secs(SYNC_TIMEOUT_SECS), mobile_foreground_work(state, sync_once(state, source != REALTIME_SYNC_SOURCE))) => {
         match timed {
           Ok(inner) => inner,
           Err(_) => Err(format!("\u{5237}\u{65B0}\u{8D85}\u{65F6}\u{FF08}\u{8D85}\u{8FC7} {} \u{79D2}\u{FF09}", SYNC_TIMEOUT_SECS)),
         }
       }
     };
+
+    #[cfg(any(target_os = "ios", test))]
+    if result.is_err() {
+        let _guard = state.sync_guard.lock().await;
+        if let Err(error) = recover_mobile_persisted_work(state) {
+            result = Err(error);
+        }
+    }
 
     if let Ok(mut sync_cancel) = state.sync_cancel.lock() {
         sync_cancel.take();
@@ -18762,7 +19931,7 @@ async fn run_sync(
             Ok(status.clone())
         }
         Err(err) => {
-            if err == SYNC_CANCELLED_SENTINEL {
+            if err == SYNC_CANCELLED_SENTINEL || err == MOBILE_TRANSFER_PAUSED {
                 status.last_error = None;
                 status.last_result = Some(SYNC_CANCELLED_MESSAGE.to_string());
                 Err(SYNC_CANCELLED_MESSAGE.to_string())
@@ -18788,6 +19957,8 @@ async fn run_sync(
 
 async fn sync_once(state: &AppState, manual: bool) -> Result<usize, String> {
     let _guard = state.sync_guard.lock().await;
+    #[cfg(any(target_os = "ios", test))]
+    recover_mobile_persisted_work(state)?;
     let settings = {
         let settings = state
             .settings
@@ -18803,6 +19974,8 @@ async fn sync_once(state: &AppState, manual: bool) -> Result<usize, String> {
             .map_err(|error| error.message)?
             .ok_or_else(|| "请先登录当前 Supabase 存储空间".to_string())?;
         let (pushed, pulled) = sync_supabase_profile(state, &profile, &session, manual).await?;
+        #[cfg(any(target_os = "ios", test))]
+        resume_mobile_partial_downloads(state, &profile, &session).await?;
         return Ok(pushed + pulled);
     }
 
@@ -19370,6 +20543,10 @@ fn set_autostart(_app: &AppHandle, enabled: bool) -> Result<(), String> {
 
 #[cfg(desktop)]
 fn refresh_autostart_registration(app: &AppHandle, state: &AppState) {
+    // Isolated test instances must not replace the user's global login registration.
+    if std::env::var_os("TRANSFER_GENIE_APP_DATA_DIR").is_some() {
+        return;
+    }
     match current_settings(state) {
         Ok(settings) => {
             if let Err(err) = set_autostart(app, settings.auto_start) {
@@ -20070,6 +21247,181 @@ fn run_telegram_bridge_mode() {
     }
 }
 
+#[cfg(all(desktop, debug_assertions))]
+fn debug_webview_e2e_pending(
+) -> &'static Mutex<HashMap<String, oneshot::Sender<Result<String, String>>>> {
+    DEBUG_WEBVIEW_E2E_PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(all(desktop, debug_assertions))]
+async fn debug_webview_e2e_health() -> &'static str {
+    "ok"
+}
+
+#[cfg(all(desktop, debug_assertions))]
+async fn debug_webview_e2e_eval(
+    AxumState(app): AxumState<AppHandle>,
+    Json(request): Json<DebugWebviewEvalRequest>,
+) -> Result<Json<DebugWebviewEvalResponse>, (StatusCode, String)> {
+    const MAX_EXPRESSION_BYTES: usize = 1_000_000;
+    if request.expression.len() > MAX_EXPRESSION_BYTES {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "WebView E2E expression is too large".to_string(),
+        ));
+    }
+
+    let request_id = format!("{}-{}", now_ms(), rand::random::<u64>());
+    let (reply_tx, reply_rx) = oneshot::channel();
+    debug_webview_e2e_pending()
+        .lock()
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "WebView E2E response registry is unavailable".to_string(),
+            )
+        })?
+        .insert(request_id.clone(), reply_tx);
+
+    let expression_json = serde_json::to_string(&request.expression).map_err(|err| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Unable to encode WebView E2E expression: {err}"),
+        )
+    })?;
+    let request_id_json = serde_json::to_string(&request_id).unwrap_or_else(|_| "null".into());
+    let script = format!(
+        r#"(async () => {{
+          const requestId = {request_id_json};
+          try {{
+            const value = await (0, eval)({expression_json});
+            await window.__TAURI__.core.invoke('resolve_debug_webview_eval', {{
+              requestId,
+              payload: JSON.stringify(value === undefined ? null : value),
+              error: null
+            }});
+          }} catch (error) {{
+            await window.__TAURI__.core.invoke('resolve_debug_webview_eval', {{
+              requestId,
+              payload: null,
+              error: error && (error.stack || error.message) ? String(error.stack || error.message) : String(error)
+            }});
+          }}
+        }})()"#
+    );
+
+    let Some(window) = app.get_webview_window("main") else {
+        if let Ok(mut pending) = debug_webview_e2e_pending().lock() {
+            pending.remove(&request_id);
+        }
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Main WebView is unavailable".to_string(),
+        ));
+    };
+    if let Err(err) = window.eval(script) {
+        if let Ok(mut pending) = debug_webview_e2e_pending().lock() {
+            pending.remove(&request_id);
+        }
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Unable to evaluate WebView E2E script: {err}"),
+        ));
+    }
+
+    let reply = tokio::time::timeout(Duration::from_secs(90), reply_rx)
+        .await
+        .map_err(|_| {
+            if let Ok(mut pending) = debug_webview_e2e_pending().lock() {
+                pending.remove(&request_id);
+            }
+            (
+                StatusCode::GATEWAY_TIMEOUT,
+                "Timed out waiting for the WebView E2E result".to_string(),
+            )
+        })?
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "WebView E2E response channel closed".to_string(),
+            )
+        })?
+        .map_err(|err| (StatusCode::BAD_GATEWAY, err))?;
+    let value = serde_json::from_str(&reply).map_err(|err| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("WebView E2E returned invalid JSON: {err}"),
+        )
+    })?;
+    Ok(Json(DebugWebviewEvalResponse { value }))
+}
+
+#[cfg(all(desktop, debug_assertions))]
+fn start_debug_webview_e2e_driver(app: AppHandle) -> Result<(), String> {
+    if std::env::var_os("TRANSFER_GENIE_ALLOW_TEST_INSTANCE").is_none() {
+        return Ok(());
+    }
+    let Some(raw_port) = std::env::var_os("TRANSFER_GENIE_E2E_DRIVER_PORT") else {
+        return Ok(());
+    };
+    let port = raw_port
+        .to_string_lossy()
+        .parse::<u16>()
+        .map_err(|_| "TRANSFER_GENIE_E2E_DRIVER_PORT must be a valid TCP port".to_string())?;
+    if port == 0 {
+        return Err("TRANSFER_GENIE_E2E_DRIVER_PORT must not be zero".to_string());
+    }
+
+    tauri::async_runtime::spawn(async move {
+        let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+            Ok(listener) => listener,
+            Err(err) => {
+                eprintln!("WebView E2E driver failed to bind: {err}");
+                return;
+            }
+        };
+        let router = Router::new()
+            .route("/health", axum::routing::get(debug_webview_e2e_health))
+            .route("/eval", axum::routing::post(debug_webview_e2e_eval))
+            .layer(DefaultBodyLimit::max(1_100_000))
+            .with_state(app);
+        if let Err(err) = axum::serve(listener, router).await {
+            eprintln!("WebView E2E driver stopped: {err}");
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn resolve_debug_webview_eval(
+    request_id: String,
+    payload: Option<String>,
+    error: Option<String>,
+) -> Result<(), String> {
+    #[cfg(all(desktop, debug_assertions))]
+    {
+        let sender = debug_webview_e2e_pending()
+            .lock()
+            .map_err(|_| "WebView E2E response registry is unavailable".to_string())?
+            .remove(&request_id)
+            .ok_or_else(|| "Unknown or expired WebView E2E request".to_string())?;
+        let reply = match error {
+            Some(error) => Err(error),
+            None => Ok(payload.unwrap_or_else(|| "null".to_string())),
+        };
+        sender
+            .send(reply)
+            .map_err(|_| "WebView E2E request is no longer waiting".to_string())?;
+        return Ok(());
+    }
+
+    #[cfg(not(all(desktop, debug_assertions)))]
+    {
+        let _ = (request_id, payload, error);
+        Err("WebView E2E driver is unavailable in this build".to_string())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(desktop)]
@@ -20100,13 +21452,20 @@ pub fn run() {
             let default_download_dir = default_download_dir(&app.handle())?;
 
             let settings = load_settings(&settings_path, &default_download_dir)?;
-            let restored_supabase_sessions = credential_store::restore_sessions(
+            #[allow(unused_mut)] // Mutated only by the debug iOS Simulator auth-expiry probe.
+            let mut restored_supabase_sessions = credential_store::restore_sessions(
                 settings
                     .storage_profiles
                     .iter()
                     .filter(|profile| profile.provider_kind == StorageProviderKind::Supabase)
                     .map(|profile| profile.id.clone()),
             );
+            #[cfg(all(target_os = "ios", target_abi = "sim", debug_assertions))]
+            arm_ios_simulator_expired_session_test(
+                &settings_path,
+                &settings,
+                &mut restored_supabase_sessions,
+            )?;
             let migration_endpoint_id = settings.active_webdav_id.as_deref().or_else(|| {
                 settings
                     .webdav_endpoints
@@ -20176,6 +21535,8 @@ pub fn run() {
                 system_dictation_hidden_main_position: Mutex::new(None),
                 media_playback: media_playback::PlaybackRegistry::default(),
                 media_preview_jobs: AsyncMutex::new(HashMap::new()),
+                #[cfg(any(target_os = "ios", test))]
+                supabase_download_guard: AsyncMutex::new(()),
             });
 
             #[cfg(desktop)]
@@ -20471,6 +21832,9 @@ pub fn run() {
 
             start_sync_loop(app.handle().clone());
 
+            #[cfg(all(desktop, debug_assertions))]
+            start_debug_webview_e2e_driver(app.handle().clone())?;
+
             // Open DevTools when TRANSFER_GENIE_DEVTOOLS env var is set and devtools feature is enabled.
             #[cfg(feature = "devtools")]
             if std::env::var("TRANSFER_GENIE_DEVTOOLS").is_ok() {
@@ -20497,6 +21861,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_mobile_integration::init())
         .invoke_handler(tauri::generate_handler![
+            resolve_debug_webview_eval,
             get_settings,
             get_platform_capabilities,
             set_mobile_lifecycle_state,
@@ -20608,6 +21973,8 @@ pub fn run() {
             refresh,
             cancel_refresh,
             get_sync_status,
+            get_mobile_cache_summary,
+            clear_mobile_cache,
             start_telegram_bridge,
             stop_telegram_bridge,
             mark_message,
@@ -20966,6 +22333,8 @@ mod tests {
         storage_put_counts: Arc<Mutex<TestHashMap<String, usize>>>,
         storage_delete_counts: Arc<Mutex<TestHashMap<String, usize>>>,
         failed_storage_puts: Arc<Mutex<HashSet<String>>>,
+        slow_storage_gets: Arc<Mutex<HashSet<String>>>,
+        slow_storage_puts: Arc<Mutex<HashSet<String>>>,
         restricted_owner: Arc<Mutex<Option<String>>>,
     }
 
@@ -21261,8 +22630,27 @@ mod tests {
                 .unwrap();
         }
         match state.objects.lock().unwrap().get(&path).cloned() {
+            Some(bytes) if state.slow_storage_gets.lock().unwrap().contains(&path) => {
+                let content_length = bytes.len();
+                let stream =
+                    futures_util::stream::unfold((bytes, 0_usize), |(bytes, offset)| async move {
+                        if offset >= bytes.len() {
+                            return None;
+                        }
+                        tokio::time::sleep(TokioDuration::from_millis(80)).await;
+                        let end = (offset + 256 * 1024).min(bytes.len());
+                        let chunk = Bytes::copy_from_slice(&bytes[offset..end]);
+                        Some((Ok::<Bytes, std::convert::Infallible>(chunk), (bytes, end)))
+                    });
+                AxumResponse::builder()
+                    .status(HttpStatusCode::OK)
+                    .header("content-length", content_length.to_string())
+                    .body(Body::from_stream(stream))
+                    .unwrap()
+            }
             Some(bytes) => AxumResponse::builder()
                 .status(HttpStatusCode::OK)
+                .header("content-length", bytes.len().to_string())
                 .body(Body::from(bytes))
                 .unwrap(),
             None => AxumResponse::builder()
@@ -21295,7 +22683,15 @@ mod tests {
         if state.failed_storage_puts.lock().unwrap().contains(&path) {
             return HttpStatusCode::INTERNAL_SERVER_ERROR;
         }
-        state.objects.lock().unwrap().insert(path, body.to_vec());
+        state
+            .objects
+            .lock()
+            .unwrap()
+            .insert(path.clone(), body.to_vec());
+        let slow = state.slow_storage_puts.lock().unwrap().contains(&path);
+        if slow {
+            tokio::time::sleep(TokioDuration::from_secs(2)).await;
+        }
         HttpStatusCode::OK
     }
 
@@ -21355,6 +22751,7 @@ mod tests {
                 "/storage/v1/object/transfer-genie-files",
                 delete(test_supabase_storage_delete),
             )
+            .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -21821,6 +23218,169 @@ mod tests {
         let _ = fs::remove_dir_all(temp_dir);
     }
 
+    #[tokio::test]
+    async fn supabase_binding_retry_reuses_existing_destination_and_session() {
+        let _credential_guard = credential_store::credential_test_guard();
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-binding-retry-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let profile_id = format!("supabase-existing-{}", uuid::Uuid::new_v4());
+        let mut settings = test_supabase_settings_with_url(server.base_url.clone());
+        settings.storage_profiles[0].id = profile_id.clone();
+        settings.active_storage_profile_id = None;
+        let existing = settings.storage_profiles[0].clone();
+        let state = test_app_state(&temp_dir, settings);
+        db::init_db(&state.db_path, None).unwrap();
+        let session = supabase_auth::SupabaseSession {
+            access_token: "access-token".into(),
+            refresh_token: "retry-refresh-token".into(),
+            user_id: "user-a".into(),
+            email: "user@example.invalid".into(),
+            expires_at: i64::MAX,
+        };
+        state.supabase_binding_flows.lock().unwrap().insert(
+            "retry-flow".into(),
+            SupabaseBindingFlow {
+                api_url: server.base_url.clone(),
+                anon_key: existing.supabase.as_ref().unwrap().anon_key.clone(),
+                session: session.clone(),
+                updated_at_ms: now_ms(),
+            },
+        );
+        let mut draft = existing.clone();
+        draft.id = format!("supabase-draft-{}", uuid::Uuid::new_v4());
+        draft.name = "Retry draft".into();
+
+        let updated = complete_supabase_binding_impl(
+            &state,
+            CompleteSupabaseBindingInput {
+                flow_id: "retry-flow".into(),
+                original_profile_id: None,
+                space_id: existing.supabase.as_ref().unwrap().space_id.clone(),
+                profile: draft,
+            },
+        )
+        .await
+        .expect("reuse existing destination");
+
+        assert_eq!(updated.storage_profiles.len(), 1);
+        assert_eq!(updated.storage_profiles[0].id, profile_id);
+        assert_eq!(updated.storage_profiles[0].name, existing.name);
+        assert_eq!(
+            credential_store::load_session(&profile_id)
+                .unwrap()
+                .unwrap()
+                .refresh_token,
+            "retry-refresh-token"
+        );
+        assert_eq!(
+            state
+                .supabase_sessions
+                .lock()
+                .unwrap()
+                .get(&profile_id)
+                .map(|value| value.user_id.as_str()),
+            Some("user-a")
+        );
+        assert!(!state
+            .supabase_binding_flows
+            .lock()
+            .unwrap()
+            .contains_key("retry-flow"));
+
+        credential_store::delete_session(&profile_id).unwrap();
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_binding_rejects_account_replacement_with_pending_work() {
+        let _credential_guard = credential_store::credential_test_guard();
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-binding-account-guard-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let profile_id = format!("supabase-protected-{}", uuid::Uuid::new_v4());
+        let mut settings = test_supabase_settings_with_url(server.base_url.clone());
+        settings.storage_profiles[0].id = profile_id.clone();
+        let existing = settings.storage_profiles[0].clone();
+        let state = test_app_state(&temp_dir, settings);
+        db::init_db(&state.db_path, None).unwrap();
+        credential_store::save_session(
+            &profile_id,
+            &supabase_auth::SupabaseSession {
+                access_token: "old-access-token".into(),
+                refresh_token: "old-refresh-token".into(),
+                user_id: "user-a".into(),
+                email: "old@example.invalid".into(),
+                expires_at: i64::MAX,
+            },
+        )
+        .unwrap();
+        rusqlite::Connection::open(&state.db_path)
+            .unwrap()
+            .execute(
+                "INSERT INTO sync_outbox (operation_id,endpoint_id,owner_scope,entity_type,
+                 entity_id,action,base_revision,payload_json,payload_hash,state,attempt_count,
+                 next_attempt_at_ms,created_at_ms,updated_at_ms)
+                 VALUES ('pending-binding',?1,'user-a','message','message-a','upsert',0,'{}',
+                 'hash','pending',0,0,1,1)",
+                rusqlite::params![profile_id],
+            )
+            .unwrap();
+        state.supabase_binding_flows.lock().unwrap().insert(
+            "account-flow".into(),
+            SupabaseBindingFlow {
+                api_url: server.base_url.clone(),
+                anon_key: existing.supabase.as_ref().unwrap().anon_key.clone(),
+                session: supabase_auth::SupabaseSession {
+                    access_token: "access-token".into(),
+                    refresh_token: "new-refresh-token".into(),
+                    user_id: "user-b".into(),
+                    email: "new@example.invalid".into(),
+                    expires_at: i64::MAX,
+                },
+                updated_at_ms: now_ms(),
+            },
+        );
+        let mut draft = existing.clone();
+        draft.id = format!("supabase-draft-{}", uuid::Uuid::new_v4());
+        let error = match complete_supabase_binding_impl(
+            &state,
+            CompleteSupabaseBindingInput {
+                flow_id: "account-flow".into(),
+                original_profile_id: None,
+                space_id: existing.supabase.as_ref().unwrap().space_id.clone(),
+                profile: draft,
+            },
+        )
+        .await
+        {
+            Ok(_) => panic!("pending work must block account replacement"),
+            Err(error) => error,
+        };
+        assert!(error.contains("未完成任务"));
+        assert_eq!(
+            credential_store::load_session(&profile_id)
+                .unwrap()
+                .unwrap()
+                .user_id,
+            "user-a"
+        );
+        assert!(state
+            .supabase_binding_flows
+            .lock()
+            .unwrap()
+            .contains_key("account-flow"));
+
+        credential_store::delete_session(&profile_id).unwrap();
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
     #[test]
     fn storage_profile_edit_updates_in_place_and_rejects_duplicate_supabase_destination() {
         let temp_dir = std::env::temp_dir().join(format!(
@@ -21985,6 +23545,8 @@ mod tests {
             system_dictation_hidden_main_position: Mutex::new(None),
             media_playback: media_playback::PlaybackRegistry::default(),
             media_preview_jobs: AsyncMutex::new(HashMap::new()),
+            #[cfg(any(target_os = "ios", test))]
+            supabase_download_guard: AsyncMutex::new(()),
         }
     }
 
@@ -22021,6 +23583,117 @@ mod tests {
             source_channel_id: None,
             source_message_id: None,
         }
+    }
+
+    #[test]
+    fn mobile_attachment_cache_state_requires_complete_current_scope_file() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("tg-cache-state-{}", uuid::Uuid::new_v4()));
+        let state = test_app_state(&temp_dir, test_settings());
+        db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+        let root = endpoint_files_dir(&state, "supabase-1").join("user-a");
+        let cache = root.join("downloads/file");
+        fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        fs::write(&cache, b"test").unwrap();
+        seed_mobile_cache_attachment(&state, "user-a", "file", "file", Some(&cache), "uploaded");
+        let rows = db::list_messages_for_scope(
+            &state.db_path,
+            "supabase-1",
+            "user-a",
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(
+            !rows[0].download_exists,
+            "SQLite mapping itself does not inspect files"
+        );
+        let valid =
+            with_mobile_attachment_cache_state(&state, "supabase-1", "user-a", rows.clone());
+        assert!(valid[0].download_exists);
+        assert!(
+            !with_mobile_attachment_cache_state(&state, "supabase-1", "user-b", rows.clone())[0]
+                .download_exists
+        );
+        let partial = root.join("downloads/file.part");
+        fs::write(&partial, b"test").unwrap();
+        let short = root.join("downloads/short");
+        fs::write(&short, b"te").unwrap();
+        let outside = temp_dir.join("outside");
+        fs::write(&outside, b"test").unwrap();
+        for path in [&partial, &short, &outside, &root.join("missing")] {
+            let mut invalid = rows.clone();
+            invalid[0].local_path = Some(path.to_string_lossy().to_string());
+            assert!(
+                !with_mobile_attachment_cache_state(&state, "supabase-1", "user-a", invalid)[0]
+                    .download_exists
+            );
+        }
+        #[cfg(unix)]
+        {
+            let link = root.join("downloads/link");
+            std::os::unix::fs::symlink(&outside, &link).unwrap();
+            let mut invalid = rows.clone();
+            invalid[0].local_path = Some(link.to_string_lossy().to_string());
+            assert!(
+                !with_mobile_attachment_cache_state(&state, "supabase-1", "user-a", invalid)[0]
+                    .download_exists
+            );
+        }
+        fs::remove_file(&cache).unwrap();
+        assert!(
+            !with_mobile_attachment_cache_state(&state, "supabase-1", "user-a", rows)[0]
+                .download_exists
+        );
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    fn seed_mobile_cache_attachment(
+        state: &AppState,
+        owner_scope: &str,
+        filename: &str,
+        attachment_id: &str,
+        local_path: Option<&Path>,
+        upload_state: &str,
+    ) {
+        let message_id = format!("message-{attachment_id}");
+        let local_path = local_path.map(|path| path.to_string_lossy().to_string());
+        let conn = rusqlite::Connection::open(&state.db_path).expect("open cache test database");
+        conn.execute(
+            "INSERT INTO messages (endpoint_id,filename,sender,timestamp_ms,size,kind,
+             original_name,local_path,remote_path,marked,marked_tag_ids,marked_pinned,format,
+             message_id,remote_revision,sync_state,owner_scope)
+             VALUES ('supabase-1',?1,'tester',1,4,'file',?2,?3,?4,0,'[]',0,'text',?5,1,'synced',?6)",
+            rusqlite::params![
+                filename,
+                format!("{filename}.bin"),
+                local_path.clone(),
+                format!("user/space/{attachment_id}/object.bin"),
+                message_id,
+                owner_scope,
+            ],
+        )
+        .expect("insert cache test message");
+        conn.execute(
+            "INSERT INTO attachment_sync (endpoint_id,owner_scope,attachment_id,message_id,
+             original_name,local_path,object_path,preview_object_path,mime_type,size,sha256,
+             upload_state,remote_revision,updated_at_ms)
+             VALUES ('supabase-1',?1,?2,?3,?4,?5,?6,?7,'application/octet-stream',4,
+             'hash',?8,1,1)",
+            rusqlite::params![
+                owner_scope,
+                attachment_id,
+                message_id,
+                format!("{filename}.bin"),
+                local_path,
+                format!("user/space/{attachment_id}/object.bin"),
+                format!("user/space/{attachment_id}/preview.jpg"),
+                upload_state,
+            ],
+        )
+        .expect("insert cache test attachment");
     }
 
     #[test]
@@ -22924,6 +24597,7 @@ mod tests {
             &DbDownloadHistory {
                 id: 0,
                 endpoint_id: message.endpoint_id.clone(),
+                owner_scope: String::new(),
                 filename: message.filename.clone(),
                 original_name: message.original_name.clone(),
                 saved_path: Some(formal.to_string_lossy().to_string()),
@@ -27942,6 +29616,313 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mobile_large_download_pauses_and_cold_foreground_recovers_only_requested_object() {
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-mobile-download-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let settings = test_supabase_settings_with_url(server.base_url.clone());
+        let state = test_app_state(&temp_dir, settings.clone());
+        db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+        install_test_supabase_session(&state);
+        let (profile, session) = active_supabase_scope(&state).unwrap();
+        let config = profile.supabase.as_ref().unwrap();
+        let filename = "requested-large.bin";
+        let object_path = format!("user-a/{}/attachment/large.bin", config.space_id);
+        let bytes = vec![0x71; 4 * 1024 * 1024];
+        let hash = format!("{:x}", Sha256::digest(&bytes));
+        let mut message =
+            test_db_message("supabase-1", filename, "large.bin", 100, bytes.len() as i64);
+        message.remote_path = Some(object_path.clone());
+        message.file_hash = Some(hash.clone());
+        let operation = outbox_operation_with_id(
+            "seed-download",
+            "supabase-1",
+            "user-a",
+            "message",
+            "requested-message",
+            "upsert",
+            0,
+            supabase_message_payload(&message),
+        )
+        .unwrap();
+        db::save_message_and_enqueue(&state.db_path, &message, &operation).unwrap();
+        server
+            .state
+            .objects
+            .lock()
+            .unwrap()
+            .insert(object_path.clone(), bytes.clone());
+        server
+            .state
+            .slow_storage_gets
+            .lock()
+            .unwrap()
+            .insert(object_path.clone());
+        let cache_path = endpoint_files_dir(&state, "supabase-1")
+            .join("user-a")
+            .join("downloads")
+            .join(filename);
+        ensure_parent_dir(&cache_path).unwrap();
+        let suspend = async {
+            tokio::time::sleep(TokioDuration::from_millis(300)).await;
+            suspend_mobile_background(&state).unwrap();
+        };
+        let (download, _) = tokio::join!(
+            stream_supabase_attachment_download(
+                None,
+                &state,
+                &profile,
+                &session,
+                config,
+                filename,
+                "large.bin",
+                &object_path,
+                bytes.len() as i64,
+                Some(&hash),
+                &cache_path
+            ),
+            suspend,
+        );
+        assert_eq!(download.unwrap_err(), MOBILE_TRANSFER_PAUSED);
+        assert!(!cache_path.exists());
+        let partial = db::get_partial_download(&state.db_path, "supabase-1", "user-a", filename)
+            .unwrap()
+            .unwrap();
+        assert!(partial.downloaded_bytes > 0 && partial.downloaded_bytes < bytes.len() as i64);
+        assert_eq!(
+            partial.downloaded_bytes,
+            fs::metadata(&partial.temp_path).unwrap().len() as i64
+        );
+        let history =
+            db::find_download_history_by_key(&state.db_path, "supabase-1", "user-a", filename)
+                .unwrap()
+                .unwrap();
+        assert_eq!(history.status, "paused");
+        assert!(history.saved_path.is_none());
+        assert_eq!(
+            list_download_history_for_platform(&state, None, None, true)
+                .unwrap()
+                .records[0]
+                .received,
+            Some(partial.downloaded_bytes)
+        );
+        let mut other_account = partial.clone();
+        other_account.owner_scope = "user-b".into();
+        db::upsert_partial_download(&state.db_path, &other_account).unwrap();
+        let mut old_space = partial.clone();
+        old_space.filename = "old-space.bin".into();
+        old_space.final_path = cache_path
+            .parent()
+            .unwrap()
+            .join("old-space.bin")
+            .to_string_lossy()
+            .into();
+        old_space.temp_path = format!("{}.part", old_space.final_path);
+        old_space.etag = Some("user-a/previous-space/old/file.bin".into());
+        let mut old_message = message.clone();
+        old_message.filename = old_space.filename.clone();
+        old_message.remote_path = old_space.etag.clone();
+        let old_operation = outbox_operation_with_id(
+            "seed-old-space",
+            "supabase-1",
+            "user-a",
+            "message",
+            "old-space-message",
+            "upsert",
+            0,
+            supabase_message_payload(&old_message),
+        )
+        .unwrap();
+        db::save_message_and_enqueue(&state.db_path, &old_message, &old_operation).unwrap();
+        db::upsert_partial_download(&state.db_path, &old_space).unwrap();
+        // No retained future is needed: the next process-state instance discovers SQLite work.
+        drop(state);
+        let restored = test_app_state(&temp_dir, settings);
+        install_test_supabase_session(&restored);
+        server.state.slow_storage_gets.lock().unwrap().clear();
+        recover_mobile_foreground(&restored).await.unwrap();
+        assert_eq!(fs::read(&cache_path).unwrap(), bytes);
+        assert!(
+            db::get_partial_download(&restored.db_path, "supabase-1", "user-a", filename)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(server.state.storage_get_count(&object_path), 2);
+        assert_eq!(
+            server
+                .state
+                .storage_get_count(old_space.etag.as_deref().unwrap()),
+            0
+        );
+        assert!(
+            db::get_partial_download(&restored.db_path, "supabase-1", "user-b", filename)
+                .unwrap()
+                .is_some()
+        );
+        assert!(db::get_partial_download(
+            &restored.db_path,
+            "supabase-1",
+            "user-a",
+            "old-space.bin"
+        )
+        .unwrap()
+        .is_some());
+        assert_eq!(
+            db::find_download_history_by_key(&restored.db_path, "supabase-1", "user-a", filename)
+                .unwrap()
+                .unwrap()
+                .status,
+            "complete"
+        );
+        assert_eq!(
+            db::get_message_for_scope(&restored.db_path, "supabase-1", "user-a", filename)
+                .unwrap()
+                .unwrap()
+                .local_path
+                .as_deref(),
+            cache_path.to_str()
+        );
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn mobile_large_upload_unknown_response_requeues_same_operation_and_recovers() {
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-mobile-upload-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(
+            &temp_dir,
+            test_supabase_settings_with_url(server.base_url.clone()),
+        );
+        db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+        install_test_supabase_session(&state);
+        let source = temp_dir.join("large.bin");
+        let bytes = vec![0x45; 4 * 1024 * 1024];
+        fs::write(&source, &bytes).unwrap();
+        send_file_path_impl(
+            &state,
+            None,
+            &source,
+            "large.bin".into(),
+            Some("mobile-large-upload".into()),
+            None,
+        )
+        .await
+        .unwrap();
+        let ids = supabase_client_send_ids("supabase-1", "user-a", "mobile-large-upload");
+        let attachment = db::get_attachment_sync_record(
+            &state.db_path,
+            "supabase-1",
+            "user-a",
+            &ids.attachment_id,
+        )
+        .unwrap()
+        .unwrap();
+        let object_path = attachment.object_path.unwrap();
+        server
+            .state
+            .slow_storage_puts
+            .lock()
+            .unwrap()
+            .insert(object_path.clone());
+        let suspend = async {
+            tokio::time::timeout(TokioDuration::from_secs(5), async {
+                while server.state.storage_put_count(&object_path) == 0 {
+                    tokio::time::sleep(TokioDuration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            // The server has the bytes, but its response is deliberately withheld.
+            suspend_mobile_background(&state).unwrap();
+        };
+        let (sync, _) = tokio::join!(run_sync(&state, "mobile-test", true), suspend);
+        assert!(sync.is_err());
+        let pending = db::list_pending_operations(&state.db_path, "supabase-1", "user-a").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].operation_id, ids.attachment_operation_id);
+        assert_eq!(pending[0].state, "pending");
+        let unconfirmed = db::get_attachment_sync_record(
+            &state.db_path,
+            "supabase-1",
+            "user-a",
+            &ids.attachment_id,
+        )
+        .unwrap()
+        .unwrap();
+        assert_ne!(unconfirmed.upload_state, "uploaded");
+        assert_eq!(fs::read(unconfirmed.local_path.unwrap()).unwrap(), bytes);
+        assert!(!server
+            .state
+            .snapshots
+            .lock()
+            .unwrap()
+            .contains_key(&format!("attachments/{}", ids.attachment_id)));
+        server.state.slow_storage_puts.lock().unwrap().clear();
+        recover_mobile_foreground(&state).await.unwrap();
+        assert_eq!(
+            db::count_pending_outbox(&state.db_path, "supabase-1", "user-a").unwrap(),
+            0
+        );
+        assert_eq!(
+            db::get_attachment_sync_record(
+                &state.db_path,
+                "supabase-1",
+                "user-a",
+                &ids.attachment_id
+            )
+            .unwrap()
+            .unwrap()
+            .upload_state,
+            "uploaded"
+        );
+        assert_eq!(server.state.storage_put_count(&object_path), 2);
+        assert_eq!(server.state.objects.lock().unwrap()[&object_path], bytes);
+        assert_eq!(
+            server
+                .state
+                .snapshots
+                .lock()
+                .unwrap()
+                .keys()
+                .filter(|key| key.starts_with("attachments/"))
+                .count(),
+            1
+        );
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn mobile_rapid_background_foreground_abandons_old_generation() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-mobile-generation-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(&temp_dir, test_supabase_settings());
+        db::init_db(&state.db_path, None).unwrap();
+        let work = mobile_foreground_work(&state, async {
+            tokio::time::sleep(TokioDuration::from_secs(5)).await;
+            Ok(())
+        });
+        let transition = async {
+            tokio::task::yield_now().await;
+            suspend_mobile_background(&state).unwrap();
+            set_mobile_foreground(&state, true);
+            invalidate_mobile_realtime(&state);
+        };
+        let (result, _) = tokio::join!(work, transition);
+        assert_eq!(result.unwrap_err(), MOBILE_TRANSFER_PAUSED);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
     async fn supabase_mark_mutations_signal_the_background_sync_loop() {
         let temp_dir =
             std::env::temp_dir().join(format!("transfer-genie-mark-wakeup-{}", now_ms()));
@@ -28016,6 +29997,513 @@ mod tests {
         assert_eq!(outbox, 2);
         assert!(!sent.filename.is_empty());
         drop(conn);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_file_send_retry_reuses_client_identity_without_duplicates() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-file-idempotent-{}", now_ms()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let source = temp_dir.join("source.bin");
+        fs::write(&source, b"attachment bytes").expect("write source");
+        let state = test_app_state(&temp_dir, test_supabase_settings());
+        db::init_db(&state.db_path, None).expect("initialize database");
+        install_test_supabase_session(&state);
+        let client_id = "mobile-stable-attachment";
+
+        let first = send_file_path_impl(
+            &state,
+            None,
+            &source,
+            "source.bin".into(),
+            Some(client_id.into()),
+            None,
+        )
+        .await
+        .expect("save attachment locally");
+        let ids = supabase_client_send_ids("supabase-1", "user-a", client_id);
+        let claimed = db::claim_outbox_operations(
+            &state.db_path,
+            "supabase-1",
+            "user-a",
+            "interrupted-worker",
+            now_ms(),
+            30_000,
+            1,
+            true,
+        )
+        .expect("claim stable message operation");
+        assert_eq!(claimed[0].operation_id, ids.message_operation_id);
+        let retried = send_file_path_impl(
+            &state,
+            None,
+            &source,
+            "source.bin".into(),
+            Some(client_id.into()),
+            None,
+        )
+        .await
+        .expect("return prior attachment after unknown response");
+
+        assert_eq!(retried.filename, first.filename);
+        assert_eq!(retried.endpoint_id, first.endpoint_id);
+        let conn = rusqlite::Connection::open(&state.db_path).unwrap();
+        let message_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM messages WHERE endpoint_id='supabase-1' AND owner_scope='user-a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let attachment_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM attachment_sync WHERE endpoint_id='supabase-1' AND owner_scope='user-a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let outbox_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sync_outbox WHERE endpoint_id='supabase-1' AND owner_scope='user-a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((message_count, attachment_count, outbox_count), (1, 1, 2));
+        drop(conn);
+        let attachment = db::get_attachment_sync_record(
+            &state.db_path,
+            "supabase-1",
+            "user-a",
+            &ids.attachment_id,
+        )
+        .unwrap()
+        .expect("stable attachment");
+        assert_eq!(attachment.message_id, ids.message_id);
+        assert_eq!(
+            attachment.object_path.as_deref(),
+            Some(
+                supabase_attachment_object_path(
+                    "user-a",
+                    "00000000-0000-4000-8000-000000000001",
+                    &ids.attachment_id,
+                    "source.bin",
+                )
+                .as_str()
+            )
+        );
+        assert_eq!(
+            db::get_outbox_operation(&state.db_path, &ids.message_operation_id)
+                .unwrap()
+                .unwrap()
+                .entity_id,
+            ids.message_id
+        );
+        assert_eq!(
+            db::get_outbox_operation(&state.db_path, &ids.attachment_operation_id)
+                .unwrap()
+                .unwrap()
+                .entity_id,
+            ids.attachment_id
+        );
+        assert_eq!(
+            db::recover_all_outbox_claims(&state.db_path, now_ms()).unwrap(),
+            1
+        );
+        let recovered = db::get_outbox_operation(&state.db_path, &ids.message_operation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.state, "pending");
+        assert_eq!(recovered.operation_id, ids.message_operation_id);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_file_send_rejects_reused_client_id_for_different_content() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("transfer-genie-file-id-conflict-{}", now_ms()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let source = temp_dir.join("source.bin");
+        fs::write(&source, b"first attachment").expect("write first source");
+        let state = test_app_state(&temp_dir, test_supabase_settings());
+        db::init_db(&state.db_path, None).expect("initialize database");
+        install_test_supabase_session(&state);
+        let client_id = "mobile-conflicting-attachment";
+
+        send_file_path_impl(
+            &state,
+            None,
+            &source,
+            "source.bin".into(),
+            Some(client_id.into()),
+            None,
+        )
+        .await
+        .expect("save first attachment");
+        fs::write(&source, b"other attachment").expect("replace source");
+        let error = match send_file_path_impl(
+            &state,
+            None,
+            &source,
+            "source.bin".into(),
+            Some(client_id.into()),
+            None,
+        )
+        .await
+        {
+            Ok(_) => panic!("client id must not overwrite another attachment"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("已用于其他附件"));
+        let ids = supabase_client_send_ids("supabase-1", "user-a", client_id);
+        let attachment = db::get_attachment_sync_record(
+            &state.db_path,
+            "supabase-1",
+            "user-a",
+            &ids.attachment_id,
+        )
+        .unwrap()
+        .expect("original attachment remains");
+        assert_eq!(
+            fs::read(attachment.local_path.unwrap()).unwrap(),
+            b"first attachment"
+        );
+        let conn = rusqlite::Connection::open(&state.db_path).unwrap();
+        let counts: (i64, i64, i64) = (
+            conn.query_row("SELECT count(*) FROM messages", [], |row| row.get(0))
+                .unwrap(),
+            conn.query_row("SELECT count(*) FROM attachment_sync", [], |row| row.get(0))
+                .unwrap(),
+            conn.query_row("SELECT count(*) FROM sync_outbox", [], |row| row.get(0))
+                .unwrap(),
+        );
+        assert_eq!(counts, (1, 1, 2));
+        drop(conn);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_download_interruption_keeps_account_scoped_partial_and_restarts_safely() {
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-supabase-download-recovery-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(
+            &temp_dir,
+            test_supabase_settings_with_url(server.base_url.clone()),
+        );
+        db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+        install_test_supabase_session(&state);
+        let settings = current_settings(&state).unwrap();
+        let (profile, session) = active_supabase_context(&state, &settings).unwrap().unwrap();
+        let config = profile.supabase.as_ref().unwrap();
+        let filename = "remote-large.bin";
+        let object_path = "user-a/00000000-0000-4000-8000-000000000001/attachment/download.bin";
+        let bytes = vec![0x5a; 2 * 1024 * 1024];
+        let expected_sha256 = format!("{:x}", Sha256::digest(&bytes));
+        server
+            .state
+            .objects
+            .lock()
+            .unwrap()
+            .insert(object_path.into(), bytes.clone());
+        server
+            .state
+            .slow_storage_gets
+            .lock()
+            .unwrap()
+            .insert(object_path.into());
+        let cache_path = endpoint_files_dir(&state, &profile.id)
+            .join(&session.user_id)
+            .join("downloads")
+            .join(filename);
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+
+        let interrupted = tokio::time::timeout(
+            TokioDuration::from_millis(450),
+            stream_supabase_attachment_download(
+                None,
+                &state,
+                &profile,
+                &session,
+                config,
+                filename,
+                "download.bin",
+                object_path,
+                bytes.len() as i64,
+                Some(&expected_sha256),
+                &cache_path,
+            ),
+        )
+        .await;
+        assert!(interrupted.is_err());
+        let partial =
+            db::get_partial_download(&state.db_path, &profile.id, &session.user_id, filename)
+                .unwrap()
+                .expect("interrupted partial should remain");
+        assert_eq!(partial.owner_scope, session.user_id);
+        let temp_size = fs::metadata(&partial.temp_path).unwrap().len();
+        assert!(temp_size > 0);
+        assert!(temp_size < bytes.len() as u64);
+        assert!(!cache_path.exists());
+        assert!(
+            db::get_partial_download(&state.db_path, &profile.id, "user-b", filename,)
+                .unwrap()
+                .is_none()
+        );
+
+        server
+            .state
+            .slow_storage_gets
+            .lock()
+            .unwrap()
+            .remove(object_path);
+        let completed = stream_supabase_attachment_download(
+            None,
+            &state,
+            &profile,
+            &session,
+            config,
+            filename,
+            "download.bin",
+            object_path,
+            bytes.len() as i64,
+            Some(&expected_sha256),
+            &cache_path,
+        )
+        .await
+        .unwrap();
+        assert_eq!(completed, bytes.len() as i64);
+        assert_eq!(fs::read(&cache_path).unwrap(), bytes);
+        assert!(
+            db::get_partial_download(&state.db_path, &profile.id, &session.user_id, filename,)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(server.state.storage_get_count(object_path), 2);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn ios_download_history_hides_and_rejects_other_accounts_and_signed_out_records() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-download-history-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(&temp_dir, test_supabase_settings());
+        db::init_db(&state.db_path, None).unwrap();
+        install_test_supabase_session(&state);
+        let mut records = Vec::new();
+        for owner in ["user-a", "user-b", ""] {
+            let record = db::upsert_download_history(
+                &state.db_path,
+                &DbDownloadHistory {
+                    id: 0,
+                    endpoint_id: "supabase-1".into(),
+                    owner_scope: owner.into(),
+                    filename: "same-name".into(),
+                    original_name: format!("{owner}.bin"),
+                    saved_path: Some(format!("/{owner}/private.bin")),
+                    status: "complete".into(),
+                    error: None,
+                    file_size: 100,
+                    created_at_ms: 1,
+                    updated_at_ms: 1,
+                },
+            )
+            .unwrap();
+            records.push(record);
+        }
+        let mobile = list_download_history_for_platform(&state, Some(30), Some(0), true).unwrap();
+        assert_eq!(mobile.total, 1);
+        assert_eq!(mobile.records[0].original_name, "user-a.bin");
+        assert!(validate_download_history_access(&state, &records[0], true).is_ok());
+        assert!(validate_download_history_access(&state, &records[1], true).is_err());
+        assert!(validate_download_history_access(&state, &records[2], true).is_err());
+        assert_eq!(
+            list_download_history_for_platform(&state, None, None, false)
+                .unwrap()
+                .total,
+            3
+        );
+        state.supabase_sessions.lock().unwrap().clear();
+        assert_eq!(
+            list_download_history_for_platform(&state, None, None, true)
+                .unwrap()
+                .total,
+            0
+        );
+        assert!(validate_download_history_access(&state, &records[0], true).is_err());
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_download_integrity_failure_never_publishes_a_complete_cache() {
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-download-integrity-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(
+            &temp_dir,
+            test_supabase_settings_with_url(server.base_url.clone()),
+        );
+        db::init_db(&state.db_path, None).unwrap();
+        install_test_supabase_session(&state);
+        let (profile, session) =
+            active_supabase_context(&state, &current_settings(&state).unwrap())
+                .unwrap()
+                .unwrap();
+        let config = profile.supabase.as_ref().unwrap();
+        let object_path = "user-a/space/attachment/file.bin";
+        let bytes = b"original bytes".to_vec();
+        server
+            .state
+            .objects
+            .lock()
+            .unwrap()
+            .insert(object_path.into(), bytes.clone());
+        let path = temp_dir.join("cache.bin");
+        for (size, hash, expected_error) in [
+            (bytes.len() as i64 + 1, None, "大小不一致"),
+            (bytes.len() as i64, Some("incorrect-sha256"), "摘要不一致"),
+        ] {
+            let error = stream_supabase_attachment_download(
+                None,
+                &state,
+                &profile,
+                &session,
+                config,
+                "file",
+                "file.bin",
+                object_path,
+                size,
+                hash,
+                &path,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.contains(expected_error), "{error}");
+            assert!(!path.exists());
+            assert!(db::get_partial_download(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                "file"
+            )
+            .unwrap()
+            .is_some());
+            let history = db::find_download_history_by_key(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                "file",
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(history.status, "error");
+            assert!(history.saved_path.is_none());
+        }
+        let hash = format!("{:x}", Sha256::digest(&bytes));
+        stream_supabase_attachment_download(
+            None,
+            &state,
+            &profile,
+            &session,
+            config,
+            "file",
+            "file.bin",
+            object_path,
+            bytes.len() as i64,
+            Some(&hash),
+            &path,
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert!(
+            db::get_partial_download(&state.db_path, &profile.id, &session.user_id, "file")
+                .unwrap()
+                .is_none()
+        );
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_download_rejects_late_completion_after_account_switch() {
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-download-switch-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(
+            &temp_dir,
+            test_supabase_settings_with_url(server.base_url.clone()),
+        );
+        db::init_db(&state.db_path, None).unwrap();
+        install_test_supabase_session(&state);
+        let (profile, session) =
+            active_supabase_context(&state, &current_settings(&state).unwrap())
+                .unwrap()
+                .unwrap();
+        let object_path = "user-a/space/attachment/large.bin";
+        let bytes = vec![0x5a; 2 * 1024 * 1024];
+        server
+            .state
+            .objects
+            .lock()
+            .unwrap()
+            .insert(object_path.into(), bytes);
+        server
+            .state
+            .slow_storage_gets
+            .lock()
+            .unwrap()
+            .insert(object_path.into());
+        let path = temp_dir.join("cache.bin");
+        let switch = async {
+            tokio::time::sleep(TokioDuration::from_millis(180)).await;
+            let mut next = session.clone();
+            next.user_id = "user-b".into();
+            state
+                .supabase_sessions
+                .lock()
+                .unwrap()
+                .insert(profile.id.clone(), next);
+        };
+        let download = stream_supabase_attachment_download(
+            None,
+            &state,
+            &profile,
+            &session,
+            profile.supabase.as_ref().unwrap(),
+            "file",
+            "large.bin",
+            object_path,
+            2 * 1024 * 1024,
+            None,
+            &path,
+        );
+        let (result, _) = tokio::join!(download, switch);
+        assert!(result.unwrap_err().contains("已切换"));
+        assert!(!path.exists());
+        assert!(
+            db::get_partial_download(&state.db_path, &profile.id, "user-a", "file")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            db::get_partial_download(&state.db_path, &profile.id, "user-b", "file")
+                .unwrap()
+                .is_none()
+        );
         let _ = fs::remove_dir_all(temp_dir);
     }
 
@@ -31559,6 +34047,7 @@ mod tests {
                 &DbDownloadHistory {
                     id: 0,
                     endpoint_id: "endpoint-1".into(),
+                    owner_scope: String::new(),
                     filename: filename.into(),
                     original_name: format!("{filename}.bin"),
                     saved_path: Some(saved_path.to_string_lossy().to_string()),
@@ -31575,6 +34064,7 @@ mod tests {
             &state.db_path,
             &DbPartialDownload {
                 endpoint_id: "endpoint-1".into(),
+                owner_scope: String::new(),
                 filename: "partial".into(),
                 original_name: "partial.bin".into(),
                 final_path: temp_dir.join("partial.bin").to_string_lossy().to_string(),
@@ -31647,6 +34137,7 @@ mod tests {
         let partial =
             |etag: Option<&str>, mtime: Option<&str>, total_bytes: i64| DbPartialDownload {
                 endpoint_id: "endpoint-1".into(),
+                owner_scope: String::new(),
                 filename: "file".into(),
                 original_name: "file.bin".into(),
                 final_path: "file.bin".into(),
@@ -31677,5 +34168,231 @@ mod tests {
             &partial(None, None, 10),
             &response(None, None, Some(11))
         ));
+    }
+
+    #[tokio::test]
+    async fn mobile_cache_clear_removes_only_recoverable_current_account_files() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-mobile-cache-clear-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(&temp_dir, test_supabase_settings());
+        db::init_db(&state.db_path, None).unwrap();
+        install_test_supabase_session(&state);
+        let endpoint_root = endpoint_files_dir(&state, "supabase-1");
+        let owner_root = endpoint_root.join("user-a");
+        let attachment_path = owner_root
+            .join("attachments")
+            .join("attachment-ready")
+            .join("ready.bin");
+        let download_path = owner_root.join("downloads").join("ready");
+        let export_path = owner_root.join("exports").join("ready").join("ready.bin");
+        let preview_path = media_preview::isolated_preview_attachment_dir(
+            &endpoint_root,
+            "user-a",
+            "attachment-ready",
+        )
+        .join("preview.jpg");
+        let playback_path = media_preview::media_playback_cache_path(
+            &owner_root,
+            "supabase-1\0user-a",
+            "ready",
+            "ready.bin",
+            "file",
+        );
+        for (path, bytes) in [
+            (&attachment_path, b"aaaa".as_slice()),
+            (&download_path, b"bb".as_slice()),
+            (&export_path, b"ccc".as_slice()),
+            (&preview_path, b"dddd".as_slice()),
+            (&playback_path, b"eeeee".as_slice()),
+        ] {
+            ensure_parent_dir(path).unwrap();
+            fs::write(path, bytes).unwrap();
+        }
+        seed_mobile_cache_attachment(
+            &state,
+            "user-a",
+            "ready",
+            "attachment-ready",
+            Some(&attachment_path),
+            "uploaded",
+        );
+        db::upsert_download_history(
+            &state.db_path,
+            &DbDownloadHistory {
+                id: 0,
+                endpoint_id: "supabase-1".into(),
+                owner_scope: "user-a".into(),
+                filename: "ready".into(),
+                original_name: "ready.bin".into(),
+                saved_path: Some(download_path.to_string_lossy().to_string()),
+                status: "complete".into(),
+                error: None,
+                file_size: 2,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+            },
+        )
+        .unwrap();
+
+        let (summary, _) = mobile_cache_inventory(&state).unwrap();
+        assert_eq!(summary.file_count, 5);
+        assert_eq!(summary.reclaimable_bytes, 18);
+        let cleared = clear_mobile_cache_impl(&state).await.unwrap();
+        assert_eq!(cleared.removed_files, 5);
+        assert_eq!(cleared.removed_bytes, 18);
+        assert_eq!(cleared.file_count, 0);
+        for path in [
+            &attachment_path,
+            &download_path,
+            &export_path,
+            &preview_path,
+            &playback_path,
+        ] {
+            assert!(!path.exists(), "{} should be cleared", path.display());
+        }
+        assert!(
+            db::get_message_for_scope(&state.db_path, "supabase-1", "user-a", "ready")
+                .unwrap()
+                .unwrap()
+                .local_path
+                .is_none()
+        );
+        assert!(db::get_attachment_sync_record(
+            &state.db_path,
+            "supabase-1",
+            "user-a",
+            "attachment-ready"
+        )
+        .unwrap()
+        .unwrap()
+        .local_path
+        .is_none());
+        assert_eq!(
+            db::find_download_history_by_key(&state.db_path, "supabase-1", "user-a", "ready")
+                .unwrap()
+                .unwrap()
+                .status,
+            "cache_removed"
+        );
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn mobile_cache_inventory_protects_pending_partial_foreign_and_symlink_files() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-mobile-cache-protection-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(&temp_dir, test_supabase_settings());
+        db::init_db(&state.db_path, None).unwrap();
+        install_test_supabase_session(&state);
+        let endpoint_root = endpoint_files_dir(&state, "supabase-1");
+        let owner_root = endpoint_root.join("user-a");
+
+        let pending_path = owner_root.join("downloads").join("pending");
+        ensure_parent_dir(&pending_path).unwrap();
+        fs::write(&pending_path, b"pending").unwrap();
+        seed_mobile_cache_attachment(
+            &state,
+            "user-a",
+            "pending",
+            "attachment-pending",
+            None,
+            "uploaded",
+        );
+        rusqlite::Connection::open(&state.db_path)
+            .unwrap()
+            .execute(
+                "INSERT INTO sync_outbox (operation_id,endpoint_id,owner_scope,entity_type,
+                 entity_id,action,base_revision,payload_json,payload_hash,state,attempt_count,
+                 next_attempt_at_ms,created_at_ms,updated_at_ms)
+                 VALUES ('cache-pending','supabase-1','user-a','attachment',
+                 'attachment-pending','upsert',0,'{}','hash','pending',0,0,1,1)",
+                [],
+            )
+            .unwrap();
+
+        let partial_path = owner_root.join("downloads").join("partial");
+        ensure_parent_dir(&partial_path).unwrap();
+        fs::write(&partial_path, b"partial").unwrap();
+        seed_mobile_cache_attachment(
+            &state,
+            "user-a",
+            "partial",
+            "attachment-partial",
+            None,
+            "uploaded",
+        );
+        db::upsert_partial_download(
+            &state.db_path,
+            &DbPartialDownload {
+                endpoint_id: "supabase-1".into(),
+                owner_scope: "user-a".into(),
+                filename: "partial".into(),
+                original_name: "partial.bin".into(),
+                final_path: partial_path.to_string_lossy().to_string(),
+                temp_path: partial_path
+                    .with_extension("part")
+                    .to_string_lossy()
+                    .to_string(),
+                downloaded_bytes: 1,
+                total_bytes: 7,
+                etag: None,
+                mtime: None,
+                updated_at_ms: 1,
+            },
+        )
+        .unwrap();
+
+        let foreign_path = endpoint_root
+            .join("user-b")
+            .join("downloads")
+            .join("foreign");
+        ensure_parent_dir(&foreign_path).unwrap();
+        fs::write(&foreign_path, b"foreign").unwrap();
+        seed_mobile_cache_attachment(
+            &state,
+            "user-b",
+            "foreign",
+            "attachment-foreign",
+            None,
+            "uploaded",
+        );
+
+        let outside = temp_dir.join("outside.bin");
+        fs::write(&outside, b"outside").unwrap();
+        let linked_cache = owner_root.join("downloads").join("linked");
+        ensure_parent_dir(&linked_cache).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &linked_cache).unwrap();
+        seed_mobile_cache_attachment(
+            &state,
+            "user-a",
+            "linked",
+            "attachment-linked",
+            None,
+            "uploaded",
+        );
+
+        let (summary, _) = mobile_cache_inventory(&state).unwrap();
+        assert_eq!(summary.file_count, 0);
+        assert_eq!(summary.reclaimable_bytes, 0);
+        assert_eq!(summary.protected_tasks, 1);
+        let cleared = clear_mobile_cache_impl(&state).await.unwrap();
+        assert_eq!(cleared.removed_files, 0);
+        assert!(pending_path.is_file());
+        assert!(partial_path.is_file());
+        assert!(foreign_path.is_file());
+        assert!(outside.is_file());
+        #[cfg(unix)]
+        assert!(fs::symlink_metadata(&linked_cache)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let _ = fs::remove_dir_all(temp_dir);
     }
 }

@@ -9,6 +9,7 @@ docs/.vitepress/cache
 docs/.vitepress/dist
 
 /dist
+/.playwright-mcp
 
 # Optional platform FFmpeg binaries are supplied by release packaging.
 /tools/ffmpeg/ffmpeg

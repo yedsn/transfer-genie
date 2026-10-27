@@ -994,6 +994,8 @@ pub struct DownloadHistoryRecord {
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     pub local_exists: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub received: Option<i64>,
 }
 
 #[derive(Clone, Serialize)]

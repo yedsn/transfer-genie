@@ -2,6 +2,53 @@
 
 ## ADDED Requirements
 
+### Requirement: Chat-ordered mobile history
+iOS 消息流 SHALL 从上到下按时间由旧到新排列，最新消息位于底部。首次进入空间 SHALL 定位到最新消息，用户向上滚动 SHALL 加载更早消息并保持正在阅读的消息位置。用户正在阅读历史内容时，新消息或同步刷新 MUST NOT 强制滚到底部或丢弃已加载历史。用户发送成功后 SHALL 定位到新发送内容。桌面消息列表行为 MUST 保持不变。
+
+#### Scenario: Open a message space
+- **WHEN** 用户首次进入移动端消息页
+- **THEN** 最新消息显示在列表底部且进入可视区域
+- **AND** 顶部空间、搜索、同步入口保持可达
+
+#### Scenario: Scroll upward for history
+- **WHEN** 用户向上滚动到已加载消息的顶部
+- **THEN** 更早消息被插入现有消息前方
+- **AND** 现有可见消息保持原阅读位置且重复触发不产生并发分页请求
+
+#### Scenario: Receive while reading history
+- **WHEN** 用户不在底部且新消息到达或执行同步刷新
+- **THEN** 新消息保留在底部且已加载历史继续可读
+- **AND** 用户当前阅读位置不被强制改变
+
+### Requirement: Device-aligned mobile conversation bubbles
+iOS 消息流 SHALL 参考桌面端使用对话气泡，本机发送的消息靠右，其他设备发送的消息靠左。自身判断 SHALL 沿用桌面规则：发送者为“我”或匹配当前非空的发送者名称；同一 Supabase 账号下其他设备的消息 MUST NOT 全部被视为本机消息。气泡 SHALL 保留发送者、时间、标记和明确操作入口，文本 SHALL 支持换行，附件 SHALL 保留预览与缓存状态。
+
+#### Scenario: Mix device senders in one account
+- **WHEN** 当前发送者名称为 Jam，列表含 Jam 与 Mac 发送的消息
+- **THEN** Jam 的消息显示在右侧浅绿色气泡中，Mac 的消息显示在左侧浅色气泡中
+- **AND** 已标记消息保留橙色标记与气泡提示，左右方向不变
+
+#### Scenario: Read multiline text and attachments
+- **WHEN** 用户查看多行文本、长链接或附件消息
+- **THEN** 文本换行且不以两行摘要代替正文，内容不造成横向溢出
+- **AND** 附件保留缩略图或类型卡以及显式更多操作
+
+### Requirement: Bounded mobile message height
+移动端每条消息 SHALL 限制默认内容高度；文本正文使用桌面同样的 130px 阈值，附件内容使用适合缩略图的 260px 阈值。超过阈值 SHALL 显示“展开更多”按钮，点击后完整展开并提供“收起”；未超限消息 MUST NOT 显示展开按钮。展开操作 MUST NOT 触发详情或长按菜单，刷新同一条消息 SHALL 保持展开状态，横竖屏尺寸变化 SHALL 重新判断溢出。
+
+#### Scenario: Expand a long conversation message
+- **WHEN** 用户点击长消息的“展开更多”
+- **THEN** 正文完整显示，按钮变为“收起”
+- **AND** 当前消息保持可阅读位置，不打开详情弹层
+
+### Requirement: Compact mobile sync status
+移动消息页 SHALL 将同步状态合并到顶部空间选择器，以一行小字显示已同步、同步中、待同步、离线或冲突。消息页 MUST NOT 为同步状态单独显示大卡片；完整状态、手动同步和传输记录 SHALL 继续通过“我的”页面的同步与传输入口访问。
+
+#### Scenario: Read sync state while browsing messages
+- **WHEN** 同步状态发生变化
+- **THEN** 空间名称下的小字更新为真实状态
+- **AND** 不新增占用消息区域的大状态卡片
+
 ### Requirement: Touch-first message interaction
 iOS 消息流 SHALL 使用单击打开明确操作或详情，并 SHALL 使用长按或显式菜单进入选择模式。关键操作 MUST NOT 依赖 hover、鼠标右键、桌面双击、拖拽文件或矩形框选，交互控件 SHALL 适合触摸操作。
 

@@ -52,6 +52,7 @@ pub struct DbDownloadHistory {
     #[allow(dead_code)]
     pub id: i64,
     pub endpoint_id: String,
+    pub owner_scope: String,
     pub filename: String,
     pub original_name: String,
     pub saved_path: Option<String>,
@@ -80,6 +81,7 @@ pub struct DbUploadHistory {
 #[derive(Clone)]
 pub struct DbPartialDownload {
     pub endpoint_id: String,
+    pub owner_scope: String,
     pub filename: String,
     pub original_name: String,
     pub final_path: String,
@@ -593,6 +595,60 @@ fn ensure_local_first_sync_schema(conn: &Connection) -> rusqlite::Result<()> {
                 [],
             )?;
         }
+    }
+    let download_history_columns = table_columns(conn, "download_history")?;
+    if !download_history_columns
+        .iter()
+        .any(|column| column == "owner_scope")
+    {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(
+            "CREATE TABLE download_history_account_scoped (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,endpoint_id TEXT NOT NULL,
+               owner_scope TEXT NOT NULL DEFAULT '',filename TEXT NOT NULL,
+               original_name TEXT NOT NULL,saved_path TEXT,status TEXT NOT NULL,error TEXT,
+               file_size INTEGER NOT NULL DEFAULT 0,created_at_ms INTEGER NOT NULL,
+               updated_at_ms INTEGER NOT NULL,UNIQUE(endpoint_id,owner_scope,filename)
+             );
+             INSERT INTO download_history_account_scoped
+               (id,endpoint_id,owner_scope,filename,original_name,saved_path,status,error,
+                file_size,created_at_ms,updated_at_ms)
+               SELECT id,endpoint_id,'',filename,original_name,saved_path,status,error,
+                 file_size,created_at_ms,updated_at_ms FROM download_history;
+             DROP TABLE download_history;
+             ALTER TABLE download_history_account_scoped RENAME TO download_history;",
+        )?;
+        tx.commit()?;
+    }
+    let partial_download_columns = table_columns(conn, "partial_downloads")?;
+    if !partial_download_columns
+        .iter()
+        .any(|column| column == "owner_scope")
+    {
+        conn.execute(
+            "ALTER TABLE partial_downloads ADD COLUMN owner_scope TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    if table_primary_key_columns(conn, "partial_downloads")?
+        != ["endpoint_id", "owner_scope", "filename"]
+    {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(
+            "CREATE TABLE partial_downloads_account_scoped (
+               endpoint_id TEXT NOT NULL,owner_scope TEXT NOT NULL DEFAULT '',filename TEXT NOT NULL,
+               original_name TEXT NOT NULL,final_path TEXT NOT NULL,temp_path TEXT NOT NULL,
+               downloaded_bytes INTEGER NOT NULL DEFAULT 0,total_bytes INTEGER NOT NULL DEFAULT 0,
+               etag TEXT,mtime TEXT,updated_at_ms INTEGER NOT NULL,
+               PRIMARY KEY(endpoint_id,owner_scope,filename)
+             );
+             INSERT INTO partial_downloads_account_scoped
+               SELECT endpoint_id,owner_scope,filename,original_name,final_path,temp_path,
+                 downloaded_bytes,total_bytes,etag,mtime,updated_at_ms FROM partial_downloads;
+             DROP TABLE partial_downloads;
+             ALTER TABLE partial_downloads_account_scoped RENAME TO partial_downloads;",
+        )?;
+        tx.commit()?;
     }
     Ok(())
 }
@@ -2441,6 +2497,9 @@ fn apply_pulled_message(
     now_ms: i64,
 ) -> rusqlite::Result<()> {
     if local_entity_has_work(tx, endpoint_id, owner_scope, "message", &change.entity_id)? {
+        if pulled_revision_is_known(tx, endpoint_id, owner_scope, change)? {
+            return Ok(());
+        }
         return insert_pull_conflict(tx, endpoint_id, owner_scope, change, now_ms);
     }
     let Some(snapshot) = change.snapshot.as_ref() else {
@@ -2557,6 +2616,9 @@ fn apply_pulled_tag(
     now_ms: i64,
 ) -> rusqlite::Result<()> {
     if local_entity_has_work(tx, endpoint_id, owner_scope, "tag", &change.entity_id)? {
+        if pulled_revision_is_known(tx, endpoint_id, owner_scope, change)? {
+            return Ok(());
+        }
         return insert_pull_conflict(tx, endpoint_id, owner_scope, change, now_ms);
     }
     let Some(snapshot) = change.snapshot.as_ref() else {
@@ -2628,6 +2690,28 @@ fn local_entity_has_work(
         params![endpoint_id, owner_scope, entity_type, entity_id],
         |row| row.get(0),
     )?)
+}
+
+fn pulled_revision_is_known(
+    tx: &Connection,
+    endpoint_id: &str,
+    owner_scope: &str,
+    change: &PulledChange,
+) -> rusqlite::Result<bool> {
+    // History can replay the unchanged base while a local edit is still queued.
+    let query = match change.entity_type.as_str() {
+        "message" => "SELECT remote_revision FROM messages WHERE endpoint_id=?1 AND owner_scope=?2 AND message_id=?3",
+        "tag" => "SELECT remote_revision FROM marked_tags WHERE endpoint_id=?1 AND owner_scope=?2 AND id=?3",
+        _ => return Ok(false),
+    };
+    let known_revision = tx
+        .query_row(
+            query,
+            params![endpoint_id, owner_scope, change.entity_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    Ok(known_revision.is_some_and(|revision| revision > 0 && change.revision <= revision))
 }
 
 fn insert_pull_conflict(
@@ -2976,6 +3060,67 @@ pub fn get_attachment_for_message(
             map_attachment_sync_record,
         )
         .optional()
+}
+
+pub fn list_evictable_attachment_messages(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+) -> rusqlite::Result<Vec<(String, AttachmentSyncRecord)>> {
+    let conn = Connection::open(path)?;
+    let mut stmt = conn.prepare(
+        "SELECT m.filename,a.attachment_id,a.message_id,a.original_name,a.local_path,
+         a.object_path,a.preview_object_path,a.mime_type,a.size,a.sha256,a.upload_state,a.remote_revision
+         FROM attachment_sync a JOIN messages m ON m.endpoint_id=a.endpoint_id
+           AND m.owner_scope=a.owner_scope AND m.message_id=a.message_id
+         WHERE a.endpoint_id=?1 AND a.owner_scope=?2 AND a.upload_state='uploaded'
+           AND a.remote_revision>0 AND a.object_path IS NOT NULL AND a.object_path<>''
+           AND a.deleted_at_ms IS NULL AND m.deleted_at_ms IS NULL
+           AND NOT EXISTS (SELECT 1 FROM sync_outbox o WHERE o.endpoint_id=a.endpoint_id
+             AND o.owner_scope=a.owner_scope AND o.state NOT IN ('acknowledged','superseded')
+             AND ((o.entity_type='attachment' AND o.entity_id=a.attachment_id)
+               OR (o.entity_type='message' AND o.entity_id=a.message_id)))
+           AND NOT EXISTS (SELECT 1 FROM partial_downloads p WHERE p.endpoint_id=a.endpoint_id
+             AND p.owner_scope=a.owner_scope AND p.filename=m.filename)",
+    )?;
+    let rows = stmt.query_map(params![endpoint_id, owner_scope], |row| {
+        Ok((
+            row.get(0)?,
+            AttachmentSyncRecord {
+                attachment_id: row.get(1)?,
+                message_id: row.get(2)?,
+                original_name: row.get(3)?,
+                local_path: row.get(4)?,
+                object_path: row.get(5)?,
+                preview_object_path: row.get(6)?,
+                mime_type: row.get(7)?,
+                size: row.get(8)?,
+                sha256: row.get(9)?,
+                upload_state: row.get(10)?,
+                remote_revision: row.get(11)?,
+            },
+        ))
+    })?;
+    rows.collect()
+}
+
+pub fn clear_cached_download_metadata(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    filename: &str,
+) -> rusqlite::Result<()> {
+    let conn = Connection::open(path)?;
+    conn.execute(
+        "UPDATE messages SET local_path=NULL WHERE endpoint_id=?1 AND owner_scope=?2 AND filename=?3",
+        params![endpoint_id, owner_scope, filename],
+    )?;
+    conn.execute(
+        "UPDATE download_history SET saved_path=NULL,status='cache_removed',error=NULL
+         WHERE endpoint_id=?1 AND owner_scope=?2 AND filename=?3 AND status='complete'",
+        params![endpoint_id, owner_scope, filename],
+    )?;
+    Ok(())
 }
 
 pub fn set_attachment_preview_and_enqueue(
@@ -4629,8 +4774,8 @@ pub fn list_bulk_download_candidates(
         "SELECT m.filename, m.timestamp_ms, m.size, m.original_name, \
                 m.transcript_source, m.source_audio_mime_type, d.status, d.saved_path, p.downloaded_bytes \
          FROM messages m \
-         LEFT JOIN download_history d ON d.endpoint_id = m.endpoint_id AND d.filename = m.filename \
-         LEFT JOIN partial_downloads p ON p.endpoint_id = m.endpoint_id AND p.filename = m.filename \
+         LEFT JOIN download_history d ON d.endpoint_id = m.endpoint_id AND d.owner_scope = m.owner_scope AND d.filename = m.filename \
+         LEFT JOIN partial_downloads p ON p.endpoint_id = m.endpoint_id AND p.owner_scope = m.owner_scope AND p.filename = m.filename \
          WHERE m.endpoint_id = ?1 AND m.owner_scope = ?2 AND m.deleted_at_ms IS NULL \
            AND (m.kind = 'file' OR m.transcript_source = 'speech-to-text'){} \
          ORDER BY m.timestamp_ms DESC, m.filename DESC",
@@ -5485,21 +5630,22 @@ pub fn list_cleanup_candidates(
 pub fn get_download_history(path: &Path, id: i64) -> rusqlite::Result<Option<DbDownloadHistory>> {
     let conn = Connection::open(path)?;
     conn.query_row(
-        "SELECT id, endpoint_id, filename, original_name, saved_path, status, error, file_size, created_at_ms, updated_at_ms \
+        "SELECT id, endpoint_id, owner_scope, filename, original_name, saved_path, status, error, file_size, created_at_ms, updated_at_ms \
          FROM download_history WHERE id = ?1",
         params![id],
         |row| {
             Ok(DbDownloadHistory {
                 id: row.get(0)?,
                 endpoint_id: row.get(1)?,
-                filename: row.get(2)?,
-                original_name: row.get(3)?,
-                saved_path: row.get(4)?,
-                status: row.get(5)?,
-                error: row.get(6)?,
-                file_size: row.get(7)?,
-                created_at_ms: row.get(8)?,
-                updated_at_ms: row.get(9)?,
+                owner_scope: row.get(2)?,
+                filename: row.get(3)?,
+                original_name: row.get(4)?,
+                saved_path: row.get(5)?,
+                status: row.get(6)?,
+                error: row.get(7)?,
+                file_size: row.get(8)?,
+                created_at_ms: row.get(9)?,
+                updated_at_ms: row.get(10)?,
             })
         },
     )
@@ -5509,24 +5655,26 @@ pub fn get_download_history(path: &Path, id: i64) -> rusqlite::Result<Option<DbD
 fn get_download_history_by_key(
     conn: &Connection,
     endpoint_id: &str,
+    owner_scope: &str,
     filename: &str,
 ) -> rusqlite::Result<Option<DbDownloadHistory>> {
     conn.query_row(
-        "SELECT id, endpoint_id, filename, original_name, saved_path, status, error, file_size, created_at_ms, updated_at_ms \
-         FROM download_history WHERE endpoint_id = ?1 AND filename = ?2",
-        params![endpoint_id, filename],
+        "SELECT id, endpoint_id, owner_scope, filename, original_name, saved_path, status, error, file_size, created_at_ms, updated_at_ms \
+         FROM download_history WHERE endpoint_id = ?1 AND owner_scope = ?2 AND filename = ?3",
+        params![endpoint_id, owner_scope, filename],
         |row| {
             Ok(DbDownloadHistory {
                 id: row.get(0)?,
                 endpoint_id: row.get(1)?,
-                filename: row.get(2)?,
-                original_name: row.get(3)?,
-                saved_path: row.get(4)?,
-                status: row.get(5)?,
-                error: row.get(6)?,
-                file_size: row.get(7)?,
-                created_at_ms: row.get(8)?,
-                updated_at_ms: row.get(9)?,
+                owner_scope: row.get(2)?,
+                filename: row.get(3)?,
+                original_name: row.get(4)?,
+                saved_path: row.get(5)?,
+                status: row.get(6)?,
+                error: row.get(7)?,
+                file_size: row.get(8)?,
+                created_at_ms: row.get(9)?,
+                updated_at_ms: row.get(10)?,
             })
         },
     )
@@ -5536,10 +5684,11 @@ fn get_download_history_by_key(
 pub fn find_download_history_by_key(
     path: &Path,
     endpoint_id: &str,
+    owner_scope: &str,
     filename: &str,
 ) -> rusqlite::Result<Option<DbDownloadHistory>> {
     let conn = Connection::open(path)?;
-    get_download_history_by_key(&conn, endpoint_id, filename)
+    get_download_history_by_key(&conn, endpoint_id, owner_scope, filename)
 }
 
 pub fn upsert_download_history(
@@ -5549,9 +5698,9 @@ pub fn upsert_download_history(
     let conn = Connection::open(path)?;
     conn.execute(
         "INSERT INTO download_history \
-         (endpoint_id, filename, original_name, saved_path, status, error, file_size, created_at_ms, updated_at_ms) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
-         ON CONFLICT(endpoint_id, filename) DO UPDATE SET \
+         (endpoint_id, owner_scope, filename, original_name, saved_path, status, error, file_size, created_at_ms, updated_at_ms) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+         ON CONFLICT(endpoint_id, owner_scope, filename) DO UPDATE SET \
            original_name=excluded.original_name, \
            saved_path=COALESCE(excluded.saved_path, download_history.saved_path), \
            status=excluded.status, \
@@ -5560,6 +5709,7 @@ pub fn upsert_download_history(
            updated_at_ms=excluded.updated_at_ms",
         params![
             entry.endpoint_id,
+            entry.owner_scope,
             entry.filename,
             entry.original_name,
             entry.saved_path,
@@ -5570,8 +5720,13 @@ pub fn upsert_download_history(
             entry.updated_at_ms,
         ],
     )?;
-    get_download_history_by_key(&conn, &entry.endpoint_id, &entry.filename)?
-        .ok_or(rusqlite::Error::QueryReturnedNoRows)
+    get_download_history_by_key(
+        &conn,
+        &entry.endpoint_id,
+        &entry.owner_scope,
+        &entry.filename,
+    )?
+    .ok_or(rusqlite::Error::QueryReturnedNoRows)
 }
 
 pub fn list_download_history_paged(
@@ -5611,6 +5766,7 @@ pub fn list_download_history_paged(
             created_at_ms: row.get(8)?,
             updated_at_ms: row.get(9)?,
             local_exists,
+            received: None,
         })
     })?;
     let mut records = Vec::new();
@@ -5620,11 +5776,70 @@ pub fn list_download_history_paged(
     Ok(records)
 }
 
+pub fn list_download_history_paged_for_scope(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> rusqlite::Result<Vec<DownloadHistoryRecord>> {
+    let conn = Connection::open(path)?;
+    let mut sql =
+        "SELECT id, endpoint_id, filename, original_name, saved_path, status, error, file_size, created_at_ms, updated_at_ms \
+         FROM download_history WHERE endpoint_id = ?1 AND owner_scope = ?2 \
+         ORDER BY updated_at_ms DESC, id DESC"
+            .to_string();
+    if let Some(limit) = limit {
+        sql.push_str(" LIMIT ");
+        sql.push_str(&limit.max(0).to_string());
+        if let Some(offset) = offset {
+            sql.push_str(" OFFSET ");
+            sql.push_str(&offset.max(0).to_string());
+        }
+    }
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![endpoint_id, owner_scope], |row| {
+        let saved_path: Option<String> = row.get(4)?;
+        let local_exists = saved_path
+            .as_ref()
+            .map(|path| Path::new(path).is_file())
+            .unwrap_or(false);
+        Ok(DownloadHistoryRecord {
+            id: row.get(0)?,
+            endpoint_id: row.get(1)?,
+            filename: row.get(2)?,
+            original_name: row.get(3)?,
+            saved_path,
+            status: row.get(5)?,
+            error: row.get(6)?,
+            file_size: row.get(7)?,
+            created_at_ms: row.get(8)?,
+            updated_at_ms: row.get(9)?,
+            local_exists,
+            received: None,
+        })
+    })?;
+    rows.collect()
+}
+
 pub fn count_download_history(path: &Path) -> rusqlite::Result<i64> {
     let conn = Connection::open(path)?;
     conn.query_row("SELECT COUNT(*) FROM download_history", [], |row| {
         row.get(0)
     })
+}
+
+pub fn count_download_history_for_scope(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+) -> rusqlite::Result<i64> {
+    let conn = Connection::open(path)?;
+    conn.query_row(
+        "SELECT COUNT(*) FROM download_history WHERE endpoint_id = ?1 AND owner_scope = ?2",
+        params![endpoint_id, owner_scope],
+        |row| row.get(0),
+    )
 }
 
 fn get_upload_history_by_key(
@@ -5765,25 +5980,27 @@ pub fn delete_upload_history_many(path: &Path, ids: &[i64]) -> rusqlite::Result<
 pub fn get_partial_download(
     path: &Path,
     endpoint_id: &str,
+    owner_scope: &str,
     filename: &str,
 ) -> rusqlite::Result<Option<DbPartialDownload>> {
     let conn = Connection::open(path)?;
     conn.query_row(
-        "SELECT endpoint_id, filename, original_name, final_path, temp_path, downloaded_bytes, total_bytes, etag, mtime, updated_at_ms \
-         FROM partial_downloads WHERE endpoint_id = ?1 AND filename = ?2",
-        params![endpoint_id, filename],
+        "SELECT endpoint_id, owner_scope, filename, original_name, final_path, temp_path, downloaded_bytes, total_bytes, etag, mtime, updated_at_ms \
+         FROM partial_downloads WHERE endpoint_id = ?1 AND owner_scope = ?2 AND filename = ?3",
+        params![endpoint_id, owner_scope, filename],
         |row| {
             Ok(DbPartialDownload {
                 endpoint_id: row.get(0)?,
-                filename: row.get(1)?,
-                original_name: row.get(2)?,
-                final_path: row.get(3)?,
-                temp_path: row.get(4)?,
-                downloaded_bytes: row.get(5)?,
-                total_bytes: row.get(6)?,
-                etag: row.get(7)?,
-                mtime: row.get(8)?,
-                updated_at_ms: row.get(9)?,
+                owner_scope: row.get(1)?,
+                filename: row.get(2)?,
+                original_name: row.get(3)?,
+                final_path: row.get(4)?,
+                temp_path: row.get(5)?,
+                downloaded_bytes: row.get(6)?,
+                total_bytes: row.get(7)?,
+                etag: row.get(8)?,
+                mtime: row.get(9)?,
+                updated_at_ms: row.get(10)?,
             })
         },
     )
@@ -5794,9 +6011,9 @@ pub fn upsert_partial_download(path: &Path, entry: &DbPartialDownload) -> rusqli
     let conn = Connection::open(path)?;
     conn.execute(
         "INSERT INTO partial_downloads \
-         (endpoint_id, filename, original_name, final_path, temp_path, downloaded_bytes, total_bytes, etag, mtime, updated_at_ms) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
-         ON CONFLICT(endpoint_id, filename) DO UPDATE SET \
+         (endpoint_id, owner_scope, filename, original_name, final_path, temp_path, downloaded_bytes, total_bytes, etag, mtime, updated_at_ms) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
+         ON CONFLICT(endpoint_id, owner_scope, filename) DO UPDATE SET \
            original_name=excluded.original_name, \
            final_path=excluded.final_path, \
            temp_path=excluded.temp_path, \
@@ -5807,6 +6024,7 @@ pub fn upsert_partial_download(path: &Path, entry: &DbPartialDownload) -> rusqli
            updated_at_ms=excluded.updated_at_ms",
         params![
             entry.endpoint_id,
+            entry.owner_scope,
             entry.filename,
             entry.original_name,
             entry.final_path,
@@ -5821,15 +6039,39 @@ pub fn upsert_partial_download(path: &Path, entry: &DbPartialDownload) -> rusqli
     Ok(())
 }
 
+#[cfg(any(target_os = "ios", test))]
+pub fn list_partial_downloads_for_scope(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+) -> rusqlite::Result<Vec<DbPartialDownload>> {
+    let conn = Connection::open(path)?;
+    let mut statement = conn.prepare(
+        "SELECT filename FROM partial_downloads WHERE endpoint_id=?1 AND owner_scope=?2 ORDER BY updated_at_ms, filename",
+    )?;
+    let filenames = statement
+        .query_map(params![endpoint_id, owner_scope], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    filenames
+        .iter()
+        .filter_map(|filename| {
+            get_partial_download(path, endpoint_id, owner_scope, filename).transpose()
+        })
+        .collect()
+}
+
 pub fn delete_partial_download(
     path: &Path,
     endpoint_id: &str,
+    owner_scope: &str,
     filename: &str,
 ) -> rusqlite::Result<usize> {
     let conn = Connection::open(path)?;
     conn.execute(
-        "DELETE FROM partial_downloads WHERE endpoint_id = ?1 AND filename = ?2",
-        params![endpoint_id, filename],
+        "DELETE FROM partial_downloads WHERE endpoint_id = ?1 AND owner_scope = ?2 AND filename = ?3",
+        params![endpoint_id, owner_scope, filename],
     )
 }
 
@@ -6323,13 +6565,125 @@ mod tests {
                 [],
             )
             .unwrap();
+        upsert_partial_download(
+            &path,
+            &DbPartialDownload {
+                endpoint_id: "supabase-1".into(),
+                owner_scope: "user-a".into(),
+                filename: "shared".into(),
+                original_name: "user-a.png".into(),
+                final_path: "a.png".into(),
+                temp_path: "a.png.part".into(),
+                downloaded_bytes: 42,
+                total_bytes: 100,
+                etag: None,
+                mtime: None,
+                updated_at_ms: 1,
+            },
+        )
+        .unwrap();
+        upsert_download_history(
+            &path,
+            &DbDownloadHistory {
+                id: 0,
+                endpoint_id: "supabase-1".into(),
+                owner_scope: "user-a".into(),
+                filename: "shared".into(),
+                original_name: "user-a.png".into(),
+                saved_path: Some("a.png".into()),
+                status: "complete".into(),
+                error: None,
+                file_size: 100,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+            },
+        )
+        .unwrap();
 
         let rows = list_bulk_download_candidates(&path, "supabase-1", "user-a", None).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].original_name, "user-a.png");
+        assert_eq!(rows[0].partial_bytes, Some(42));
+        assert_eq!(rows[0].download_status.as_deref(), Some("complete"));
         let other = list_bulk_download_candidates(&path, "supabase-1", "user-b", None).unwrap();
         assert_eq!(other.len(), 1);
         assert_eq!(other[0].original_name, "user-b.png");
+        assert_eq!(other[0].partial_bytes, None);
+        assert_eq!(other[0].download_status, None);
+        upsert_download_history(
+            &path,
+            &DbDownloadHistory {
+                id: 0,
+                endpoint_id: "supabase-1".into(),
+                owner_scope: "user-b".into(),
+                filename: "shared".into(),
+                original_name: "user-b.png".into(),
+                saved_path: Some("b.png".into()),
+                status: "complete".into(),
+                error: None,
+                file_size: 200,
+                created_at_ms: 2,
+                updated_at_ms: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(count_download_history(&path).unwrap(), 2);
+        assert_eq!(
+            count_download_history_for_scope(&path, "supabase-1", "user-a").unwrap(),
+            1
+        );
+        let history =
+            list_download_history_paged_for_scope(&path, "supabase-1", "user-a", None, None)
+                .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].saved_path.as_deref(), Some("a.png"));
+        assert_eq!(
+            find_download_history_by_key(&path, "supabase-1", "user-b", "shared")
+                .unwrap()
+                .unwrap()
+                .saved_path
+                .as_deref(),
+            Some("b.png")
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn init_db_preserves_legacy_download_history_and_partial_progress() {
+        let path = temp_db_path("legacy-download-migration");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE download_history (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,endpoint_id TEXT NOT NULL,filename TEXT NOT NULL,
+               original_name TEXT NOT NULL,saved_path TEXT,status TEXT NOT NULL,error TEXT,
+               file_size INTEGER NOT NULL DEFAULT 0,created_at_ms INTEGER NOT NULL,
+               updated_at_ms INTEGER NOT NULL,UNIQUE(endpoint_id,filename)
+             );
+             INSERT INTO download_history VALUES (7,'webdav-1','legacy','legacy.bin','saved.bin','complete',NULL,100,1,2);
+             CREATE TABLE partial_downloads (
+               endpoint_id TEXT NOT NULL,filename TEXT NOT NULL,original_name TEXT NOT NULL,
+               final_path TEXT NOT NULL,temp_path TEXT NOT NULL,downloaded_bytes INTEGER NOT NULL,
+               total_bytes INTEGER NOT NULL,etag TEXT,mtime TEXT,updated_at_ms INTEGER NOT NULL,
+               PRIMARY KEY(endpoint_id,filename)
+             );
+             INSERT INTO partial_downloads VALUES ('webdav-1','pending','pending.bin','pending.bin','pending.bin.part',42,100,'etag','mtime',3);"
+        ).unwrap();
+        drop(conn);
+        init_db(&path, None).unwrap();
+        init_db(&path, None).unwrap();
+        let history = get_download_history(&path, 7).unwrap().unwrap();
+        assert_eq!(history.owner_scope, "");
+        assert_eq!(history.saved_path.as_deref(), Some("saved.bin"));
+        assert_eq!(history.status, "complete");
+        let partial = get_partial_download(&path, "webdav-1", "", "pending")
+            .unwrap()
+            .unwrap();
+        assert_eq!(partial.downloaded_bytes, 42);
+        assert_eq!(partial.etag.as_deref(), Some("etag"));
+        assert!(get_partial_download(&path, "webdav-1", "user-a", "pending")
+            .unwrap()
+            .is_none());
+        assert_eq!(count_download_history(&path).unwrap(), 1);
         let _ = std::fs::remove_file(path);
     }
 
@@ -7638,6 +7992,95 @@ mod tests {
     }
 
     #[test]
+    fn pulled_base_revision_during_local_edit_is_not_a_conflict() {
+        let path = temp_db_path("pull-pending-base-revision");
+        init_db(&path, None).unwrap();
+        let snapshot = remote_message("message-a", "message.txt", 100);
+        apply_supabase_message_page(
+            &path,
+            "profile",
+            "user-a",
+            &[snapshot.clone()],
+            &[],
+            &[],
+            false,
+            true,
+            100,
+        )
+        .unwrap();
+        let operation = NewOutboxOperation {
+            operation_id: "mark-a".into(),
+            endpoint_id: "profile".into(),
+            owner_scope: "user-a".into(),
+            entity_type: "message".into(),
+            entity_id: "message-a".into(),
+            action: "upsert".into(),
+            base_revision: 1,
+            payload_json: r#"{"marked":true}"#.into(),
+            payload_hash: "mark-hash".into(),
+            created_at_ms: 101,
+        };
+        set_message_marked_and_enqueue(
+            &path,
+            "profile",
+            "user-a",
+            "message.txt",
+            true,
+            &[],
+            false,
+            None,
+            &operation,
+        )
+        .unwrap();
+        // Opening history can return the unchanged base while the outbox is pending.
+        apply_supabase_message_page(
+            &path,
+            "profile",
+            "user-a",
+            &[snapshot.clone()],
+            &[],
+            &[],
+            false,
+            false,
+            102,
+        )
+        .unwrap();
+        assert_eq!(count_open_conflicts(&path, "profile", "user-a").unwrap(), 0);
+        assert!(
+            get_message_for_scope(&path, "profile", "user-a", "message.txt")
+                .unwrap()
+                .unwrap()
+                .marked
+        );
+        assert_eq!(
+            get_outbox_operation(&path, "mark-a")
+                .unwrap()
+                .unwrap()
+                .state,
+            "pending"
+        );
+        // A genuinely newer remote revision must still preserve both versions.
+        let change = PulledChange {
+            change_seq: 2,
+            entity_type: "message".into(),
+            entity_id: "message-a".into(),
+            change_type: "upsert".into(),
+            revision: 2,
+            snapshot: Some(snapshot),
+        };
+        apply_pulled_changes(&path, "profile", "user-a", &[change], 2, 103).unwrap();
+        assert_eq!(count_open_conflicts(&path, "profile", "user-a").unwrap(), 1);
+        assert!(
+            get_message_for_scope(&path, "profile", "user-a", "message.txt")
+                .unwrap()
+                .unwrap()
+                .marked
+        );
+        assert_eq!(count_open_conflicts(&path, "profile", "user-b").unwrap(), 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn pulled_changes_and_checkpoint_rollback_and_replay_atomically() {
         let path = temp_db_path("pull-checkpoint-atomic");
         init_db(&path, None).expect("initialize database");
@@ -7726,6 +8169,112 @@ mod tests {
                 .map(|item| item.filename.as_str())
                 .collect::<Vec<_>>(),
             vec!["b.txt"]
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn scoped_search_and_marked_paging_reach_old_matches_without_crossing_accounts() {
+        let path = temp_db_path("scoped-search-marked-paging");
+        init_db(&path, None).unwrap();
+        for owner in ["user-a", "user-b"] {
+            for index in 0..125 {
+                let filename = format!("message-{index:03}.txt");
+                let mut message = sample_message(&filename, index, &["tag-a"], false);
+                message.content = Some(
+                    if index < 75 {
+                        "older match"
+                    } else {
+                        "recent content"
+                    }
+                    .into(),
+                );
+                let operation = NewOutboxOperation {
+                    operation_id: format!("op-{owner}-{index}"),
+                    endpoint_id: "endpoint-1".into(),
+                    owner_scope: owner.into(),
+                    entity_type: "message".into(),
+                    entity_id: format!("id-{owner}-{index}"),
+                    action: "upsert".into(),
+                    base_revision: 0,
+                    payload_json: "{}".into(),
+                    payload_hash: format!("hash-{owner}-{index}"),
+                    created_at_ms: index,
+                };
+                save_message_and_enqueue(&path, &message, &operation).unwrap();
+            }
+        }
+        let first = list_messages_for_scope(
+            &path,
+            "endpoint-1",
+            "user-a",
+            Some(51),
+            Some(0),
+            false,
+            Some("older match"),
+        )
+        .unwrap();
+        let second = list_messages_for_scope(
+            &path,
+            "endpoint-1",
+            "user-a",
+            Some(51),
+            Some(50),
+            false,
+            Some("older match"),
+        )
+        .unwrap();
+        assert_eq!(first.len(), 51);
+        assert_eq!(first[0].filename, "message-074.txt");
+        assert_eq!(second.len(), 25);
+        assert_eq!(first[50].filename, second[0].filename);
+        assert_eq!(second.last().unwrap().filename, "message-000.txt");
+        assert!(list_messages_for_scope(
+            &path,
+            "endpoint-1",
+            "unknown",
+            Some(51),
+            Some(0),
+            false,
+            Some("older match")
+        )
+        .unwrap()
+        .is_empty());
+        let all = list_marked_messages_for_scope(
+            &path,
+            "endpoint-1",
+            "user-a",
+            Some("tag-a"),
+            None,
+            Some(100),
+            Some(0),
+            None,
+        )
+        .unwrap();
+        let older = list_marked_messages_for_scope(
+            &path,
+            "endpoint-1",
+            "user-a",
+            Some("tag-a"),
+            None,
+            Some(100),
+            Some(100),
+            None,
+        )
+        .unwrap();
+        assert_eq!(all.len(), 100);
+        assert_eq!(older.len(), 25);
+        assert_eq!(
+            count_marked_messages_for_scope(
+                &path,
+                "endpoint-1",
+                "user-a",
+                Some("tag-a"),
+                None,
+                None
+            )
+            .unwrap(),
+            125
         );
         let _ = std::fs::remove_file(path);
     }
@@ -9714,6 +10263,7 @@ mod tests {
                 &DbDownloadHistory {
                     id: 0,
                     endpoint_id: "endpoint-1".to_string(),
+                    owner_scope: String::new(),
                     filename: format!("download-{index}.bin"),
                     original_name: format!("download-{index}.bin"),
                     saved_path: None,

@@ -6,8 +6,9 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 
 const ROOT = process.cwd();
-const APP_EXE = join(ROOT, 'target', 'debug', 'transfer-genie.exe');
-const FFMPEG = join(ROOT, 'tools', 'ffmpeg', 'ffmpeg.exe');
+const IS_WINDOWS = process.platform === 'win32';
+const APP_EXE = join(ROOT, 'target', 'debug', IS_WINDOWS ? 'transfer-genie.exe' : 'transfer-genie');
+const FFMPEG = process.env.TRANSFER_GENIE_TEST_FFMPEG || (IS_WINDOWS ? join(ROOT, 'tools', 'ffmpeg', 'ffmpeg.exe') : '/opt/homebrew/bin/ffmpeg');
 const APP_URL = 'http://127.0.0.1:7120/';
 const BUNDLED_APP_URL = 'http://tauri.localhost/';
 
@@ -27,6 +28,10 @@ async function waitFor(check, label, timeoutMs = 30000) {
 
 async function killTree(pid) {
   if (!pid) return;
+  if (!IS_WINDOWS) {
+    try { process.kill(pid, 'SIGTERM'); } catch (_) { /* already stopped */ }
+    return;
+  }
   await new Promise((resolve) => {
     const child = spawn('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
     child.on('close', resolve);
@@ -38,7 +43,9 @@ async function ensureDevServer() {
   try {
     if ((await fetch(APP_URL)).ok) return null;
   } catch (_) { /* start below */ }
-  const child = spawn('cmd.exe', ['/c', 'npm', 'run', 'dev'], { cwd: ROOT, stdio: 'ignore', windowsHide: true });
+  const child = IS_WINDOWS
+    ? spawn('cmd.exe', ['/c', 'npm', 'run', 'dev'], { cwd: ROOT, stdio: 'ignore', windowsHide: true })
+    : spawn('npm', ['run', 'dev'], { cwd: ROOT, stdio: 'ignore' });
   await waitFor(async () => {
     try { return (await fetch(APP_URL)).ok; } catch (_) { return false; }
   }, 'Vite dev server');
@@ -140,6 +147,15 @@ function cdp(socket) {
 }
 
 async function evaluate(client, expression) {
+  if (client.driverUrl) {
+    const response = await fetch(`${client.driverUrl}/eval`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ expression }),
+    });
+    if (!response.ok) throw new Error(`WebView E2E eval failed (${response.status}): ${await response.text()}`);
+    return (await response.json()).value;
+  }
   const result = await client.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
   if (result.exceptionDetails) {
     const exception = result.exceptionDetails.exception || {};
@@ -180,6 +196,17 @@ async function waitForDesktopTarget(port, app, getAppOutput, timeoutMs = 60000) 
   throw new Error(`Timed out waiting for desktop Tauri WebView on port ${port}${lastError ? ` (${lastError})` : ''}.\n${getAppOutput()}`);
 }
 
+async function waitForDesktopDriver(port, app, getAppOutput, timeoutMs = 60000) {
+  const driverUrl = `http://127.0.0.1:${port}`;
+  await waitFor(async () => {
+    if (app.exitCode !== null) {
+      throw new Error(`Desktop app exited before WebView startup (code ${app.exitCode}).\n${getAppOutput()}`);
+    }
+    try { return (await fetch(`${driverUrl}/health`)).ok; } catch (_) { return false; }
+  }, 'macOS desktop WebView E2E driver', timeoutMs);
+  return { driverUrl, close() {} };
+}
+
 async function runTest() {
   assert.ok(existsSync(APP_EXE), `Missing desktop binary: ${APP_EXE}`);
   assert.ok(existsSync(FFMPEG), `Missing FFmpeg sidecar: ${FFMPEG}`);
@@ -207,8 +234,10 @@ async function runTest() {
       TRANSFER_GENIE_APP_DATA_DIR: appData,
       TRANSFER_GENIE_ALLOW_TEST_INSTANCE: '1',
       TRANSFER_GENIE_FFMPEG: FFMPEG,
-      WEBVIEW2_USER_DATA_FOLDER: join(work, 'webview2'),
-      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port} --autoplay-policy=no-user-gesture-required`,
+      ...(IS_WINDOWS ? {
+        WEBVIEW2_USER_DATA_FOLDER: join(work, 'webview2'),
+        WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port} --autoplay-policy=no-user-gesture-required`,
+      } : { TRANSFER_GENIE_E2E_DRIVER_PORT: String(port) }),
     },
   });
   const captureAppOutput = (chunk) => {
@@ -218,9 +247,13 @@ async function runTest() {
   app.stderr.on('data', captureAppOutput);
   let client;
   try {
-    const target = await waitForDesktopTarget(port, app, () => appOutput);
-    client = cdp(await connectWebSocket(target.webSocketDebuggerUrl));
-    await client.send('Runtime.enable');
+    if (IS_WINDOWS) {
+      const target = await waitForDesktopTarget(port, app, () => appOutput);
+      client = cdp(await connectWebSocket(target.webSocketDebuggerUrl));
+      await client.send('Runtime.enable');
+    } else {
+      client = await waitForDesktopDriver(port, app, () => appOutput);
+    }
     await waitForDesktopUi(client);
     // Vite can perform one final navigation while the desktop WebView is starting.
     // Wait for the document to remain usable before issuing stateful upload calls.
@@ -243,17 +276,25 @@ async function runTest() {
     for (const name of ['photo.png', 'movie.mp4', 'movie.webm', 'unsupported.mkv']) {
       const item = byOriginal.get(name);
       const preview = await waitFor(async () => {
-        try { return await evaluate(client, `window.__TAURI__.core.invoke('get_media_preview', { input: { endpointId: 'desktop-a', filename: ${JSON.stringify(item.filename)}, originalName: ${JSON.stringify(name)} } })`); } catch (_) { return null; }
+        try {
+          const result = await evaluate(client, `window.__TAURI__.core.invoke('get_media_preview', { input: { endpointId: 'desktop-a', filename: ${JSON.stringify(item.filename)}, originalName: ${JSON.stringify(name)} } })`);
+          return result?.state === 'ready' && result.path ? result : null;
+        } catch (_) { return null; }
       }, `${name} generated preview`, 30000);
-      assert.ok(existsSync(preview), `${name} preview file should exist`);
+      assert.ok(existsSync(preview.path), `${name} preview file should exist`);
     }
     const previewA = await evaluate(client, `window.__TAURI__.core.invoke('get_media_preview', { input: { endpointId: 'desktop-a', filename: ${JSON.stringify(byOriginal.get('photo.png').filename)}, originalName: 'photo.png' } })`);
     const previewB = await waitFor(async () => {
-      try { return await evaluate(client, `window.__TAURI__.core.invoke('get_media_preview', { input: { endpointId: 'desktop-b', filename: ${JSON.stringify(uploadB.filename)}, originalName: 'photo.png' } })`); } catch (_) { return null; }
+      try {
+        const result = await evaluate(client, `window.__TAURI__.core.invoke('get_media_preview', { input: { endpointId: 'desktop-b', filename: ${JSON.stringify(uploadB.filename)}, originalName: 'photo.png' } })`);
+        return result?.state === 'ready' && result.path ? result : null;
+      } catch (_) { return null; }
     }, 'endpoint B image preview');
-    assert.notEqual(previewA, previewB);
-    assert.match(previewA, /desktop-a/i);
-    assert.match(previewB, /desktop-b/i);
+    assert.equal(previewA.state, 'ready');
+    assert.equal(previewB.state, 'ready');
+    assert.notEqual(previewA.path, previewB.path);
+    assert.match(previewA.path, /desktop-a/i);
+    assert.match(previewB.path, /desktop-b/i);
 
     console.log('Desktop E2E: verifying remote playback cache');
     await evaluate(client, `(async () => { const invoke = window.__TAURI__.core.invoke; const settings = await invoke('get_settings'); settings.active_storage_profile_id = 'desktop-a'; settings.active_webdav_id = 'desktop-a'; return invoke('save_settings', { settings }); })()`);
@@ -269,8 +310,7 @@ async function runTest() {
     assert.equal(bulkA.resources.find((item) => item.filename === remoteTarget.filename)?.status, 'notDownloaded');
 
     console.log('Desktop E2E: rendering and exercising media UI');
-    await evaluate(client, `(async () => { const invoke = window.__TAURI__.core.invoke; const settings = await invoke('get_settings'); settings.active_storage_profile_id = 'desktop-a'; settings.active_webdav_id = 'desktop-a'; await invoke('save_settings', { settings }); await invoke('refresh'); document.querySelector('#refresh-btn')?.click(); return true; })()`);
-    await evaluate(client, `new Promise((resolve, reject) => { const started = Date.now(); const tick = () => document.querySelectorAll('#message-list .message-card').length >= 6 ? resolve(true) : Date.now() - started > 20000 ? reject(new Error('messages not rendered')) : setTimeout(tick, 100); tick(); })`);
+    await evaluate(client, `(async () => { const invoke = window.__TAURI__.core.invoke; const settings = await invoke('get_settings'); settings.active_storage_profile_id = 'desktop-a'; settings.active_webdav_id = 'desktop-a'; await invoke('save_settings', { settings }); const button = document.querySelector('#refresh-btn'); button?.click(); const started = Date.now(); let stableSince = 0; while (Date.now() - started < 30000) { const ready = button && !button.disabled && !button.classList.contains('is-loading') && document.querySelectorAll('#message-list .message-card').length >= 6; if (ready) { if (!stableSince) stableSince = Date.now(); if (Date.now() - stableSince >= 500) return true; } else stableSince = 0; await new Promise((r) => setTimeout(r, 100)); } throw new Error('desktop refresh did not settle'); })()`);
     const ui = await evaluate(client, `(async () => {
       const cards = [...document.querySelectorAll('#message-list .message-card')];
       const byName = (name) => cards.find((card) => card.querySelector('.message-file-name')?.textContent?.includes(name) || card.textContent.includes(name));
@@ -278,9 +318,32 @@ async function runTest() {
       imageCard?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
       const imageOpened = !!document.querySelector('#message-preview.is-active .message-preview-image');
       document.querySelector('#message-preview .message-preview-close')?.click();
-      const playAndClose = async (card) => { card?.querySelector('.message-media-play-button')?.click(); await new Promise((r) => setTimeout(r, 80)); const load = document.querySelector('#message-preview .message-preview-media-load'); load?.click(); const started = Date.now(); while (Date.now() - started < 2000 && !document.querySelector('#message-preview audio:not([hidden]), #message-preview video:not([hidden])')) await new Promise((r) => setTimeout(r, 50)); const ready = !!document.querySelector('#message-preview audio:not([hidden]), #message-preview video:not([hidden])'); document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); return ready && !document.querySelector('#message-preview')?.classList.contains('is-active'); };
-      const mp3Played = await playAndClose(mp3Card); const wavPlayed = await playAndClose(wavCard); const mp4Played = await playAndClose(mp4Card); const webmPlayed = await playAndClose(webmCard);
-      mkvCard?.querySelector('.message-media-play-button')?.click(); document.querySelector('#message-preview .message-preview-media-load')?.click(); await new Promise((r) => setTimeout(r, 500)); const unsupported = document.querySelector('#message-preview .message-preview-media-status')?.textContent || ''; document.querySelector('#message-preview .message-preview-close')?.click();
+      const waitForElement = async (find, timeout = 30000) => { const started = Date.now(); let value; while (Date.now() - started < timeout && !(value = find())) await new Promise((r) => setTimeout(r, 50)); return value; };
+      const audioDiagnostics = {};
+      const playAudioAndClose = async (card, label) => {
+        card?.querySelector('.message-media-play-button')?.click();
+        const player = await waitForElement(() => card?.querySelector('.message-inline-audio-player'));
+        const ready = !!player && !!player.querySelector('audio[src]');
+        audioDiagnostics[label] = {
+          ready,
+          buttonText: card?.querySelector('.message-media-play-button')?.textContent || '',
+          buttonDisabled: !!card?.querySelector('.message-media-play-button')?.disabled,
+          bodyClass: card?.querySelector('.message-body')?.className || '',
+          toast: document.querySelector('.toast.is-visible, .toast.show')?.textContent || '',
+        };
+        player?.querySelector('.bulk-audio-close')?.click();
+        return ready && !card?.querySelector('.message-inline-audio-player');
+      };
+      const playVideoAndClose = async (card) => {
+        card?.querySelector('.message-media-play-button')?.click();
+        const overlay = await waitForElement(() => document.querySelector('.message-media-overlay.is-video'));
+        const video = await waitForElement(() => overlay?.querySelector('video[src]'));
+        const ready = !!video;
+        overlay?.querySelector('.message-media-overlay-close')?.click();
+        return ready && !document.querySelector('.message-media-overlay');
+      };
+      const mp3Played = await playAudioAndClose(mp3Card, 'mp3'); const wavPlayed = await playAudioAndClose(wavCard, 'wav'); const mp4Played = await playVideoAndClose(mp4Card); const webmPlayed = await playVideoAndClose(webmCard);
+      mkvCard?.querySelector('.message-media-play-button')?.click(); await new Promise((r) => setTimeout(r, 500)); const unsupported = document.querySelector('.message-media-overlay-status')?.textContent || ''; document.querySelector('.message-media-overlay-close')?.click();
       document.querySelector('#open-bulk-download')?.click();
       await new Promise((r) => setTimeout(r, 500));
       const bulkItem = [...document.querySelectorAll('.bulk-download-item')].find((item) => item.textContent.includes('movie.mp4'));
@@ -288,14 +351,15 @@ async function runTest() {
       bulkItem?.querySelector('.bulk-download-thumb-play')?.click();
       await new Promise((r) => setTimeout(r, 350));
       const after = bulkItem?.classList.contains('is-selected');
+      document.querySelector('.bulk-media-close')?.click();
       document.querySelector('[data-bulk-category="audio"]')?.click();
       await new Promise((r) => setTimeout(r, 350));
       const bulkAudioItem = [...document.querySelectorAll('.bulk-download-item')].find((item) => item.textContent.includes('tone.mp3'));
       const audioBefore = bulkAudioItem?.classList.contains('is-selected');
       const bulkAudioHeightBefore = bulkAudioItem?.getBoundingClientRect().height || 0;
       bulkAudioItem?.querySelector('.bulk-download-thumb-play')?.click();
-      await new Promise((r) => setTimeout(r, 500));
-      const bulkAudioPlayer = bulkAudioItem?.querySelector('.bulk-audio-player');
+      const bulkAudioPlayer = await waitForElement(() => bulkAudioItem?.querySelector('.bulk-audio-player'));
+      await waitForElement(() => { const progress = bulkAudioPlayer?.querySelector('.bulk-audio-progress'); return progress && Number(progress.max) > 0 ? progress : null; });
       const bulkAudioHeightAfter = bulkAudioItem?.getBoundingClientRect().height || 0;
       const bulkAudioProgress = bulkAudioPlayer?.querySelector('.bulk-audio-progress');
       const bulkAudioTime = bulkAudioPlayer?.querySelector('.bulk-audio-time')?.textContent || '';
@@ -308,7 +372,7 @@ async function runTest() {
         bulkAudioProgressReady: !!bulkAudioProgress && !bulkAudioProgress.disabled && Number(bulkAudioProgress.max) > 0,
         bulkAudioTime,
         bulkAudioCardHeightStable: Math.abs(bulkAudioHeightAfter - bulkAudioHeightBefore) < 1,
-        bulkAudioSelectionIsolated: audioBefore === audioAfter,
+        bulkAudioSelectionIsolated: audioBefore === audioAfter, audioDiagnostics,
       };
     })()`);
     assert.equal(ui.imageOpened, true);

@@ -81,6 +81,13 @@ final class DocumentPickerCoordinator: NSObject, UIDocumentPickerDelegate {
     }
 
     let destination = try importDestination(for: source)
+    var imported = false
+    defer {
+      if !imported {
+        try? FileManager.default.removeItem(at: destination.deletingLastPathComponent())
+      }
+    }
+    try MobileImportTestHooks.checkWritableStorage()
     let coordinator = NSFileCoordinator()
     var coordinationError: NSError?
     var copyError: Error?
@@ -102,8 +109,8 @@ final class DocumentPickerCoordinator: NSObject, UIDocumentPickerDelegate {
         message: "The selected document could not be read: \(error.localizedDescription)"
       )
     }
-
     let values = try destination.resourceValues(forKeys: [.contentTypeKey, .fileSizeKey])
+    imported = true
     return [
       "path": destination.path,
       "originalName": source.lastPathComponent,
@@ -128,9 +135,9 @@ final class DocumentPickerCoordinator: NSObject, UIDocumentPickerDelegate {
       withIntermediateDirectories: true
     )
 
-    let destination = importDirectory.appendingPathComponent(UUID().uuidString)
-    guard !source.pathExtension.isEmpty else { return destination }
-    return destination.appendingPathExtension(source.pathExtension)
+    let selectionDirectory = importDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try fileManager.createDirectory(at: selectionDirectory, withIntermediateDirectories: true)
+    return selectionDirectory.appendingPathComponent(source.lastPathComponent)
   }
 
   private func finish() {

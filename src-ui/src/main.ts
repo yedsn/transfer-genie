@@ -2,6 +2,8 @@ import { createApp } from "vue";
 import { installTransferGenieBridge, useTransferGenieStore } from "./store";
 import "./styles.css";
 import ComposerWorkspace from "./workspace/ComposerWorkspace.vue";
+import MobileShell from "./mobile/MobileShell.vue";
+import "./mobile/mobile.css";
 import "./workspace/composer.css";
 import { composerStore } from "./workspace/composer-store";
 import "./services/tauri-api.js";
@@ -40,6 +42,20 @@ async function loadLegacyEditorDeps() {
 
 installTransferGenieBridge();
 
+const previewMobile = new URLSearchParams(window.location.search).get("mobile-preview") === "1";
+const nativeIosWebview = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+let mobileShellMounted = false;
+
+function mountMobileShell() {
+  if (mobileShellMounted) return;
+  mobileShellMounted = true;
+  document.documentElement.classList.add("is-ios-platform");
+  createApp(MobileShell).mount("#mobile-app-shell");
+  document.getElementById("app-boot-screen")?.remove();
+}
+
+if (previewMobile || nativeIosWebview) mountMobileShell();
+
 async function installIosLifecycleBridge(capabilities: any) {
   if (!capabilities?.ios) return;
 
@@ -50,6 +66,10 @@ async function installIosLifecycleBridge(capabilities: any) {
       await api?.settings?.setMobileLifecycleState(state);
     } catch (error) {
       console.warn(`[mobile-integration] ${state} recovery failed`, String(error));
+    } finally {
+      if (state === "foreground") {
+        window.dispatchEvent(new Event("transfer-genie-mobile-recovered"));
+      }
     }
   };
 
@@ -69,12 +89,14 @@ async function installIosLifecycleBridge(capabilities: any) {
   applyDocumentState();
 }
 
-void (async () => {
+const platformReady = (async () => {
   try {
-    const capabilities = await (window as any).transferGenieApi?.settings?.getPlatformCapabilities();
+    const detected = await (window as any).transferGenieApi?.settings?.getPlatformCapabilities();
+    const capabilities = (previewMobile || nativeIosWebview) ? { ...(detected || {}), ios: true } : detected;
     (window as any).__TRANSFER_GENIE_PLATFORM_CAPABILITIES__ = capabilities;
     (window as any).transferGenieVue?.syncPlatformCapabilities?.(capabilities);
     document.documentElement.classList.toggle("is-ios-platform", !!capabilities?.ios);
+    if (capabilities?.ios) mountMobileShell();
     await installIosLifecycleBridge(capabilities);
     const requestId = `startup-${Date.now()}`;
     const diagnostic = await (window as any).transferGenieApi?.mobileIntegration?.diagnostic(requestId);
@@ -572,8 +594,11 @@ app.component("settings-page-shell", { template: "<div style='display:flex;flex-
 app.component("composer-workspace", ComposerWorkspace);
 (window as any).transferGenieComposerStore = composerStore;
 
-app.mount("#app-shell");
-document.getElementById("app-boot-screen")?.remove();
+if (previewMobile || nativeIosWebview) {
+  document.getElementById("app-shell")?.remove();
+} else {
+  app.mount("#app-shell");
+}
 
 async function loadLegacyRuntime() {
   await loadLegacyEditorDeps();
@@ -588,4 +613,9 @@ async function loadLegacyRuntime() {
   await import("./bulk-download-dialog.js");
 }
 
-loadLegacyRuntime();
+void platformReady.finally(() => {
+  document.getElementById("app-boot-screen")?.remove();
+  if (!document.documentElement.classList.contains("is-ios-platform")) {
+    void loadLegacyRuntime();
+  }
+});

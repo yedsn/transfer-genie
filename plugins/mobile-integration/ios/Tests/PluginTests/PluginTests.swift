@@ -3,15 +3,56 @@ import AVFoundation
 import CoreGraphics
 import Foundation
 import ImageIO
+import QuickLook
 import Tauri
 import UniformTypeIdentifiers
 import UIKit
+import WebKit
 @testable import tauri_plugin_mobile_integration
 
 final class MobileIntegrationPluginTests: XCTestCase {
     func testPluginCanBeCreated() throws {
         let plugin = MobileIntegrationPlugin()
         XCTAssertNotNil(plugin)
+    }
+
+    func testSystemTextScaleCoversStandardAndAccessibilityCategories() {
+        XCTAssertEqual(MobileAccessibility.textScale(for: .large), 1, accuracy: 0.001)
+        XCTAssertLessThan(MobileAccessibility.textScale(for: .small), 1)
+        XCTAssertGreaterThan(MobileAccessibility.textScale(for: .extraExtraExtraLarge), 1)
+        XCTAssertGreaterThan(MobileAccessibility.textScale(for: .accessibilityExtraExtraExtraLarge), 3)
+    }
+
+    func testAccessibilityScriptScalesActualWebTextAndRestoresPreferences() throws {
+        let ready = expectation(description: "Web document loaded")
+        let webview = WKWebView()
+        final class NavigationDelegate: NSObject, WKNavigationDelegate {
+            let ready: XCTestExpectation
+            init(_ ready: XCTestExpectation) { self.ready = ready }
+            func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { ready.fulfill() }
+        }
+        let delegate = NavigationDelegate(ready)
+        webview.navigationDelegate = delegate
+        webview.loadHTMLString("<p style='font-size:calc(15px * var(--mobile-text-scale, 1))'>正文</p>", baseURL: nil)
+        wait(for: [ready], timeout: 10)
+        for category in [UIContentSizeCategory.large, .accessibilityExtraExtraExtraLarge, .large] {
+            let applied = expectation(description: "Applied system settings")
+            let expected = 15 * MobileAccessibility.textScale(for: category)
+            let reduceMotion = category.isAccessibilityCategory
+            webview.evaluateJavaScript(MobileAccessibility.script(category: category, reduceMotion: reduceMotion)) { _, error in
+                XCTAssertNil(error)
+                webview.evaluateJavaScript("[parseFloat(getComputedStyle(document.querySelector('p')).fontSize), document.documentElement.dataset.mobileReducedMotion, document.documentElement.dataset.mobileAccessibilityText]") { result, error in
+                    XCTAssertNil(error)
+                    let values = result as? [Any]
+                    XCTAssertEqual((values?.first as? NSNumber)?.doubleValue ?? 0, Double(expected), accuracy: 0.01)
+                    XCTAssertEqual(values?[1] as? String, String(reduceMotion))
+                    XCTAssertEqual(values?[2] as? String, String(category.isAccessibilityCategory))
+                    applied.fulfill()
+                }
+            }
+            wait(for: [applied], timeout: 10)
+        }
+        withExtendedLifetime(delegate) {}
     }
 
     func testLifecycleNotificationsMapToStablePluginStates() throws {
@@ -24,6 +65,39 @@ final class MobileIntegrationPluginTests: XCTestCase {
             "foreground"
         )
         XCTAssertNil(mobileLifecycleState(for: UIApplication.didReceiveMemoryWarningNotification))
+    }
+
+    func testSystemPreferenceNotificationsRefreshTheLoadedWebView() {
+        let ready = expectation(description: "Loaded document")
+        final class NavigationDelegate: NSObject, WKNavigationDelegate {
+            let ready: XCTestExpectation
+            init(_ ready: XCTestExpectation) { self.ready = ready }
+            func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { ready.fulfill() }
+        }
+        let webview = WKWebView()
+        let delegate = NavigationDelegate(ready)
+        let plugin = MobileIntegrationPlugin()
+        webview.navigationDelegate = delegate
+        plugin.load(webview: webview)
+        webview.loadHTMLString("<p style='font-size:calc(15px * var(--mobile-text-scale, 1))'>正文</p>", baseURL: nil)
+        wait(for: [ready], timeout: 10)
+        for notification in [UIContentSizeCategory.didChangeNotification, UIAccessibility.reduceMotionStatusDidChangeNotification, UIApplication.didBecomeActiveNotification] {
+            let refreshed = expectation(description: "Notification refresh")
+            webview.evaluateJavaScript("document.documentElement.style.setProperty('--mobile-text-scale','0.1'); document.documentElement.dataset.mobileReducedMotion='stale';") { _, error in
+                XCTAssertNil(error)
+                NotificationCenter.default.post(name: notification, object: nil)
+                webview.evaluateJavaScript("[parseFloat(getComputedStyle(document.querySelector('p')).fontSize), document.documentElement.dataset.mobileReducedMotion]") { result, error in
+                    XCTAssertNil(error)
+                    let values = result as? [Any]
+                    let expected = 15 * MobileAccessibility.textScale(for: UIApplication.shared.preferredContentSizeCategory)
+                    XCTAssertEqual((values?.first as? NSNumber)?.doubleValue ?? 0, Double(expected), accuracy: 0.01)
+                    XCTAssertEqual(values?[1] as? String, String(UIAccessibility.isReduceMotionEnabled))
+                    refreshed.fulfill()
+                }
+            }
+            wait(for: [refreshed], timeout: 10)
+        }
+        withExtendedLifetime((plugin, delegate)) {}
     }
 
     func testTopViewControllerFollowsNavigationController() throws {
@@ -91,6 +165,41 @@ final class MobileIntegrationPluginTests: XCTestCase {
         XCTAssertEqual(try LocalFileValidator.url(for: url.path), url.standardizedFileURL)
     }
 
+    func testMediaPlaybackRoutingRecognizesSystemMediaTypes() throws {
+        XCTAssertTrue(MediaPlaybackSupport.isMediaFile(URL(fileURLWithPath: "/tmp/sample.mp4")))
+        XCTAssertTrue(MediaPlaybackSupport.isMediaFile(URL(fileURLWithPath: "/tmp/sample.mov")))
+        XCTAssertTrue(MediaPlaybackSupport.isMediaFile(URL(fileURLWithPath: "/tmp/sample.m4a")))
+        XCTAssertFalse(MediaPlaybackSupport.isMediaFile(URL(fileURLWithPath: "/tmp/sample.jpg")))
+        XCTAssertFalse(MediaPlaybackSupport.isMediaFile(URL(fileURLWithPath: "/tmp/sample.pdf")))
+        XCTAssertFalse(MediaPlaybackSupport.isMediaFile(URL(fileURLWithPath: "/tmp/sample.txt")))
+    }
+
+    func testQuickLookSupportsRepresentativeDocumentsAndRejectsUnknownType() throws {
+        let fixtures: [(String, Data)] = [
+            ("pdf", Data("%PDF-1.4\n%%EOF".utf8)),
+            ("jpg", Data([0xff, 0xd8, 0xff, 0xd9])),
+            ("txt", Data("Transfer Genie".utf8)),
+            ("docx", Data([0x50, 0x4b, 0x03, 0x04])),
+        ]
+        var urls: [URL] = []
+        defer { urls.forEach { try? FileManager.default.removeItem(at: $0) } }
+
+        for (extensionName, bytes) in fixtures {
+            let url = temporaryURL(extension: extensionName)
+            try bytes.write(to: url)
+            urls.append(url)
+            XCTAssertTrue(
+                QLPreviewController.canPreview(url as QLPreviewItem),
+                "Quick Look should route .\(extensionName) documents to system preview"
+            )
+        }
+
+        let unsupported = temporaryURL(extension: "tgunsupported")
+        try Data("unsupported".utf8).write(to: unsupported)
+        urls.append(unsupported)
+        XCTAssertFalse(QLPreviewController.canPreview(unsupported as QLPreviewItem))
+    }
+
     func testPresenterLookupRequiresMainThread() throws {
         let expectation = expectation(description: "background presenter lookup")
         DispatchQueue.global().async {
@@ -98,6 +207,80 @@ final class MobileIntegrationPluginTests: XCTestCase {
             expectation.fulfill()
         }
         wait(for: [expectation], timeout: 2)
+    }
+
+    func testMediaImportPreservesNameAndSurvivesSourceRemoval() throws {
+        let source = temporaryURL(extension: "jpg")
+        let bytes = Data("photo fixture".utf8)
+        try bytes.write(to: source)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let first = try MediaPickerCoordinator.copyIntoSandbox(source: source, originalName: "假日照片", contentType: .jpeg)
+        let second = try MediaPickerCoordinator.copyIntoSandbox(source: source, originalName: "假日照片", contentType: .jpeg)
+        defer {
+            try? FileManager.default.removeItem(at: first.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: second.deletingLastPathComponent())
+        }
+        XCTAssertEqual(first.lastPathComponent, "假日照片.jpg")
+        XCTAssertEqual(second.lastPathComponent, "假日照片.jpg")
+        XCTAssertNotEqual(first, second)
+        try FileManager.default.removeItem(at: source)
+        XCTAssertEqual(try Data(contentsOf: first), bytes)
+        XCTAssertEqual(try Data(contentsOf: second), bytes)
+    }
+
+    func testDocumentImportPreservesNameAndSurvivesSourceRemoval() throws {
+        let sourceDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sourceDirectory) }
+        let source = sourceDirectory.appendingPathComponent("项目说明.txt")
+        let bytes = Data("document fixture".utf8)
+        try bytes.write(to: source)
+        let first = try DocumentPickerCoordinator.copyIntoSandbox(source)
+        let second = try DocumentPickerCoordinator.copyIntoSandbox(source)
+        let firstURL = URL(fileURLWithPath: try XCTUnwrap(first["path"] as? String))
+        let secondURL = URL(fileURLWithPath: try XCTUnwrap(second["path"] as? String))
+        defer {
+            try? FileManager.default.removeItem(at: firstURL.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: secondURL.deletingLastPathComponent())
+        }
+        XCTAssertEqual(firstURL.lastPathComponent, "项目说明.txt")
+        XCTAssertEqual(first["originalName"] as? String, "项目说明.txt")
+        XCTAssertNotEqual(firstURL, secondURL)
+        try FileManager.default.removeItem(at: source)
+        XCTAssertEqual(try Data(contentsOf: firstURL), bytes)
+    }
+
+    func testSimulatorLowStorageImportFailsWithoutPublishingAFile() throws {
+        #if DEBUG && targetEnvironment(simulator)
+        let source = temporaryURL(extension: "txt")
+        try Data("low storage fixture".utf8).write(to: source)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let importDirectory = try FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+            .appendingPathComponent("TransferGenie", isDirectory: true)
+            .appendingPathComponent("MobileImports", isDirectory: true)
+        let before = Set((try? FileManager.default.contentsOfDirectory(
+            at: importDirectory,
+            includingPropertiesForKeys: nil
+        )) ?? [])
+        setenv("TRANSFER_GENIE_IOS_SIMULATOR_IMPORT_TEST", "no-space", 1)
+        defer { unsetenv("TRANSFER_GENIE_IOS_SIMULATOR_IMPORT_TEST") }
+
+        XCTAssertThrowsError(try DocumentPickerCoordinator.copyIntoSandbox(source)) { error in
+            let integrationError = error as? MobileIntegrationError
+            XCTAssertEqual(integrationError?.code, .copyFailed)
+            XCTAssertTrue(integrationError?.message.contains("存储空间不足") == true)
+        }
+        let after = Set((try? FileManager.default.contentsOfDirectory(
+            at: importDirectory,
+            includingPropertiesForKeys: nil
+        )) ?? [])
+        XCTAssertEqual(after, before, "Failed imports must remove their empty selection directory")
+        #endif
     }
 
     func testImageThumbnailBoundsLargeJPEGAndAppliesOrientation() throws {

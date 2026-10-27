@@ -11,12 +11,26 @@ class MobileIntegrationPlugin: Plugin {
   private var mediaPickerCoordinators: [UUID: MediaPickerCoordinator] = [:]
   private var documentPickerCoordinators: [UUID: DocumentPickerCoordinator] = [:]
   private var previewCoordinators: [UUID: PreviewCoordinator] = [:]
+  private var playbackCoordinators: [UUID: PlaybackCoordinator] = [:]
   private var videoPosterRequests: [String: VideoPosterRequest] = [:]
   private let videoPosterLock = NSLock()
   private var lifecycleObservers: [NSObjectProtocol] = []
+  private weak var accessibilityWebview: WKWebView?
 
   override func load(webview: WKWebView) {
     super.load(webview: webview)
+    #if DEBUG && targetEnvironment(simulator)
+    if ProcessInfo.processInfo.environment["TRANSFER_GENIE_IOS_LAYOUT_PROBE"] == "1" {
+      SimulatorLayoutProbe().install(in: webview)
+    }
+    #endif
+    accessibilityWebview = webview
+    webview.configuration.userContentController.addUserScript(WKUserScript(
+      source: MobileAccessibility.currentScript(),
+      injectionTime: .atDocumentEnd,
+      forMainFrameOnly: true
+    ))
+    webview.evaluateJavaScript(MobileAccessibility.currentScript(), completionHandler: nil)
 
     let center = NotificationCenter.default
     lifecycleObservers = [
@@ -25,16 +39,32 @@ class MobileIntegrationPlugin: Plugin {
         object: nil,
         queue: .main
       ) { [weak self] notification in
+        self?.refreshAccessibility()
         self?.emitLifecycleState(for: notification.name)
       },
+      center.addObserver(
+        forName: UIContentSizeCategory.didChangeNotification,
+        object: nil,
+        queue: .main
+      ) { [weak self] _ in self?.refreshAccessibility() },
+      center.addObserver(
+        forName: UIAccessibility.reduceMotionStatusDidChangeNotification,
+        object: nil,
+        queue: .main
+      ) { [weak self] _ in self?.refreshAccessibility() },
       center.addObserver(
         forName: UIApplication.didBecomeActiveNotification,
         object: nil,
         queue: .main
       ) { [weak self] notification in
+        self?.refreshAccessibility()
         self?.emitLifecycleState(for: notification.name)
       },
     ]
+  }
+
+  private func refreshAccessibility() {
+    accessibilityWebview?.evaluateJavaScript(MobileAccessibility.currentScript(), completionHandler: nil)
   }
 
   deinit {
@@ -57,7 +87,8 @@ class MobileIntegrationPlugin: Plugin {
     }
 
     let reply = MobileInvocation(invoke)
-    DispatchQueue.main.async {
+    DispatchQueue.main.async { [weak self] in
+      self?.refreshAccessibility()
       reply.resolve([
         "requestId": args.requestId,
         "platform": "ios",
@@ -160,13 +191,23 @@ class MobileIntegrationPlugin: Plugin {
         ))
         return
       }
-      let coordinator = PreviewCoordinator(
-        plugin: self,
-        reply: presentationReply,
-        fileURL: fileURL
-      )
-      self.previewCoordinators[coordinator.id] = coordinator
-      coordinator.present(from: presenter)
+      if MediaPlaybackSupport.isMediaFile(fileURL) {
+        let coordinator = PlaybackCoordinator(
+          plugin: self,
+          reply: presentationReply,
+          fileURL: fileURL
+        )
+        self.playbackCoordinators[coordinator.id] = coordinator
+        coordinator.present(from: presenter)
+      } else {
+        let coordinator = PreviewCoordinator(
+          plugin: self,
+          reply: presentationReply,
+          fileURL: fileURL
+        )
+        self.previewCoordinators[coordinator.id] = coordinator
+        coordinator.present(from: presenter)
+      }
     }
   }
 
@@ -354,6 +395,10 @@ class MobileIntegrationPlugin: Plugin {
 
   func releasePreview(_ id: UUID) {
     previewCoordinators.removeValue(forKey: id)
+  }
+
+  func releasePlayback(_ id: UUID) {
+    playbackCoordinators.removeValue(forKey: id)
   }
 }
 

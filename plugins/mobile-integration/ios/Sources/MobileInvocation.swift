@@ -41,6 +41,20 @@ struct MobileIntegrationError: Error {
   }
 }
 
+enum MobileImportTestHooks {
+  static func checkWritableStorage() throws {
+    #if DEBUG && targetEnvironment(simulator)
+    if let raw = getenv("TRANSFER_GENIE_IOS_SIMULATOR_IMPORT_TEST"),
+       String(cString: raw) == "no-space" {
+      throw MobileIntegrationError(
+        code: .copyFailed,
+        message: "本机存储空间不足，未保存所选文件。请释放空间后重试。"
+      )
+    }
+    #endif
+  }
+}
+
 final class MobileInvocation {
   private let invoke: Invoke
   private let lock = NSLock()

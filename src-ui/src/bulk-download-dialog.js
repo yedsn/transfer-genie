@@ -62,6 +62,20 @@ if (api && runtime && modal && openButton) {
       : minutes + ':' + String(remainder).padStart(2, '0');
   }
 
+  function isAutoplayBlocked(error) {
+    const name = String(error?.name || '');
+    const message = String(error?.message || error || '').toLowerCase();
+    if (name === 'NotSupportedError' || message.includes('not supported') || message.includes('不支持')) {
+      return false;
+    }
+    return name === 'NotAllowedError'
+      || name === 'AbortError'
+      || message.includes('user gesture')
+      || message.includes('user interaction')
+      || message.includes('not allowed by the user agent')
+      || message.includes('operation was aborted');
+  }
+
   function categoryLabel(category) {
     return { all: '全部', file: '文件', image: '图片', audio: '音频', video: '视频' }[category] || '文件';
   }
@@ -415,7 +429,12 @@ if (api && runtime && modal && openButton) {
           item.querySelector('.bulk-audio-player')?.remove();
         }
       } });
-      await media.play();
+      try {
+        await media.play();
+      } catch (error) {
+        if (!isAutoplayBlocked(error)) throw error;
+        if (resource.category === 'audio') item.querySelector('.bulk-audio-player')?.classList.add('is-awaiting-play');
+      }
     } catch (error) {
       mediaSession?.stopOwner(owner);
       button.disabled = false;
