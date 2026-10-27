@@ -17,6 +17,11 @@ import {
 import MobileMessageBody from "./MobileMessageBody.vue";
 
 type MobileTab = "feed" | "marked" | "profile";
+type MobileDiagnostic = {
+  platform?: string;
+  nativePlugin?: boolean;
+  mainThread?: boolean;
+};
 type SheetName =
   "composer" | "actions" | "transfer" | "spaces" | "detail" | "cache" | "sender" | "about" | "marked-edit" | "conflicts" | "delete-confirm" | null;
 
@@ -27,6 +32,12 @@ const activeSheet = ref<SheetName>(null);
 const viewportHeight = ref(window.visualViewport?.height || window.innerHeight);
 const viewportTop = ref(window.visualViewport?.offsetTop || 0);
 const keyboardVisible = ref(false);
+const mobileDiagnostic = ref<MobileDiagnostic | null>(
+  (window as any).__TRANSFER_GENIE_MOBILE_DIAGNOSTIC__ || null,
+);
+function updateMobileDiagnostic(event: Event) {
+  mobileDiagnostic.value = (event as CustomEvent<MobileDiagnostic>).detail || null;
+}
 function updateViewport() {
   const viewport = window.visualViewport;
   // Pin the shell to the visible area, not the layout viewport behind the keyboard.
@@ -444,6 +455,10 @@ onMounted(async () => {
   window.visualViewport?.addEventListener("scroll", updateViewport);
   window.addEventListener("resize", updateViewport);
   window.addEventListener(
+    "transfer-genie-mobile-diagnostic",
+    updateMobileDiagnostic,
+  );
+  window.addEventListener(
     "transfer-genie-mobile-recovered",
     controller.refreshAfterForeground,
   );
@@ -459,6 +474,10 @@ onBeforeUnmount(() => {
   window.visualViewport?.removeEventListener("resize", updateViewport);
   window.visualViewport?.removeEventListener("scroll", updateViewport);
   window.removeEventListener("resize", updateViewport);
+  window.removeEventListener(
+    "transfer-genie-mobile-diagnostic",
+    updateMobileDiagnostic,
+  );
   window.clearTimeout(searchTimer);
   window.removeEventListener(
     "transfer-genie-mobile-recovered",
@@ -1508,6 +1527,7 @@ onBeforeUnmount(() => {
           <dl class="mobile-about-facts">
             <div><dt>版本</dt><dd>{{ state.appVersion || "暂时无法读取" }}</dd></div>
             <div><dt>平台</dt><dd>iOS</dd></div>
+            <div v-if="mobileDiagnostic"><dt>原生桥接</dt><dd>{{ mobileDiagnostic.platform }} · native={{ mobileDiagnostic.nativePlugin ? "true" : "false" }} · main-thread={{ mobileDiagnostic.mainThread ? "true" : "false" }}</dd></div>
             <div><dt>同步服务</dt><dd>Supabase</dd></div>
             <div><dt>发送者</dt><dd>{{ state.settings?.sender_name }}</dd></div>
           </dl>

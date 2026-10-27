@@ -158,6 +158,12 @@ try {
   await page.locator('.mobile-settings-group button').filter({ hasText: '关于 Transfer Genie' }).dispatchEvent('click');
   assert.equal(await page.locator('.mobile-about-sheet').count(), 1);
   assert.match(await page.locator('.mobile-about-facts').innerText(), /Supabase/);
+  await page.evaluate(() => {
+    window.dispatchEvent(new CustomEvent('transfer-genie-mobile-diagnostic', {
+      detail: { platform: 'ios', nativePlugin: true, mainThread: true },
+    }));
+  });
+  assert.match(await page.locator('.mobile-about-facts').innerText(), /ios · native=true · main-thread=true/);
   await page.getByRole('button', { name: '关闭关于', exact: true }).dispatchEvent('click');
   await page.locator('.mobile-settings-group button').filter({ hasText: '发送者名称' }).dispatchEvent('click');
   const sender = page.getByRole('textbox', { name: '发送者名称', exact: true });

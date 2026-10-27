@@ -12679,17 +12679,16 @@ async fn download_message_file_impl(
             db::get_message_for_scope(&state.db_path, &profile.id, &session.user_id, filename)
                 .map_err(|error| format!("读取消息失败: {error}"))?
                 .ok_or_else(|| "未找到附件消息".to_string())?;
-        let base_dir = resolve_download_dir(state, &settings);
-        fs::create_dir_all(&base_dir).map_err(|error| format!("创建下载目录失败: {error}"))?;
-        let target = if cfg!(target_os = "ios") {
-            endpoint_files_dir(state, &profile.id)
-                .join(&session.user_id)
-                .join("exports")
-                .join(filename)
-                .join(sanitize_filename(original_name))
-        } else {
-            build_download_target_path(state, &settings, original_name, message.timestamp_ms)
-        };
+        let target = prepare_supabase_download_target(
+            state,
+            &settings,
+            &profile.id,
+            &session.user_id,
+            filename,
+            original_name,
+            message.timestamp_ms,
+            cfg!(target_os = "ios"),
+        )?;
         let final_path =
             match resolve_download_target(&target, parse_conflict_action(conflict_action))? {
                 DownloadDecision::Conflict { suggested } => {
@@ -19363,6 +19362,35 @@ fn resolve_download_dir(state: &AppState, settings: &Settings) -> PathBuf {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn prepare_supabase_download_target(
+    state: &AppState,
+    settings: &Settings,
+    profile_id: &str,
+    owner_scope: &str,
+    filename: &str,
+    original_name: &str,
+    timestamp_ms: i64,
+    use_sandbox_export: bool,
+) -> Result<PathBuf, String> {
+    if use_sandbox_export {
+        return Ok(endpoint_files_dir(state, profile_id)
+            .join(owner_scope)
+            .join("exports")
+            .join(filename)
+            .join(sanitize_filename(original_name)));
+    }
+
+    let base_dir = resolve_download_dir(state, settings);
+    fs::create_dir_all(&base_dir).map_err(|error| format!("创建下载目录失败: {error}"))?;
+    Ok(build_download_target_path(
+        state,
+        settings,
+        original_name,
+        timestamp_ms,
+    ))
+}
+
 fn split_filename_parts(original_name: &str) -> (String, String) {
     let sanitized = sanitize_filename(original_name);
     let path = Path::new(&sanitized);
@@ -25453,6 +25481,45 @@ mod tests {
         );
 
         assert_eq!(name, "20240101_report.final");
+    }
+
+    #[test]
+    fn ios_supabase_download_target_stays_in_the_app_sandbox() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-ios-download-target-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let mut settings = test_settings();
+        let inaccessible_downloads = temp_dir.join("system-downloads");
+        fs::write(&inaccessible_downloads, b"not a directory").unwrap();
+        settings.download_dir = inaccessible_downloads.to_string_lossy().to_string();
+        let state = test_app_state(&temp_dir, settings.clone());
+
+        let target = prepare_supabase_download_target(
+            &state,
+            &settings,
+            "profile-ios",
+            "user-ios",
+            "message-id",
+            "clip.mp4",
+            1_704_067_200_000,
+            true,
+        )
+        .expect("iOS target must not touch the configured system download directory");
+
+        assert_eq!(
+            target,
+            state
+                .files_base_dir
+                .join("profile-ios")
+                .join("user-ios")
+                .join("exports")
+                .join("message-id")
+                .join("clip.mp4")
+        );
+        assert!(inaccessible_downloads.is_file());
+        let _ = fs::remove_dir_all(temp_dir);
     }
 
     #[test]

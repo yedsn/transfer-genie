@@ -307,10 +307,17 @@ final class TransferGenieSimulatorUITests: XCTestCase {
 
         let done = firstExistingButton(labels: ["完成", "Done"], timeout: 60)
         XCTAssertNotNil(done, "System video player did not present")
-        let playbackControl = firstExistingElement(
+        var playbackControl = firstExistingElement(
             labels: ["Pause", "暂停", "Play", "播放", "Playback position", "播放位置"],
-            timeout: 15
+            timeout: 2
         )
+        if playbackControl == nil {
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            playbackControl = firstExistingElement(
+                labels: ["Pause", "暂停", "Play", "播放", "Playback position", "播放位置"],
+                timeout: 15
+            )
+        }
         XCTAssertNotNil(playbackControl, "The system player did not expose playback controls")
         XCTAssertTrue(playbackControl?.isHittable == true, "The system playback control is not interactive")
         attachScreenshot(named: "sent-video-system-playback")
@@ -372,10 +379,17 @@ final class TransferGenieSimulatorUITests: XCTestCase {
             playback.tap()
             let done = firstExistingButton(labels: ["完成", "Done"], timeout: 20)
             XCTAssertNotNil(done, "System player did not present on cycle \(cycle)")
-            let playbackControl = firstExistingElement(
+            var playbackControl = firstExistingElement(
                 labels: ["Pause", "暂停", "Play", "播放", "Playback position", "播放位置"],
-                timeout: 10
+                timeout: 2
             )
+            if playbackControl == nil {
+                app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+                playbackControl = firstExistingElement(
+                    labels: ["Pause", "暂停", "Play", "播放", "Playback position", "播放位置"],
+                    timeout: 10
+                )
+            }
             XCTAssertNotNil(playbackControl, "Playback controls disappeared on cycle \(cycle)")
             done?.tap()
             XCTAssertTrue(app.buttons["关闭详情"].waitForExistence(timeout: 10), "System player did not return to details on cycle \(cycle)")
@@ -422,6 +436,19 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         XCTAssertTrue(app.buttons["保存名称"].exists)
         app.buttons["关闭发送者名称"].tap()
         XCTAssertFalse(editor.exists)
+        app.buttons["消息"].tap()
+    }
+
+    func testNativePluginDiagnosticIsVisible() {
+        app.buttons["我的"].tap()
+        button(containing: "关于 Transfer Genie").tap()
+        XCTAssertTrue(app.staticTexts["原生桥接"].waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            app.staticTexts["ios · native=true · main-thread=true"].waitForExistence(timeout: 10),
+            "The installed app did not report the expected native iOS main-thread bridge"
+        )
+        attachScreenshot(named: "native-plugin-diagnostic")
+        app.buttons["关闭关于"].tap()
         app.buttons["消息"].tap()
     }
 

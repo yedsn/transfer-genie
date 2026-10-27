@@ -101,6 +101,7 @@ const platformReady = (async () => {
     const requestId = `startup-${Date.now()}`;
     const diagnostic = await (window as any).transferGenieApi?.mobileIntegration?.diagnostic(requestId);
     (window as any).__TRANSFER_GENIE_MOBILE_DIAGNOSTIC__ = diagnostic;
+    window.dispatchEvent(new CustomEvent("transfer-genie-mobile-diagnostic", { detail: diagnostic }));
     console.info("[mobile-integration] diagnostic", JSON.stringify(diagnostic));
   } catch (error) {
     console.debug("[mobile-integration] diagnostic unavailable", String(error));
