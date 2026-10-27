@@ -1,5 +1,37 @@
 # iOS 附件持久化、恢复与界面状态验证
 
+## 2026-10-28 标记列表渐隐截断
+
+- 参考 PC 正文的 130px 上限和 36px 渐隐区，移动标记列表从三行硬截断改为实际高度测量。仅超限正文使用透明度遮罩并显示“查看全文”，点击继续打开已有全屏详情；短正文无渐隐。Markdown 与纯文本共用截断，纯文本保留换行，标签和截止日期不进入遮罩。ResizeObserver 随内容、宽度和字体变化重测；PC 样式和业务接口不变。
+- npm run build、mobile UI shell、feed 与 accessibility 浏览器回归通过；feed 覆盖 320/390/844px、2.2 倍文字、长 Markdown/纯文本、短内容取消遮罩、130px 上限、44px 标记操作和全文详情入口。浏览器预览 `/tmp/tg-marked-gradient.png`。本次渐隐样式尚未覆盖安装到 Simulator、VPhone 或 Jam。
+
+## 2026-10-28 VPhone 安装协调与新版登录恢复
+
+- 先前 smoke 在 300 秒安装超时，报告保留于 `/Volumes/VPhone/installers/vphone-smoke/20261027-latest-mark/report.json`，不计通过。只读检查设备/App 查询正常、installd 在运行、旧 binary 时间未更新、安装暂存文件 154946335 字节与新 IPA 相同；重试明确显示复制完成后等待安装协调。确认空草稿并退出仍运行的旧应用后，原请求返回 `InstallComplete (100%)`，exit 0。没有卸载、清空凭据、重启 guest 或变更安全策略，也未使用绕过 installd 的 apps.install。诊断 IPA 保存于 `/Volumes/VPhone/installers/tg-install-diagnostic.jKb8me/Transfer-Genie-VPhone.ipa`。
+- smoke 增加启动后等待移动 shell，以及通过草稿保护后退出旧应用再原位安装。修正后执行 `node tests/vphone/test_vphone_smoke.mjs --app '/Volumes/VPhone/installers/tg-install-diagnostic.jKb8me/Transfer-Genie-VPhone.ipa' --artifact-dir /Volumes/VPhone/installers/vphone-smoke/20261028-latest-mark-fixed --require-auth --reinstall-count 2 --cold-starts 2`：16 检查通过，真实 installd 连续两次安装、两次冷启动和登录恢复、截图及脱敏日志、零新增 crash。第一次新版检查因冷启动读取界面太早拒绝继续，失败报告保留 `20261028-latest-mark/report.json`。结果仅为补充环境验收，不代表 Jam。
+- 新增 `tests/vphone/test_vphone_composer.mjs`，实际 guest 已验证空草稿、保存即标记、保留取消与确认取消。后续 WYSIWYG 格式和叠层操作执行到草稿重启，因脚本给 ui.wait 传入不支持的 90 秒超时而退出；报告 `/Volumes/VPhone/installers/vphone-composer/20261028-latest/report.json` 保留失败，不计发送/重启完整通过。参数已收敛到 60 秒；未发送测试 fixture，未删除或输出其正文，草稿保留待续。
+
+## 2026-10-27 草稿处理后的新版原生验收
+
+- 用户确认草稿已处理后恢复验收。只读检查官方 Simulator 仅剩空行、无标记/标签/附件；VPhone 经解锁、打开并检查编辑器后确认空草稿并关闭，未读取或输出正文。
+- 原生验收暴露标记按钮的 `aria-haspopup="dialog"` 会让 iOS WKWebView/XCTest 把它映射成普通容器，无法按 Button 定位。已移除该属性及内嵌状态描述引用，保留明确按钮名称、原生按钮语义、绿色实心书签和 title；浏览器控制器/feed 回归通过。前两轮失败/跳过结果保留在 `tg-latest-mark-official-20261027` 与 `tg-latest-mark-official-fixed-20261027`，不计为通过。
+- 最新官方 Simulator Release 包安装保留登录。全屏 WYSIWYG、标记设置取消和独立附件菜单 2 Passed、1 Skipped（标记保存被旧 fixture 保护跳过），结果 `tg-latest-mark-official-final-20261027/Logs/Test/Test-TransferGenieSimulatorUITests-2026.10.27_23-39-44-+0800.xcresult`。修正测试的空输入占位值判断后，标记保存/保留/确认取消和真实富文本发送/重启恢复/精确 fixture 删除 **2 Passed、0 Failed、0 Skipped**，结果同目录 `Test-TransferGenieSimulatorUITests-2026.10.27_23-44-27-+0800.xcresult`。截图已导出到同目录 `screenshots/`。SQLite 确認 0 草稿、0 个存活 `TG-WYSIWYG-` 测试消息；普通消息未删除。
+- 最后一组新版官方 Simulator 回归 **3 Passed、0 Failed、0 Skipped**：详情横竖屏、键盘与选择器取消、pinch 不缩放；结果 `tg-latest-mark-official-final-20261027/Logs/Test/Test-TransferGenieSimulatorUITests-2026.10.27_23-47-56-+0800.xcresult`。
+- 最新 iPhoneOS Release 包 strict codesign 通过、TeamIdentifier=9RV293JR6V、DTPlatformName=iphoneos，VPhone 安装及登录恢复结果见上述 2026-10-28 记录；生成工程 Team 已恢复原 `LW6QTNHNV4`。本轮 Jam 未安装或测试，仍遵守虚拟环境完成后才做真机的顺序。
+
+## 2026-10-27 无勾选框的标记设置
+
+- 自动化升级保护补充：VPhone 的空草稿判断新增已标记 metadata 和自动保存失败状态拒绝；本机测试先复现缺失保护再修复并通过。官方 Simulator 的升级前 XCTest 不再把 nil 或以占位文字开头的实际正文当空值，并拒绝附件、已标记摘要和保存失败状态。`xcodebuild -project tests/ios-ui/TransferGenieSimulatorUITests.xcodeproj -scheme TransferGenieSimulatorUITests -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath /Volumes/VPhone/installers/tg-mark-draft-safety-build build-for-testing CODE_SIGNING_ALLOWED=NO -quiet` 退出 0，仅编译测试包；没有执行测试、安装或启动应用。只读检查官方 Simulator 仍有 text 长度 33 的未发送草稿。
+- 标记保存失败路径补测：真实 controller 测试先复现“标签创建已成功、刷新列表失败却返回 null”的缺陷；现保留已确认标签与稳定 ID，列表读取失败只提示稍后刷新，真正创建失败仍保留错误且不插入虚假标签。原账号延迟返回保护继续通过。feed 浏览器新增两标签部分创建失败、保存中 Escape/重复点击、确认标签不重建与重试后正常应用 metadata 的回归；控制器、feed、草稿持久化、生产构建、strict OpenSpec 和 diff 检查通过。仅本机替身，未写真实 Supabase。
+- 最新源码的官方 Simulator Release archive 构建成功：`APPLE_DEVELOPMENT_TEAM=LW6QTNHNV4 CARGO_HOME=/Volumes/ORICO/Workspaces/git/my/transfer-genie/.cargo-ios CARGO_NET_OFFLINE=true npx tauri ios build --target aarch64-sim --archive-only --ci --export-method debugging`，产物 `gen/apple/build/transfer-genie_iOS.xcarchive`；未安装、启动或终止设备应用。只读检查官方 Simulator 的草稿 text 长度仍为 33，因此继续保留，不输出草稿正文。构建成功不等于设备验收。
+- 全屏消息编辑器的标记按钮与消息操作共用同一个设置弹框；编辑器按钮的已标记状态统一为鼠尾草绿实心书签，摘要同色，辅助功能描述区分已标记与未标记。按钮打开设置而非直接切换标记；浏览器回归验证保存及确认取消后的状态和原编辑器保留。
+- 根据本次反馈删除“发送时标记”checkbox 和对应冗余开关状态，保存标记始终设为 marked=true，即使没有标签或日期。关闭/返回不保存。已标记的草稿或消息提供独立“取消标记”入口，沿用确认弹框；草稿确认取消只清除标记/标签/日期，正文、附件与富文本编辑器不变，消息仍使用已有取消标记命令。
+- frontend-design 引导本次采用暖白纸面与低饱和鼠尾草色：标签多选胶囊、新建标签行、标题在上且输入独占一行的截止日期、可选清除日期、绿色书签保存按钮和低强调取消动作。修正共享桌面 label 列布局和 button color 对该移动弹框的覆盖；日期至少 16px 防止 iOS 输入放大。
+- npm run build、test_mobile_ui_shell.js、feed/Markdown/accessibility 浏览器套件均通过。新增断言验证没有 checkbox、320/390/844px 日期全宽且无横向溢出、保存自动标记（含空标签/日期）、清除日期保存前不改已有值、取消确认保留状态、确认取消清除 metadata 但保留正文/附件/编辑器 DOM。浏览器预览 /tmp/tg-mark-settings-clean.png。
+- 补充浏览器回归：最大字体和长标签下，320/390/844px 的设置弹框无横向溢出，日期仍独占一行，控件可滚动到达且点击区域至少 44px；已标记消息的独立取消入口在取消时不写入，模拟失败后保留状态和错误提示，再次确认可成功并返回原消息操作弹框。以上使用测试替身，不代表真实设备或 Supabase 验收。
+- 本次未覆盖安装或终止官方 Simulator：检查仅输出草稿字段长度/数量，发现仍有非空未发送草稿。VPhone 与 Jam 均未操作，因此这次标记样式不声明原生安装验收完成。
+- 补记录上一轮 full cargo test：主库 384 Passed、2 Ignored；Bridge 43 Passed，0 Failed。最新原生发送测试追加非空标记保护后运行结果为 Skipped（Test-TransferGenieSimulatorUITests-2026.10.27_22-49-03-+0800.xcresult），不是 Passed；保留此前两次真实成功发送/清理证据，不将该跳过计入完成。
+
 ## 2026-10-27 富文本实际发送与草稿完整验证
 
 - 最新已安装官方 Simulator Release 上实际点击粗体/列表工具并输入专用随机标识消息，发送、等待已同步、终止进程再启动，搜索唯一结果通过。SQLite 精确限定测试标识查询证明只有一条记录、format=markdown、content 含粗体和列表末尾 END、remote_revision=1、sync_state=synced，草稿数量为 0。发送证据 /Volumes/VPhone/installers/tg-wysiwyg-20261027-2148/Logs/Test/Test-TransferGenieSimulatorUITests-2026.10.27_22-38-42-+0800.xcresult（1 Passed，0 Failed/Skipped）。

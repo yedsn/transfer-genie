@@ -550,8 +550,46 @@ try {
   assert.equal(await page.locator('.mobile-task-pin').count(), 1);
   assert.equal(await page.locator('.mobile-task-body .mobile-markdown h1').innerText(), 'Markdown 标题');
   assert.match(await page.locator('.mobile-task-body small').innerText(), /工作.*个人.*2026-10-29/s);
-  const bounded = await page.locator('.mobile-task-body .mobile-markdown').evaluate(el => ({ client: el.clientHeight, full: el.scrollHeight }));
+  const bounded = await page.locator('.mobile-marked-excerpt-viewport').evaluate(el => ({ client: el.clientHeight, full: el.scrollHeight }));
   assert.ok(bounded.client < bounded.full, 'marked rows bound long text while showing more than a title');
+  await page.waitForSelector('.mobile-marked-excerpt.is-truncated');
+  const fade = await page.locator('.mobile-marked-excerpt-viewport').evaluate(el => getComputedStyle(el).maskImage);
+  assert.match(fade, /linear-gradient/);
+  assert.match(fade, /36px/);
+  assert.equal(await page.locator('.mobile-marked-read-more').textContent(), '查看全文');
+  assert.equal(await page.locator('.mobile-marked-read-more svg[aria-hidden="true"]').count(), 1);
+  for (const [width, height, scale] of [[320, 640, 1], [390, 844, 1], [844, 390, 2.2]]) {
+    await page.setViewportSize({ width, height });
+    await page.evaluate(scale => document.documentElement.style.setProperty('--mobile-text-scale', scale), scale);
+    await page.waitForFunction(() => document.querySelector('.mobile-marked-excerpt').classList.contains('is-truncated'));
+    const geometry = await page.locator('.mobile-task-list').evaluate(el => ({ overflow: el.scrollWidth > el.clientWidth, preview: el.querySelector('.mobile-marked-excerpt-viewport').clientHeight, pin: el.querySelector('.mobile-task-pin').getBoundingClientRect().width }));
+    assert.equal(geometry.overflow, false);
+    assert.equal(geometry.preview, 130);
+    assert.ok(geometry.pin >= 44);
+  }
+  await page.evaluate(() => {
+    const item = window.__feedTest.ui.state.markedView.messages[0];
+    window.__feedTest.longMarkedBody = item.body;
+    item.body = '短内容完整显示。'; item.format = 'text';
+  });
+  await page.waitForFunction(() => !document.querySelector('.mobile-marked-excerpt').classList.contains('is-truncated'));
+  assert.equal(await page.locator('.mobile-marked-read-more').count(), 0, 'short content must not fade');
+  assert.equal(await page.locator('.mobile-marked-excerpt-viewport').evaluate(el => getComputedStyle(el).maskImage), 'none');
+  await page.evaluate(() => {
+    window.__feedTest.ui.state.markedView.messages[0].body = '长纯文本内容保留换行。\n'.repeat(40);
+  });
+  await page.waitForSelector('.mobile-marked-excerpt.is-truncated');
+  assert.equal(await page.locator('.mobile-marked-excerpt .mobile-plain-text').evaluate(el => getComputedStyle(el).whiteSpace), 'pre-wrap');
+  await page.evaluate(() => {
+    const item = window.__feedTest.ui.state.markedView.messages[0];
+    item.body = window.__feedTest.longMarkedBody; item.format = 'markdown';
+    document.documentElement.style.removeProperty('--mobile-text-scale');
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator('.mobile-marked-read-more').click();
+  assert.equal(await page.locator('.mobile-detail-sheet').count(), 1, 'read-more opens the existing full detail');
+  await page.getByRole('button', { name: '关闭详情', exact: true }).dispatchEvent('click');
+  await page.screenshot({ path: '/tmp/tg-marked-gradient.png' });
   await page.locator('.mobile-task-pin').dispatchEvent('click');
   assert.equal(await page.locator('.mobile-unmark-sheet').count(), 1);
   assert.equal(await page.evaluate(() => window.__feedTest.markWrites.length), 0);
@@ -579,7 +617,20 @@ try {
     window.__editorElement.setSelectionRange(3, 7);
   });
   await composerMarkButton.focus();
+  assert.equal(await composerMarkButton.getAttribute('title'), '设置标记');
   await composerMarkButton.dispatchEvent('click');
+  assert.equal(await page.locator('.mobile-marked-edit-sheet input[type="checkbox"]').count(), 0, 'saving the settings is the only enable action');
+  const dateBox = await page.getByLabel('截止日期', { exact: true }).boundingBox();
+  const dateSection = await page.locator('.mobile-mark-date-section').boundingBox();
+  const dateHeading = await page.locator('.mobile-mark-field-heading').boundingBox();
+  assert.equal(dateBox.width, dateSection.width, 'date field occupies its own full-width row');
+  assert.ok(dateBox.y >= dateHeading.y + dateHeading.height);
+  for (const viewport of [{ width: 320, height: 568 }, { width: 844, height: 390 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(viewport);
+    const dateGeometry = await page.locator('.mobile-marked-edit-sheet').evaluate(el => ({ overflow: el.scrollWidth > el.clientWidth, width: el.querySelector('.mobile-mark-date-section').getBoundingClientRect().width, input: el.querySelector('#mobile-marked-due').getBoundingClientRect().width }));
+    assert.equal(dateGeometry.overflow, false, 'mark settings must not overflow on narrow or landscape screens');
+    assert.equal(dateGeometry.input, dateGeometry.width, 'date remains full width at every viewport');
+  }
   assert.ok(await page.locator('.mobile-composer-sheet').evaluate(el => el === window.__composerElement && el.inert && el.querySelector('textarea') === window.__editorElement));
   assert.equal(await page.locator('.mobile-composer-sheet').getAttribute('aria-hidden'), 'true');
   assert.equal(await page.locator('.mobile-attachment-strip strong').innerText(), 'draft.pdf');
@@ -601,11 +652,16 @@ try {
   await page.getByRole('textbox', { name: '新标签名称', exact: true }).fill('紧急发送');
   await page.getByRole('button', { name: '添加', exact: true }).dispatchEvent('click');
   await page.getByLabel('截止日期', { exact: true }).fill('2026-10-30');
+  await page.getByRole('heading', { name: '标记设置', exact: true }).click();
   await page.locator('.mobile-marked-edit-sheet .mobile-primary-button').dispatchEvent('click');
   assert.deepEqual(await page.evaluate(() => window.__feedTest.createdTags), ['紧急发送']);
   assert.deepEqual(await page.evaluate(() => window.__feedTest.ui.state.composer.tagIds), ['work', 'tag-紧急发送']);
+  assert.equal(await page.evaluate(() => window.__feedTest.ui.state.composer.marked), true, 'saving automatically marks without a checkbox');
+  assert.equal(await composerMarkButton.getAttribute('title'), '已标记，编辑标记设置');
+  assert.equal(await composerMarkButton.locator('svg').evaluate(el => getComputedStyle(el).fill), 'rgb(53, 83, 70)', 'saved mark uses the same sage visual language as the settings sheet');
   assert.equal(await page.evaluate(() => window.__feedTest.ui.state.composer.dueDate), '2026-10-30');
   assert.match(await page.locator('.mobile-composer-mark-summary').innerText(), /工作.*紧急发送.*2026-10-30/s);
+  if (process.env.MOBILE_COMPOSER_MARK_SCREENSHOT) await page.screenshot({ path: process.env.MOBILE_COMPOSER_MARK_SCREENSHOT });
   assert.ok(await page.locator('.mobile-composer-sheet').evaluate(el => el === window.__composerElement));
   assert.equal(await page.locator('.mobile-attachment-strip strong').innerText(), 'draft.pdf');
   await page.locator('.mobile-compose-tools button').filter({ hasText: '标记' }).dispatchEvent('click');
@@ -616,6 +672,31 @@ try {
   await page.locator('.ProseMirror').evaluate(el => { window.__composerPreviewElement = el; });
   await composerMarkButton.dispatchEvent('click');
   assert.ok(await page.locator('.ProseMirror').evaluate(el => el === window.__composerPreviewElement));
+  await page.getByRole('button', { name: '清除截止日期', exact: true }).click();
+  assert.equal(await page.getByLabel('截止日期', { exact: true }).inputValue(), '');
+  assert.equal(await page.evaluate(() => window.__feedTest.ui.state.composer.dueDate), '2026-10-30', 'clearing only changes settings until saved');
+  await page.getByLabel('截止日期', { exact: true }).fill('2026-10-30');
+  await page.getByLabel('截止日期', { exact: true }).blur();
+  if (process.env.MOBILE_MARK_SCREENSHOT) await page.screenshot({ path: process.env.MOBILE_MARK_SCREENSHOT });
+  await page.getByRole('button', { name: '取消标记', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.__feedTest.ui.state.composer.marked), true);
+  await page.getByRole('button', { name: '保留标记', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.__feedTest.ui.state.composer.marked), true);
+  assert.ok(await page.locator('.ProseMirror').evaluate(el => el === window.__composerPreviewElement));
+  await composerMarkButton.dispatchEvent('click');
+  await page.getByRole('button', { name: '取消标记', exact: true }).click();
+  await page.getByRole('button', { name: '确认取消标记', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.__feedTest.ui.state.composer.marked), false);
+  assert.equal(await composerMarkButton.getAttribute('title'), '设置标记');
+  assert.deepEqual(await page.evaluate(() => window.__feedTest.ui.state.composer.tagIds), []);
+  assert.equal(await page.evaluate(() => window.__feedTest.ui.state.composer.dueDate), '');
+  assert.ok(await page.locator('.ProseMirror').evaluate(el => el === window.__composerPreviewElement));
+  assert.equal(await page.locator('.mobile-attachment-strip strong').innerText(), 'draft.pdf');
+  await composerMarkButton.dispatchEvent('click');
+  await page.getByRole('button', { name: '保存标记', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.__feedTest.ui.state.composer.marked), true, 'saving no tags or date still means marked');
+  assert.deepEqual(await page.evaluate(() => window.__feedTest.ui.state.composer.tagIds), []);
+  await composerMarkButton.dispatchEvent('click');
   await page.locator('.mobile-mark-overlay-backdrop').click({ position: { x: 10, y: 10 } });
   assert.ok(await page.locator('.ProseMirror').evaluate(el => el === window.__composerPreviewElement));
   assert.equal(await page.getByRole('button', { name: '预览', exact: true }).count(), 0, 'the live editor needs no separate preview mode');
@@ -630,6 +711,71 @@ try {
   assert.equal(await page.evaluate(() => window.__feedTest.markWrites.length), 1);
   await page.locator('.mobile-marked-edit-sheet .mobile-primary-button').dispatchEvent('click');
   assert.deepEqual(await page.evaluate(() => window.__feedTest.markWrites[1]), { filename: 'markdown-fixture', ids: ['work', 'personal'], date: '2026-10-29' });
+  assert.ok(await page.locator('.mobile-action-sheet').evaluate(el => el === window.__actionElement && !el.inert));
+  // The new explicit removal in saved settings must retain its source and retry on failure.
+  await page.locator('.mobile-action-row').filter({ hasText: '编辑标签与截止日期' }).click();
+  const removeSaved = page.getByRole('button', { name: '取消标记', exact: true });
+  assert.ok(await removeSaved.isVisible());
+  assert.equal(await page.evaluate(() => window.__feedTest.markWrites.length), 2, 'opening saved settings does not write');
+  await removeSaved.click();
+  assert.equal(await page.getByRole('dialog').count(), 1);
+  assert.ok(await page.locator('.mobile-action-sheet').evaluate(el => el === window.__actionElement && el.inert));
+  await page.getByRole('button', { name: '保留标记', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.__feedTest.markWrites.length), 2, 'cancelling saved-settings removal does not write');
+  assert.ok(await page.locator('.mobile-action-sheet').evaluate(el => el === window.__actionElement && !el.inert));
+  await page.locator('.mobile-action-row').filter({ hasText: '编辑标签与截止日期' }).click();
+  await removeSaved.click();
+  await page.evaluate(() => {
+    window.__feedTest.ui.controller.toggleMark = async () => { window.__feedTest.ui.state.error = 'fixture unmark failed'; return false; };
+  });
+  await page.getByRole('button', { name: '确认取消标记', exact: true }).click();
+  assert.match(await page.locator('.mobile-unmark-sheet [role="alert"]').innerText(), /fixture unmark failed/);
+  assert.equal(await page.evaluate(() => window.__feedTest.ui.selectedMessage.marked), true, 'failed unmark retains the saved state');
+  await page.evaluate(() => {
+    window.__feedTest.ui.controller.toggleMark = async item => { window.__feedTest.markWrites.push({ unmark: item.filename }); window.__feedTest.ui.state.error = ''; return true; };
+  });
+  await page.getByRole('button', { name: '确认取消标记', exact: true }).click();
+  assert.deepEqual(await page.evaluate(() => window.__feedTest.markWrites.at(-1)), { unmark: 'markdown-fixture' });
+  assert.equal(await page.locator('.mobile-action-sheet .mobile-action-grid button').filter({ hasText: '取消标记' }).count(), 0);
+  assert.ok(await page.locator('.mobile-action-sheet').evaluate(el => el === window.__actionElement && !el.inert));
+  // Partial creation and repeated save retain confirmed IDs and do not apply a mark early.
+  await page.evaluate(() => {
+    const test = window.__feedTest;
+    test.retryCalls = [];
+    test.markWritesBeforeRetry = test.markWrites.length;
+    test.ui.controller.createMarkedTag = async name => {
+      test.retryCalls.push(name);
+      if (name === '重试标签二' && test.retryCalls.filter(item => item === name).length === 1) {
+        test.ui.state.error = 'fixture tag creation failed';
+        return null;
+      }
+      if (name === '重试标签一') await new Promise(resolve => { test.releaseTag = resolve; });
+      const tag = { id: 'stable-' + name, name };
+      test.ui.state.tags.push(tag);
+      test.ui.state.error = '';
+      return tag;
+    };
+  });
+  await page.locator('.mobile-action-sheet .mobile-action-grid button').filter({ hasText: '标记' }).click();
+  for (const name of ['重试标签一', '重试标签二']) {
+    await page.getByRole('textbox', { name: '新标签名称', exact: true }).fill(name);
+    await page.getByRole('button', { name: '添加', exact: true }).click();
+  }
+  const saveRetry = page.getByRole('button', { name: '保存标记', exact: true });
+  await saveRetry.dispatchEvent('click');
+  await page.waitForFunction(() => typeof window.__feedTest.releaseTag === 'function');
+  assert.equal(await page.getByRole('button', { name: '正在保存…', exact: true }).isDisabled(), true);
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('.mobile-marked-edit-sheet').count(), 1, 'cannot dismiss during an in-flight save');
+  await page.locator('.mobile-marked-edit-sheet .mobile-primary-button').dispatchEvent('click');
+  assert.deepEqual(await page.evaluate(() => window.__feedTest.retryCalls), ['重试标签一']);
+  await page.evaluate(() => window.__feedTest.releaseTag());
+  assert.match(await page.locator('.mobile-marked-edit-sheet [role="alert"]').innerText(), /fixture tag creation failed/);
+  assert.equal(await page.evaluate(() => window.__feedTest.markWrites.length), await page.evaluate(() => window.__feedTest.markWritesBeforeRetry));
+  await saveRetry.click();
+  assert.deepEqual(await page.evaluate(() => window.__feedTest.retryCalls), ['重试标签一', '重试标签二', '重试标签二']);
+  const retryWrite = await page.evaluate(() => window.__feedTest.markWrites.at(-1));
+  assert.ok(retryWrite.ids.includes('stable-重试标签一') && retryWrite.ids.includes('stable-重试标签二'));
   assert.ok(await page.locator('.mobile-action-sheet').evaluate(el => el === window.__actionElement && !el.inert));
   console.log('mobile feed browser tests passed: existing feed/search/paging regressions; safe Markdown, editing/preview, bounded marked rows, unmark confirmation, no-write cancellation, detailed draft/message marks, full-screen details and full-width actions');
 } finally {

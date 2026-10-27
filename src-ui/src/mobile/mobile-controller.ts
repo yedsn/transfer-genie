@@ -1058,9 +1058,16 @@ export function useMobileController() {
     try {
       const tag = await api().marked.createMarkedTag(normalized);
       if (generation !== viewGeneration) return null;
-      const tags = await api().marked.listMarkedTags();
-      if (generation !== viewGeneration) return null;
-      state.tags = tags;
+      // Creation is already committed; a failed read must not lose its stable ID.
+      state.tags = [...state.tags.filter((item) => item.id !== tag.id), tag];
+      try {
+        const tags = await api().marked.listMarkedTags();
+        if (generation !== viewGeneration) return null;
+        state.tags = tags;
+      } catch {
+        if (generation !== viewGeneration) return null;
+        state.notice = "标签已保存，列表暂未刷新；稍后刷新即可";
+      }
       return tag;
     } catch (error) {
       if (generation === viewGeneration) setError(error);

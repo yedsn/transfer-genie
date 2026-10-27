@@ -686,6 +686,20 @@ runtimeApi.marked.createMarkedTag = async (name) => ({ id: 'new-tag', name });
 runtimeApi.marked.listMarkedTags = async () => [{ id: 'old-tag', name: '旧标签' }, { id: 'new-tag', name: '工作' }];
 assert.deepEqual(await runtime.createMarkedTag(' 工作 '), { id: 'new-tag', name: '工作' });
 assert.equal(runtime.state.tags.length, 2);
+// A successful local creation must survive a separate catalog-refresh failure.
+let confirmedTagWrites = 0;
+runtimeApi.marked.createMarkedTag = async (name) => { confirmedTagWrites += 1; return { id: 'confirmed-tag', name }; };
+runtimeApi.marked.listMarkedTags = async () => { throw new Error('fixture catalog refresh failed'); };
+assert.deepEqual(await runtime.createMarkedTag('已保存标签'), { id: 'confirmed-tag', name: '已保存标签' });
+assert.equal(confirmedTagWrites, 1);
+assert.equal(runtime.state.tags.find(tag => tag.id === 'confirmed-tag').name, '已保存标签');
+assert.equal(runtime.state.error, '', 'a confirmed write is not presented as a failed creation');
+assert.match(runtime.state.notice, /标签已保存.*列表.*刷新/);
+runtimeApi.marked.createMarkedTag = async () => { throw new Error('fixture creation failed'); };
+assert.equal(await runtime.createMarkedTag('未创建标签'), null);
+assert.match(runtime.state.error, /fixture creation failed/);
+assert.equal(runtime.state.tags.some(tag => tag.name === '未创建标签'), false);
+runtimeApi.marked.createMarkedTag = async (name) => ({ id: 'new-tag', name });
 const oldTags = deferred();
 let tagReads = 0;
 runtimeApi.marked.listMarkedTags = async () => {

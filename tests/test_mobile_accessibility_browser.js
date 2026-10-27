@@ -54,6 +54,26 @@ try {
   await page.evaluate(() => { document.documentElement.dataset.mobileReducedMotion = 'false'; });
   await page.emulateMedia({ reducedMotion: 'reduce' });
   assert.equal(await animation('.mobile-attachment-strip > div', '::before'), 'none', 'media preference also disables draft loader');
+  await page.evaluate(() => { window.__accessibilityTest.state.tags = [{ id: 'long-tag', name: '项目跟进与资料整理以及后续需要关注的事项' }]; });
+  await page.getByRole('button', { name: '标记', exact: true }).click();
+  assert.equal(await page.locator('.mobile-marked-edit-sheet input[type="checkbox"]').count(), 0);
+  assert.ok(await fontSize('.mobile-new-tag-form input') >= 14 * scale - 0.02, 'tag input respects system font scaling');
+  for (const viewport of [{ width: 320, height: 568 }, { width: 390, height: 844 }, { width: 844, height: 390 }]) {
+    await page.setViewportSize(viewport);
+    const sheet = page.locator('.mobile-marked-edit-sheet');
+    assert.equal(await sheet.evaluate(el => el.scrollWidth > el.clientWidth), false, 'large-font mark settings and long tags stay bounded');
+    const date = await page.getByLabel('截止日期', { exact: true }).boundingBox();
+    const dateSection = await page.locator('.mobile-mark-date-section').boundingBox();
+    assert.equal(date.width, dateSection.width, 'date occupies its own row at accessibility sizes');
+    for (const control of await sheet.locator('button, input').all()) {
+      await control.scrollIntoViewIfNeeded();
+      const box = await control.boundingBox();
+      assert.ok(box.width >= 44 && box.height >= 44, 'mark control has a 44px target');
+      assert.ok(box.y >= 0 && box.y + box.height <= viewport.height + 1, 'mark control is reachable by scrolling');
+    }
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('button', { name: '关闭编辑标记', exact: true }).click();
   await page.getByRole('button', { name: '关闭新消息', exact: true }).click();
   await page.getByRole('button', { name: '我的', exact: true }).click();
   await page.locator('.mobile-settings-group button').filter({ hasText: '关于 Transfer Genie' }).click();

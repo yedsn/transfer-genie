@@ -417,7 +417,7 @@ html[data-mobile-accessibility-text="true"] .is-keyboard-visible .mobile-compose
 .mobile-markdown > :first-child { margin-top: 0; }
 .mobile-markdown > :last-child { margin-bottom: 0; }
 .mobile-message-content > .mobile-markdown { font-size: calc(15px * var(--mobile-text-scale, 1)); }.mobile-message-content .mobile-markdown p { margin: .55em 0; white-space: normal; }.mobile-message-content .mobile-markdown > p:first-child { margin-top: 0; }.mobile-message-content .mobile-markdown > p:last-child { margin-bottom: 0; }
-.mobile-composer-mark-summary { margin: 6px 0; color: var(--mobile-orange-deep); font-size: calc(11px * var(--mobile-text-scale, 1)); overflow-wrap: anywhere; }
+.mobile-composer-mark-summary { margin: 6px 0; color: #496757; font-size: calc(11px * var(--mobile-text-scale, 1)); overflow-wrap: anywhere; }
 .mobile-draft-save-status { margin: -8px 0 10px; color: var(--mobile-muted); font-size: calc(10px * var(--mobile-text-scale, 1)); line-height: 1.4; text-align: right; }.mobile-draft-save-status.is-error { color: var(--mobile-red); }
 .mobile-markdown p, .mobile-markdown ul, .mobile-markdown ol, .mobile-markdown blockquote, .mobile-markdown pre { margin: .55em 0; }
 .mobile-markdown h1, .mobile-markdown h2, .mobile-markdown h3, .mobile-markdown h4, .mobile-markdown h5, .mobile-markdown h6 { margin: .7em 0 .35em; line-height: 1.25; }
@@ -449,9 +449,48 @@ html[data-mobile-accessibility-text="true"] .is-keyboard-visible .mobile-compose
 .mobile-compose-preview { min-height: 120px; max-height: 35vh; padding: 14px; overflow: auto; border: 1px solid var(--mobile-line); border-radius: 14px; background: #fff; font-size: calc(14px * var(--mobile-text-scale, 1)); }
 .mobile-task-list article { grid-template-columns: minmax(0, 1fr) auto; align-items: start; padding: 14px; }
 .mobile-task-body { width: 100%; gap: 7px; }.mobile-task-body strong { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; white-space: normal; line-height: 1.45; }
-.mobile-task-body > .mobile-plain-text, .mobile-task-body > .mobile-markdown { display: -webkit-box; width: 100%; max-height: 5.1em; margin: 0; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 3; color: var(--mobile-ink); font-size: calc(13px * var(--mobile-text-scale, 1)); line-height: 1.7; }
+.mobile-marked-excerpt { width: 100%; min-width: 0; text-align: left; }
+.mobile-marked-excerpt-viewport { position: relative; max-height: 130px; overflow: hidden; }
+.mobile-marked-excerpt-content { display: flow-root; min-width: 0; color: var(--mobile-ink); font-size: calc(13px * var(--mobile-text-scale, 1)); line-height: 1.7; }
+.mobile-marked-excerpt-content > .mobile-plain-text, .mobile-marked-excerpt-content > .mobile-markdown { margin: 0; font-size: inherit; line-height: inherit; }
+.mobile-marked-excerpt-content > .mobile-plain-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.mobile-marked-excerpt.is-truncated .mobile-marked-excerpt-viewport { -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 36px), transparent 100%); mask-image: linear-gradient(to bottom, #000 calc(100% - 36px), transparent 100%); }
+.mobile-marked-read-more { display: flex; align-items: center; gap: 5px; margin-top: 5px; color: #75816c; font-size: calc(11px * var(--mobile-text-scale, 1)); line-height: 1.6; font-weight: 600; }
+.mobile-marked-read-more > svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .mobile-task-body small { flex-wrap: wrap; gap: 5px 7px; }.mobile-task-controls { display: flex; flex-direction: column; align-items: center; }.mobile-task-pin, .mobile-task-edit { position: static; display: grid; place-items: center; width: 44px; height: 44px; padding: 10px; border: 0; border-radius: 12px; color: var(--mobile-orange-deep); background: transparent; }.mobile-task-pin svg { width: 20px; height: 20px; fill: currentColor; }.mobile-task-edit { padding: 0; }
-.mobile-mark-enable { display: flex; align-items: center; gap: 9px; min-height: 44px; margin-bottom: 10px; color: var(--mobile-ink); font-size: calc(13px * var(--mobile-text-scale, 1)); }.mobile-mark-enable input { width: 19px; height: 19px; accent-color: var(--mobile-orange-deep); }.mobile-unmark-copy { overflow-wrap: anywhere; color: var(--mobile-muted); line-height: 1.6; }
+.mobile-unmark-copy { overflow-wrap: anywhere; color: var(--mobile-muted); line-height: 1.6; }
+/* A quiet, structured settings sheet: warm paper, sage controls, one clear action. */
+.mobile-marked-edit-sheet { background: #faf9f5; }
+.mobile-marked-edit-sheet header { margin-bottom: 22px; }
+.mobile-marked-edit-sheet header > div { min-width: 0; }
+.mobile-marked-edit-sheet header small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mobile-marked-edit-sheet .mobile-marked-tag-options { gap: 8px; }
+.mobile-marked-edit-sheet .mobile-marked-tag-options legend,
+.mobile-marked-edit-sheet .mobile-mark-field-heading { color: #536257; font-size: calc(13px * var(--mobile-text-scale, 1)); font-weight: 700; }
+.mobile-marked-edit-sheet .mobile-marked-tag-options legend { margin-bottom: 10px; }
+.mobile-marked-edit-sheet .mobile-marked-tag-options legend small,
+.mobile-marked-edit-sheet .mobile-mark-field-heading small { margin-left: 4px; color: #969d92; font-size: calc(11px * var(--mobile-text-scale, 1)); font-weight: 400; }
+.mobile-marked-edit-sheet .mobile-marked-tag-options button { border-color: #dce4db; color: #4b6252; background: #f0f4ed; }
+.mobile-marked-edit-sheet .mobile-marked-tag-options button.is-selected { border-color: #496757; color: #fff; background: #496757; }
+.mobile-marked-edit-sheet .mobile-sheet-footnote { margin: 0; color: #929a90; font-size: calc(12px * var(--mobile-text-scale, 1)); text-align: left; }
+.mobile-marked-edit-sheet .mobile-new-tag-form { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-top: 12px; }
+.mobile-marked-edit-sheet .mobile-new-tag-form input,
+.mobile-marked-edit-sheet .mobile-due-field input { width: 100%; min-width: 0; min-height: 48px; padding: 11px 13px; border: 1px solid #dce4db; border-radius: 12px; color: #30473a; background: #fffefa; font-size: max(16px, calc(14px * var(--mobile-text-scale, 1))); }
+.mobile-marked-edit-sheet .mobile-new-tag-form input::placeholder { color: #a0aaa0; }
+.mobile-marked-edit-sheet .mobile-new-tag-form button { min-width: 64px; min-height: 48px; color: #496757; background: #e5ede3; font-weight: 700; }
+.mobile-marked-edit-sheet .mobile-new-tag-form button:disabled { color: #9ca99d; background: #edf1eb; }
+.mobile-mark-date-section { margin: 22px 0; }
+.mobile-mark-field-heading { display: flex; align-items: center; justify-content: space-between; min-height: 24px; margin-bottom: 8px; }
+.mobile-mark-field-heading label { display: flex; flex-direction: row; align-items: baseline; gap: 4px; margin: 0; color: inherit; font: inherit; }
+.mobile-mark-field-heading button { min-height: 44px; margin: -10px 0; padding: 0 4px 0 12px; border: 0; color: #637d6a; background: transparent; font-size: calc(12px * var(--mobile-text-scale, 1)); }
+.mobile-marked-edit-sheet .mobile-due-field { display: block; width: 100%; margin: 0; }
+.mobile-marked-edit-sheet .mobile-due-field input { display: block; -webkit-appearance: none; appearance: none; }
+.mobile-marked-edit-sheet .mobile-due-field input::-webkit-date-and-time-value { min-height: 24px; text-align: left; }
+.mobile-marked-edit-sheet .mobile-mark-footer { display: flex; flex-direction: column; gap: 5px; }
+.mobile-marked-edit-sheet .mobile-mark-footer .mobile-primary-button { min-height: 52px; height: auto; border-radius: 14px; color: #fff; background: #496757; box-shadow: none; }
+.mobile-marked-edit-sheet .mobile-mark-footer .mobile-primary-button:disabled { color: #aaa199; background: #e4ddd4; }
+.mobile-marked-edit-sheet .mobile-mark-footer .mobile-primary-button svg { width: 18px; height: 18px; }
+.mobile-marked-edit-sheet .mobile-mark-remove { min-height: 44px; padding: 0 12px; border: 0; color: #a06a5b; background: transparent; font-size: calc(12px * var(--mobile-text-scale, 1)); font-weight: 600; }
 .mobile-detail-sheet { display: flex; flex-direction: column; height: var(--mobile-viewport-height, 100dvh); max-height: none; padding-top: calc(env(safe-area-inset-top) + 16px); overflow: hidden; border-radius: 0; }
 .mobile-detail-sheet header { flex: none; min-width: 0; }.mobile-detail-sheet header > div { min-width: 0; }.mobile-detail-sheet h2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mobile-detail-sheet > .mobile-sheet-grabber { display: none; }

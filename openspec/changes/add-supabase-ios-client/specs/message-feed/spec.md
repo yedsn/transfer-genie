@@ -57,7 +57,13 @@ iOS composer and message mark actions SHALL open tag and optional due-date setti
 #### Scenario: Configure a mark
 - **WHEN** the user opens mark settings from a draft or message
 - **THEN** tags and due date can be selected before confirmation
+- **AND** saving settings applies the mark without a separate enable checkbox, even when tags and due date are empty
 - **AND** draft settings apply to both text and attachments when sent
+
+#### Scenario: Remove a saved composer mark
+- **WHEN** the user chooses the separate unmark action from saved draft mark settings
+- **THEN** the client requests explicit confirmation instead of toggling a checkbox
+- **AND** confirming clears draft mark metadata without changing its text or attachments; cancelling preserves the saved mark
 
 #### Scenario: Keep the source dialog beneath mark settings
 - **WHEN** the user opens mark settings or unmark confirmation from a composer or message action menu

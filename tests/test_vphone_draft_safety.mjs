@@ -17,4 +17,9 @@ assert.doesNotThrow(() => assertEmptyComposer(composer("写下你的想法…\n�
 for (const draft of [composer("unsent fixture"), composer(" "), composer("", true), composer(undefined), tree()]) {
   assert.throws(() => assertEmptyComposer(draft), /nonempty or unverifiable draft/);
 }
+for (const label of ["已标记 · 未分类 · 无截止日期", "已标记", "草稿自动保存失败"]) {
+  const metadataOnlyDraft = composer("");
+  metadataOnlyDraft.elements.push({ label });
+  assert.throws(() => assertEmptyComposer(metadataOnlyDraft), /nonempty or unverifiable draft/, "saved mark metadata and failed persistence cannot be treated as empty");
+}
 console.log("VPhone draft safety tests passed: idle/setup allowed, editors and unknown UI rejected without reading contents");

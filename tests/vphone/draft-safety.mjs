@@ -19,7 +19,8 @@ export function assertEmptyComposer(uiTree) {
   const editor = elements.find((element) => element.label === "消息内容");
   const emptyText = typeof editor?.value === "string" && (editor.value.length === 0 || editor.value === "输入文字，或加入照片和文件…" || editor.value === "写下你的想法…\n选中文字，用上方工具添加格式。");
   const hasAttachments = elements.some((element) => String(element.label || "").includes("移除附件"));
-  if (!emptyText || hasAttachments) {
+  const protectedState = elements.some((element) => /已标记|草稿自动保存失败/.test(String(element.label || "")));
+  if (!emptyText || hasAttachments || protectedState) {
     throw new Error("A nonempty or unverifiable draft exists in VPhone; preserve it before running smoke tests");
   }
 }

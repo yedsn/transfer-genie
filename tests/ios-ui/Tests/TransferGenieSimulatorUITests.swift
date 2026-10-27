@@ -23,12 +23,15 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         app.buttons["新消息"].tap()
         let editor = composerEditor()
         XCTAssertTrue(editor.waitForExistence(timeout: 5))
-        let value = editor.value as? String ?? ""
+        let value = editor.value as? String
         defer { if app.buttons["关闭新消息"].exists { app.buttons["关闭新消息"].tap() } }
-        guard value.isEmpty || value.hasPrefix("输入文字") || value.hasPrefix("写下你的想法") else {
+        let emptyEditorValues = ["", "输入文字，或加入照片和文件…", "写下你的想法…\n选中文字，用上方工具添加格式。"]
+        guard let value, emptyEditorValues.contains(value),
+              app.buttons.matching(identifier: "移除附件").count == 0,
+              !app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "已标记")).firstMatch.exists,
+              !app.staticTexts["草稿自动保存失败"].exists else {
             throw XCTSkip("Preserve an existing unsent draft before replacement installation")
         }
-        XCTAssertEqual(app.buttons.matching(identifier: "移除附件").count, 0)
     }
 
     func testUnsentMarkdownDraftSurvivesTermination() throws {
@@ -84,7 +87,7 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         XCTAssertTrue(editor.waitForExistence(timeout: 5))
         let original = editor.value as? String ?? ""
         let draft = "# TG Markdown UI\n\n**bold fixture** and `code`"
-        guard (original.isEmpty || original.hasPrefix("输入文字") || original.trimmingCharacters(in: .newlines) == draft), app.buttons.matching(identifier: "移除附件").count == 0 else {
+        guard (original.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || original == "输入文字，或加入照片和文件…" || original.trimmingCharacters(in: .newlines) == draft), app.buttons.matching(identifier: "移除附件").count == 0 else {
             throw XCTSkip("Preserve an existing unsent draft")
         }
         defer {
@@ -135,6 +138,48 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         // No send/save/confirm action is taken: all user messages stay unchanged.
     }
 
+    func testComposerMarkSettingsSaveAndConfirmedRemoval() throws {
+        app.buttons["新消息"].tap()
+        app.switches["文字"].tap()
+        let editor = composerEditor()
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        var original = editor.value as? String ?? ""
+        if original.trimmingCharacters(in: .newlines) == "# TG Markdown UI\n\n**bold fixture** and `code`" {
+            clearVerifiedComposerFixture(editor)
+            original = editor.value as? String ?? ""
+        }
+        let emptyValues = ["", "输入文字，或加入照片和文件…", "写下你的想法…\n选中文字，用上方工具添加格式。"]
+        guard emptyValues.contains(original.trimmingCharacters(in: .whitespacesAndNewlines)),
+              app.buttons.matching(identifier: "移除附件").count == 0,
+              !app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "已标记 ·")).firstMatch.exists else {
+            throw XCTSkip("Preserve an existing draft before changing fixture mark settings")
+        }
+        dismissKeyboardIfNeeded()
+        button(containing: "标记").tap()
+        XCTAssertTrue(app.buttons["保存标记"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.switches["发送时标记"].exists)
+        XCTAssertFalse(app.buttons["取消标记"].exists)
+        attachScreenshot(named: "composer-mark-settings-without-checkbox")
+        app.buttons["保存标记"].tap()
+        let summary = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "已标记 ·")).firstMatch
+        XCTAssertTrue(summary.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["关闭新消息"].exists)
+        button(containing: "标记").tap()
+        XCTAssertTrue(app.buttons["取消标记"].waitForExistence(timeout: 5))
+        app.buttons["取消标记"].tap()
+        XCTAssertTrue(app.buttons["确认取消标记"].waitForExistence(timeout: 5))
+        app.buttons["保留标记"].tap()
+        XCTAssertTrue(summary.waitForExistence(timeout: 5))
+        button(containing: "标记").tap()
+        app.buttons["取消标记"].tap()
+        app.buttons["确认取消标记"].tap()
+        XCTAssertTrue(app.buttons["关闭新消息"].waitForExistence(timeout: 5))
+        XCTAssertFalse(summary.exists)
+        XCTAssertEqual(composerEditor().value as? String ?? "", original)
+        app.buttons["关闭新消息"].tap()
+        XCTAssertTrue(app.buttons["新消息"].waitForExistence(timeout: 5))
+    }
+
     func testFullScreenDetailMoreRowInBothOrientations() throws {
         app.buttons["搜索消息"].tap()
         let search = app.searchFields["搜索文本、文件名"]
@@ -180,6 +225,67 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         XCTAssertTrue(app.buttons["关闭详情"].waitForExistence(timeout: 5))
         XCTAssertTrue(more.isHittable)
         XCTAssertTrue(document.exists)
+    }
+
+    func testMarkedLongMarkdownExcerptAndConfirmedCleanup() throws {
+        let marker = "TG-MARK-FADE-" + UUID().uuidString
+        app.buttons["新消息"].tap()
+        app.switches["文字"].tap()
+        let editor = composerEditor()
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        let original = editor.value as? String
+        guard let original, ["", "输入文字，或加入照片和文件…"].contains(original),
+              app.buttons.matching(identifier: "移除附件").count == 0,
+              !app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "已标记")).firstMatch.exists else {
+            throw XCTSkip("Preserve user draft before marked excerpt fixture")
+        }
+        editor.tap()
+        editor.typeText("# " + marker + "\n\n" + String(repeating: "**Readable fixture** with enough content to overflow.\n\n", count: 12))
+        app.switches["Markdown"].tap()
+        XCTAssertTrue(app.switches["粗体"].waitForExistence(timeout: 5))
+        button(containing: "标记").tap()
+        XCTAssertTrue(app.buttons["保存标记"].waitForExistence(timeout: 5))
+        app.buttons["保存标记"].tap()
+        XCTAssertTrue(app.buttons["发送"].waitForExistence(timeout: 5))
+        app.buttons["发送"].tap()
+        XCTAssertTrue(app.buttons["新消息"].waitForExistence(timeout: 20))
+        XCTAssertTrue(button(containing: "存储空间，已同步").waitForExistence(timeout: 60))
+        app.buttons["标记"].tap()
+        try verifyMarkedExcerptAndCleanup(marker: marker)
+    }
+
+    private func verifyMarkedExcerptAndCleanup(marker: String) throws {
+        let row = app.buttons.matching(NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@", marker, "查看全文")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 20))
+        attachScreenshot(named: "native-marked-gradient-excerpt")
+        row.tap()
+        XCTAssertTrue(app.buttons["关闭详情"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts[marker].exists)
+        attachScreenshot(named: "native-marked-full-detail")
+        app.buttons["关闭详情"].tap()
+        let unmark = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@ AND label CONTAINS %@", "取消标记 ", marker)).firstMatch
+        XCTAssertTrue(unmark.waitForExistence(timeout: 5))
+        unmark.tap()
+        XCTAssertTrue(app.buttons["确认取消标记"].waitForExistence(timeout: 5))
+        app.buttons["保留标记"].tap()
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        app.buttons["消息"].tap()
+        app.buttons["搜索消息"].tap()
+        let search = app.searchFields["搜索文本、文件名"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap()
+        search.typeText(marker)
+        XCTAssertTrue(app.staticTexts[marker].waitForExistence(timeout: 20))
+        XCTAssertEqual(app.buttons.matching(identifier: "更多操作").count, 1)
+        dismissSearchKeyboard()
+        app.buttons["更多操作"].tap()
+        XCTAssertTrue(button(containing: "删除消息（同步到云端）").waitForExistence(timeout: 5))
+        button(containing: "删除消息（同步到云端）").tap()
+        XCTAssertTrue(app.buttons["确认删除"].waitForExistence(timeout: 5))
+        app.buttons["确认删除"].tap()
+        XCTAssertTrue(app.staticTexts["没有找到相关内容"].waitForExistence(timeout: 20))
+        XCTAssertTrue(button(containing: "存储空间，已同步").waitForExistence(timeout: 60))
+        app.buttons["清除"].tap()
     }
 
     func testAppPinchDoesNotScaleComposer() {
@@ -1340,7 +1446,7 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         let plain = composerEditor()
         XCTAssertTrue(plain.waitForExistence(timeout: 5))
         let original = plain.value as? String ?? ""
-        guard (original.isEmpty || original.hasPrefix("输入文字") || original.hasPrefix("写下你的想法")),
+        guard (original.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || original == "输入文字，或加入照片和文件…" || original == "写下你的想法…\n选中文字，用上方工具添加格式。"),
               app.buttons.matching(identifier: "移除附件").count == 0,
               app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "已标记 ·")).count == 0 else {
             throw XCTSkip("Preserve an existing unsent draft")

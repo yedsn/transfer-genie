@@ -16,6 +16,7 @@ import {
   useMobileController,
 } from "./mobile-controller";
 import MobileMessageBody from "./MobileMessageBody.vue";
+import MobileMarkedExcerpt from "./MobileMarkedExcerpt.vue";
 import MobileText from "./MobileText.vue";
 const MobileMarkdownEditor = defineAsyncComponent(() => import('./MobileMarkdownEditor.vue'));
 
@@ -77,13 +78,14 @@ const markedDueDraft = ref("");
 const newTagDraft = ref("");
 const pendingTags = ref<{ id: string; name: string }[]>([]);
 const markEditorSource = ref<"message" | "composer" | "selection">("message");
-const markedEnabledDraft = ref(true);
 const savingMark = ref(false);
 const markReturnSheet = ref<SheetName>(null);
 const composerUnderlay = computed(() => ["marked-edit", "unmark-confirm"].includes(activeSheet.value || "") && markReturnSheet.value === "composer");
 const actionsUnderlay = computed(() => ["marked-edit", "unmark-confirm"].includes(activeSheet.value || "") && markReturnSheet.value === "actions");
 let markOpener: HTMLElement | null = null;
 let unmarkSelection = false;
+let unmarkComposer = false;
+const canRemoveSavedMark = computed(() => markEditorSource.value === "composer" ? state.composer.marked : markEditorSource.value === "message" && selectedMessage.value?.marked);
 const markedTagOptions = computed(() => [...state.tags, ...pendingTags.value]);
 const markedFilter = ref<"pending" | "all">("pending");
 const activeTag = ref("");
@@ -463,7 +465,6 @@ function openMarkSettings(source: "message" | "composer" | "selection") {
   markEditorSource.value = source;
   markedTagDraft.value = [...(source === "composer" ? state.composer.tagIds : source === "message" ? selectedMessage.value?.tagIds || [] : [])];
   markedDueDraft.value = source === "composer" ? state.composer.dueDate : source === "message" ? selectedMessage.value?.dueDate || "" : "";
-  markedEnabledDraft.value = true;
   pendingTags.value = [];
   newTagDraft.value = "";
   openSheet("marked-edit");
@@ -484,11 +485,24 @@ function openUnmarkConfirmation(message: MobileMessage | null, selection = false
   if (message) selectedMessage.value = message;
   rememberMarkSource();
   unmarkSelection = selection;
+  unmarkComposer = false;
+  openSheet("unmark-confirm");
+}
+function removeSavedMark() {
+  if (state.busy || savingMark.value || !canRemoveSavedMark.value) return;
+  // Keep the original composer/actions return target, not the settings sheet.
+  unmarkSelection = false;
+  unmarkComposer = markEditorSource.value === "composer";
   openSheet("unmark-confirm");
 }
 async function confirmUnmark() {
   if (state.busy) return;
-  if (unmarkSelection) {
+  if (unmarkComposer) {
+    state.composer.marked = false;
+    state.composer.tagIds = [];
+    state.composer.dueDate = "";
+    returnFromMarkSettings();
+  } else if (unmarkSelection) {
     await applySelection("unmark", true);
     if (!state.error) returnFromMarkSettings();
   } else if (selectedMessage.value && await controller.toggleMark(selectedMessage.value)) {
@@ -561,19 +575,17 @@ async function saveMarkedMetadata() {
   if (state.busy || savingMark.value) return;
   savingMark.value = true;
   try {
-    if (markedEnabledDraft.value) {
-      for (const pending of [...pendingTags.value]) {
-        if (!markedTagDraft.value.includes(pending.id)) continue;
-        const tag = await controller.createMarkedTag(pending.name);
-        if (!tag) return;
-        markedTagDraft.value = markedTagDraft.value.map((id) => id === pending.id ? tag.id : id);
-        pendingTags.value = pendingTags.value.filter((item) => item.id !== pending.id);
-      }
+    for (const pending of [...pendingTags.value]) {
+      if (!markedTagDraft.value.includes(pending.id)) continue;
+      const tag = await controller.createMarkedTag(pending.name);
+      if (!tag) return;
+      markedTagDraft.value = markedTagDraft.value.map((id) => id === pending.id ? tag.id : id);
+      pendingTags.value = pendingTags.value.filter((item) => item.id !== pending.id);
     }
     if (markEditorSource.value === "composer") {
-      state.composer.marked = markedEnabledDraft.value;
-      state.composer.tagIds = markedEnabledDraft.value ? [...markedTagDraft.value] : [];
-      state.composer.dueDate = markedEnabledDraft.value ? markedDueDraft.value : "";
+      state.composer.marked = true;
+      state.composer.tagIds = [...markedTagDraft.value];
+      state.composer.dueDate = markedDueDraft.value;
       returnFromMarkSettings();
     } else if (markEditorSource.value === "selection") {
       const result = await controller.applyMessageSelection(selectedMessages.value, "mark", { tagIds: markedTagDraft.value, dueDate: markedDueDraft.value || null });
@@ -1068,7 +1080,7 @@ onBeforeUnmount(() => {
                 @click="openMessage(item)"
               >
                 <strong v-if="item.kind !== 'text'">{{ item.title }}</strong>
-                <MobileText v-if="item.body" :text="item.body" :format="item.format" />
+                <MobileMarkedExcerpt v-if="item.body" :text="item.body" :format="item.format" />
                 <strong v-else-if="item.kind === 'text'">{{ item.title }}</strong>
                 <small><span v-for="tag in state.tags.filter((tag) => item.tagIds.includes(tag.id))" :key="tag.id">{{ tag.name }}</span><span v-if="!item.tagIds.length">未分类</span><i></i>{{ item.dueDate || "无截止日期" }}</small>
               </button>
@@ -1363,7 +1375,7 @@ onBeforeUnmount(() => {
           <div class="mobile-compose-tools">
             <button type="button" aria-label="照片" :disabled="state.busy || state.composer.sending || state.composer.selecting" @click="controller.selectMedia"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="8.5" cy="9" r="1.5"/><path d="m4 18 5-5 3 3 3-4 5 6"/></svg><span class="mobile-visually-hidden">照片</span></button>
             <button type="button" aria-label="文件" :disabled="state.busy || state.composer.sending || state.composer.selecting" @click="controller.selectDocuments"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h9l5 5v13H5zM14 3v5h5M8 13h8M8 17h8"/></svg><span class="mobile-visually-hidden">文件</span></button>
-            <button type="button" aria-label="标记" :class="{ 'is-selected': state.composer.marked }" :disabled="state.composer.sending" @click="openMarkSettings('composer')"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10v18l-5-3-5 3z"/></svg><span class="mobile-visually-hidden">标记</span></button>
+            <button type="button" aria-label="标记" :title="state.composer.marked ? '已标记，编辑标记设置' : '设置标记'" :class="{ 'is-selected': state.composer.marked }" :disabled="state.composer.sending" @click="openMarkSettings('composer')"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10v18l-5-3-5 3z"/></svg><span class="mobile-visually-hidden">标记</span></button>
           </div>
           <button
             class="mobile-primary-button"
@@ -1645,26 +1657,31 @@ onBeforeUnmount(() => {
           <div class="mobile-sheet-grabber"></div>
           <header>
             <div><small>{{ markEditorSource === 'composer' ? '为即将发送的内容设置' : markEditorSource === 'selection' ? `已选择 ${selectedMessages.length} 条消息` : selectedMessage?.title }}</small><h2 id="mobile-marked-edit-title">标记设置</h2></div>
-            <button type="button" aria-label="关闭编辑标记" @click="closeSheet">×</button>
+            <button type="button" aria-label="关闭编辑标记" :disabled="state.busy || savingMark" @click="closeSheet">×</button>
           </header>
-          <label v-if="markEditorSource === 'composer'" class="mobile-mark-enable"><input v-model="markedEnabledDraft" type="checkbox" :disabled="state.busy || savingMark" /> 发送时标记</label>
-          <fieldset class="mobile-marked-tag-options" :disabled="!markedEnabledDraft || state.busy || savingMark">
-            <legend>标签</legend>
+          <fieldset class="mobile-marked-tag-options" :disabled="state.busy || savingMark">
+            <legend>标签 <small>可多选</small></legend>
             <button v-for="tag in markedTagOptions" :key="tag.id" type="button" :class="{ 'is-selected': markedTagDraft.includes(tag.id) }" :aria-pressed="markedTagDraft.includes(tag.id)" @click="toggleMarkedTag(tag.id)">{{ tag.name }}<span>{{ markedTagDraft.includes(tag.id) ? "✓" : "＋" }}</span></button>
             <p v-if="!markedTagOptions.length" class="mobile-sheet-footnote">还没有标签，可以在下方新建。</p>
           </fieldset>
           <form class="mobile-new-tag-form" @submit.prevent="addMarkedTag">
-            <input v-model="newTagDraft" aria-label="新标签名称" placeholder="新建标签" :disabled="state.busy || savingMark || !markedEnabledDraft" />
-            <button type="submit" :disabled="state.busy || savingMark || !markedEnabledDraft || !newTagDraft.trim()">添加</button>
+            <input v-model="newTagDraft" aria-label="新标签名称" placeholder="新建标签…" :disabled="state.busy || savingMark" />
+            <button type="submit" :disabled="state.busy || savingMark || !newTagDraft.trim()">添加</button>
           </form>
-          <label class="mobile-due-field" for="mobile-marked-due"><span>截止日期</span><input id="mobile-marked-due" v-model="markedDueDraft" type="date" aria-label="截止日期" :disabled="state.busy || savingMark || !markedEnabledDraft" /></label>
+          <div class="mobile-mark-date-section">
+            <div class="mobile-mark-field-heading"><label for="mobile-marked-due">截止日期 <small>可选</small></label><button v-if="markedDueDraft" type="button" aria-label="清除截止日期" :disabled="state.busy || savingMark" @click="markedDueDraft = ''">清除</button></div>
+            <div class="mobile-due-field"><input id="mobile-marked-due" v-model="markedDueDraft" type="date" aria-label="截止日期" :disabled="state.busy || savingMark" /></div>
+          </div>
           <p v-if="state.error" class="mobile-feedback is-error" role="alert">{{ state.error }}</p>
-          <button class="mobile-primary-button" type="button" :disabled="state.busy || savingMark" @click="saveMarkedMetadata">{{ state.busy || savingMark ? "正在保存…" : "保存标记" }}</button>
+          <div class="mobile-mark-footer">
+            <button class="mobile-primary-button" type="button" :disabled="state.busy || savingMark" @click="saveMarkedMetadata"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10v18l-5-3-5 3z" /></svg>{{ state.busy || savingMark ? "正在保存…" : "保存标记" }}</button>
+            <button v-if="canRemoveSavedMark" class="mobile-mark-remove" type="button" :disabled="state.busy || savingMark" @click="removeSavedMark">取消标记</button>
+          </div>
         </section>
         <section v-else-if="activeSheet === 'unmark-confirm'" class="mobile-sheet mobile-unmark-sheet" role="dialog" aria-modal="true" aria-labelledby="mobile-unmark-title" tabindex="-1">
           <div class="mobile-sheet-grabber"></div>
           <header><div><small>此操作不会删除消息</small><h2 id="mobile-unmark-title">确认取消标记？</h2></div><button type="button" aria-label="关闭确认" :disabled="state.busy" @click="closeSheet">×</button></header>
-          <p class="mobile-unmark-copy">{{ unmarkSelection ? `将取消所选 ${selectedMessages.length} 条消息的标记。` : selectedMessage?.title }}</p>
+          <p class="mobile-unmark-copy">{{ unmarkComposer ? '发送时将不再标记这条消息，已选标签和截止日期也会清除。' : unmarkSelection ? `将取消所选 ${selectedMessages.length} 条消息的标记。` : selectedMessage?.title }}</p>
           <p v-if="state.error" class="mobile-feedback is-error" role="alert">{{ state.error }}</p>
           <button class="mobile-primary-button" type="button" :disabled="state.busy" @click="confirmUnmark">{{ state.busy ? '正在处理…' : '确认取消标记' }}</button>
           <button class="mobile-sheet-cancel" type="button" :disabled="state.busy" @click="closeSheet">保留标记</button>

@@ -377,7 +377,7 @@ try {
   if (existingApp.apps?.some((app) => app.bundle_id === BUNDLE_ID)) {
     // Launching an already-running app preserves its process and draft.
     guestRpc("apps.launch", { bundle_id: BUNDLE_ID });
-    const currentUI = tree();
+    const { ui: currentUI } = waitForMobileShell();
     assertNoActiveEditing(currentUI);
     if (hasLabel(currentUI, "新消息")) {
       tapText("新消息", "exact");
@@ -386,6 +386,10 @@ try {
       tapText("关闭新消息", "exact");
     }
     record("idle app and empty draft verified before installation or termination");
+    // Install coordination can wait indefinitely while the replaced app runs.
+    // Terminate only after the protected-draft checks above have succeeded.
+    guestRpc("apps.terminate", { bundle_id: BUNDLE_ID });
+    record("verified idle app terminated before replacement installation");
   }
 
   const ipa = makeIpa(options.app);
