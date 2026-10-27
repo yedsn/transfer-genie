@@ -4,6 +4,7 @@ import "./styles.css";
 import ComposerWorkspace from "./workspace/ComposerWorkspace.vue";
 import MobileShell from "./mobile/MobileShell.vue";
 import "./mobile/mobile.css";
+import "./mobile/composer.css";
 import "./workspace/composer.css";
 import { composerStore } from "./workspace/composer-store";
 import "./services/tauri-api.js";

@@ -1,0 +1,78 @@
+/* Full-screen writing surface, shared by plain text and Markdown. */
+.mobile-visually-hidden { position: absolute !important; width: 1px; height: 1px; padding: 0 !important; margin: -1px !important; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+.mobile-composer-launcher { gap: 6px; }
+.mobile-composer-launcher .mobile-add-button { flex: 0 0 44px; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 13px; color: #50665e; background: #e5ebe4; font-size: 27px; }
+.mobile-composer-entry { display: flex; flex: 1; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; height: 44px; padding: 0 10px; border: 0; background: transparent; text-align: left; }
+.mobile-composer-entry span { color: var(--mobile-muted); font-size: calc(13px * var(--mobile-text-scale, 1)); }
+.mobile-composer-entry svg { flex: 0 0 20px; width: 20px; height: 20px; fill: none; stroke: #8b8174; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+html .mobile-shell .mobile-sheet.mobile-composer-sheet.is-fullscreen-editor { display: flex; flex-direction: column; gap: 0; width: 100%; height: var(--mobile-viewport-height, 100dvh); max-height: none; padding: calc(env(safe-area-inset-top) + 4px) 0 max(12px, env(safe-area-inset-bottom)); overflow: hidden; border: 0; border-radius: 0; background: #faf9f5; }
+html .mobile-shell .mobile-composer-sheet.is-fullscreen-editor > .mobile-sheet-grabber { display: none; }
+html .mobile-shell .mobile-composer-sheet.is-fullscreen-editor header { display: flex; flex: 0 0 44px; align-items: center; justify-content: space-between; gap: 12px; margin: 0 12px 8px; }
+html .mobile-shell .mobile-composer-sheet.is-fullscreen-editor header > button { position: static; flex: 0 0 44px; margin: 0; color: #50665e; background: #e9eee8; }
+.mobile-editor-destination { min-width: 0; overflow: hidden; color: #7c8277; font-size: calc(11px * var(--mobile-text-scale, 1)); text-overflow: ellipsis; white-space: nowrap; }
+html .mobile-shell .mobile-composer-sheet.is-fullscreen-editor .mobile-composer-content { display: flex; flex: 1; flex-direction: column; gap: 0; min-height: 0; margin: 0; padding: 0; overflow: hidden; }
+html .mobile-shell .mobile-composer-sheet.is-fullscreen-editor .mobile-compose-editor { display: flex; flex: 1; flex-direction: column; width: 100%; margin: 0; min-width: 0; min-height: 72px; max-height: none; overflow: hidden; }
+html .mobile-shell .mobile-composer-sheet.is-fullscreen-editor textarea { flex: 1; width: 100%; height: 100%; min-height: 64px; max-height: none; padding: 18px 12px; border: 0; border-radius: 0; background: transparent; box-shadow: none; line-height: 1.7; }
+html .mobile-shell .mobile-composer-sheet.is-fullscreen-editor textarea:focus { box-shadow: none; }
+.mobile-rich-editor { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+.mobile-rich-editor-host { flex: 1; min-height: 64px; padding: 0 24px; overflow-y: auto; overscroll-behavior-y: contain; -webkit-overflow-scrolling: touch; font-size: calc(16px * var(--mobile-text-scale, 1)); }
+.mobile-rich-editor-host .milkdown { min-height: 100%; }
+.mobile-rich-editor-host .ProseMirror { min-height: 100%; padding: 16px 0 40px; outline: none; overflow-wrap: anywhere; }
+.mobile-rich-editor-host .ProseMirror:focus-visible { outline: none; }
+.mobile-rich-editor-host .ProseMirror > p:first-child:last-child:empty::before { position: absolute; color: #929a90; content: '写下你的想法…'; pointer-events: none; }
+.mobile-rich-editor-host .ProseMirror > p:first-child:last-child:has(> br:only-child)::before { position: absolute; color: #929a90; content: '写下你的想法…'; pointer-events: none; }
+.mobile-rich-editor-host h1 { font-size: 1.65em; letter-spacing: -.035em; }.mobile-rich-editor-host h2 { font-size: 1.4em; letter-spacing: -.025em; }
+.mobile-rich-editor-host blockquote { border-left-color: #8da899; color: #5e7066; }
+.mobile-rich-editor-host table { display: table; width: 100%; }.mobile-rich-editor-host th, .mobile-rich-editor-host td { min-width: 44px; }
+.mobile-editor-image-placeholder { display: inline-block; padding: 3px 8px; border: 1px solid #cad4c9; border-radius: 7px; color: #53675c; background: #eaf0e7; font-size: .85em; }
+html .mobile-shell .mobile-composer-sheet.is-fullscreen-editor .mobile-markdown-toolbar { flex: 0 0 auto; gap: 0; width: 100%; max-width: none; margin: 0; padding: 0; border: 0; border-radius: 0; color: #355346; background: rgba(211,225,211,.65); backdrop-filter: blur(18px) saturate(125%); -webkit-backdrop-filter: blur(18px) saturate(125%); box-shadow: none; }
+html .mobile-shell .mobile-composer-sheet.is-fullscreen-editor .mobile-markdown-toolbar button { border-radius: 0; color: #405d4f; }.mobile-markdown-toolbar button[aria-pressed="true"] { background: #c5d6c6; }
+.mobile-markdown-toolbar svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }.mobile-markdown-toolbar .is-mirrored { transform: scaleX(-1); }
+.mobile-editor-link-form { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 0; }
+.mobile-editor-link-form input { flex: 1; min-width: 100px; min-height: 44px; padding: 8px; border: 1px solid #bacdbd; border-radius: 10px; font-size: calc(16px * var(--mobile-text-scale, 1)); background: #fff; }
+.mobile-editor-link-form button { min-width: 44px; min-height: 44px; padding: 0 8px; border: 0; border-radius: 10px; color: #355346; background: #e2ebe0; }.mobile-editor-link-form p { flex: 0 0 100%; margin: 0; color: var(--mobile-red); }
+html .mobile-shell .mobile-composer-sheet.is-fullscreen-editor .mobile-compose-actions { display: flex; flex: 0 1 auto; flex-direction: column; width: calc(100% - 24px); margin: 0 12px; max-height: 45%; min-height: 60px; padding-top: 6px; overflow-y: auto; overscroll-behavior: contain; border-top: 1px solid #e6e7de; }
+html .mobile-shell .mobile-composer-sheet.is-fullscreen-editor .mobile-attachment-strip { flex: 0 0 auto; width: 100%; margin: 0 0 8px; padding: 0; }.mobile-compose-actions > .mobile-draft-save-status { margin: 2px 6px 4px; font-size: calc(10px * var(--mobile-text-scale, 1)); }
+.mobile-compose-bottom { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 4px; width: 100%; min-height: 52px; }
+html .mobile-shell .mobile-composer-sheet.is-fullscreen-editor .mobile-composer-format { display: flex; flex: 0 0 auto; flex-wrap: nowrap; gap: 0; margin: 0 auto 0 0; padding: 2px; border-radius: 12px; background: #eeefe7; }
+html .mobile-shell .mobile-composer-sheet.is-fullscreen-editor .mobile-composer-format button { min-width: 44px; min-height: 44px; padding: 0 7px; border-radius: 10px; font-size: calc(11px * var(--mobile-text-scale, 1)); }
+html .mobile-shell .mobile-composer-sheet.is-fullscreen-editor .mobile-composer-format button[aria-pressed="true"] { border-color: transparent; color: #355346; background: #fffefa; box-shadow: 0 1px 4px rgba(45,62,43,.08); }
+html .mobile-shell .mobile-composer-sheet.is-fullscreen-editor .mobile-compose-tools { display: flex; flex: 0 0 auto; flex-wrap: nowrap; gap: 0; margin: 0; }
+html .mobile-shell .mobile-composer-sheet.is-fullscreen-editor .mobile-compose-tools button { flex: 0 0 44px; width: 44px; min-width: 44px; height: 44px; padding: 10px; border: 0; color: #617367; background: transparent; }
+.mobile-compose-tools svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; }
+html .mobile-shell .mobile-composer-sheet.is-fullscreen-editor .mobile-compose-tools .is-selected { color: var(--mobile-orange-deep); background: #fff0df; }
+html .mobile-shell .mobile-composer-sheet.is-fullscreen-editor .mobile-primary-button { position: static; flex: 0 0 auto; order: 0; width: auto; min-width: 58px; height: auto; min-height: 44px; margin: 0; padding: 0 12px; border-radius: 13px; font-size: calc(12px * var(--mobile-text-scale, 1)); box-shadow: none; }
+html .mobile-shell .mobile-composer-sheet.is-fullscreen-editor .mobile-compose-actions > .mobile-draft-preview-status { position: static !important; max-width: none; color: var(--mobile-muted); background: transparent; }
+.mobile-attachment-menu > button { display: grid; grid-template-columns: 44px 1fr; gap: 3px 10px; align-items: center; width: 100%; min-height: 72px; margin-top: 8px; padding: 12px; border: 1px solid var(--mobile-line); border-radius: 16px; background: #fffdf8; text-align: left; }.mobile-attachment-menu > button span { grid-row: 1 / 3; font-size: 27px; color: #5c7769; }.mobile-attachment-menu > button small { color: var(--mobile-muted); }
+@media (max-width: 350px) {
+  html .mobile-shell .mobile-composer-sheet.is-fullscreen-editor .mobile-compose-bottom { flex-wrap: wrap; }
+  html .mobile-shell .mobile-composer-sheet.is-fullscreen-editor .mobile-composer-format { flex: 0 0 100%; justify-content: flex-start; background: transparent; }
+  html .mobile-shell .mobile-composer-sheet.is-fullscreen-editor .mobile-compose-tools { margin-right: auto; }
+}
+html[data-mobile-accessibility-text="true"] .mobile-shell .mobile-composer-sheet.is-fullscreen-editor .mobile-compose-bottom { flex-wrap: wrap; }
+html[data-mobile-accessibility-text="true"] .mobile-shell .mobile-composer-sheet.is-fullscreen-editor .mobile-composer-format { flex: 0 0 100%; background: transparent; }
+html[data-mobile-accessibility-text="true"] .mobile-shell .mobile-composer-sheet.is-fullscreen-editor .mobile-compose-tools { margin-right: auto; }
+html[data-mobile-accessibility-text="true"] .mobile-shell .mobile-composer-sheet.is-fullscreen-editor .mobile-attachment-strip > div { height: 96px; }
+html[data-mobile-accessibility-text="true"] .mobile-composer-launcher { height: auto; min-height: 70px; }
+@media (orientation: landscape) and (max-height: 520px) {
+  html .mobile-shell.is-keyboard-visible .mobile-sheet.mobile-composer-sheet.is-fullscreen-editor { position: relative; padding-top: 8px; padding-bottom: 8px; padding-left: max(12px, env(safe-area-inset-left)); padding-right: max(64px, calc(env(safe-area-inset-right) + 48px)); }
+  html .mobile-shell.is-keyboard-visible .mobile-composer-sheet.is-fullscreen-editor header { position: absolute; top: 8px; right: max(8px, env(safe-area-inset-right)); margin: 0; }
+  html .mobile-shell.is-keyboard-visible .mobile-composer-sheet.is-fullscreen-editor .mobile-editor-destination { display: none; }
+  html .mobile-shell.is-keyboard-visible .mobile-composer-sheet.is-fullscreen-editor .mobile-composer-content { display: grid; grid-template-columns: minmax(0, 1fr) minmax(270px, .9fr); gap: 12px; overflow: hidden; }
+  html .mobile-shell.is-keyboard-visible .mobile-composer-sheet.is-fullscreen-editor .mobile-compose-editor { grid-column: 1; grid-row: 1; width: 100%; height: 100%; margin: 0; min-height: 0; overflow-y: auto; }
+  html .mobile-shell.is-keyboard-visible .mobile-composer-sheet.is-fullscreen-editor .mobile-markdown-toolbar { width: 100%; margin: 0; padding: 0; }
+  html .mobile-shell.is-keyboard-visible .mobile-composer-sheet.is-fullscreen-editor .mobile-rich-editor { flex: 0 0 auto; min-height: 100%; overflow: visible; }
+  html .mobile-shell.is-keyboard-visible .mobile-composer-sheet.is-fullscreen-editor .mobile-rich-editor-host { flex: 0 0 96px; height: 96px; }
+  html .mobile-shell.is-keyboard-visible .mobile-composer-sheet.is-fullscreen-editor textarea { flex: 0 0 96px; width: 100%; height: 96px; }
+  html .mobile-shell.is-keyboard-visible .mobile-composer-sheet.is-fullscreen-editor .mobile-compose-actions { position: relative; display: flex; grid-column: 2; grid-row: 1; flex-direction: row; align-items: start; gap: 8px; width: 100%; height: 100%; margin: 0; max-height: none; min-width: 0; min-height: 0; padding: 0 0 4px; overflow-x: auto; overflow-y: hidden; border: 0; }
+  html .mobile-shell.is-keyboard-visible .mobile-composer-sheet.is-fullscreen-editor .mobile-compose-bottom { display: contents; }
+  html .mobile-shell.is-keyboard-visible .mobile-composer-sheet.is-fullscreen-editor .mobile-primary-button { order: -2; min-height: 44px; flex: 0 0 auto; }
+  html .mobile-shell.is-keyboard-visible .mobile-composer-sheet.is-fullscreen-editor .mobile-composer-format { flex: 0 0 auto; order: -1; }
+  html .mobile-shell.is-keyboard-visible .mobile-composer-sheet.is-fullscreen-editor .mobile-compose-tools { display: contents; }.mobile-compose-tools button { scroll-margin: 4px; }
+  html .mobile-shell.is-keyboard-visible .mobile-composer-sheet.is-fullscreen-editor .mobile-attachment-strip { display: flex; flex: 0 0 auto; order: 1; width: max-content; height: 100%; margin: 0; overflow: visible; }
+  html .mobile-shell.is-keyboard-visible .mobile-composer-sheet.is-fullscreen-editor .mobile-attachment-strip > div { flex: 0 0 160px; width: 160px; height: min(96px, 100%); }
+  html .mobile-shell.is-keyboard-visible .mobile-composer-sheet.is-fullscreen-editor .mobile-compose-actions > p { flex: 0 0 220px; order: 2; margin: 0; }
+}
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  html .mobile-shell .mobile-composer-sheet.is-fullscreen-editor .mobile-markdown-toolbar { background: #dde8da; backdrop-filter: none; -webkit-backdrop-filter: none; }
+}

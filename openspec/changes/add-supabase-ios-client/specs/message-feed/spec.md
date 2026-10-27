@@ -11,17 +11,22 @@
 - **AND** 标记设置与删除确认的取消路径逐层返回，未确认前不修改消息
 
 ### Requirement: Mobile Markdown composition and reading
-iOS SHALL offer plain-text and Markdown editing with a rendered preview. Markdown messages SHALL retain their format and original source in the existing send contract, and SHALL render safely in feed, marked rows and details. Message HTML MUST NOT execute scripts or load remote images during passive reading.
+iOS SHALL offer full-screen plain-text and WYSIWYG Markdown editing without a preview toggle. Untouched drafts MUST preserve exact source; rich edits MAY normalize equivalent Markdown. The existing send format SHALL be retained. Scripts and remote images MUST NOT execute or load during reading or editing.
 
 #### Scenario: Compose and read Markdown
-- **WHEN** the user writes Markdown and selects preview
-- **THEN** headings, lists, links, code and tables render without changing the source
-- **AND** sending preserves format=markdown and the original content
+- **WHEN** the user enters or pastes Markdown in the full-screen editor
+- **THEN** headings, lists, links and code are directly editable in rendered form without selecting preview
+- **AND** sending preserves format=markdown and the authored content, and untouched imported source is not rewritten
 
 #### Scenario: Insert formatting while composing
 - **WHEN** the user selects text or positions the caret and taps a Markdown formatting action
-- **THEN** the action inserts or wraps the appropriate syntax without losing the remaining draft
-- **AND** the editor remains usable with the iOS keyboard, while preview and edit retain the original source
+- **THEN** the action immediately applies the corresponding visible formatting without losing the remaining draft
+- **AND** the top translucent toolbar provides list indentation, outdent, undo and redo, and retains keyboard usability
+
+#### Scenario: Separate file selection from text editing
+- **WHEN** the user taps the plus button to the left of the feed input entry
+- **THEN** a menu offers photo/video and document selection without opening text editing first
+- **AND** selecting a resource prepares a composer attachment without automatically sending it
 
 ### Requirement: Account-scoped durable mobile drafts
 iOS composer drafts SHALL be persisted in the local business store by storage Profile, authenticated Supabase user and Space. A draft SHALL retain text, format, mark metadata and stable sandbox attachment identity across composer dismissal, process termination and application restart, and MUST NOT be placed in ordinary WebView local storage. Restoring a draft MUST NOT send it automatically.

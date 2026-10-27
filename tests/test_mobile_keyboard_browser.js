@@ -5,6 +5,7 @@ const { chromium } = createRequire(import.meta.url)(process.env.PLAYWRIGHT_MODUL
 const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || undefined, headless: true });
 try {
   const page = await browser.newPage({ viewport: { width: 390, height: 844 }, reducedMotion: 'reduce' });
+  page.setDefaultTimeout(10000);
   await page.goto((process.env.MOBILE_PREVIEW_URL || 'http://127.0.0.1:7120') + '/?mobile-preview=1');
   await page.waitForSelector('.mobile-message-card');
   await page.evaluate(() => {
@@ -39,7 +40,7 @@ try {
     assert.equal(await page.locator('.is-keyboard-visible').count(), 1);
     await page.getByRole('textbox', { name: '消息内容', exact: true }).fill('keyboard-local-fixture');
     const sheet = page.locator('.mobile-composer-sheet');
-    assert.equal(await sheet.evaluate((el) => el.scrollWidth > el.clientWidth), false);
+    assert.equal(await sheet.evaluate((el) => el.scrollWidth > el.clientWidth), false, JSON.stringify({ accessibilityText, width, height, visibleHeight, overflow: await sheet.evaluate(el => [...el.querySelectorAll('*')].filter(child => child.getBoundingClientRect().right > el.getBoundingClientRect().right + 1).map(child => ({ class: child.className, right: child.getBoundingClientRect().right, width: child.getBoundingClientRect().width })).slice(0, 10)) }));
     if (accessibilityText && width > height) {
       const layout = await sheet.evaluate((el) => {
         const editor = el.querySelector('textarea').getBoundingClientRect();
@@ -50,7 +51,7 @@ try {
         const closeHit = document.elementFromPoint(close.x + close.width / 2, close.y + close.height / 2);
         return { editorRight: editor.right, actionsLeft: actions.left, actionsRight: actions.right, sendTop: send.top, closeLeft: close.left, contentRight: content.right, closeHittable: closeHit?.closest('button') === el.querySelector('header > button') };
       });
-      assert.ok(layout.editorRight < layout.actionsLeft && layout.actionsRight <= layout.closeLeft, 'large-text landscape keeps editor and horizontally scrolling actions separate');
+      assert.ok(layout.editorRight < layout.actionsLeft && layout.actionsRight <= layout.closeLeft, 'large-text landscape keeps editor and horizontally scrolling actions separate: ' + JSON.stringify(layout));
       assert.ok(layout.contentRight <= layout.closeLeft && layout.closeHittable, 'the content grid must not intercept the separate close control');
     }
     await page.evaluate(({ height, visibleHeight }) => {
@@ -86,7 +87,7 @@ try {
       await action.scrollIntoViewIfNeeded();
       const box = await action.boundingBox();
       assert.ok(box.width >= 44 && box.height >= 44);
-      assert.ok(box.y >= shell.y && box.y + box.height <= shell.y + visibleHeight + 1, 'draft attachments must not push actions below the visible keyboard area');
+      assert.ok(box.y >= shell.y && box.y + box.height <= shell.y + visibleHeight + 1, 'draft attachments must not push actions below the visible keyboard area: ' + JSON.stringify({ accessibilityText, width, height, visibleHeight, box, label: await action.getAttribute('aria-label') }));
       const hit = await action.evaluate((el) => {
         const r = el.getBoundingClientRect();
         const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);

@@ -121,4 +121,55 @@ await controller.persistComposerDraft(true);
 assert.equal(draftRows.has(key()), false, 'complete local send clears the persisted draft');
 assert.equal(textSends, 1, 'attachment retry must not resend text already saved locally');
 
-console.log('mobile draft persistence passed: restart restore, Profile/Auth/Space isolation, missing-file guard, partial retry identity and successful cleanup');
+// The native picker result must be durable before its controller call returns.
+api.mobileIntegration.selectDocuments = async () => ({ items: [{ path: '/sandbox/picked.pdf', originalName: 'picked.pdf', sizeBytes: 20 }] });
+await controller.selectDocuments();
+assert.equal(draftRows.get(key()).attachments.length, 1);
+assert.equal(draftRows.get(key()).attachments[0].path, '/sandbox/picked.pdf');
+const selectedClientId = draftRows.get(key()).attachments[0].clientId;
+await terminate(controller);
+controller = await makeController();
+assert.equal(controller.state.composer.attachments[0].clientId, selectedClientId);
+
+// Switching Profile, not just Auth or Space, cannot expose an existing draft.
+await terminate(controller);
+activeProfile = { ...activeProfile, id: 'profile-b' };
+controller = await makeController();
+assert.equal(controller.state.composer.text, '');
+assert.equal(controller.state.composer.attachments.length, 0);
+controller.state.composer.text = 'profile-b-only';
+assert.equal(controller.state.composer.draftStatus, 'idle');
+await new Promise(resolve => setTimeout(resolve, 450));
+assert.equal(draftRows.get(key()).text, 'profile-b-only');
+assert.equal(controller.state.composer.draftStatus, 'saved');
+
+// A failed save must not fall through to sending or silently discard the draft.
+const realSave = api.mobileDraft.save;
+const sendsBeforeFailure = textSends;
+api.mobileDraft.save = async () => { throw new Error('fixture database write failure'); };
+controller.state.composer.text = 'retain-after-write-failure';
+assert.equal(await controller.sendDraft(), false);
+assert.equal(textSends, sendsBeforeFailure);
+assert.equal(controller.state.composer.text, 'retain-after-write-failure');
+assert.equal(controller.state.composer.draftStatus, 'error');
+assert.equal(controller.state.composer.sending, false);
+api.mobileDraft.save = realSave;
+assert.equal(await controller.persistComposerDraft(true), true);
+assert.equal(draftRows.get(key()).text, 'retain-after-write-failure');
+
+// An unreadable persisted payload cannot be overwritten by an empty editor.
+await terminate(controller);
+const realGet = api.mobileDraft.get;
+api.mobileDraft.get = async () => { throw new Error('fixture corrupt payload'); };
+controller = await makeController();
+assert.equal(controller.state.composer.persistenceReady, false);
+assert.equal(controller.state.composer.draftStatus, 'error');
+assert.equal(await controller.persistComposerDraft(true), false);
+assert.equal(draftRows.get(key()).text, 'retain-after-write-failure');
+api.mobileDraft.get = realGet;
+await terminate(controller);
+controller = await makeController();
+assert.equal(controller.state.composer.text, 'retain-after-write-failure');
+await terminate(controller);
+
+console.log('mobile draft persistence passed: restart restore, Profile/Auth/Space isolation, immediate picker save, debounce/status, missing-file guard, save/restore failure protection, partial retry identity and successful cleanup');

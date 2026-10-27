@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {
   computed,
+  defineAsyncComponent,
   nextTick,
   onBeforeUnmount,
   onMounted,
@@ -16,7 +17,7 @@ import {
 } from "./mobile-controller";
 import MobileMessageBody from "./MobileMessageBody.vue";
 import MobileText from "./MobileText.vue";
-import { formatMarkdown, type MarkdownAction } from "./markdown-edit";
+const MobileMarkdownEditor = defineAsyncComponent(() => import('./MobileMarkdownEditor.vue'));
 
 type MobileTab = "feed" | "marked" | "profile";
 type MobileDiagnostic = {
@@ -25,7 +26,7 @@ type MobileDiagnostic = {
   mainThread?: boolean;
 };
 type SheetName =
-  "composer" | "actions" | "transfer" | "spaces" | "detail" | "cache" | "sender" | "about" | "marked-edit" | "unmark-confirm" | "conflicts" | "delete-confirm" | null;
+  "composer" | "attach" | "actions" | "transfer" | "spaces" | "detail" | "cache" | "sender" | "about" | "marked-edit" | "unmark-confirm" | "conflicts" | "delete-confirm" | null;
 
 const controller = useMobileController();
 const { state, currentSpace, pendingCount, activeTransfers } = controller;
@@ -78,47 +79,6 @@ const pendingTags = ref<{ id: string; name: string }[]>([]);
 const markEditorSource = ref<"message" | "composer" | "selection">("message");
 const markedEnabledDraft = ref(true);
 const savingMark = ref(false);
-const composerPreview = ref(false);
-const composerEditor = ref<HTMLTextAreaElement | null>(null);
-let editorReadingPosition = 0;
-function toggleComposerPreview() {
-  if (state.composer.sending) return;
-  const editor = composerEditor.value;
-  if (!composerPreview.value) {
-    editorReadingPosition = editor?.scrollTop || 0;
-    editor?.blur();
-    composerPreview.value = true;
-  } else {
-    composerPreview.value = false;
-    void nextTick(() => {
-      editor?.focus({ preventScroll: true });
-      if (editor) editor.scrollTop = editorReadingPosition;
-    });
-  }
-}
-const markdownTools: { action: MarkdownAction; label: string; glyph: string }[] = [
-  { action: "bold", label: "粗体", glyph: "B" },
-  { action: "italic", label: "斜体", glyph: "I" },
-  { action: "heading", label: "标题", glyph: "H₂" },
-  { action: "bullets", label: "无序列表", glyph: "• ≡" },
-  { action: "numbered", label: "有序列表", glyph: "1. ≡" },
-  { action: "quote", label: "引用", glyph: "❝" },
-  { action: "code", label: "代码", glyph: "</>" },
-  { action: "link", label: "链接", glyph: "↗" },
-];
-function insertMarkdown(action: MarkdownAction) {
-  const editor = composerEditor.value;
-  if (!editor || state.composer.sending || composerPreview.value) return;
-  const edit = formatMarkdown(editor.value, editor.selectionStart, editor.selectionEnd, action);
-  editor.focus({ preventScroll: true });
-  editor.setSelectionRange(edit.from, edit.to);
-  // WebKit's native edit command participates in the keyboard undo stack.
-  if (!document.execCommand("insertText", false, edit.insertion)) {
-    editor.setRangeText(edit.insertion, edit.from, edit.to, "end");
-    editor.dispatchEvent(new Event("input", { bubbles: true }));
-  }
-  editor.setSelectionRange(edit.selectionStart, edit.selectionEnd);
-}
 const markReturnSheet = ref<SheetName>(null);
 const composerUnderlay = computed(() => ["marked-edit", "unmark-confirm"].includes(activeSheet.value || "") && markReturnSheet.value === "composer");
 const actionsUnderlay = computed(() => ["marked-edit", "unmark-confirm"].includes(activeSheet.value || "") && markReturnSheet.value === "actions");
@@ -339,6 +299,12 @@ function closeSheet() {
     return;
   }
   dismissSheets();
+}
+async function chooseAttachment(kind: 'media' | 'document') {
+  openSheet('composer');
+  await nextTick();
+  if (kind === 'media') await controller.selectMedia();
+  else await controller.selectDocuments();
 }
 function dismissSheets() {
   if (activeSheet.value === "composer" && state.composer.selecting) return;
@@ -1222,19 +1188,17 @@ onBeforeUnmount(() => {
           ><strong>{{ activeTransfers.length }} 个传输任务</strong
           ><small>{{ activeTransferProgress }}%</small
           ><svg viewBox="0 0 20 20"><path d="m8 5 5 5-5 5" /></svg></button
-        ><button
-          class="mobile-composer-launcher"
+        ><div class="mobile-composer-launcher">
+          <button class="mobile-add-button" type="button" aria-label="添加附件" @click="openSheet('attach')">＋</button>
+          <button class="mobile-composer-entry"
           type="button"
           aria-label="新消息"
           @click="openSheet('composer')"
         >
-          <span class="mobile-add-button">＋</span><span>发送消息或文件…</span
-          ><span class="mobile-send-orb"
-            ><svg viewBox="0 0 24 24">
-              <path d="m4 5 16 7-16 7 3-7-3-7Z" />
-              <path d="M7 12h8" /></svg
-          ></span>
-        </button>
+          <span>{{ state.composer.text || state.composer.attachments.length ? '继续编辑草稿…' : '写消息…' }}</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 4 5 5-11 11H4v-5L15 4ZM12 7l5 5"/></svg>
+          </button>
+        </div>
         </template>
       </div>
       <nav
@@ -1294,7 +1258,7 @@ onBeforeUnmount(() => {
         <div v-if="composerUnderlay || actionsUnderlay" class="mobile-mark-overlay-backdrop" aria-hidden="true" @click="closeSheet"></div>
         <section
           v-if="activeSheet === 'composer' || composerUnderlay"
-          class="mobile-sheet mobile-composer-sheet"
+          class="mobile-sheet mobile-composer-sheet is-fullscreen-editor"
           role="dialog"
           :aria-modal="!composerUnderlay"
           :aria-hidden="composerUnderlay ? 'true' : undefined"
@@ -1304,34 +1268,22 @@ onBeforeUnmount(() => {
         >
           <div class="mobile-sheet-grabber"></div>
           <header>
-            <div>
-              <small>发送到 {{ currentSpace?.name }}</small>
-              <h2 id="mobile-composer-title">新消息</h2>
-            </div>
+            <h2 id="mobile-composer-title" class="mobile-visually-hidden">新消息</h2>
+            <span class="mobile-editor-destination">{{ currentSpace?.name }}</span>
             <button type="button" aria-label="关闭新消息" :disabled="state.composer.selecting" @click="closeSheet">×</button>
           </header>
           <div class="mobile-composer-content" role="region" aria-label="消息编辑与附件">
           <div class="mobile-compose-editor">
-          <div class="mobile-composer-format" aria-label="消息格式">
-            <button type="button" :aria-pressed="state.composer.format === 'text'" :disabled="state.composer.sending" @click="state.composer.format = 'text'; composerPreview = false">文字</button>
-            <button type="button" :aria-pressed="state.composer.format === 'markdown'" :disabled="state.composer.sending" @click="state.composer.format = 'markdown'">Markdown</button>
-            <button v-if="state.composer.format === 'markdown'" class="mobile-preview-toggle" type="button" :aria-pressed="composerPreview" :disabled="state.composer.sending" @click="toggleComposerPreview"><svg v-if="!composerPreview" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>{{ composerPreview ? '继续编辑' : '预览' }}</button>
-          </div>
-          <div v-if="state.composer.format === 'markdown' && !composerPreview" class="mobile-markdown-toolbar" role="toolbar" aria-label="Markdown 格式工具">
-            <button v-for="tool in markdownTools" :key="tool.action" type="button" :aria-label="tool.label" :title="tool.label" :class="`is-${tool.action}`" :disabled="state.composer.sending" @pointerdown.prevent @click="insertMarkdown(tool.action)"><span aria-hidden="true">{{ tool.glyph }}</span></button>
-          </div>
+          <MobileMarkdownEditor v-if="state.composer.format === 'markdown'" v-model="state.composer.text" :disabled="state.composer.sending || !state.composer.persistenceReady" />
           <textarea
-            ref="composerEditor"
-            :class="{ 'is-markdown-editor': state.composer.format === 'markdown' }"
-            v-show="!composerPreview || state.composer.format !== 'markdown'"
+            v-else
             v-model="state.composer.text"
             :disabled="state.composer.sending || !state.composer.persistenceReady"
             rows="6"
             aria-label="消息内容"
-            :placeholder="state.composer.format === 'markdown' ? '写下你的想法…\n选中文字，用上方工具添加格式。' : '输入文字，或加入照片和文件…'"
+            placeholder="输入文字，或加入照片和文件…"
             autofocus
           ></textarea>
-          <div v-if="composerPreview && state.composer.format === 'markdown'" class="mobile-compose-preview" aria-label="Markdown 预览"><MobileText v-if="state.composer.text" :text="state.composer.text" format="markdown" /><span v-else>输入内容后可在这里预览。</span></div>
           </div>
           <div class="mobile-compose-actions">
           <div
@@ -1392,20 +1344,6 @@ onBeforeUnmount(() => {
               </button>
             </div>
           </div>
-          <div class="mobile-compose-tools">
-            <button type="button" :disabled="state.busy || state.composer.sending || state.composer.selecting" @click="controller.selectMedia">
-              <span>▧</span>照片</button
-            ><button type="button" :disabled="state.busy || state.composer.sending || state.composer.selecting" @click="controller.selectDocuments">
-              <span>⌑</span>文件</button
-            ><button
-              type="button"
-              :class="{ 'is-selected': state.composer.marked }"
-              :disabled="state.composer.sending"
-              @click="openMarkSettings('composer')"
-            >
-              <span>★</span>标记
-            </button>
-          </div>
           <p v-if="state.composer.marked" class="mobile-composer-mark-summary">已标记 · {{ state.tags.filter((tag) => state.composer.tagIds.includes(tag.id)).map((tag) => tag.name).join('、') || '未分类' }} · {{ state.composer.dueDate || '无截止日期' }}</p>
           <p
             v-if="['saving', 'saved', 'restored', 'error'].includes(state.composer.draftStatus)"
@@ -1417,6 +1355,16 @@ onBeforeUnmount(() => {
           <p v-if="state.composer.error" class="mobile-inline-error" role="alert">
             {{ state.composer.error }}
           </p>
+          <div class="mobile-compose-bottom">
+          <div class="mobile-composer-format" aria-label="消息格式">
+            <button type="button" :aria-pressed="state.composer.format === 'text'" :disabled="state.composer.sending" @click="state.composer.format = 'text'">文字</button>
+            <button type="button" :aria-pressed="state.composer.format === 'markdown'" :disabled="state.composer.sending" @click="state.composer.format = 'markdown'">Markdown</button>
+          </div>
+          <div class="mobile-compose-tools">
+            <button type="button" aria-label="照片" :disabled="state.busy || state.composer.sending || state.composer.selecting" @click="controller.selectMedia"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="8.5" cy="9" r="1.5"/><path d="m4 18 5-5 3 3 3-4 5 6"/></svg><span class="mobile-visually-hidden">照片</span></button>
+            <button type="button" aria-label="文件" :disabled="state.busy || state.composer.sending || state.composer.selecting" @click="controller.selectDocuments"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h9l5 5v13H5zM14 3v5h5M8 13h8M8 17h8"/></svg><span class="mobile-visually-hidden">文件</span></button>
+            <button type="button" aria-label="标记" :class="{ 'is-selected': state.composer.marked }" :disabled="state.composer.sending" @click="openMarkSettings('composer')"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10v18l-5-3-5 3z"/></svg><span class="mobile-visually-hidden">标记</span></button>
+          </div>
           <button
             class="mobile-primary-button"
             :class="{ 'is-queued': state.composer.savedLocally }"
@@ -1440,6 +1388,13 @@ onBeforeUnmount(() => {
           </button>
           </div>
           </div>
+          </div>
+        </section>
+        <section v-if="activeSheet === 'attach'" class="mobile-sheet mobile-attachment-menu" role="dialog" aria-modal="true" aria-labelledby="mobile-attachment-menu-title" tabindex="-1">
+          <div class="mobile-sheet-grabber"></div>
+          <header><h2 id="mobile-attachment-menu-title">添加附件</h2><button type="button" aria-label="关闭附件菜单" @click="closeSheet">×</button></header>
+          <button type="button" @click="chooseAttachment('media')"><span>▧</span><strong>照片与视频</strong><small>从照片图库选择</small></button>
+          <button type="button" @click="chooseAttachment('document')"><span>⌑</span><strong>文件</strong><small>从文件 App 选择</small></button>
         </section>
         <section
           v-if="activeSheet === 'actions' || actionsUnderlay"

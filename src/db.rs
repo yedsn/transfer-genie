@@ -10799,6 +10799,42 @@ mod tests {
     }
 
     #[test]
+    fn mobile_composer_drafts_migrate_without_changing_existing_messages() {
+        let path = temp_db_path("mobile-composer-migration");
+        init_db(&path, None).expect("initialize fixture database");
+        let message = sample_message("existing.txt", 100, &[], false);
+        upsert_message(&path, &message).expect("save existing message");
+        let conn = Connection::open(&path).expect("open fixture database");
+        conn.execute_batch("DROP TABLE mobile_composer_drafts;")
+            .expect("simulate schema before mobile drafts");
+        drop(conn);
+
+        init_db(&path, None).expect("migrate existing database");
+        let restored = get_message(&path, "endpoint-1", "existing.txt")
+            .expect("read existing message")
+            .expect("existing message remains");
+        assert_eq!(restored.content, message.content);
+        let draft = MobileComposerDraftRecord {
+            endpoint_id: "profile-a".into(),
+            owner_scope: "user-a".into(),
+            space_id: "space-a".into(),
+            payload_json: r#"{"text":"after migration"}"#.into(),
+            updated_at_ms: 10,
+        };
+        upsert_mobile_composer_draft(&path, &draft).expect("save migrated draft");
+        init_db(&path, None).expect("initialize migrated database again");
+        assert_eq!(
+            get_mobile_composer_draft(&path, "profile-a", "user-a", "space-a").unwrap(),
+            Some(draft)
+        );
+        assert_eq!(
+            get_message(&path, "endpoint-1", "existing.txt").unwrap().unwrap().content,
+            message.content
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn mobile_composer_drafts_are_profile_account_and_space_scoped() {
         let path = temp_db_path("mobile-composer-drafts");
         init_db(&path, None).expect("initialize database");

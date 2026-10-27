@@ -1,5 +1,30 @@
 # iOS 附件持久化、恢复与界面状态验证
 
+## 2026-10-27 富文本实际发送与草稿完整验证
+
+- 最新已安装官方 Simulator Release 上实际点击粗体/列表工具并输入专用随机标识消息，发送、等待已同步、终止进程再启动，搜索唯一结果通过。SQLite 精确限定测试标识查询证明只有一条记录、format=markdown、content 含粗体和列表末尾 END、remote_revision=1、sync_state=synced，草稿数量为 0。发送证据 /Volumes/VPhone/installers/tg-wysiwyg-20261027-2148/Logs/Test/Test-TransferGenieSimulatorUITests-2026.10.27_22-38-42-+0800.xcresult（1 Passed，0 Failed/Skipped）。
+- 使用应用内“删除消息（同步到云端）→确认删除”仅清理精确随机标识的唯一搜索结果，删除后没有搜索结果且状态已同步，SQLite 确认测试行已为 synced tombstone；没有删除普通消息。清理结果 Test-TransferGenieSimulatorUITests-2026.10.27_22-40-06-+0800.xcresult（1 Passed，0 Failed/Skipped）。最终可重复 XCTest 用每次新 UUID，发送/重启验证后自行精确清理，运行 testSendRichMarkdownFixture 通过，结果 Test-TransferGenieSimulatorUITests-2026.10.27_22-44-40-+0800.xcresult（1 Passed，0 Failed/Skipped）。两次测试均完整保存粗体/列表/END 并成功清理，0 个存活测试消息、0 个草稿。
+- 新增数据库升级测试模拟已有消息的数据库缺少 mobile_composer_drafts 表，init_db 创建表并保留消息；二次初始化仍保留消息与新草稿。cargo test mobile_composer --lib 6/6 通过。
+- 扩展 node tests/test_mobile_draft_persistence.js 并通过：Profile/Auth/Space 隔离、原生文件选择返回前立即保存、350ms debounce、状态更新、写入失败不能发送且保留输入、损坏草稿无法被空编辑器覆盖、缺失文件不可发、部分失败稳定附件 ID 和最终清空。浏览器 Markdown suite 验证 role=status 的保存/恢复/失败提示，feed 和 accessibility suites 及 test_mobile_ui_shell.js 均通过。
+- 根据当前 Rust、controller、browser 和已安装官方 Simulator 完整证据勾选 5.19；5.20 仍待 VPhone/Jam。VPhone 未安装、未终止或读取真实草稿；Jam 未操作。
+
+## 2026-10-27 工具条零外围留白
+
+- 按本次视觉反馈去掉 Markdown 工具条的左右 12px 内边距，保持直角、无边框、无阴影和半透明鼠尾草色；首个 44pt 按钮直接贴齐左边，12 项工具仍支持横向滚动。没有改动格式命令、发送和草稿逻辑。
+- `npm run build`、Markdown/WYSIWYG 和 keyboard 浏览器回归、`node tests/test_mobile_draft_persistence.js` 通过。浏览器断言包含工具条零 padding、320/390/844px 下首按钮贴边、按钮至少 44px 和焦点不改写原始 Markdown。预览截图 `/tmp/tg-toolbar-edge-clean.png`。
+- 补核上一轮附件草稿恢复结果：`testUnsentDocumentDraftSurvivesTermination` 为 Passed 而非 Skipped，结果 `/Volumes/VPhone/installers/tg-wysiwyg-20261027-2148/Logs/Test/Test-TransferGenieSimulatorUITests-2026.10.27_22-22-59-+0800.xcresult`。最新 `cargo test mobile_composer --lib` 5/5 通过，包含账号/空间切换后写入仍归已校验作用域的测试。
+- 使用 Team `LW6QTNHNV4` 离线构建最新官方 Simulator Release archive，strict codesign 通过；确认持久化草稿数量为 0 且原生空草稿检查 Passed 后原位覆盖安装，没有卸载。VPhone 受保护草稿和 `Jam` 均未操作。
+- 最新包的原生 Markdown 与文件草稿终止恢复分别 Passed；首个工具按钮贴边、44pt 点击区域、键盘及标记叠层在单独重跑中 Passed（0 失败、0 跳过），结果 `/Volumes/VPhone/installers/tg-wysiwyg-20261027-2148/Logs/Test/Test-TransferGenieSimulatorUITests-2026.10.27_22-33-37-+0800.xcresult`。首次组合测试中这项因已打开编辑页仍尝试点击被遮挡的“新消息”而失败；已修正测试的入口判断，草稿恢复两项当次均 Passed（结果 `Test-TransferGenieSimulatorUITests-2026.10.27_22-31-01-+0800.xcresult`）。
+
+## 2026-10-27 全屏所见即所得编辑与贴边工具条
+
+- 采用精确锁定的 `@milkdown/kit@7.23.0`，按需加载 CommonMark/GFM 编辑器。去掉源码/预览切换；输入、粘贴和格式操作直接显示结果，未编辑的导入原文保持不变，实际富文本编辑允许等价 Markdown 规范化。12 项工具包含粗体、斜体、标题、两种列表、增加/减少缩进、引用、代码、链接、撤销和重做。列表缩进改变嵌套层级，普通段落缩进用 Markdown 引用表达。图片只显示保留源信息的占位，不请求远程图片；HTML 不执行。
+- 全屏编辑页取消大标题，顶部只保留空间小字与关闭，工具条为半透明低饱和鼠尾草色、直角、无边框、左右贴边。底部左侧切换文字/Markdown，右侧为照片、文件、标记与发送。消息页加号独立打开照片/视频或文件菜单。标记叠层保留编辑器 DOM。
+- `npm run build`、`node tests/test_mobile_ui_shell.js`、`node tests/test_mobile_draft_persistence.js`、`git diff --check` 和 strict OpenSpec 校验通过。Edge/Playwright 的 Markdown（现有入口转到新的 WYSIWYG suite）、keyboard、feed、accessibility 四套浏览器测试通过；包含选区、即时输入/粘贴、GFM 表格、缩进/撤销、危险链接、无远程图片/脚本执行、源码不变、叠层保留和 320px/横屏/最大文字/114px 键盘可见高度。截图 `/tmp/tg-wysiwyg-flush.png` 为浏览器预览。
+- 使用 Team `LW6QTNHNV4` 和项目 `.cargo-ios` 的离线依赖构建 `aarch64-sim` Release archive，覆盖安装（没有卸载）到官方 iPhone 12 Simulator。最新版四项原生测试 4/4 通过、0失败/0跳过：`testComposerKeyboardAndPickerCancellation`、`testFeedPlusOpensAttachmentMenu`、`testMarkdownEditorPreviewAndCancelledMarkSettings`、`testUnsentMarkdownDraftSurvivesTermination`。结果：`/Volumes/VPhone/installers/tg-wysiwyg-20261027-2148/Logs/Test/Test-TransferGenieSimulatorUITests-2026.10.27_22-14-53-+0800.xcresult`。该目录位于外置盘，测试设备是官方 Simulator，不是 VPhone。
+- 早期原生尝试因 aria-pressed 在 iOS 被识别为 Switch、缺失元素 isHittable 查询、测试 fixture 光标不在末尾而未彻底清理，发生失败或跳过。后续精确识别测试 fixture 并使用 Select All 清理后重跑通过；没有发送测试草稿或修改普通消息。恢复测试验证进程退出后重现既有源码。
+- VPhone 的真实非空草稿仍受保护，本轮未终止、覆盖安装或清空 guest；`Jam` 未更新，本轮不声明 VPhone 或真机验收完成，5.20 保留未完成状态。`npm audit --omit=dev` 仍报告 Vue/server-renderer 和 source-map-js 的既有高风险依赖提示，未运行扩大范围的自动升级。
+
 日期：2026-10-26。范围：任务 4.5 / 4.6 的发送身份、文件快照、前后台传输恢复、完成态和账号隔离，以及 5.4 的附件界面状态；不代表真机稳定性验收完成。
 
 ## 已执行检查

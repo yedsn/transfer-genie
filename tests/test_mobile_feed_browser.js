@@ -565,10 +565,9 @@ try {
   const editor = page.getByRole('textbox', { name: '消息内容', exact: true });
   await editor.fill('# 草稿\n\n**保留原文**');
   await page.getByRole('button', { name: 'Markdown', exact: true }).dispatchEvent('click');
-  await page.getByRole('button', { name: '预览', exact: true }).dispatchEvent('click');
-  assert.equal(await page.locator('.mobile-compose-preview h1').innerText(), '草稿');
-  assert.equal(await page.locator('.mobile-compose-preview strong').innerText(), '保留原文');
-  await page.getByRole('button', { name: '继续编辑', exact: true }).dispatchEvent('click');
+  assert.equal(await page.locator('.ProseMirror h1').innerText(), '草稿');
+  assert.equal(await page.locator('.ProseMirror strong').innerText(), '保留原文');
+  await page.getByRole('button', { name: '文字', exact: true }).dispatchEvent('click');
   assert.equal(await editor.inputValue(), '# 草稿\n\n**保留原文**');
   await page.evaluate(() => {
     window.__feedTest.ui.state.composer.attachments = [{ id: 'mark-draft', clientId: 'mark-draft', path: '/fixture/draft.pdf', originalName: 'draft.pdf', mediaType: 'file', sizeBytes: 100, previewState: 'unsupported' }];
@@ -613,14 +612,13 @@ try {
   await page.getByLabel('截止日期', { exact: true }).fill('2026-11-01');
   await page.keyboard.press('Escape');
   assert.equal(await page.evaluate(() => window.__feedTest.ui.state.composer.dueDate), '2026-10-30', 'cancel preserves saved composer metadata');
-  await page.getByRole('button', { name: '预览', exact: true }).dispatchEvent('click');
-  await page.locator('.mobile-compose-preview').evaluate(el => { window.__composerPreviewElement = el; });
+  await page.getByRole('button', { name: 'Markdown', exact: true }).dispatchEvent('click');
+  await page.locator('.ProseMirror').evaluate(el => { window.__composerPreviewElement = el; });
   await composerMarkButton.dispatchEvent('click');
-  assert.ok(await page.locator('.mobile-compose-preview').evaluate(el => el === window.__composerPreviewElement));
+  assert.ok(await page.locator('.ProseMirror').evaluate(el => el === window.__composerPreviewElement));
   await page.locator('.mobile-mark-overlay-backdrop').click({ position: { x: 10, y: 10 } });
-  assert.ok(await page.locator('.mobile-compose-preview').evaluate(el => el === window.__composerPreviewElement));
-  assert.equal(await page.getByRole('button', { name: '继续编辑', exact: true }).count(), 1, 'closing the overlay preserves preview mode');
-  await page.getByRole('button', { name: '继续编辑', exact: true }).dispatchEvent('click');
+  assert.ok(await page.locator('.ProseMirror').evaluate(el => el === window.__composerPreviewElement));
+  assert.equal(await page.getByRole('button', { name: '预览', exact: true }).count(), 0, 'the live editor needs no separate preview mode');
   await page.getByRole('button', { name: '关闭新消息', exact: true }).dispatchEvent('click');
   await page.evaluate(() => { window.__feedTest.ui.state.composer.attachments = []; });
   // An unmarked message opens settings without writing; save carries detailed metadata.

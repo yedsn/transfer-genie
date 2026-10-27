@@ -11109,11 +11109,24 @@ fn get_mobile_composer_draft_impl(
     })
 }
 
+#[cfg(test)]
 fn save_mobile_composer_draft_impl(
     state: &AppState,
     payload: MobileComposerDraftPayload,
 ) -> Result<MobileComposerDraftResult, String> {
     let (profile, session, space_id) = mobile_composer_scope(state)?;
+    save_mobile_composer_draft_for_scope(state, payload, MobileComposerDraftScope {
+        profile_id: profile.id, user_id: session.user_id, space_id,
+    })
+}
+
+fn save_mobile_composer_draft_for_scope(
+    state: &AppState,
+    payload: MobileComposerDraftPayload,
+    scope: MobileComposerDraftScope,
+) -> Result<MobileComposerDraftResult, String> {
+    // Use this verified snapshot for the entire write, even if the active
+    // account/Space changes while validating attachments or accessing SQLite.
     #[allow(unused_mut)] // Relative sandbox paths are normalized only on iOS.
     let mut payload = normalize_mobile_composer_draft(payload)?;
     #[cfg(target_os = "ios")]
@@ -11127,9 +11140,9 @@ fn save_mobile_composer_draft_impl(
     if mobile_composer_draft_is_empty(&payload) {
         db::delete_mobile_composer_draft(
             &state.db_path,
-            &profile.id,
-            &session.user_id,
-            &space_id,
+            &scope.profile_id,
+            &scope.user_id,
+            &scope.space_id,
         )
         .map_err(|error| format!("清除移动端草稿失败: {error}"))?;
         return Ok(MobileComposerDraftResult { payload, updated_at_ms: None });
@@ -11140,9 +11153,9 @@ fn save_mobile_composer_draft_impl(
     db::upsert_mobile_composer_draft(
         &state.db_path,
         &db::MobileComposerDraftRecord {
-            endpoint_id: profile.id,
-            owner_scope: session.user_id,
-            space_id,
+            endpoint_id: scope.profile_id,
+            owner_scope: scope.user_id,
+            space_id: scope.space_id,
             payload_json,
             updated_at_ms,
         },
@@ -11177,7 +11190,7 @@ fn save_mobile_composer_draft(
     if profile.id != scope.profile_id || session.user_id != scope.user_id || space_id != scope.space_id {
         return Err("账号或空间已切换，旧草稿保存已取消".into());
     }
-    save_mobile_composer_draft_impl(&state, payload)
+    save_mobile_composer_draft_for_scope(&state, payload, scope)
 }
 
 async fn clear_mobile_cache_impl(state: &AppState) -> Result<MobileCacheSummary, String> {
@@ -24014,6 +24027,25 @@ mod tests {
         for invalid in ["../fixture.pdf", "../../secret", "/etc/passwd", "bad/fixture.pdf"] {
             assert!(mobile_draft_import_path(&root, invalid).is_err());
         }
+    }
+
+    #[test]
+    fn mobile_composer_draft_write_retains_the_verified_scope_after_switch() {
+        let temp_dir = std::env::temp_dir().join(format!("tg-mobile-draft-switch-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(&temp_dir, test_supabase_settings());
+        install_test_supabase_session(&state);
+        db::init_db(&state.db_path, None).unwrap();
+        let (profile, session, space_id) = mobile_composer_scope(&state).unwrap();
+        let scope = MobileComposerDraftScope { profile_id: profile.id.clone(), user_id: session.user_id.clone(), space_id: space_id.clone() };
+        state.supabase_sessions.lock().unwrap().get_mut(&profile.id).unwrap().user_id = "user-b".into();
+        state.settings.lock().unwrap().storage_profiles[0].supabase.as_mut().unwrap().space_id = "space-b".into();
+        save_mobile_composer_draft_for_scope(&state, MobileComposerDraftPayload { text: "scope-a-only".into(), ..Default::default() }, scope).unwrap();
+        assert!(get_mobile_composer_draft_impl(&state).unwrap().updated_at_ms.is_none());
+        let original = db::get_mobile_composer_draft(&state.db_path, &profile.id, &session.user_id, &space_id).unwrap().unwrap();
+        let payload: MobileComposerDraftPayload = serde_json::from_str(&original.payload_json).unwrap();
+        assert_eq!(payload.text, "scope-a-only");
+        let _ = fs::remove_dir_all(temp_dir);
     }
 
     #[tokio::test]

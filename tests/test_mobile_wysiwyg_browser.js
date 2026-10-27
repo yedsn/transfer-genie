@@ -1,0 +1,146 @@
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+
+const { chromium } = createRequire(import.meta.url)(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || undefined, headless: true });
+try {
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 }, reducedMotion: 'reduce' });
+  page.setDefaultTimeout(10000);
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.goto((process.env.MOBILE_PREVIEW_URL || 'http://127.0.0.1:7120') + '/?mobile-preview=1');
+  await page.getByRole('button', { name: '添加附件', exact: true }).click();
+  assert.equal(await page.locator('.mobile-attachment-menu').count(), 1);
+  assert.equal(await page.locator('.mobile-composer-sheet').count(), 0, 'plus opens a picker menu, not the editor');
+  assert.ok(await page.getByRole('button', { name: /照片与视频/ }).isVisible());
+  assert.ok(await page.locator('.mobile-attachment-menu').getByRole('button', { name: /文件 从文件/ }).isVisible());
+  await page.getByRole('button', { name: '关闭附件菜单', exact: true }).click();
+  await page.getByRole('button', { name: '新消息', exact: true }).click();
+  const plain = page.getByRole('textbox', { name: '消息内容', exact: true });
+  const imported = '# 今天的想法\n\n**轻松记录**，即时排版。\n\n- 直观编辑\n- 保存为 Markdown';
+  await plain.fill(imported);
+  await page.getByRole('button', { name: 'Markdown', exact: true }).click();
+  const editor = page.locator('.ProseMirror');
+  await editor.waitFor();
+  assert.equal(await editor.locator('h1').innerText(), '今天的想法');
+  assert.equal(await editor.locator('strong').innerText(), '轻松记录');
+  assert.equal(await editor.locator('li').count(), 2);
+  assert.equal(await page.getByRole('button', { name: '预览', exact: true }).count(), 0);
+  const source = () => page.evaluate(() => document.querySelector('.mobile-shell').__vueParentComponent.setupState.state.composer.text);
+  assert.equal(await source(), imported, 'opening WYSIWYG must not rewrite an untouched source');
+  await editor.click();
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.equal(await source(), imported, 'focus and heading-ID updates must not normalize untouched source');
+  await page.getByText('草稿已自动保存', { exact: true }).waitFor();
+  const draftStatus = page.locator('.mobile-draft-save-status');
+  assert.equal(await draftStatus.getAttribute('role'), 'status');
+  await page.evaluate(() => { document.querySelector('.mobile-shell').__vueParentComponent.setupState.state.composer.draftStatus = 'restored'; });
+  assert.equal(await draftStatus.innerText(), '已恢复上次未发送的草稿');
+  await page.evaluate(() => { document.querySelector('.mobile-shell').__vueParentComponent.setupState.state.composer.draftStatus = 'error'; });
+  assert.equal(await draftStatus.innerText(), '草稿自动保存失败');
+  assert.ok(await draftStatus.evaluate(el => el.classList.contains('is-error')));
+  await page.evaluate(() => { document.querySelector('.mobile-shell').__vueParentComponent.setupState.state.composer.draftStatus = 'saved'; });
+  const tools = page.getByRole('toolbar', { name: 'Markdown 格式工具', exact: true });
+  assert.equal(await tools.getByRole('button').count(), 12);
+  const toolbarGeometry = await tools.evaluate(el => ({ x: el.getBoundingClientRect().x, width: el.getBoundingClientRect().width, radius: getComputedStyle(el).borderRadius, border: getComputedStyle(el).borderTopWidth, padding: getComputedStyle(el).padding, firstButtonX: el.querySelector('button').getBoundingClientRect().x }));
+  assert.deepEqual(toolbarGeometry, { x: 0, width: 390, radius: '0px', border: '0px', padding: '0px', firstButtonX: 0 }, 'toolbar and its buttons are straight-edged and flush with the screen');
+  const select = async (selector, start, end = start) => editor.locator(selector).first().evaluate((el, range) => {
+    const node = [...el.childNodes].find(node => node.nodeType === Node.TEXT_NODE);
+    const selection = window.getSelection();
+    const selected = document.createRange();
+    selected.setStart(node, range[0]); selected.setEnd(node, range[1]);
+    el.closest('[contenteditable]').focus(); selection.removeAllRanges(); selection.addRange(selected);
+    document.dispatchEvent(new Event('selectionchange'));
+  }, [start, end]);
+  const load = async text => {
+    await page.getByRole('button', { name: '文字', exact: true }).click();
+    await page.getByRole('textbox', { name: '消息内容', exact: true }).fill(text);
+    await page.getByRole('button', { name: 'Markdown', exact: true }).click();
+    await editor.waitFor();
+  };
+  for (const [label, tag, pattern] of [['粗体', 'strong', /\*\*second\*\*/], ['斜体', 'em', /\*second\*/], ['代码', 'code', /`second`/]]) {
+    await load('first second');
+    await select('p', 6, 12);
+    await tools.getByRole('button', { name: label, exact: true }).click();
+    assert.equal(await editor.locator(tag).innerText(), 'second');
+    assert.match(await source(), pattern);
+    assert.ok(await editor.evaluate(el => document.activeElement === el));
+  }
+  await tools.getByRole('button', { name: '撤销', exact: true }).click();
+  assert.equal(await editor.locator('code').count(), 0);
+  await tools.getByRole('button', { name: '重做', exact: true }).click();
+  assert.equal(await editor.locator('code').innerText(), 'second');
+  await load('word');
+  await select('p', 0, 4);
+  await tools.getByRole('button', { name: '链接', exact: true }).click();
+  await page.getByRole('textbox', { name: '链接地址', exact: true }).fill('javascript:alert(1)');
+  await page.getByRole('button', { name: '确定', exact: true }).click();
+  assert.ok(await page.getByRole('alert').isVisible());
+  await page.getByRole('textbox', { name: '链接地址', exact: true }).fill('https://example.com');
+  await page.getByRole('button', { name: '确定', exact: true }).click();
+  assert.equal(await editor.locator('a').getAttribute('href'), 'https://example.com');
+  assert.match(await source(), /\[word\]\(https:\/\/example.com\)/);
+  for (const [label, selector] of [['标题', 'h2'], ['无序列表', 'ul li'], ['有序列表', 'ol li'], ['引用', 'blockquote']]) {
+    await load('word'); await select('p', 0, 4);
+    await tools.getByRole('button', { name: label, exact: true }).click();
+    assert.equal(await editor.locator(selector).innerText(), 'word');
+  }
+  await load('- first\n- second');
+  await select('li:nth-child(2) p', 3);
+  await tools.getByRole('button', { name: '增加缩进', exact: true }).click();
+  assert.equal(await editor.locator('li li').count(), 1);
+  await tools.getByRole('button', { name: '减少缩进', exact: true }).click();
+  assert.equal(await editor.locator('li li').count(), 0);
+  await load('');
+  await editor.click(); await page.keyboard.type('# ');
+  await page.keyboard.type('Live title');
+  assert.equal(await editor.locator('h1').innerText(), 'Live title', 'Markdown input rules show formatting while typing');
+  await page.keyboard.press('Enter');
+  await page.keyboard.type('**bold** ');
+  assert.equal(await editor.locator('strong').innerText(), 'bold');
+  assert.match(await source(), /Live title/);
+  await load('');
+  await editor.focus();
+  await editor.evaluate(el => {
+    const clipboard = new DataTransfer();
+    clipboard.setData('text/plain', '# 粘贴的标题\n\n**粘贴的粗体**');
+    el.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: clipboard }));
+  });
+  assert.equal(await editor.locator('h1').innerText(), '粘贴的标题');
+  assert.equal(await editor.locator('strong').innerText(), '粘贴的粗体');
+  const beforeMark = await source();
+  await page.getByRole('button', { name: '标记', exact: true }).click();
+  assert.equal(await editor.count(), 1, 'mark dialog keeps the live editor mounted');
+  await page.getByRole('button', { name: '关闭编辑标记', exact: true }).click();
+  assert.equal(await source(), beforeMark);
+  let imageRequests = 0;
+  page.on('request', request => { if (request.url().startsWith('https://tracking.invalid/')) imageRequests++; });
+  await load('![private](https://tracking.invalid/image.png)\n\n<script>window.__unsafe = 1</script>\n\n| A | B |\n| --- | --- |\n| 1 | 2 |');
+  assert.equal(await editor.locator('img[src]').count(), 0, 'only inert ProseMirror cursor separators may be images');
+  assert.equal(await editor.locator('.mobile-editor-image-placeholder').count(), 1);
+  assert.equal(await editor.locator('table').count(), 1);
+  assert.equal(imageRequests, 0);
+  assert.equal(await page.evaluate(() => window.__unsafe), undefined);
+  const unsafeSource = await source();
+  await page.getByRole('button', { name: '文字', exact: true }).click();
+  assert.equal(await page.getByRole('textbox', { name: '消息内容', exact: true }).inputValue(), unsafeSource);
+  await load(imported);
+  for (const viewport of [{ width: 320, height: 568 }, { width: 390, height: 844 }, { width: 844, height: 390 }]) {
+    await page.setViewportSize(viewport);
+    await page.waitForFunction(height => Math.abs(document.querySelector('.mobile-shell').getBoundingClientRect().height - height) < 1, viewport.height);
+    const box = await page.locator('.mobile-composer-sheet').boundingBox();
+    assert.equal(box.height, viewport.height); assert.equal(box.width, viewport.width);
+    assert.equal(await page.locator('.mobile-composer-sheet').evaluate(el => el.scrollWidth > el.clientWidth), false);
+    await tools.evaluate(el => { el.scrollLeft = 0; });
+    assert.equal(await tools.locator('button').first().evaluate(el => el.getBoundingClientRect().left), 0, 'first tool is flush at every viewport');
+    for (const button of await tools.getByRole('button').all()) {
+      await button.scrollIntoViewIfNeeded(); const buttonBox = await button.boundingBox();
+      assert.ok(buttonBox.width >= 44 && buttonBox.height >= 44);
+    }
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  await tools.evaluate(el => { el.scrollLeft = 0; });
+  if (process.env.MARKDOWN_EDITOR_SCREENSHOT) await page.screenshot({ path: process.env.MARKDOWN_EDITOR_SCREENSHOT });
+  assert.deepEqual(errors, []);
+  console.log('mobile WYSIWYG passed: full-screen, separate plus menu, 12 tools, live input rules, selection, undo/redo, list indentation, safe links/HTML/images, GFM table, source preservation and mark underlay');
+} finally { await browser.close(); }
