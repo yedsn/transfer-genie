@@ -20,9 +20,16 @@
       "type": "node-terminal"
     },
     {
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/release.ps1 -Push",
+      "cwd": "${workspaceFolder}",
+      "name": "release",
+      "request": "launch",
+      "type": "node-terminal"
+    },
+    {
       "command": "npm run ios:update",
       "cwd": "${workspaceFolder}",
-      "name": "iOS: 无线静默更新",
+      "name": "iOS: 无线更新",
       "request": "launch",
       "type": "node-terminal"
     },
@@ -30,13 +37,6 @@
       "command": "npm run ios:update:launch",
       "cwd": "${workspaceFolder}",
       "name": "iOS: 无线更新并打开",
-      "request": "launch",
-      "type": "node-terminal"
-    },
-    {
-      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/release.ps1 -Push",
-      "cwd": "${workspaceFolder}",
-      "name": "release",
       "request": "launch",
       "type": "node-terminal"
     }
