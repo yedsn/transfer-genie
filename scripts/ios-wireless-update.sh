@@ -3,8 +3,10 @@
 set -euo pipefail
 
 project_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-device_name="${TRANSFER_GENIE_IOS_DEVICE:-Jam}"
-development_team="${APPLE_DEVELOPMENT_TEAM:-9RV293JR6V}"
+config_file="${TRANSFER_GENIE_IOS_CONFIG:-$project_root/.env}"
+device_name="${TRANSFER_GENIE_IOS_DEVICE:-}"
+development_team="${APPLE_DEVELOPMENT_TEAM:-}"
+ios_cargo_home="${TRANSFER_GENIE_IOS_CARGO_HOME:-}"
 bundle_id="com.transfergenie"
 build_mode="release"
 skip_build=false
@@ -20,8 +22,8 @@ Build, verify, and update Transfer Genie on a paired iPhone over the local
 network. The update is in-place and keeps the app data container.
 
 Options:
-  --device <name-or-id>  CoreDevice target (default: Jam)
-  --team <team-id>       Apple development team (default: 9RV293JR6V)
+  --device <name-or-id>  Override TRANSFER_GENIE_IOS_DEVICE from .env
+  --team <team-id>       Override APPLE_DEVELOPMENT_TEAM from .env
   --debug                Build a Debug archive instead of Release
   --skip-build           Reuse gen/apple/build/transfer-genie_iOS.xcarchive
   --check-only           Run all safety checks but do not install or launch
@@ -30,7 +32,11 @@ Options:
 
 Environment equivalents:
   TRANSFER_GENIE_IOS_DEVICE, APPLE_DEVELOPMENT_TEAM,
-  TRANSFER_GENIE_IOS_CARGO_HOME
+  TRANSFER_GENIE_IOS_CARGO_HOME, TRANSFER_GENIE_IOS_CONFIG
+
+Setup:
+  Copy .env.example to .env and configure the iOS device and Apple team.
+  Existing process environment variables override values from .env.
 EOF
 }
 
@@ -51,6 +57,29 @@ cleanup() {
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "Missing required command: $1"
+}
+
+read_config_value() {
+  local key="$1"
+  local line
+  local value
+
+  [[ -f "$config_file" ]] || return 0
+  line="$(sed -n "s/^${key}=//p" "$config_file" | tail -n 1)"
+  value="${line%$'\r'}"
+
+  case "$value" in
+    \"*\")
+      value="${value#\"}"
+      value="${value%\"}"
+      ;;
+    \'*\')
+      value="${value#\'}"
+      value="${value%\'}"
+      ;;
+  esac
+
+  printf '%s' "$value"
 }
 
 copy_container_file() {
@@ -103,6 +132,21 @@ inspect_drafts() {
   log "$label draft guard passed: SQLite ok, saved drafts=0"
 }
 
+if [[ -z "$device_name" ]]; then
+  device_name="$(read_config_value TRANSFER_GENIE_IOS_DEVICE)"
+fi
+if [[ -z "$development_team" ]]; then
+  development_team="$(read_config_value APPLE_DEVELOPMENT_TEAM)"
+fi
+if [[ -z "$ios_cargo_home" ]]; then
+  ios_cargo_home="$(read_config_value TRANSFER_GENIE_IOS_CARGO_HOME)"
+fi
+if [[ -z "$ios_cargo_home" ]]; then
+  ios_cargo_home="$project_root/.cargo-ios"
+elif [[ "$ios_cargo_home" != /* ]]; then
+  ios_cargo_home="$project_root/$ios_cargo_home"
+fi
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --device)
@@ -140,6 +184,15 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+[[ -n "$device_name" ]] \
+  || fail "Missing TRANSFER_GENIE_IOS_DEVICE. Configure it in $config_file (see .env.example)"
+[[ -n "$development_team" ]] \
+  || fail "Missing APPLE_DEVELOPMENT_TEAM. Configure it in $config_file (see .env.example)"
+[[ "$device_name" != YOUR_* ]] \
+  || fail "Replace the placeholder TRANSFER_GENIE_IOS_DEVICE in $config_file"
+[[ "$development_team" != YOUR_* ]] \
+  || fail "Replace the placeholder APPLE_DEVELOPMENT_TEAM in $config_file"
 
 for command_name in jq sqlite3 security plutil codesign npm xcrun; do
   require_command "$command_name"
@@ -201,7 +254,7 @@ if [[ "$skip_build" != "true" ]]; then
 
   log "Building a signed $build_mode iPhone archive"
   APPLE_DEVELOPMENT_TEAM="$development_team" \
-  CARGO_HOME="${TRANSFER_GENIE_IOS_CARGO_HOME:-$project_root/.cargo-ios}" \
+  CARGO_HOME="$ios_cargo_home" \
     npx tauri "${build_args[@]}"
 else
   log "Reusing the existing archive (--skip-build)"

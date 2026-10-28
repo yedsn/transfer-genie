@@ -20,16 +20,16 @@
       "type": "node-terminal"
     },
     {
-      "command": "npm run ios:update:jam",
+      "command": "npm run ios:update",
       "cwd": "${workspaceFolder}",
-      "name": "iOS: 无线静默更新 Jam",
+      "name": "iOS: 无线静默更新",
       "request": "launch",
       "type": "node-terminal"
     },
     {
-      "command": "npm run ios:update:jam:launch",
+      "command": "npm run ios:update:launch",
       "cwd": "${workspaceFolder}",
-      "name": "iOS: 无线更新并打开 Jam",
+      "name": "iOS: 无线更新并打开",
       "request": "launch",
       "type": "node-terminal"
     },
