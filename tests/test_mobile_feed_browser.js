@@ -380,6 +380,26 @@ try {
   await page.locator('.mobile-marked-edit-sheet .mobile-primary-button').dispatchEvent('click');
   assert.equal(await actionSheet.count(), 1, 'saving returns to the source action sheet');
   await actionSheet.locator('.mobile-sheet-cancel').dispatchEvent('click');
+  // Removing cache returns to the retained detail with the fresh backend row.
+  await page.evaluate(() => {
+    const ui = window.__feedTest.ui;
+    const base = ui.state.messages.at(-1);
+    ui.state.messages = [{ ...base, filename: 'cache-detail', kind: 'file', title: 'cache-fixture.txt', originalName: 'cache-fixture.txt', body: undefined, cached: true, attachmentState: 'cached' }];
+    ui.controller.deleteMessage = async (message, remote) => {
+      if (remote) throw new Error('This fixture only removes local cache');
+      ui.state.messages = [{ ...message, cached: false, attachmentState: 'idle' }];
+      return true;
+    };
+  });
+  await page.locator('[data-message-filename="cache-detail"] .mobile-message-bubble').dispatchEvent('click');
+  await page.waitForSelector('.mobile-detail-sheet');
+  assert.match(await page.locator('.mobile-attachment-feedback').innerText(), /原件已缓存/);
+  await page.locator('.mobile-detail-more').dispatchEvent('click');
+  await page.getByRole('button', { name: '仅移除本地附件缓存', exact: false }).dispatchEvent('click');
+  await page.waitForSelector('.mobile-action-sheet', { state: 'detached' });
+  assert.match(await page.locator('.mobile-attachment-feedback').innerText(), /按需下载/);
+  assert.doesNotMatch(await page.locator('.mobile-attachment-feedback').innerText(), /原件已缓存/);
+  await page.getByRole('button', { name: '关闭详情', exact: true }).dispatchEvent('click');
   await page.evaluate(() => {
     const ui = window.__feedTest.ui;
     ui.state.cache.fileCount = 1;

@@ -7,8 +7,11 @@ import { createHash } from 'node:crypto';
 
 // An opt-in, loopback-only proxy. No credentials, URL, header or body logs.
 // Pass the installed app settings path; only its configured Supabase origins are allowed.
-const [settingsPath, fixtureDirectory, mode = 'upload'] = process.argv.slice(2);
-if (!settingsPath || !fixtureDirectory || !['upload', 'download'].includes(mode)) throw new Error('Usage: node slow-http-proxy.mjs SETTINGS_PATH FIXTURE_DIRECTORY [upload|download]');
+const [settingsPath, fixtureDirectory, mode = 'upload', listenHost = '127.0.0.1', listenPortText = '17992'] = process.argv.slice(2);
+const listenPort = Number(listenPortText);
+if (!settingsPath || !fixtureDirectory || !['upload', 'download'].includes(mode) || !listenHost || !Number.isInteger(listenPort) || listenPort < 1 || listenPort > 65535) {
+  throw new Error('Usage: node slow-http-proxy.mjs SETTINGS_PATH FIXTURE_DIRECTORY [upload|download] [LISTEN_HOST] [LISTEN_PORT]');
+}
 const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
 const destinations = new Set((settings.storage_profiles || [])
   .filter((profile) => profile.provider_kind === 'supabase' && profile.supabase?.api_url)
@@ -123,7 +126,7 @@ server.on('connect', (request, client, head) => {
     upstream.pipe(client);
   });
 });
-server.listen(17992, '127.0.0.1', () => console.log(`Slow test proxy ready on loopback port 17992 (256 KiB/s ${mode})`));
+server.listen(listenPort, listenHost, () => console.log(`Slow test proxy ready on ${listenHost}:${listenPort} (256 KiB/s ${mode})`));
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => {
   for (const socket of sockets) socket.destroy();
   server.close(() => process.exit(0));

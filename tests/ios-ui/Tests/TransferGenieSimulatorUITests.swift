@@ -148,11 +148,17 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         let dismissTool = app.buttons["收起键盘"]
         XCTAssertTrue(dismissTool.waitForExistence(timeout: 5))
         XCTAssertEqual(dismissTool.frame.minX, app.frame.minX, accuracy: 1, "Keyboard dismiss must be the first toolbar icon")
-        let docked = NSPredicate { _, _ in
-            let gap = self.app.keyboards.firstMatch.frame.minY - dismissTool.frame.maxY
-            return gap >= 0 && gap <= 140
+        let aboveKeyboard = NSPredicate { _, _ in
+            dismissTool.frame.maxY <= self.app.keyboards.firstMatch.frame.minY
         }
-        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: docked, object: nil)], timeout: 5), .completed, "The formatting toolbar must sit immediately above the software keyboard and its native assistant bar")
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: aboveKeyboard, object: nil)], timeout: 5), .completed, "The formatting toolbar must stay above the software keyboard")
+        let assistantButtons = app.buttons.matching(NSPredicate(format: "label IN %@", ["Previous", "Next", "上一个", "下一个", "上一项", "下一项"]))
+        for index in 0..<assistantButtons.count {
+            let assistant = assistantButtons.element(boundBy: index)
+            if assistant.isHittable && assistant.frame.minY > richEditor.frame.minY {
+                XCTAssertLessThanOrEqual(dismissTool.frame.maxY, assistant.frame.minY - 4, "Formatting tools must not overlap the system input assistant")
+            }
+        }
         attachScreenshot(named: "fullscreen-wysiwyg-keyboard-toolbar")
         XCTAssertFalse(app.buttons["发送"].isHittable, "Only formatting tools follow the software keyboard")
         app.buttons["收起键盘"].tap()
@@ -626,9 +632,23 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         attachScreenshot(named: "signed-in-supabase-shell")
     }
 
-    func testDraftImagePreviewAndRemoval() {
+    func testDraftImagePreviewAndRemoval() throws {
         app.buttons["新消息"].tap()
-        XCTAssertTrue(composerEditor().waitForExistence(timeout: 5))
+        let editor = composerEditor()
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        let original = editor.value as? String ?? ""
+        guard (original.isEmpty || original.hasPrefix("输入文字")), app.buttons.matching(identifier: "移除附件").count == 0 else {
+            throw XCTSkip("Preserve the existing draft before selecting the dedicated image fixture")
+        }
+        defer {
+            if let done = firstExistingButton(labels: ["完成", "Done", "关闭", "Close"], timeout: 1), done.exists { done.tap() }
+            app.activate()
+            if button(containing: "预览附件 TG-IOS-PROBE-20261026-image").exists,
+               app.buttons.matching(identifier: "移除附件").count == 1 {
+                app.buttons["移除附件"].tap()
+            }
+            if app.buttons["关闭新消息"].exists { app.buttons["关闭新消息"].tap() }
+        }
         dismissKeyboardIfNeeded()
         button(containing: "照片").tap()
         let image = app.images.matching(NSPredicate(format: "identifier == %@ AND label BEGINSWITH %@ AND label CONTAINS %@", "PXGGridLayout-Info", "照片", "21:46")).firstMatch
@@ -658,6 +678,15 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         let original = composerEditor().value as? String ?? ""
         guard (original.isEmpty || original.hasPrefix("输入文字")), app.buttons.matching(identifier: "移除附件").count == 0 else {
             throw XCTSkip("Preserve the existing draft before selecting the dedicated document fixture")
+        }
+        defer {
+            if let done = firstExistingButton(labels: ["完成", "Done"], timeout: 1), done.exists { done.tap() }
+            app.activate()
+            if button(containing: "预览附件 TG-IOS-PROBE-20261027-document.txt").exists,
+               app.buttons.matching(identifier: "移除附件").count == 1 {
+                app.buttons["移除附件"].tap()
+            }
+            if app.buttons["关闭新消息"].exists { app.buttons["关闭新消息"].tap() }
         }
         dismissKeyboardIfNeeded()
         button(containing: "文件").tap()
@@ -776,6 +805,9 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         XCTAssertNotNil(done, "Downloaded document did not open in Quick Look")
         attachScreenshot(named: "downloaded-document-system-preview")
         done?.tap()
+        // System banners can briefly steal the accessibility session as Quick Look
+        // dismisses on a physical device. Re-activate before querying the WebView.
+        app.activate()
         XCTAssertTrue(app.buttons["关闭详情"].waitForExistence(timeout: 10))
         app.buttons["关闭详情"].tap()
     }
@@ -854,6 +886,84 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         attachScreenshot(named: "image-original-system-preview")
         done?.tap()
         XCTAssertTrue(app.buttons["关闭详情"].waitForExistence(timeout: 10), "Quick Look did not return to image details")
+        app.buttons["关闭详情"].tap()
+    }
+
+    func testReleaseImageOfflineFailureThenRedownloadsAndRestoresCache() {
+        let fixtureName = "TG-IOS-PROBE-20261026-image.jpeg"
+        defer {
+            app.terminate()
+            app.launchEnvironment = [:]
+            app.launch()
+        }
+
+        func openFixtureFromSearch() {
+            app.buttons["搜索消息"].tap()
+            let search = app.searchFields["搜索文本、文件名"]
+            XCTAssertTrue(search.waitForExistence(timeout: 5))
+            search.tap()
+            search.typeText(fixtureName)
+            XCTAssertTrue(app.staticTexts[fixtureName].firstMatch.waitForExistence(timeout: 20))
+            XCTAssertEqual(app.buttons.matching(identifier: "更多操作").count, 1, "Only the dedicated image fixture may be changed")
+            dismissSearchKeyboard()
+        }
+
+        openFixtureFromSearch()
+        app.buttons["更多操作"].firstMatch.tap()
+        button(containing: "仅移除本地附件缓存").tap()
+        XCTAssertTrue(app.staticTexts[fixtureName].firstMatch.waitForExistence(timeout: 10))
+
+        app.terminate()
+        app.launchEnvironment = [
+            "HTTP_PROXY": "http://127.0.0.1:17991",
+            "HTTPS_PROXY": "http://127.0.0.1:17991",
+            "ALL_PROXY": "http://127.0.0.1:17991",
+            "NO_PROXY": "",
+            "no_proxy": "",
+        ]
+        app.launch()
+        XCTAssertTrue(app.buttons["消息"].waitForExistence(timeout: 30))
+        openFixtureFromSearch()
+        app.buttons["更多操作"].firstMatch.tap()
+        button(containing: "查看详情").tap()
+        XCTAssertTrue(app.buttons["关闭详情"].waitForExistence(timeout: 5))
+        let onDemand = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "按需下载")).firstMatch
+        let recoveredCache = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "原件已缓存")).firstMatch
+        let recovered = NSPredicate { _, _ in onDemand.exists || recoveredCache.exists }
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: recovered, object: nil)], timeout: 10),
+            .completed,
+            "The original must remain on-demand or recover automatically after connectivity returns"
+        )
+        app.buttons["查看"].tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "打开失败，可重试")).firstMatch.waitForExistence(timeout: 30))
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "原件已缓存")).firstMatch.exists)
+        attachScreenshot(named: "release-image-offline-open-failed-recoverably")
+
+        app.terminate()
+        app.launchEnvironment = [:]
+        app.launch()
+        XCTAssertTrue(app.buttons["消息"].waitForExistence(timeout: 30))
+        XCTAssertTrue(button(containing: "存储空间，已同步").waitForExistence(timeout: 90))
+        openFixtureFromSearch()
+        app.buttons["更多操作"].firstMatch.tap()
+        button(containing: "查看详情").tap()
+        XCTAssertTrue(app.buttons["关闭详情"].waitForExistence(timeout: 5))
+        let restoredOnDemand = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "按需下载")).firstMatch
+        let restoredAutomatically = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "原件已缓存")).firstMatch
+        let restoredState = NSPredicate { _, _ in restoredOnDemand.exists || restoredAutomatically.exists }
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: restoredState, object: nil)], timeout: 10),
+            .completed,
+            "The original must remain on-demand or recover automatically after connectivity returns"
+        )
+        app.buttons["查看"].tap()
+        let done = firstExistingButton(labels: ["完成", "Done"], timeout: 60)
+        XCTAssertNotNil(done, "The dedicated image did not redownload into the app sandbox")
+        done?.tap()
+        XCTAssertTrue(app.buttons["关闭详情"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "原件已缓存")).firstMatch.waitForExistence(timeout: 10))
+        attachScreenshot(named: "release-image-redownloaded-and-cache-restored")
         app.buttons["关闭详情"].tap()
     }
 
@@ -2106,10 +2216,11 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         let pickerName = "TG-IOS-SLOW-20261027-upload"
         let baseline = try await slowProxyForwardedBytes()
         app.terminate()
+        let proxyURL = slowProxyURL.absoluteString
         app.launchEnvironment = [
-            "HTTP_PROXY": "http://127.0.0.1:17992",
-            "HTTPS_PROXY": "http://127.0.0.1:17992",
-            "ALL_PROXY": "http://127.0.0.1:17992",
+            "HTTP_PROXY": proxyURL,
+            "HTTPS_PROXY": proxyURL,
+            "ALL_PROXY": proxyURL,
             "NO_PROXY": "", "no_proxy": "",
         ]
         defer { app.terminate(); app.launchEnvironment = [:]; app.launch() }
@@ -2203,10 +2314,11 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         XCTAssertTrue(app.buttons["新消息"].waitForExistence(timeout: 10))
 
         app.terminate()
+        let proxyURL = slowProxyURL.absoluteString
         app.launchEnvironment = [
-            "HTTP_PROXY": "http://127.0.0.1:17992",
-            "HTTPS_PROXY": "http://127.0.0.1:17992",
-            "ALL_PROXY": "http://127.0.0.1:17992",
+            "HTTP_PROXY": proxyURL,
+            "HTTPS_PROXY": proxyURL,
+            "ALL_PROXY": proxyURL,
             "NO_PROXY": "", "no_proxy": "",
         ]
         app.launch()
@@ -2277,11 +2389,19 @@ final class TransferGenieSimulatorUITests: XCTestCase {
     }
 
     private func slowProxyForwardedBytes(direction: String = "Upload") async throws -> Int {
-        var request = URLRequest(url: URL(string: "http://127.0.0.1:17992/status")!)
+        var request = URLRequest(url: slowProxyURL.appendingPathComponent("status"))
         request.timeoutInterval = 3
         let (data, _) = try await URLSession.shared.data(for: request)
         let status = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         return status?["large" + direction + "BytesForwarded"] as? Int ?? 0
+    }
+
+    private var slowProxyURL: URL {
+        let configured = ProcessInfo.processInfo.environment["TRANSFER_GENIE_TEST_SLOW_PROXY_URL"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let configured, !configured.isEmpty, let url = URL(string: configured), ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else {
+            return URL(string: "http://127.0.0.1:17992")!
+        }
+        return url
     }
 
     func testRecoveredBlockedAttachmentPreviewAndCleanup() {

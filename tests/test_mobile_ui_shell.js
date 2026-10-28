@@ -106,6 +106,8 @@ assert.match(shell, /state.composer.attachments/);
 assert.match(shell, /已保存到本机/);
 assert.match(shell, /仅移除本地附件缓存/);
 assert.match(shell, /删除消息（同步到云端）/);
+assert.ok(shell.includes('state.messages.find((item) => item.filename === message.filename)'));
+assert.match(shell, /attachmentState: "idle"/);
 
 for (const command of [
   'listWindow', 'mark', 'unmark', 'getMediaPreview', 'completeMediaPreview',

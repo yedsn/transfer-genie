@@ -101,6 +101,26 @@ try {
     }
   }
 
+  // The iOS floating input-assistant capsule is not reflected reliably in VisualViewport.
+  await page.setViewportSize({ width: 440, height: 956 });
+  await page.evaluate(() => {
+    document.documentElement.style.setProperty('--mobile-text-scale', '1');
+    document.documentElement.dataset.mobileAccessibilityText = 'false';
+  });
+  await visibleViewport(620);
+  await sheet.getByRole('textbox', { name: '消息内容', exact: true }).focus();
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent('transfer-genie-keyboard-geometry', { detail: { visibleHeight: 548 } })));
+  const nativeTools = sheet.getByRole('toolbar', { name: 'Markdown 格式工具' });
+  const nativeBox = await nativeTools.boundingBox();
+  assert.equal(nativeBox.y + nativeBox.height, 548, 'native keyboard geometry keeps the toolbar above the 72pt assistant area');
+  assert.equal(await sheet.locator('.mobile-compose-actions').isVisible(), false);
+  assert.equal(await sheet.getByRole('textbox', { name: '消息内容', exact: true }).getAttribute('contenteditable'), 'true');
+  await nativeTools.getByRole('button', { name: '收起键盘', exact: true }).click();
+  await visibleViewport(956);
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent('transfer-genie-keyboard-geometry', { detail: { visibleHeight: null } })));
+  await page.waitForSelector('.mobile-shell:not(.is-keyboard-visible)');
+  assert.equal(await sheet.locator('.mobile-compose-actions').isVisible(), true, 'native hide restores send controls');
+
   const iosContext = await browser.newContext({
     viewport: { width: 430, height: 932 },
     reducedMotion: 'reduce',

@@ -37,6 +37,11 @@ const detailUnderlay = ref(false);
 const viewportHeight = ref(window.visualViewport?.height || window.innerHeight);
 const viewportTop = ref(window.visualViewport?.offsetTop || 0);
 const viewportKeyboardVisible = ref(false);
+const nativeKeyboardHeight = ref<number | null>((window as any).__TRANSFER_GENIE_KEYBOARD_HEIGHT__ ?? null);
+function updateNativeKeyboard(event: Event) {
+  nativeKeyboardHeight.value = (event as CustomEvent<{ visibleHeight: number | null }>).detail.visibleHeight;
+  updateViewport();
+}
 const composerTextInputFocused = ref(false);
 const useIOSKeyboardFocusFallback =
   /iPhone|iPad|iPod/i.test(navigator.userAgent) ||
@@ -67,12 +72,15 @@ function updateViewport() {
   // Pin the shell to the visible area, not the layout viewport behind the keyboard.
   // Ignore unexpected browser scale changes; Dynamic Type is applied separately.
   if (viewport && Math.abs(viewport.scale - 1) > 0.01) return;
-  viewportHeight.value = viewport?.height || window.innerHeight;
+  const visualHeight = viewport?.height || window.innerHeight;
+  viewportHeight.value = nativeKeyboardHeight.value === null
+    ? visualHeight
+    : Math.min(visualHeight, Math.max(0, nativeKeyboardHeight.value - (viewport?.offsetTop || 0)));
   viewportTop.value = viewport?.offsetTop || 0;
   // WKWebView may scroll the layout viewport when refocusing after a native
   // picker, reducing innerHeight by the same amount as the page scroll.
   viewportKeyboardVisible.value =
-    window.innerHeight + window.scrollY - viewportHeight.value > 100;
+    nativeKeyboardHeight.value !== null || window.innerHeight + window.scrollY - viewportHeight.value > 100;
 }
 function isComposerTextInput(element: EventTarget | null): element is HTMLElement {
   return (
@@ -579,6 +587,10 @@ async function deleteSelectedMessage(deleteRemote: boolean, confirmed = false) {
     return;
   }
   if (await controller.deleteMessage(message, deleteRemote) && selectedMessage.value === message && ["actions", "delete-confirm"].includes(activeSheet.value || "")) {
+    if (!deleteRemote) {
+      selectedMessage.value = state.messages.find((item) => item.filename === message.filename)
+        || { ...message, cached: false, attachmentState: "idle", attachmentError: undefined };
+    }
     if (deleteRemote) dismissSheets();
     else closeSheet();
   }
@@ -682,6 +694,7 @@ onMounted(async () => {
   window.visualViewport?.addEventListener("resize", updateViewport);
   window.visualViewport?.addEventListener("scroll", updateViewport);
   window.addEventListener("resize", updateViewport);
+  window.addEventListener("transfer-genie-keyboard-geometry", updateNativeKeyboard);
   window.addEventListener(
     "transfer-genie-mobile-diagnostic",
     updateMobileDiagnostic,
@@ -704,6 +717,7 @@ onBeforeUnmount(() => {
   window.visualViewport?.removeEventListener("resize", updateViewport);
   window.visualViewport?.removeEventListener("scroll", updateViewport);
   window.removeEventListener("resize", updateViewport);
+  window.removeEventListener("transfer-genie-keyboard-geometry", updateNativeKeyboard);
   window.removeEventListener(
     "transfer-genie-mobile-diagnostic",
     updateMobileDiagnostic,

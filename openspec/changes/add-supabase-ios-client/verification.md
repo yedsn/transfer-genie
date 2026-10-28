@@ -1,5 +1,33 @@
 # iOS 附件持久化、恢复与界面状态验证
 
+## 2026-10-28 iOS 图标居中与浮动键盘辅助栏避让（Jam 已验证）
+
+- 用户报告图标裁切/偏心和 Markdown 工具条被系统“上下箭头/勾选”胶囊遮挡。读取此前 Jam 截图确认 iOS 27 浮动输入辅助栏存在；旧测试仅检查距键盘顶部的宽松间隙，不能证明无遮挡。
+- 复用 macOS `icons/icon.png` 的绿色文件夹/白箭头，裁掉不对称透明留白后以画布宽度76%居中。`icons/ios-source.png` 保留透明源图，18个主屏幕 AppIcon 使用 `#faf9f5` 不透明底板，满足传统 iOS 图标要求；没有声称主屏幕可以像 macOS Dock 一样透出壁纸。源目录与 Xcode catalog 同步，未修改 macOS 图标。`swift scripts/generate_ios_icons.swift --verify` 对18个尺寸、无alpha通道、双份一致、主体居中误差≤2像素及≥10%遮罩留白全部通过。
+- Swift 插件监听键盘frame/hide事件，转为 WebView 坐标并向 Vue 发送原生可用高度。iOS26+额外预留72pt给浮动辅助栏，保留输入法预测、系统辅助按钮和工具条首个“收起键盘”；关闭键盘清除原生高度约束。浏览器仍保留 VisualViewport fallback，没有移动发送/附件区域去跟随键盘。
+- Edge/Playwright `test_mobile_keyboard_browser.js` 通过窄屏/横屏/最大字体、原生高度548与辅助栏72pt、仅工具条吸附、草稿与附件保留和收起后发送区恢复。`test_mobile_feed_browser.js`、`test_mobile_ui_shell.js` 与 `npm run build` 通过。Swift插件完整35/35、0失败/跳过，结果 `/Volumes/VPhone/installers/tg-keyboard-plugin-full-20261028.xcresult`；另加真实通知→WebView值/清除的测试1/1通过，结果 `/Volumes/VPhone/installers/tg-keyboard-notification-20261028.xcresult`。真机测试增加系统上下项按钮与工具条不得相交的断言，并已在下述Jam签名Release测试通过。
+- 同时修复本轮文档缓存测试揭示的旧详情对象：移除缓存后从已刷新的消息列表同步详情对象，保留详情弹框并立即显示真实按需下载状态。浏览器回归覆盖此路径。早期Jam文档运行实际完成缓存移除、下载和Quick Look，但系统通知造成AX连接丢失；第二轮真实层级证明详情仍显示旧缓存状态，未把失败当通过。结果保留 `/Volumes/VPhone/installers/tg-jam-document-existing-release-20261028.xcresult` 和 `/Volumes/VPhone/installers/tg-jam-document-release-redownload-final-20261028.xcresult`。
+- 新版签名Release命令 `APPLE_DEVELOPMENT_TEAM=9RV293JR6V CARGO_HOME="$PWD/.cargo-ios" CARGO_NET_OFFLINE=true npx tauri ios build --target aarch64 --archive-only --ci --export-method debugging` 退出0。archive `gen/apple/build/transfer-genie_iOS.xcarchive`；`DTPlatformName=iphoneos`、TeamIdentifier=9RV293JR6V、strict codesign通过，内嵌AppIcon120x120且无alpha通道。外置盘保留产物 `/Volumes/VPhone/installers/tg-ios-icon-keyboard-release-20261028.xcarchive`。
+- 安装前草稿保护两次都未进入正文，runner建立连接前退出74：`/Volumes/VPhone/installers/tg-jam-icon-keyboard-preupgrade-20261028.xcresult` 和 `/Volumes/VPhone/installers/tg-jam-icon-keyboard-preupgrade-retry-20261028.xcresult`。恢复有线连接并解锁后，保护测试1/1通过、0失败/跳过：`/Volumes/VPhone/installers/tg-jam-icon-keyboard-wired-guard-20261028.xcresult`。随后原位覆盖安装签名Release，没有卸载，安装结果中的data container UUID仍为 `E47BF4A4-1988-4BC0-B000-41C55CDBB998`。
+- CoreDevice从Jam实际安装的 `com.transfergenie` 导出1024×1024非placeholder图标到 `/Volumes/VPhone/installers/tg-jam-installed-icon-20261028.png`；真机返回图中绿色文件夹/白箭头居中，四边保留安全留白且没有裁切。iOS主屏幕AppIcon仍按系统要求使用不透明浅色底板。
+- Jam签名Release的WYSIWYG真机测试最终1/1通过、0失败/跳过、40.036秒：工具条首位为44pt收起键盘图标，工具条整体位于系统浮动上下项/勾选胶囊上方且不相交，发送/附件区不随键盘上移，收起键盘、标记弹框叠层返回与fixture清理均通过。结果 `/Volumes/VPhone/installers/tg-jam-icon-keyboard-release-markdown-v3-20261028.xcresult`，截图 `/Volumes/VPhone/installers/tg-jam-icon-keyboard-release-markdown-v3-20261028-attachments/0D0010D3-9BEB-4A9B-BE44-E472C97678F5.png`。前两次运行仅因测试仍把系统胶囊占用区域当作“离键盘过远”而失败；录屏已显示产品无遮挡，最终断言改为直接验证工具条在键盘上方并与XCTest暴露的Previous/Next按钮不相交，没有放宽产品遮挡要求。
+- 测试后空草稿保护再次1/1通过：`/Volumes/VPhone/installers/tg-jam-icon-keyboard-post-empty-20261028.xcresult`。本轮同时修复的文档详情缓存刷新路径在Jam Release 1/1通过：仅移除本地缓存后详情立即显示按需下载，再下载并进入Quick Look，关闭Quick Look后保留同一详情；结果 `/Volumes/VPhone/installers/tg-jam-document-cache-detail-fixed-20261028.xcresult`。
+- Jam自动锁定已从测试用“永不”恢复到原值“5分钟”，设置摘要核对 `label=自动锁定、5分钟`，1/1通过、0失败/跳过；结果 `/Volumes/VPhone/installers/tg-jam-icon-keyboard-restore-autolock-20261028.xcresult`。以上完成本轮图标/键盘/详情缓存修复验收，但不替代iCloud、完整Keychain周期、网络切换、真实传输挂起、实际照片/视频/文档成功选择和辅助功能等剩余门禁；OpenSpec保持49/59。
+
+## 2026-10-28 Jam Release 图片离线失败与恢复缓存
+
+- 在当前已安装的签名 Release 上，专用图片 `TG-IOS-PROBE-20261026-image.jpeg` 完成完整真机恢复路径：先从 App 内只移除本地原件缓存，再仅为 App 进程注入不可达 loopback HTTP/HTTPS proxy；详情仍显示按需下载，点击“查看”明确进入“打开失败，可重试”，且没有误报原件已缓存。测试没有修改 Jam 的系统 Wi-Fi、蜂窝或代理设置。
+- 清除进程级 proxy 并冷启动后，客户端允许处于“按需下载”或已经自动恢复缓存的合法中间态；最终点击“查看”成功进入系统原图预览，点击 `Done` 返回同一详情并显示“原件已缓存，可离线打开”。定向 XCTest 1/1通过、0失败、0跳过、57.735秒，结果 `/Volumes/VPhone/installers/tg-jam-image-offline-runner.D9ee2P/jam-release-image-offline-redownload.xcresult`。
+- 初次复测失败来自测试第920行仍保留旧的“联网后必须先显示按需下载”假设，而 UI 层级已显示“原件已缓存”；产品已在联网冷启动中主动恢复下载。测试只放宽该中间态，最终系统预览成功与缓存状态断言保持严格。另一次重建因漏传真机签名覆盖而生成 `com.apple.XCTRunner`/`Software Signing` 产物，在测试正文前被 iOS 以 `0xe8008018` 拒绝，不计产品失败；最终 runner 按文档使用 Team `9RV293JR6V`、`com.transfergenie.tests.physical-ui`、嵌入 profile 和 strict codesign 后执行。
+- 测试后通过 CoreDevice 只读复制 `messages.sqlite` 到 `/Volumes/VPhone/installers/tg-jam-image-offline-audit.TYPiMI/messages.sqlite`，`PRAGMA integrity_check=ok`。专用消息仍为唯一可见 revision 1 synced 行、`deleted_at_ms` 为空；附件仍为同一 ID、revision 1、`upload_state=uploaded`、对象路径和 `preview.jpg` 路径不变。沙盒下载和 Quick Look 导出均存在 5,849 字节原件，证明缓存恢复完成；未删除或修改该云端消息。
+- 该结果补强任务5.4的 offline/failed preview/retry 与任务6.3/6.4的 Release 真机错误恢复证据，但不覆盖 unsupported fixture、真实 Wi-Fi/蜂窝切换、低存储或完整稳定性门禁，因此 OpenSpec 仍保持49/59。Jam 的自动锁定在用户授权下继续临时保持“永不”，待本轮全部真机测试结束恢复为原来的5分钟。
+
+## 2026-10-28 Jam Reduce Motion 安全探测
+
+- 真机空草稿 guard 先行通过：1/1、0失败、6.054秒，结果 `/Volumes/VPhone/installers/tg-jam-motion-runner.pq6T21/pre-motion-empty-draft.xcresult`。随后通过 iOS 27 设置搜索的稳定 deep-link identifier 精确进入“无障碍→动态效果→减弱动态效果”；早期两次失败均发生在找到开关之前，没有修改设置。
+- 自动化最终确实点击了 `REDUCE_MOTION`，但系统侧的开关值没有变为开启，测试因此保持失败而没有冒充验收通过：`/Volumes/VPhone/installers/tg-jam-motion-runner.pq6T21/physical-reduce-motion-final.xcresult`。没有放宽“必须实际开启”的断言，也没有用 Simulator 结果替代 Jam。
+- 独立恢复审计随后读取 `REDUCE_MOTION_CLEANUP_BEFORE=Optional(0)`、`AFTER=Optional(0)`，1/1通过、0失败、6.942秒，并保留关闭状态截图：`/Volumes/VPhone/installers/tg-jam-motion-runner.pq6T21/restore-reduce-motion-disabled.xcresult`。Jam 最终明确保持原来的“减弱动态效果关闭”，没有遗留系统设置变更。实验性真机测试代码已移除；任务5.6仍需 Dynamic Type、实际 Reduce Motion 和 VoiceOver 的完整人工/真机验收，因此不勾选。
+
 ## 2026-10-28 Jam 中断 Markdown 恢复、非阻塞发送与删除防复活
 
 - 真机发送失败现场显示正文已清空，但 composer 长时间停在“正在保存到本机…”。SQLite 只读副本确认草稿已清除、消息已生成且 `remote_revision=1` / `sync_state=synced`。根因是 `sendDraft()` 在本地业务提交和清草稿后仍同步等待消息、标记、状态和传输四组刷新；任一读取挂起都会把界面锁在发送态。发送完成边界现收敛为本地提交与草稿清除，后续刷新改为后台 `Promise.allSettled`。`test_mobile_ui_shell.js` 新增永久挂起 `listWindow()` 的回归，确认仅提交一次、及时返回、`sending=false`、正文清空且 `savedLocally=true`。
@@ -10,6 +38,12 @@
 - 测试后终止 App 再只读复制 SQLite：`mobile_composer_drafts=0`；marker 只对应消息 `e96df711-e3ba-5bba-b8c6-760535f4ab94`，为 `remote_revision=2`、`sync_state=synced` 的 tombstone；upsert 与 delete 两条 outbox 均 `acknowledged`、各尝试1次、无错误；可见 marker 数为0。随后空草稿 guard 1/1通过：`/Volumes/VPhone/installers/tg-jam-toolbar-draftguard-20261028.vqQt2h/empty-draft-after-recover.xcresult`。没有直接修改 SQLite、卸载 App、清理容器或触碰普通消息。
 - 回归结果：`cargo test` 主库385通过/2个显式真实环境验收 ignored，Bridge 43通过；`test_mobile_ui_shell.js`、生产构建、strict OpenSpec 和 `git diff --check` 通过。WYSIWYG 浏览器套件输出完整通过结论后 Edge 进程未自行退出，手工中止残留进程，产品断言无失败。以上仅收口本轮 Markdown/删除一致性路径；OpenSpec 仍49/59，iCloud、Keychain完整周期、网络切换、真实传输挂起、完整照片/视频/文档、辅助功能、Development/Release纵向探针和最终稳定性门禁继续开放。
 - Jam 的自动锁定原值为“5分钟”，测试期间经用户授权临时设为“永不”。本轮真机操作完成后，专用 XCTest 已选择 identifier `300` 的五分钟选项并返回摘要页核对 `label=自动锁定、5分钟`，1/1通过、0失败、0跳过、16.271秒；截图作为 xcresult 附件保存。结果 `/Volumes/VPhone/installers/tg-jam-toolbar-draftguard-20261028.vqQt2h/restore-auto-lock-five-minutes-v2.xcresult`。第一次恢复尝试只因 iOS 27 中文标签为“5分钟”而非“5 分钟”在点击时长前安全失败，没有改到其他值；最终已恢复原设置。
+
+## 2026-10-28 Jam Release 进程级离线文本恢复
+
+- 最新已安装 Release 使用运行时唯一 marker `TG-IOS-OFFLINE-2B11F74A-A95C-4DE3-98EA-2CEE28515DCD` 验证进程级断网恢复。测试仅为 App 进程注入不可达 loopback HTTP/HTTPS proxy，不改变 Jam 的 Wi-Fi、蜂窝或系统代理设置；断网阶段正文先提交到本机，Space 明确显示离线而非已同步。
+- 在相同离线环境终止并重新启动 App 后，唯一 marker 仍可见且状态保持离线。清除测试进程环境并再次冷启动后，状态收敛为已同步，搜索 marker 恰好一条；随后通过 App 内“删除消息（同步到云端）→确认删除”精确清理，搜索变为空并再次达到已同步。1/1通过、0失败、0跳过、65.184秒，结果 `/Volumes/VPhone/installers/tg-jam-toolbar-draftguard-20261028.vqQt2h/jam-release-offline-text-recovery.xcresult`。
+- 测试后终止 App 再只读复制 SQLite：草稿数为0；marker 对应单一 message 已是 `remote_revision=2`、`sync_state=synced` tombstone；upsert/delete outbox 均 `acknowledged`、各尝试1次、无错误。该结果证明 Release 真机的文本离线持久化、进程终止恢复、联网收敛和无重复清理，不替代 4.4/6.4 要求的真实 Wi-Fi/蜂窝/offline 系统转换。
 
 ## 2026-10-28 Jam Release 只读关键路径回归
 

@@ -11,9 +11,52 @@ import WebKit
 @testable import tauri_plugin_mobile_integration
 
 final class MobileIntegrationPluginTests: XCTestCase {
+    func testKeyboardGeometryReservesFloatingAssistantAndIgnoresUndockedKeyboards() {
+        let bounds = CGRect(x: 0, y: 0, width: 440, height: 956)
+        XCTAssertEqual(MobileKeyboard.visibleHeight(bounds: bounds, keyboardFrame: CGRect(x: 0, y: 620, width: 440, height: 336), clearance: 72), 548)
+        XCTAssertEqual(MobileKeyboard.visibleHeight(bounds: bounds, keyboardFrame: CGRect(x: 0, y: 620, width: 440, height: 336), clearance: 0), 620)
+        XCTAssertNil(MobileKeyboard.visibleHeight(bounds: bounds, keyboardFrame: CGRect(x: 0, y: 956, width: 440, height: 336), clearance: 72))
+        XCTAssertNil(MobileKeyboard.visibleHeight(bounds: bounds, keyboardFrame: CGRect(x: 100, y: 400, width: 250, height: 200), clearance: 72))
+        XCTAssertNil(MobileKeyboard.visibleHeight(bounds: bounds, keyboardFrame: CGRect(x: 0, y: 912, width: 440, height: 44), clearance: 72))
+        XCTAssertTrue(MobileKeyboard.script(visibleHeight: nil).contains("visibleHeight: null"))
+    }
     func testPluginCanBeCreated() throws {
         let plugin = MobileIntegrationPlugin()
         XCTAssertNotNil(plugin)
+    }
+
+    func testKeyboardNotificationsUpdateAndClearLoadedWebViewGeometry() {
+        let ready = expectation(description: "Keyboard geometry document loaded")
+        final class NavigationDelegate: NSObject, WKNavigationDelegate {
+            let ready: XCTestExpectation
+            init(_ ready: XCTestExpectation) { self.ready = ready }
+            func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { ready.fulfill() }
+        }
+        let webview = WKWebView(frame: CGRect(x: 0, y: 0, width: 440, height: 956))
+        let delegate = NavigationDelegate(ready)
+        let plugin = MobileIntegrationPlugin()
+        webview.navigationDelegate = delegate
+        plugin.load(webview: webview)
+        webview.loadHTMLString("<p>Keyboard fixture</p>", baseURL: nil)
+        wait(for: [ready], timeout: 10)
+        let shown = expectation(description: "Native keyboard frame reached WebView")
+        NotificationCenter.default.post(name: UIResponder.keyboardWillChangeFrameNotification, object: nil,
+            userInfo: [UIResponder.keyboardFrameEndUserInfoKey: CGRect(x: 0, y: 620, width: 440, height: 336)])
+        webview.evaluateJavaScript("window.__TRANSFER_GENIE_KEYBOARD_HEIGHT__") { result, error in
+            XCTAssertNil(error)
+            XCTAssertEqual((result as? NSNumber)?.doubleValue, 548)
+            shown.fulfill()
+        }
+        wait(for: [shown], timeout: 10)
+        let hidden = expectation(description: "Keyboard hide cleared WebView constraint")
+        NotificationCenter.default.post(name: UIResponder.keyboardWillHideNotification, object: nil)
+        webview.evaluateJavaScript("window.__TRANSFER_GENIE_KEYBOARD_HEIGHT__ === null") { result, error in
+            XCTAssertNil(error)
+            XCTAssertEqual(result as? Bool, true)
+            hidden.fulfill()
+        }
+        wait(for: [hidden], timeout: 10)
+        withExtendedLifetime((plugin, delegate)) {}
     }
 
     func testAppWebViewDisablesPinchWithoutDisablingScrolling() {

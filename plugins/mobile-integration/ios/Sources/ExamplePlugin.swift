@@ -37,6 +37,18 @@ class MobileIntegrationPlugin: Plugin {
     let center = NotificationCenter.default
     lifecycleObservers = [
       center.addObserver(
+        forName: UIResponder.keyboardWillChangeFrameNotification,
+        object: nil,
+        queue: .main
+      ) { [weak self] notification in self?.refreshKeyboard(notification) },
+      center.addObserver(
+        forName: UIResponder.keyboardWillHideNotification,
+        object: nil,
+        queue: .main
+      ) { [weak self] _ in
+        self?.accessibilityWebview?.evaluateJavaScript(MobileKeyboard.script(visibleHeight: nil), completionHandler: nil)
+      },
+      center.addObserver(
         forName: UIApplication.didEnterBackgroundNotification,
         object: nil,
         queue: .main
@@ -68,6 +80,18 @@ class MobileIntegrationPlugin: Plugin {
   private func refreshAccessibility() {
     accessibilityWebview?.scrollView.pinchGestureRecognizer?.isEnabled = false
     accessibilityWebview?.evaluateJavaScript(MobileAccessibility.currentScript(), completionHandler: nil)
+  }
+
+  private func refreshKeyboard(_ notification: Notification) {
+    guard let webview = accessibilityWebview,
+          let frame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
+    let localFrame = webview.convert(frame, from: nil)
+    // iOS 26+ floats the previous/next/Done assistant above the keyboard.
+    // Keep it and predictive input intact, reserving its full touch area.
+    let clearance: CGFloat
+    if #available(iOS 26.0, *) { clearance = 72 } else { clearance = 0 }
+    let height = MobileKeyboard.visibleHeight(bounds: webview.bounds, keyboardFrame: localFrame, clearance: clearance)
+    webview.evaluateJavaScript(MobileKeyboard.script(visibleHeight: height), completionHandler: nil)
   }
 
   deinit {
