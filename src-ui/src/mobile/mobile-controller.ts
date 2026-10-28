@@ -574,7 +574,7 @@ export function useMobileController() {
       state.search.messages = [...new Map<string, MobileMessage>([...state.search.messages, ...page].map((message: MobileMessage) => [message.filename, message])).values()].sort(compareMessages);
       state.search.offset += Math.min(rows.length, 50);
       state.search.hasMore = rows.length > 50;
-      void loadPassivePreviews(page);
+      void loadPassivePreviews(state.search.messages);
     } catch (error) {
       if (generation === viewGeneration && request === searchGeneration) state.search.error = errorText(error);
     } finally {
@@ -596,7 +596,7 @@ export function useMobileController() {
       const merged = new Map<string, MobileMessage>([...older, ...state.messages].map((item) => [item.filename, item]));
       state.messages = [...merged.values()].sort(compareMessages);
       state.hasMoreBefore = !!result?.hasMoreBefore;
-      void loadPassivePreviews(older);
+      void loadPassivePreviews(state.messages.filter((message) => older.some((item: MobileMessage) => item.filename === message.filename)));
     };
     try {
       feedRead = feedRead.then(read, read);
@@ -698,6 +698,7 @@ export function useMobileController() {
       view.messages = [...new Map<string, MobileMessage>([...(append ? view.messages : []), ...page].map((message: MobileMessage) => [message.filename, message])).values()];
       view.offset = offset + rows.length;
       view.hasMore = rows.length > 0 && !!result?.has_more;
+      if (!previewMode) void loadPassivePreviews(view.messages);
     } catch (error) {
       if (generation === viewGeneration && request === markedGeneration) view.error = errorText(error);
     } finally {
@@ -984,7 +985,17 @@ export function useMobileController() {
         return false;
       }
       state.notice = failed ? "部分内容未保存，请重试失败附件" : "已保存到本机，正在等待云端确认";
-      await Promise.all([refreshMessages(), refreshMarked(), refreshStatus(), refreshTransfers()]);
+      // The durable local commit and draft clear above are the send boundary.
+      // Feed/status reads may wait on sync or transfer work, especially on a
+      // physical iPhone, and must not keep a successfully committed composer
+      // disabled or make the user retry the same message.
+      void Promise.allSettled([refreshMessages(), refreshMarked(), refreshStatus(), refreshTransfers()])
+        .then((results) => {
+          if (generation !== viewGeneration || failed) return;
+          if (results.some((result) => result.status === "rejected")) {
+            state.notice = "内容已保存到本机，部分状态将在稍后刷新";
+          }
+        });
       return !failed;
     } catch (error) {
       if (generation !== viewGeneration) return false;
@@ -1183,6 +1194,29 @@ export function useMobileController() {
     } finally { if (generation === viewGeneration) { state.busy = false; void refreshRuntimeState(); } }
   }
 
+  async function prepareVideo(message: MobileMessage): Promise<string | null> {
+    if (state.busy || message.kind !== "video") return null;
+    if (previewMode) { state.notice = "浏览器预览不下载视频原件"; return null; }
+    const generation = viewGeneration;
+    state.busy = true;
+    clearFeedback();
+    message.attachmentError = undefined;
+    try {
+      const path = await downloadPath(message, generation);
+      // An explicit play may repair a historical poster; it must not delay playback.
+      if (!message.previewUrl) void api().message.completeMediaPreview({ endpointId: state.activeProfile.id, filename: message.filename, originalName: message.originalName })
+        .then((result: any) => { if (generation === viewGeneration) applyPreviewResult(message, result); })
+        .catch(() => {});
+      return api().path.convertFileSrc(path);
+    } catch (error) {
+      if (generation === viewGeneration) {
+        message.attachmentState = /暂停/.test(errorText(error)) ? "paused" : "failed";
+        message.attachmentError = errorText(error);
+      }
+      return null;
+    } finally { if (generation === viewGeneration) { state.busy = false; void refreshRuntimeState(); } }
+  }
+
   async function shareMessage(message: MobileMessage) {
     if (state.busy || message.kind === "text") return;
     clearFeedback();
@@ -1317,7 +1351,7 @@ export function useMobileController() {
 
   return {
     state, currentSpace, pendingCount, activeTransfers, signedIn, initialize, refreshAll, refreshRuntimeState, refreshAfterForeground, refreshMessages, loadOlderMessages, searchMessages, loadMoreSearch, setMarkedFilter, loadMoreMarked, loadConflicts, resolveConflict, retryTransfer,
-    selectMedia, selectDocuments, removeAttachment, sendDraft, persistComposerDraft, deactivateComposerPersistence, toggleMark, copyMessage, updateMarkedMetadata, createMarkedTag, deleteMessage, applyMessageSelection, previewMessage, shareMessage, retryPreview, previewImageFailed, previewDraftAttachment,
+    selectMedia, selectDocuments, removeAttachment, sendDraft, persistComposerDraft, deactivateComposerPersistence, toggleMark, copyMessage, updateMarkedMetadata, createMarkedTag, deleteMessage, applyMessageSelection, previewMessage, prepareVideo, shareMessage, retryPreview, previewImageFailed, previewDraftAttachment,
     signIn, logout, chooseProfile, loadSpaces, switchSpace, testSetupConnection, setupSignIn, completeSetup, installTransferListeners, refreshCache, clearCache, clearFeedback, saveSenderName,
   };
 }

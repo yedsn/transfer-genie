@@ -7,7 +7,10 @@ final class TransferGenieSimulatorUITests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = false
         app = XCUIApplication(bundleIdentifier: bundleIdentifier)
-        app.launch()
+        // This pre-upgrade guard must inspect an already-running draft without
+        // launch() terminating its process before the check can protect it.
+        if name.contains("testComposerDraftIsEmptyBeforeUpgrade") { app.activate() }
+        else { app.launch() }
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 20))
         XCTAssertTrue(app.buttons["消息"].waitForExistence(timeout: 30), "The signed-in mobile shell did not become ready")
     }
@@ -32,6 +35,25 @@ final class TransferGenieSimulatorUITests: XCTestCase {
               !app.staticTexts["草稿自动保存失败"].exists else {
             throw XCTSkip("Preserve an existing unsent draft before replacement installation")
         }
+    }
+
+    func testCleanupKnownMarkdownToolbarFixture() throws {
+        if !app.buttons["关闭新消息"].exists, app.buttons["新消息"].isHittable { app.buttons["新消息"].tap() }
+        let editor = composerEditor()
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        let fixture = "# TG Markdown UI\n\n**bold fixture** and `code`"
+        let value = (editor.value as? String ?? "").trimmingCharacters(in: .newlines)
+        guard value == fixture, app.buttons.matching(identifier: "移除附件").count == 0 else {
+            throw XCTSkip("Only the exact attachment-free toolbar fixture may be removed")
+        }
+        clearVerifiedComposerFixture(editor)
+        XCTAssertTrue(NSPredicate { _, _ in
+            let current = editor.value as? String ?? ""
+            return current.isEmpty || current == "输入文字，或加入照片和文件…"
+        }.evaluate(with: nil))
+        dismissKeyboardIfNeeded()
+        app.buttons["关闭新消息"].tap()
+        XCTAssertTrue(app.buttons["新消息"].waitForExistence(timeout: 5))
     }
 
     func testUnsentMarkdownDraftSurvivesTermination() throws {
@@ -81,6 +103,7 @@ final class TransferGenieSimulatorUITests: XCTestCase {
     func testMarkdownEditorPreviewAndCancelledMarkSettings() throws {
         XCUIDevice.shared.orientation = .portrait
         if !app.buttons["关闭新消息"].exists, app.buttons["新消息"].isHittable { app.buttons["新消息"].tap() }
+        dismissKeyboardIfNeeded()
         XCTAssertTrue(app.switches["文字"].waitForExistence(timeout: 5))
         app.switches["文字"].tap()
         var editor = composerEditor()
@@ -92,6 +115,8 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         }
         defer {
             if app.buttons["关闭编辑标记"].exists { app.buttons["关闭编辑标记"].tap() }
+            if app.buttons["收起键盘"].exists { app.buttons["收起键盘"].tap() }
+            else { dismissKeyboardIfNeeded() }
             if app.switches["文字"].exists { app.switches["文字"].tap() }
             editor = composerEditor()
             if editor.exists {
@@ -105,12 +130,12 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         }
         editor.tap()
         if original.trimmingCharacters(in: .newlines) != draft { editor.typeText(draft) }
+        dismissKeyboardIfNeeded()
         app.switches["Markdown"].tap()
         let heading = app.switches["标题"]
         XCTAssertTrue(heading.waitForExistence(timeout: 5))
         XCTAssertTrue(heading.isHittable)
         let firstTool = app.switches["粗体"]
-        XCTAssertEqual(firstTool.frame.minX, app.frame.minX, accuracy: 1, "The toolbar must have no leading gutter")
         XCTAssertGreaterThanOrEqual(firstTool.frame.width, 44)
         XCTAssertGreaterThanOrEqual(firstTool.frame.height, 44)
         XCTAssertTrue(app.switches["增加缩进"].exists)
@@ -120,7 +145,18 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         XCTAssertTrue(richEditor.waitForExistence(timeout: 5))
         richEditor.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "The rendered editor must keep the software keyboard open")
+        let dismissTool = app.buttons["收起键盘"]
+        XCTAssertTrue(dismissTool.waitForExistence(timeout: 5))
+        XCTAssertEqual(dismissTool.frame.minX, app.frame.minX, accuracy: 1, "Keyboard dismiss must be the first toolbar icon")
+        let docked = NSPredicate { _, _ in
+            let gap = self.app.keyboards.firstMatch.frame.minY - dismissTool.frame.maxY
+            return gap >= 0 && gap <= 140
+        }
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: docked, object: nil)], timeout: 5), .completed, "The formatting toolbar must sit immediately above the software keyboard and its native assistant bar")
         attachScreenshot(named: "fullscreen-wysiwyg-keyboard-toolbar")
+        XCTAssertFalse(app.buttons["发送"].isHittable, "Only formatting tools follow the software keyboard")
+        app.buttons["收起键盘"].tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5), "Dismiss the keyboard without closing the draft")
         button(containing: "标记").tap()
         XCTAssertTrue(app.staticTexts["标记设置"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["保存标记"].exists)
@@ -275,7 +311,8 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         XCTAssertTrue(search.waitForExistence(timeout: 5))
         search.tap()
         search.typeText(marker)
-        XCTAssertTrue(app.staticTexts[marker].waitForExistence(timeout: 20))
+        let exactFixture = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", marker)).firstMatch
+        XCTAssertTrue(exactFixture.waitForExistence(timeout: 20))
         XCTAssertEqual(app.buttons.matching(identifier: "更多操作").count, 1)
         dismissSearchKeyboard()
         app.buttons["更多操作"].tap()
@@ -388,6 +425,155 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         XCTAssertTrue(composerEditor().isHittable)
         attachScreenshot(named: "foreground-after-system-motion-change")
         app.buttons["关闭新消息"].tap()
+        #endif
+    }
+
+    func testSetPhysicalDeviceAutoLockToNever() throws {
+        #if targetEnvironment(simulator)
+        throw XCTSkip("Auto-Lock is changed only on the explicitly authorized physical test device")
+        #else
+        let settings = XCUIApplication(bundleIdentifier: "com.apple.Preferences")
+        settings.terminate()
+        settings.launch()
+        XCTAssertTrue(settings.wait(for: .runningForeground, timeout: 10))
+
+        func firstSetting(_ labels: [String]) -> XCUIElement? {
+            for label in labels {
+                let exact = settings.descendants(matching: .any)
+                    .matching(NSPredicate(format: "label == %@ OR identifier == %@", label, label))
+                    .firstMatch
+                if exact.exists { return exact }
+            }
+            return nil
+        }
+
+        let displayLabels = ["显示与亮度", "Display & Brightness"]
+        for _ in 0..<8 where firstSetting(displayLabels) == nil {
+            let back = settings.navigationBars.buttons.element(boundBy: 0)
+            if back.exists && back.isHittable { back.tap() } else { break }
+        }
+        for _ in 0..<5 where firstSetting(displayLabels) == nil { settings.swipeUp() }
+        guard let display = firstSetting(displayLabels) else {
+            let hierarchy = XCTAttachment(string: settings.debugDescription)
+            hierarchy.name = "settings-root-before-auto-lock"
+            hierarchy.lifetime = .keepAlways
+            add(hierarchy)
+            XCTFail("Display & Brightness is not reachable in Settings")
+            app.activate()
+            return
+        }
+        display.tap()
+
+        let autoLockLabels = ["自动锁定", "Auto-Lock"]
+        for _ in 0..<5 where firstSetting(autoLockLabels) == nil { settings.swipeUp() }
+        guard let autoLock = firstSetting(autoLockLabels) else {
+            XCTFail("Auto-Lock is not reachable in Display & Brightness")
+            app.activate()
+            return
+        }
+        let containingCell = settings.cells.containing(.staticText, identifier: autoLock.label).firstMatch
+        let original = "label=\(containingCell.exists ? containingCell.label : autoLock.label); value=\(containingCell.exists ? String(describing: containingCell.value) : String(describing: autoLock.value))"
+        print("AUTO_LOCK_ORIGINAL \(original)")
+        let originalAttachment = XCTAttachment(string: original)
+        originalAttachment.name = "auto-lock-original-value"
+        originalAttachment.lifetime = .keepAlways
+        add(originalAttachment)
+        autoLock.tap()
+
+        let neverLabels = ["永不", "Never"]
+        guard let never = firstSetting(neverLabels) else {
+            XCTFail("Never is not available; Low Power Mode or a device policy may be forcing Auto-Lock")
+            app.activate()
+            return
+        }
+        never.tap()
+        let back = settings.navigationBars.buttons.element(boundBy: 0)
+        XCTAssertTrue(back.waitForExistence(timeout: 5), "Auto-Lock screen did not expose its back button")
+        back.tap()
+        let updatedCell = settings.cells["AUTOLOCK"]
+        guard updatedCell.waitForExistence(timeout: 5) else {
+            XCTFail("Could not return to the Auto-Lock summary cell")
+            app.activate()
+            return
+        }
+        let updated = "label=\(updatedCell.label); value=\(String(describing: updatedCell.value))"
+        print("AUTO_LOCK_UPDATED \(updated)")
+        XCTAssertTrue(updated.contains("永不") || updated.localizedCaseInsensitiveContains("Never"), "Auto-Lock summary did not change to Never")
+        let screenshot = XCTAttachment(screenshot: settings.screenshot())
+        screenshot.name = "auto-lock-set-to-never"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        app.activate()
+        #endif
+    }
+
+    func testRestorePhysicalDeviceAutoLockToFiveMinutes() throws {
+        #if targetEnvironment(simulator)
+        throw XCTSkip("Auto-Lock is restored only on the explicitly authorized physical test device")
+        #else
+        let settings = XCUIApplication(bundleIdentifier: "com.apple.Preferences")
+        settings.terminate()
+        settings.launch()
+        XCTAssertTrue(settings.wait(for: .runningForeground, timeout: 10))
+
+        func firstSetting(_ labels: [String]) -> XCUIElement? {
+            for label in labels {
+                let exact = settings.descendants(matching: .any)
+                    .matching(NSPredicate(format: "label == %@ OR identifier == %@", label, label))
+                    .firstMatch
+                if exact.exists { return exact }
+            }
+            return nil
+        }
+
+        let displayLabels = ["显示与亮度", "Display & Brightness"]
+        for _ in 0..<8 where firstSetting(displayLabels) == nil {
+            let back = settings.navigationBars.buttons.element(boundBy: 0)
+            if back.exists && back.isHittable { back.tap() } else { break }
+        }
+        for _ in 0..<5 where firstSetting(displayLabels) == nil { settings.swipeUp() }
+        guard let display = firstSetting(displayLabels) else {
+            XCTFail("Display & Brightness is not reachable in Settings")
+            app.activate()
+            return
+        }
+        display.tap()
+
+        let autoLockLabels = ["自动锁定", "Auto-Lock"]
+        for _ in 0..<5 where firstSetting(autoLockLabels) == nil { settings.swipeUp() }
+        guard let autoLock = firstSetting(autoLockLabels) else {
+            XCTFail("Auto-Lock is not reachable in Display & Brightness")
+            app.activate()
+            return
+        }
+        autoLock.tap()
+
+        let fiveMinutes = firstSetting(["5 分钟", "5分钟", "5 Minutes"])
+            ?? settings.descendants(matching: .any)
+                .matching(NSPredicate(format: "(label CONTAINS '5' OR value CONTAINS '5') AND (label CONTAINS '分钟' OR label CONTAINS[c] 'minute' OR value CONTAINS '分钟' OR value CONTAINS[c] 'minute')"))
+                .firstMatch
+        guard fiveMinutes.exists else {
+            XCTFail("The five-minute Auto-Lock option is not available")
+            app.activate()
+            return
+        }
+        fiveMinutes.tap()
+        let back = settings.navigationBars.buttons.element(boundBy: 0)
+        XCTAssertTrue(back.waitForExistence(timeout: 5), "Auto-Lock screen did not expose its back button")
+        back.tap()
+        let updatedCell = settings.cells["AUTOLOCK"]
+        XCTAssertTrue(updatedCell.waitForExistence(timeout: 5), "Could not return to the Auto-Lock summary cell")
+        let updated = "label=\(updatedCell.label); value=\(String(describing: updatedCell.value))"
+        print("AUTO_LOCK_RESTORED \(updated)")
+        XCTAssertTrue(
+            updated.contains("5 分钟") || updated.contains("5分钟") || updated.localizedCaseInsensitiveContains("5 Minutes"),
+            "Auto-Lock summary did not return to five minutes"
+        )
+        let screenshot = XCTAttachment(screenshot: settings.screenshot())
+        screenshot.name = "auto-lock-restored-to-five-minutes"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        app.activate()
         #endif
     }
 
@@ -620,6 +806,57 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         app.buttons["关闭详情"].tap()
     }
 
+    func testVideoPlaysInsideDetail() {
+        app.buttons["搜索消息"].tap()
+        let search = app.searchFields["搜索文本、文件名"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap()
+        search.typeText("TG-IOS-PROBE-20261026-video.mp4")
+        let fixture = app.staticTexts["TG-IOS-PROBE-20261026-video.mp4"].firstMatch
+        XCTAssertTrue(fixture.waitForExistence(timeout: 15))
+        dismissSearchKeyboard()
+        app.buttons["更多操作"].firstMatch.tap()
+        button(containing: "查看详情").tap()
+        XCTAssertTrue(app.buttons["关闭详情"].waitForExistence(timeout: 5))
+        let play = app.buttons["播放视频"]
+        XCTAssertTrue(play.waitForExistence(timeout: 5))
+        play.tap()
+        let hierarchy = XCTAttachment(string: app.debugDescription)
+        hierarchy.name = "inline-video-accessibility"
+        hierarchy.lifetime = .keepAlways
+        add(hierarchy)
+        attachScreenshot(named: "inline-video-before-control-check")
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "已播放 [1-9][0-9]* 秒")).firstMatch.waitForExistence(timeout: 30), "Real video playback time did not advance")
+        XCTAssertTrue(app.buttons["关闭详情"].exists, "Playback must retain message detail")
+        XCTAssertNil(firstExistingButton(labels: ["完成", "Done"], timeout: 1))
+        attachScreenshot(named: "video-playing-inside-detail")
+        app.buttons["关闭详情"].tap()
+    }
+
+    func testImageThumbnailAndOriginalView() {
+        let name = "TG-IOS-PROBE-20261026-image.jpeg"
+        app.buttons["搜索消息"].tap()
+        let search = app.searchFields["搜索文本、文件名"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap()
+        search.typeText(name)
+        XCTAssertTrue(app.images[name].firstMatch.waitForExistence(timeout: 20), "Feed thumbnail is missing")
+        dismissSearchKeyboard()
+        attachScreenshot(named: "image-thumbnail-in-feed")
+        app.buttons["更多操作"].firstMatch.tap()
+        button(containing: "查看详情").tap()
+        XCTAssertTrue(app.buttons["关闭详情"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["查看"].waitForExistence(timeout: 10))
+        attachScreenshot(named: "image-thumbnail-in-detail")
+        app.buttons["查看"].tap()
+        let done = firstExistingButton(labels: ["完成", "Done"], timeout: 30)
+        XCTAssertNotNil(done)
+        attachScreenshot(named: "image-original-system-preview")
+        done?.tap()
+        XCTAssertTrue(app.buttons["关闭详情"].waitForExistence(timeout: 10), "Quick Look did not return to image details")
+        app.buttons["关闭详情"].tap()
+    }
+
     func testSentFixtureVideoProvidesPlaybackControls() {
         let fixtureName = "TG-IOS-PROBE-20261026-video.mp4"
         let fixture = app.staticTexts[fixtureName]
@@ -627,7 +864,7 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         fixture.tap()
         XCTAssertTrue(app.buttons["关闭详情"].waitForExistence(timeout: 5))
 
-        let openPlayback = app.buttons["播放"]
+        let openPlayback = app.buttons["系统播放器"]
         XCTAssertTrue(openPlayback.waitForExistence(timeout: 5))
         XCTAssertTrue(openPlayback.isHittable)
         openPlayback.tap()
@@ -701,7 +938,7 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         XCTAssertTrue(app.buttons["关闭详情"].waitForExistence(timeout: 5))
 
         for cycle in 1...10 {
-            let playback = app.buttons["播放"]
+            let playback = app.buttons["系统播放器"]
             XCTAssertTrue(playback.isHittable, "Playback trigger was not responsive on cycle \(cycle)")
             playback.tap()
             let done = firstExistingButton(labels: ["完成", "Done"], timeout: 20)
@@ -1159,11 +1396,16 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         XCTAssertTrue(editor.isHittable)
         editor.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
-        XCTAssertTrue(button(containing: "照片").exists)
-        XCTAssertTrue(button(containing: "文件").exists)
-        XCTAssertTrue(button(containing: "标记").exists)
+        XCTAssertFalse(button(containing: "照片").isHittable, "Attachment actions must stay below the keyboard")
+        XCTAssertFalse(button(containing: "文件").isHittable, "Attachment actions must stay below the keyboard")
+        XCTAssertFalse(button(containing: "标记").isHittable, "Mark settings must stay below the keyboard")
+        XCTAssertFalse(app.buttons["发送"].isHittable, "Send must stay below the keyboard")
 
         dismissKeyboardIfNeeded()
+        XCTAssertTrue(button(containing: "照片").waitForExistence(timeout: 5))
+        XCTAssertTrue(button(containing: "照片").isHittable)
+        XCTAssertTrue(button(containing: "文件").isHittable)
+        XCTAssertTrue(button(containing: "标记").isHittable)
         button(containing: "照片").tap()
         let cancel = firstExistingButton(labels: ["取消", "Cancel"], timeout: 10)
         XCTAssertNotNil(cancel, "The native photo picker did not provide a cancellation path")
@@ -1441,6 +1683,7 @@ final class TransferGenieSimulatorUITests: XCTestCase {
     func testSendRichMarkdownFixture() throws {
         let marker = "TG-WYSIWYG-" + UUID().uuidString
         if !app.buttons["关闭新消息"].exists { app.buttons["新消息"].tap() }
+        dismissKeyboardIfNeeded()
         XCTAssertTrue(app.switches["文字"].waitForExistence(timeout: 5))
         app.switches["文字"].tap()
         let plain = composerEditor()
@@ -1462,6 +1705,7 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         rich.typeText(" tail\n")
         app.switches["无序列表"].tap()
         rich.typeText("list END")
+        dismissKeyboardIfNeeded()
         XCTAssertTrue(app.buttons["发送"].isEnabled)
         app.buttons["发送"].tap()
         XCTAssertTrue(app.buttons["新消息"].waitForExistence(timeout: 20))
@@ -1485,6 +1729,129 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         app.buttons["确认删除"].tap()
         XCTAssertTrue(app.staticTexts["没有找到相关内容"].waitForExistence(timeout: 20))
         XCTAssertTrue(button(containing: "存储空间，已同步").waitForExistence(timeout: 60))
+    }
+
+    func testRecoverExactInterruptedRichMarkdownFixtureAndCleanup() throws {
+        let marker = "TG-WYSIWYG-RECOVER-" + UUID().uuidString
+        if !app.buttons["关闭新消息"].exists { app.buttons["新消息"].tap() }
+        dismissKeyboardIfNeeded()
+        if app.switches["Markdown"].exists { app.switches["Markdown"].tap() }
+        let editor = composerEditor()
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        let interrupted = editor.value as? String ?? ""
+        let fixtureFingerprint = interrupted
+            .replacingOccurrences(of: "*", with: "")
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: "•", with: "")
+            .components(separatedBy: .whitespacesAndNewlines)
+            .joined()
+            .uppercased()
+        guard fixtureFingerprint.range(of: #"^[A-F0-9]{6}BOLDTAILLISTEND$"#, options: .regularExpression) != nil,
+              app.buttons.matching(identifier: "移除附件").count == 0,
+              app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "已标记 ·")).count == 0 else {
+            throw XCTSkip("Preserve any draft that is not the exact interrupted rich-Markdown fixture")
+        }
+        editor.tap()
+        editor.typeText("\n" + marker)
+        dismissKeyboardIfNeeded()
+        XCTAssertTrue(app.buttons["发送"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["发送"].isEnabled)
+        app.buttons["发送"].tap()
+        XCTAssertTrue(app.buttons["新消息"].waitForExistence(timeout: 20))
+        XCTAssertTrue(button(containing: "存储空间，已同步").waitForExistence(timeout: 60))
+
+        app.buttons["搜索消息"].tap()
+        let search = app.searchFields["搜索文本、文件名"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap()
+        search.typeText(marker)
+        XCTAssertTrue(app.staticTexts[marker].waitForExistence(timeout: 20))
+        XCTAssertEqual(app.buttons.matching(identifier: "更多操作").count, 1, "Only the recovered fixture may be deleted")
+        dismissSearchKeyboard()
+        app.buttons["更多操作"].firstMatch.tap()
+        button(containing: "删除消息（同步到云端）").tap()
+        XCTAssertTrue(app.buttons["确认删除"].waitForExistence(timeout: 5))
+        app.buttons["确认删除"].tap()
+        XCTAssertTrue(app.staticTexts["没有找到相关内容"].waitForExistence(timeout: 20))
+        XCTAssertTrue(button(containing: "存储空间，已同步").waitForExistence(timeout: 60))
+    }
+
+    func testRecoverExactUnsentRichMarkdownFixtureAndCleanup() throws {
+        if !app.buttons["关闭新消息"].exists { app.buttons["新消息"].tap() }
+        dismissKeyboardIfNeeded()
+        if app.switches["Markdown"].exists { app.switches["Markdown"].tap() }
+        let editor = composerEditor()
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        let interrupted = editor.value as? String ?? ""
+        let markerExpression = #"TG-WYSIWYG-[A-F0-9]{8}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{12}"#
+        guard let range = interrupted.uppercased().range(of: markerExpression, options: .regularExpression),
+              app.buttons.matching(identifier: "移除附件").count == 0,
+              app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "已标记 ·")).count == 0 else {
+            throw XCTSkip("Preserve any draft that is not the exact unsent rich-Markdown fixture")
+        }
+        let marker = String(interrupted.uppercased()[range])
+        let fingerprint = interrupted
+            .replacingOccurrences(of: marker, with: "", options: .caseInsensitive)
+            .replacingOccurrences(of: "*", with: "")
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: "•", with: "")
+            .components(separatedBy: .whitespacesAndNewlines)
+            .joined()
+            .uppercased()
+        guard fingerprint == "BOLDTAILLISTEND" else {
+            throw XCTSkip("Preserve a draft whose body is not the exact test fixture")
+        }
+        XCTAssertTrue(app.buttons["发送"].isEnabled)
+        app.buttons["发送"].tap()
+        XCTAssertTrue(app.buttons["新消息"].waitForExistence(timeout: 20))
+        XCTAssertTrue(button(containing: "存储空间，已同步").waitForExistence(timeout: 60))
+
+        app.buttons["搜索消息"].tap()
+        let search = app.searchFields["搜索文本、文件名"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap()
+        search.typeText(marker)
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", marker)).firstMatch.waitForExistence(timeout: 20))
+        XCTAssertEqual(app.buttons.matching(identifier: "更多操作").count, 1)
+        dismissSearchKeyboard()
+        app.buttons["更多操作"].firstMatch.tap()
+        button(containing: "删除消息（同步到云端）").tap()
+        XCTAssertTrue(app.buttons["确认删除"].waitForExistence(timeout: 5))
+        app.buttons["确认删除"].tap()
+        XCTAssertTrue(app.staticTexts["没有找到相关内容"].waitForExistence(timeout: 20))
+        XCTAssertTrue(button(containing: "存储空间，已同步").waitForExistence(timeout: 60))
+    }
+
+    func testCleanupExactRecoveredRichMarkdownMessage() throws {
+        let marker = "TG-WYSIWYG-RECOVER-A35755C7-14CB-4CB1-B707-8E8D18EC0921"
+        XCTAssertTrue(app.buttons["搜索消息"].isHittable)
+        app.buttons["搜索消息"].tap()
+        let search = app.searchFields["搜索文本、文件名"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap()
+        search.typeText(marker)
+        XCTAssertTrue(app.staticTexts[marker].waitForExistence(timeout: 20))
+        guard app.buttons.matching(identifier: "更多操作").count == 1 else {
+            throw XCTSkip("Delete only the one exact recovered fixture result")
+        }
+        dismissSearchKeyboard()
+        app.buttons["更多操作"].firstMatch.tap()
+        button(containing: "删除消息（同步到云端）").tap()
+        XCTAssertTrue(app.buttons["确认删除"].waitForExistence(timeout: 5))
+        app.buttons["确认删除"].tap()
+        XCTAssertTrue(app.staticTexts["没有找到相关内容"].waitForExistence(timeout: 20))
+        XCTAssertTrue(button(containing: "存储空间，已同步").waitForExistence(timeout: 60))
+    }
+
+    func testExactRecoveredRichMarkdownMessageIsGone() {
+        let marker = "TG-WYSIWYG-RECOVER-A35755C7-14CB-4CB1-B707-8E8D18EC0921"
+        app.buttons["搜索消息"].tap()
+        let search = app.searchFields["搜索文本、文件名"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap()
+        search.typeText(marker)
+        XCTAssertTrue(app.staticTexts["没有找到相关内容"].waitForExistence(timeout: 20))
+        XCTAssertEqual(app.buttons.matching(identifier: "更多操作").count, 0)
     }
 
     func testTwentyColdStartsRestoreSignedInShell() {
@@ -1969,8 +2336,16 @@ final class TransferGenieSimulatorUITests: XCTestCase {
     }
 
     private func dismissKeyboardIfNeeded() {
+        if app.buttons["收起键盘"].exists {
+            app.buttons["收起键盘"].tap()
+            XCTAssertTrue(app.buttons["发送"].waitForExistence(timeout: 5), "Composer actions did not return after dismissing the rich editor")
+            return
+        }
         guard app.keyboards.firstMatch.exists else { return }
-        app.staticTexts["新消息"].tap()
+        if let done = firstExistingButton(labels: ["完成", "Done"], timeout: 2) {
+            done.tap()
+        }
+        XCTAssertTrue(waitForNonExistence(app.keyboards.firstMatch, timeout: 5), "Composer keyboard did not dismiss")
     }
 
     private func dismissSearchKeyboard() {

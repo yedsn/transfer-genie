@@ -1,11 +1,119 @@
 # iOS 附件持久化、恢复与界面状态验证
 
+## 2026-10-28 Jam 中断 Markdown 恢复、非阻塞发送与删除防复活
+
+- 真机发送失败现场显示正文已清空，但 composer 长时间停在“正在保存到本机…”。SQLite 只读副本确认草稿已清除、消息已生成且 `remote_revision=1` / `sync_state=synced`。根因是 `sendDraft()` 在本地业务提交和清草稿后仍同步等待消息、标记、状态和传输四组刷新；任一读取挂起都会把界面锁在发送态。发送完成边界现收敛为本地提交与草稿清除，后续刷新改为后台 `Promise.allSettled`。`test_mobile_ui_shell.js` 新增永久挂起 `listWindow()` 的回归，确认仅提交一次、及时返回、`sending=false`、正文清空且 `savedLocally=true`。
+- 应用内确认删除旧恢复 fixture 后曾出现 delete outbox 已 `acknowledged`，但旧 revision 1 历史快照覆盖本地 tombstone、消息再次可见。`apply_pulled_message()` 现拒绝 `change.revision <= local remote_revision` 的旧/相同快照覆盖本地状态；`init_db()` 同时幂等修复“最后有效操作是 acknowledged delete、行却仍可见”的旧数据，delete 后存在新 upsert 时不会误隐藏。Rust 回归 `acknowledged_delete_is_not_resurrected_by_an_old_history_snapshot` 与 `pulled_base_revision_during_local_edit_is_not_a_conflict` 通过。
+- 最终签名 Release 以原位覆盖方式安装到 Jam，未卸载且 data container UUID 保持 `E47BF4A4-1988-4BC0-B000-41C55CDBB998`。`DTPlatformName=iphoneos`、arm64、最低 iOS 16、strict codesign、Team `9RV293JR6V` 与包含 Jam UDID 的 profile 均已核验；Release 二进制不含 Simulator 测试探针。旧恢复 marker 在最终 Release 搜索为空：`/Volumes/VPhone/installers/tg-jam-toolbar-draftguard-20261028.vqQt2h/verify-recovered-rich-gone-final.xcresult`。
+- 发送前只读复制 Jam SQLite，确认唯一未发送草稿为 `TG-WYSIWYG-0F1B4622-BFD3-444E-B263-089EFF737E64`，`format=markdown`、长度75、无附件、未标记，messages 中匹配数为0。修正 XCTest 的键盘 helper：只要“收起键盘”按钮存在就点击并等待发送区恢复，不再依赖 XCTest 是否同时暴露 keyboard 节点。
+- 精确恢复测试 `testRecoverExactUnsentRichMarkdownFixtureAndCleanup` 在 Jam Release 1/1通过、0失败、0跳过、28.154秒。它只接受 `TG-WYSIWYG-<UUID>`、无附件、未标记且正文指纹严格为 `BOLDTAILLISTEND` 的草稿；随后成功收键盘、发送一次、等待已同步、搜索唯一结果，并经应用内确认删除至搜索为空。结果 `/Volumes/VPhone/installers/tg-jam-toolbar-draftguard-20261028.vqQt2h/recover-unsent-rich-final-v2.xcresult`。
+- 测试后终止 App 再只读复制 SQLite：`mobile_composer_drafts=0`；marker 只对应消息 `e96df711-e3ba-5bba-b8c6-760535f4ab94`，为 `remote_revision=2`、`sync_state=synced` 的 tombstone；upsert 与 delete 两条 outbox 均 `acknowledged`、各尝试1次、无错误；可见 marker 数为0。随后空草稿 guard 1/1通过：`/Volumes/VPhone/installers/tg-jam-toolbar-draftguard-20261028.vqQt2h/empty-draft-after-recover.xcresult`。没有直接修改 SQLite、卸载 App、清理容器或触碰普通消息。
+- 回归结果：`cargo test` 主库385通过/2个显式真实环境验收 ignored，Bridge 43通过；`test_mobile_ui_shell.js`、生产构建、strict OpenSpec 和 `git diff --check` 通过。WYSIWYG 浏览器套件输出完整通过结论后 Edge 进程未自行退出，手工中止残留进程，产品断言无失败。以上仅收口本轮 Markdown/删除一致性路径；OpenSpec 仍49/59，iCloud、Keychain完整周期、网络切换、真实传输挂起、完整照片/视频/文档、辅助功能、Development/Release纵向探针和最终稳定性门禁继续开放。
+- Jam 的自动锁定原值为“5分钟”，测试期间经用户授权临时设为“永不”。本轮真机操作完成后，专用 XCTest 已选择 identifier `300` 的五分钟选项并返回摘要页核对 `label=自动锁定、5分钟`，1/1通过、0失败、0跳过、16.271秒；截图作为 xcresult 附件保存。结果 `/Volumes/VPhone/installers/tg-jam-toolbar-draftguard-20261028.vqQt2h/restore-auto-lock-five-minutes-v2.xcresult`。第一次恢复尝试只因 iOS 27 中文标签为“5分钟”而非“5 分钟”在点击时长前安全失败，没有改到其他值；最终已恢复原设置。
+
+## 2026-10-28 Jam Release 只读关键路径回归
+
+- 在最新已原位安装的签名 Release 上运行 8 项无破坏性真机关键路径。首次结果为 7 passed / 1 failed / 0 skipped，140.942 秒；登录态与 Supabase 导航、关于和发送者设置、原生插件诊断 `ios · native=true · main-thread=true`、独立附件菜单、横竖屏全屏详情与更多操作、详情内真实视频播放、系统分享打开后取消均通过。结果 `/Volumes/VPhone/installers/tg-jam-toolbar-draftguard-20261028.vqQt2h/release-readonly-critical.xcresult`。测试只读取已有专用 fixture，不发送、删除、保存设置或退出账号。
+- 唯一失败是图片原图预览测试的清理竞态，不是产品路径失败：列表图片、详情图片和 Quick Look 原图均已出现，系统层级只暴露 `Done`、`Share` 和文件操作菜单；测试点击 `Done` 后未等待 Quick Look 异步退场，立即查找底层“关闭详情”而失败。测试现明确等待详情重新出现后再关闭，没有修改业务代码或放宽图片/原图断言。
+- 修正后的 `testImageThumbnailAndOriginalView` 在同一 Jam Release 上定向重跑 1/1、0失败、0跳过、21.303 秒。它再次验证列表缩略图、详情缩略图、点击“查看”进入系统原图、点击 `Done` 返回同一详情并正常关闭。结果 `/Volumes/VPhone/installers/tg-jam-toolbar-draftguard-20261028.vqQt2h/image-preview-rerun.xcresult`。
+- 全部只读路径结束后，`testComposerDraftIsEmptyBeforeUpgrade` 再次通过：1/1、0失败、0跳过、4.141 秒；草稿无文字、附件、待保存标记或保存失败提示。结果 `/Volumes/VPhone/installers/tg-jam-toolbar-draftguard-20261028.vqQt2h/post-readonly-empty-draft.xcresult`。
+- 随后准备补测照片/文件 picker 取消路径时，因图片测试等待修正重新构建并签名了 UI runner，Jam 在测试正文前拒绝启动新的 `com.transfergenie.tests.physical-ui.xctrunner`：`Developer App Certificate is not trusted`。结果 `/Volumes/VPhone/installers/tg-jam-toolbar-draftguard-20261028.vqQt2h/picker-cancellation.xcresult`，0 项测试执行，不计为功能失败；业务 Release App 未重装，草稿、消息、账号和系统设置均未改动。需在 Jam 的“设置 → 通用 → VPN 与设备管理”重新信任对应 Apple Development 开发者后再重跑。
+- 用户在 Jam 重新信任开发者后，Runner 正常进入测试正文。旧 `testComposerKeyboardAndPickerCancellation` 先暴露两处已经过时的测试假设：它要求最新设计中键盘出现时仍能看到照片/文件/标记区，并要求纯文字编辑器也显示仅属于 Markdown 工具条的“收起键盘”图标。两次失败分别位于 `picker-cancellation-after-trust.xcresult` 和 `picker-cancellation-current-ui.xcresult`，都发生在打开 picker 前且未写入草稿。测试已按确认后的 UI 分工更新：键盘出现时断言照片、文件、标记、发送均不可触摸；纯文字模式使用系统 `Done` 收起；收起后再断言操作区恢复。
+- 更新后的 Jam Release picker 取消路径 1/1、0失败、0跳过、27.239 秒：真实 PhotosPicker 和 Files Picker 均打开，点击各自取消后返回同一 composer，最后关闭 composer；未选择、读取或输出私人媒体/文件，未发送内容。结果 `/Volumes/VPhone/installers/tg-jam-toolbar-draftguard-20261028.vqQt2h/picker-cancellation-current-ui-v2.xcresult`。随后空草稿 guard 1/1 通过、6.821 秒，结果 `/Volumes/VPhone/installers/tg-jam-toolbar-draftguard-20261028.vqQt2h/post-picker-empty-draft.xcresult`。
+- 专用文档成功选择测试只查找 `TG-IOS-PROBE-20261027-document.txt`；Jam 的 Files 当前页及“浏览”页均未找到该 fixture，测试在选择前严格失败并停止，没有点击其他文件。结果 `/Volumes/VPhone/installers/tg-jam-toolbar-draftguard-20261028.vqQt2h/document-preview-removal.xcresult`。随后 picker 取消清理路径再次 1/1 通过，结果 `/Volumes/VPhone/installers/tg-jam-toolbar-draftguard-20261028.vqQt2h/picker-cleanup-after-missing-document.xcresult`。fixture 缺失不记为产品导入失败，也不证明真机文档成功选择。
+- 候选 archive 的 `Info.plist`/Mach-O/codesign 再核对：`DTPlatformName=iphoneos`、arm64、iOS 16.0、strict codesign 通过；三个 Simulator-only 环境变量与 `Simulator layout geometry` 均不出现在安装二进制，源码也受 `DEBUG && targetEnvironment(simulator)` 或 Rust `target_abi=sim && debug_assertions` 条件保护。当前个人团队 profile 是 7 天 `LocalProvision`，`get-task-allow=true`，因此这里证明的是优化 Release 配置在开发签名真机上的行为，不冒充 TestFlight/App Store distribution 签名验收。
+- 这些结果补强 6.3 的 Release 真机证据，但不单独完成 6.3：实际照片/视频/文档 picker 成功选择与发送、下载、生命周期恢复等关键路径仍待执行；iCloud、网络切换、账号切换、真实传输挂起、低存储和 VoiceOver 等任务也继续保持开放。OpenSpec 仍为 49/59。
+
+## 2026-10-28 VPhone 键盘焦点兜底与首位图标验收
+
+- VPhone 的 WKWebView 在软件键盘出现时保持 `visualViewport` 不变，导致旧判定未显示首位图标且发送区仍可见。移动 shell 增加仅限 iOS 的编辑焦点兜底，同时保留 VisualViewport、缩放过滤和失焦恢复。`npm run build`、`test_mobile_keyboard_browser.js`（新增 iPhone UA/不缩 viewport 回归）、`test_mobile_wysiwyg_browser.js`、`test_mobile_ui_shell.js`、`git diff --check` 与 strict OpenSpec 均通过。
+- 官方 iPhone 12 Simulator 使用原 Keychain Team `LW6QTNHNV4` 重建并覆盖安装，登录态恢复；`testMarkdownEditorPreviewAndCancelledMarkSettings` 1/1、0 failure、41.897 秒。日志 `/Volumes/VPhone/installers/tg-keyboard-focus-sim-20261028.qiyGun/native-original-team.log`，xcresult `/Volumes/VPhone/installers/tg-keyboard-focus-sim-20261028.qiyGun/native-original-team/Logs/Test/Test-TransferGenieSimulatorUITests-2026.10.28_12-53-47-+0800.xcresult`。使用设备 Team 的首次 Simulator 尝试因 Keychain access group 不同落到登录页，不计产品失败；随后恢复原 Team 验证通过，生成工程 Team 恢复 `9RV293JR6V`。
+- 最新签名 iPhoneOS Release 覆盖安装到 VPhone 后，基础 smoke 14/14 通过，报告 `/Volumes/VPhone/installers/tg-keyboard-focus-vphone-20261028.Go0kRv/smoke/report.json`。composer 补充验收实际通过：工具条第一个 44pt 向下箭头收键盘、格式按钮随后排列、键盘期间隐藏发送/附件/标记/模式区、富文本粗体与列表、标记叠层取消、草稿终止恢复、唯一 UUID 消息发送和冷启动唯一恢复。截图 `/Volumes/VPhone/installers/tg-keyboard-focus-vphone-20261028.Go0kRv/composer-retry/wysiwyg-keyboard-toolbar.png`。
+- composer 脚本在删除后的文案等待发生超时，但搜索仍显示该唯一 fixture；随后按报告 UUID `TG-VPHONE-WYSIWYG-346dd4b6-85f0-47eb-9557-003dc746332e` 经应用内更多→同步删除→确认删除精确清理，搜索变为 `0 条 · 本机索引`/没有找到相关内容、状态已同步；独立附件菜单和最终空草稿另行确认。没有删除普通消息。脚本已增加初始自动聚焦后的收键盘步骤和零结果计数等待，避免同类竞态。该结果仅为 VPhone supplemental，不替代 Jam。
+- VPhone composer 最终自动化复跑完整通过 6/6：空草稿保护、标记保存/取消/确认取消、WYSIWYG 粗体/列表和标记叠层、终止恢复、唯一 UUID 发送/冷启动唯一恢复、应用内确认删除以及独立附件菜单/最终空草稿全部无人工补救完成。报告 `/Volumes/VPhone/installers/tg-keyboard-focus-vphone-20261028.Go0kRv/composer-green/report.json`；本次唯一 fixture `TG-VPHONE-WYSIWYG-39502281-9f0f-4a18-ac9d-cedc6f358242` 已由套件精确同步删除。
+- VPhone 只读媒体套件最终通过 5/5：图片列表与详情真实缩略图、原图 Quick Look 返回、系统分享打开/取消、视频详情内 `timeupdate` 实际前进且没有离开详情、更多叠层取消后播放器与详情仍在。报告 `/Volumes/VPhone/installers/tg-keyboard-focus-vphone-20261028.Go0kRv/media-green-3/report.json`，截图同目录。脚本改为识别系统分享的 `shareCell`/`actionGroupCell`，并安全返回残留详情，不依赖语言或 AirDrop 单一标签；全程不发送、删除或修改媒体 fixture。
+- 同一源码的 `test_mobile_media_browser.js` 使用官方 Simulator 既有专用 MP4 通过，覆盖 feed/标记/详情解码缩略图、图片查看、内嵌播放、暂停保留、迟到请求隔离和系统备用入口；feed、accessibility、UI shell、diff check 与 strict OpenSpec 一并通过。
+
+## 2026-10-28 Jam 首位图标验收前置检查
+
+- 最初的草稿保护测试在安装 runner 前失败：`0xe8008018`，测试正文未执行。Simulator 测试工程默认 `CODE_SIGNING_ALLOWED=NO`，未覆盖真机配置时保留 Apple 内置 XCTest 身份；不是消息或键盘功能失败。xcresult `/Volumes/VPhone/installers/tg-jam-toolbar-draftguard-20261028.vqQt2h/Logs/Test/Test-TransferGenieSimulatorUITests-2026.10.28_13-27-22-+0800.xcresult`。失败后的 `Password:` 来自 Mac 诊断收集 sudo，不是手机密码；已结束本次诊断进程。
+- 一次性开启签名、Automatic、Team `9RV293JR6V`、bundle ID `com.transfergenie.tests.physical-ui` 和 `GENERATE_INFOPLIST_FILE=YES` 后，`build-for-testing` 与 strict codesign 均通过。没有改变测试工程的 Simulator 默认设置。构建日志 `/Volumes/VPhone/installers/tg-jam-toolbar-draftguard-20261028.vqQt2h/signed-runner-build-2.log`，命令已补到 `docs/develop/ios.md`。
+- Jam 解锁后，用已生成的 `TransferGenieSimulatorUITests_iphoneos26.4-arm64.xctestrun` 执行 `test-without-building`，限定单个 `testComposerDraftIsEmptyBeforeUpgrade` 并关闭失败诊断收集。runner 实际安装并启动，但在 UI 自动化初始化时报告 `Timed out while enabling automation mode`；64.209 秒后退出65，0 passed、1 runner failure、0 skipped，草稿保护正文未执行。结果 `/Volumes/VPhone/installers/tg-jam-toolbar-draftguard-20261028.vqQt2h/signed-draftguard.xcresult`。
+- 失败后只读确认 `passcodeRequired=false`、开发者模式 enabled、DDI 可用、transportType wired、tunnel connected，IOUSB 列表存在 Jam 对应设备。不将原因推定为锁屏或无线连接，不擅自改手机安全/网络/账号设置；等待手机端自动化授权检查。未终止 Jam 业务 App、未覆盖安装本轮 Release、未清空或发送任何手机草稿。5.20 与其他真机门禁继续保留未完成。
+- 同次浏览器键盘回归复跑通过，包括首位图标、仅工具条吸附、iOS 焦点兜底、点击恢复操作区和草稿内容保留；`git diff --check` 与 strict OpenSpec 通过。
+
+### 后续只读诊断与锁屏复测
+
+- 从已有 `signed-draftguard.xcresult` 导出诊断到 `/Volumes/VPhone/installers/tg-jam-toolbar-draftguard-20261028.vqQt2h/automation-diagnostics`。`testmanagerd.log` 明确记录 pid3738 的 authorization result=1/error=null；runner session log 也记录 `Got authorization response from test daemon: Success`。随后才进入 `enabling automation mode` 的60秒超时，因此先前“可能等待授权提示”不是已确认根因。没有绕过自动化安全设置。
+- 当前 Mac 仅发现 `/Applications/Xcode.app`，已加载的 XCTAutomationSupport 是 Xcode2640版本；Jam 系统为27.0。版本差异记录为环境信息，因该组合前一天已有实际成功记录，不直接认定为唯一故障原因或自动升级。旧 `idevicescreenshot` 返回 screenshotr Invalid service；未重新挂载DDI或修改配对。
+- 使用同一签名 runner 和单项草稿 guard、明确 `arch=arm64` 复测；Xcode preflight 报 `Unlock Jam to Continue`，只读锁屏结果 `passcodeRequired=true`。对已核实的本次 xcodebuild PID38879 发SIGINT，81.746秒后 `TEST EXECUTE INTERRUPTED`，进程最终消失。结果 `/Volumes/VPhone/installers/tg-jam-toolbar-draftguard-20261028.vqQt2h/signed-draftguard-automation-retry.xcresult`：0 passed、1 cancellation/runner failure、0 skipped，没有进入测试正文。
+- 本轮仅限 automationmode-writer/testmanagerd 的短时日志监听已停止，无后台测试等待。未覆盖、终止或清空 Jam 业务 App，也未发送/删除消息。整体仍48/59；继续需用户解锁手机并保持屏幕亮着，先通过草稿保护再安装候选版本。
+- 取消后的最终退出码为73：Xcode 又等待30秒仍无法完成 action log 写入，提示部分 Staging 内容未导入。可读取的 summary 只证明取消/runner failure，不作为通过证据；保留该不完整结果包，不删除或重跑覆盖。
+
+### 已解锁复测：确认自动化模式需要机主验证
+
+- 2026-10-28 14:01:40 只读锁屏查询变为 `passcodeRequired=false`，Jam connected；因此对同一已签名 runner、同一单项草稿 guard 进行一次复测，没有覆盖业务 App。结果 `/Volumes/VPhone/installers/tg-jam-toolbar-draftguard-20261028.vqQt2h/signed-draftguard-unlocked-recheck.xcresult`，64.299秒、exit65、0 passed、1 runner failure、0 skipped，失败仍为 `Timed out while enabling automation mode`，未进入测试正文。
+- 定向 `idevicesyslog`（仅 automationmode-writer/testmanagerd，匹配 automation）在14:02:35.597272记录：`testmanagerd(AutomationMode)[887]: Writer daemon requires authentication to enable automation mode.`。同一时间附近writer daemon收到服务连接，日志没有包含认证凭据。14:02:58锁屏仍false。因此根因定位从“未知初始化超时”缩小为系统自动化模式要求额外手机端身份验证，而不是仅锁屏、runner签名或测试进程授权失败；不推断提示可见性或安全设置具体入口。
+- 重试与日志监听均已终态，ps无相关残留。连续三轮的真机验收阻断仍未解除，剩余11项都依赖物理设备结果；安全诊断已穷尽，需机主完成系统验证后继续。目标标记blocked而非complete，不重复启动测试、不更改安全策略、不覆盖/清空手机草稿。
+
+## 2026-10-28 Jam 首位收键盘图标验收通过
+
+- 用户要求重试后，Jam 保持 `passcodeRequired=false`。第一次单项 guard 仍在等待自动化模式时超时，但14:40:29的定向系统日志随后记录 serialized authorization 到达、状态文件创建和 `Successfully set automation mode to ENABLED`；因原测试会话已结束，该状态随即关闭。没有捕获、记录或传输验证凭据。
+- 立即用同一签名 runner 重跑 `testComposerDraftIsEmptyBeforeUpgrade`，测试正文实际执行并通过：1/1、0失败、0跳过、4.946秒。结果 `/Volumes/VPhone/installers/tg-jam-toolbar-draftguard-20261028.vqQt2h/signed-draftguard-after-auth.xcresult`。测试确认当前手机草稿为空、无附件、无待保存标记和无自动保存失败后关闭 composer。
+- 候选 `iphoneos` Release strict codesign通过，TeamIdentifier/profile均为`9RV293JR6V`，provisioning明确包含Jam UDID。使用`devicectl device install app`原位覆盖安装成功；databaseUUID与安装前一致为`E47BF4A4-1988-4BC0-B000-41C55CDBB998`，data container目录日期保持既有值，未卸载或重建应用数据。
+- 最新安装包在Jam运行`testMarkdownEditorPreviewAndCancelledMarkSettings`通过：1/1、0失败、0跳过、38.908秒。真实软件键盘下，工具条首位44pt向下箭头存在且位于屏幕左缘；发送按钮不可触摸；点击图标后键盘消失；打开/取消标记设置后仍返回同一WYSIWYG composer；纯文本源保持固定fixture。测试不发送消息、不保存标记，defer仅清除自己创建的精确`# TG Markdown UI`无附件草稿。结果 `/Volumes/VPhone/installers/tg-jam-toolbar-draftguard-20261028.vqQt2h/toolbar-after-install.xcresult`。
+- 真机截图附件导出到 `/Volumes/VPhone/installers/tg-jam-toolbar-draftguard-20261028.vqQt2h/toolbar-after-install-attachments`，视觉检查确认工具条首图标、WYSIWYG正文、原生输入辅助栏与键盘位置；发送/附件区没有随键盘上移。
+- 测试完成后再次执行空草稿guard：1/1、0失败、0跳过、6.101秒，结果 `/Volumes/VPhone/installers/tg-jam-toolbar-draftguard-20261028.vqQt2h/post-toolbar-empty-draft.xcresult`。据此完成5.20；不扩大为其余iCloud、网络切换、VoiceOver、传输或完整Release验收。OpenSpec进度49/59。
+
+## 2026-10-28 工具条独立吸附与发送区分离
+
+- 最新交互将应用内“收起键盘”从顶部文字按钮改为 Markdown 工具条第一个向下箭头图标；只在键盘显示时出现。原生测试先暴露顶部按钮 pointerdown.prevent 会吞点击，已移除该方案。纯文本模式继续使用 iOS 原生 Done 收键盘，不添加第二个悬浮入口。
+- 官方 Simulator 安装图标版并执行真实软件键盘流程：工具条首图标存在且位于屏幕左缘，工具条在 iOS 原生输入辅助栏上方，发送区不可点击；点击首图标后键盘消失，标记设置取消后仍返回原 composer。1/1、0失败，38.736秒；日志 `/Volumes/VPhone/installers/tg-toolbar-only-20261028.z3nUoW/native-icon4.log`，xcresult `/Volumes/VPhone/installers/tg-toolbar-only-20261028.z3nUoW/native-icon4/Logs/Test/Test-TransferGenieSimulatorUITests-2026.10.28_12-08-10-+0800.xcresult`。
+- 两次调试失败留下的是精确固定文本 `# TG Markdown UI` fixture、无附件；新增只接受该精确值的清理测试，1/1通过后数据库确认 `0|0|0`，没有直接删库或触碰普通用户草稿。最终包 DTPlatformName=iphonesimulator、strict codesign通过，生成工程Team恢复9RV293JR6V；未操作VPhone或Jam。
+- 按最新交互将 Markdown dock 放在发送/附件操作区上方；键盘显示时操作区 display:none，仅工具条贴住 VisualViewport 下沿。收起键盘后恢复操作区；工具条首个向下箭头只 blur 当前输入，不关闭或重建编辑器，不清空文字或附件。纯文本键盘状态同样不提升发送区。横屏不再使用编辑器和发送按钮并排的旧布局。
+- npm run build、UI shell、WYSIWYG、keyboard、feed、accessibility 浏览器测试及 git diff --check 通过。键盘 fixture 覆盖普通/最大字号、320/390px、横屏210/114px可视高度，检查工具条44px触控、贴边、正文可滚动、操作区隐藏及收键盘后文字附件保留；截图 /tmp/tg-toolbar-only-keyboard-20261028.png 为模拟可视区域的浏览器截图，不是真实软件键盘证据。原生 WYSIWYG 测试入口已补充收键盘步骤，本轮未执行原生测试。
+- 本轮未安装：官方 Simulator 仍是前一轮已安装的独立标记卡片版本；VPhone、Jam 未操作。
+
+## 2026-10-28 Markdown 工具栏底部与键盘吸附
+
+- 按用户最新要求将半透明鼠尾草工具栏移至编辑器底部。MobileMarkdownEditor 通过 Vue Teleport 将原工具与链接表单放到 composer 内的底部 dock；不是第二个编辑器，不改变源码同步、选区、撤销或发送。dock 位于滚动正文之外，并继续受来源弹框的 inert/aria-hidden 保护。现有 VisualViewport height/offset 控制键盘上沿位置；无键盘时预留底部安全区，键盘出现时取消该预留，工具栏保持直角贴边。短横屏保留独立编辑/操作区域，正文不被工具栏遮挡。
+- 新增先失败后通过的几何断言：旧工具栏底边100px而不是844px；改动后 WYSIWYG 在320/390/844px视口下底部固定。keyboard browser 在普通/最大字体、竖屏/窄屏/横屏及114px短视口下验证工具栏横向贴边、底边等于可视区域下沿、正文滚动不移动工具栏、工具44px且可实际命中、关闭键盘返回屏幕底部，全部通过。WYSIWYG、keyboard、feed、accessibility、UI shell、草稿持久化、npm run build 与 strict OpenSpec 校验通过；截图 /tmp/tg-toolbar-bottom-20261028.png 为浏览器预览。
+- 官方 Simulator Release archive 构建完成（日志 /Volumes/VPhone/installers/tg-toolbar-bottom-build-20261028.log），DTPlatformName=iphonesimulator 和 strict codesign 通过；生成工程 Team 已恢复本轮前的9RV293JR6V。未安装此包、未操作VPhone或Jam。注意该共用 archive 路径当前是Simulator包，不能安装到真机。
+- 原生草稿检查安全事件：并发发起只读SQLite检查与旧版XCTest guard是错误的顺序。SQLite最初显示1条草稿/10个字符/0附件/未标记；发现非空后发送SIGINT，但取消生效前XCTest setUp的app.launch已终止并重启旧业务进程，打开编辑器。未发送、清空、卸载或覆盖安装；xcresult /Volumes/VPhone/installers/tg-toolbar-bottom-native-20261028/Logs/Test/Test-TransferGenieSimulatorUITests-2026.10.28_09-15-19-+0800.xcresult 为0 passed/1 cancelled failure，不计通过。稍后只读复查该表为0条，截图编辑器为空；不能确认最初草稿保留，也不能从现有证据确定删除原因，因此停止进一步应用操作，不擅自重建原文。后续guard的setUp改为app.activate，避免launch先终止正在编辑的进程，仍必须先串行完成数据库和运行状态检查后才能执行guard。测试包仅build-for-testing编译通过，日志 /Volumes/VPhone/installers/tg-toolbar-bottom-test-build-20261028.log；新增真实键盘上沿几何断言尚未执行。本次原生键盘吸附与5.20真机验收仍未完成。
+
+## 2026-10-28 媒体边界回归与真机连接检查
+
+- 后续目标复查：Jam 仍为 paired/localNetwork/tcp，IOUSB 未检测到物理 Jam；锁定状态读取先失败于 Could not allocate a resource（0xE8000003），同一设备重读成功但 passcodeRequired=true。没有活跃 xcodebuild 或浏览器测试进程。剩余11项均依赖真机验收，无法以虚拟结果勾选；真机测试不可用已连续三轮，目标标记 blocked，等待用户数据线连接并解锁，不把任务标记完成。
+- 安装文档增量校正：区分当前物理包 TeamIdentifier=9RV293JR6V 与官方 Simulator 旧模拟签名组 LW6QTNHNV4，构建命令显式指定团队，补充只读链路诊断、草稿保护和共用 archive 平台检查。仅更新 docs/develop/ios.md，不改签名配置或用户凭据。npm run docs:build、strict OpenSpec 和 git diff --check 通过。
+- 本轮不改业务实现，补强 tests/test_mobile_media_browser.js：消息与标记列表真实图片解码、标记视频封面、320px/横屏不溢出、内嵌播放与菜单暂停/保留、关闭后迟到下载不能替换新详情、内嵌 error 后系统播放器备用入口仍启用并可调用。使用现有专用 MP4 与纯浏览器 stub，全部通过，不改普通消息或账号数据。
+- tests/test_mobile_ui_shell.js 新增 Vue 同步 watch 断言，验证搜索、历史分页、标记页异步预览更新的是实际响应式行；另覆盖视频重复点击仅一次原件请求、暂停/网络失败释放锁、重试成功清除错误，全部通过。
+- 本轮 keyboard browser 首次失败于已移除的“发送时标记” checkbox，旧脚本与当前 UI 不符；改为无 checkbox、取消标记必须确认、确认前标记保留，复跑通过。npm run build、UI shell、草稿持久化、WYSIWYG、feed、accessibility、keyboard、media browser 与 strict OpenSpec 均通过。未用浏览器回归替代缺失的真机验收。
+- Jam 稍后已解锁，两次空草稿 guard 在测试方法执行前均因 runner bootstrap 连接失败结束：日志 /Volumes/VPhone/installers/tg-jam-media-draftguard-unlocked-20261028.log 和 /Volumes/VPhone/installers/tg-jam-media-draftguard-connection-retry-20261028.log；xcresult 分别为 /Volumes/VPhone/installers/tg-jam-media-draftguard-20261028/Logs/Test/Test-TransferGenieSimulatorUITests-2026.10.28_02-06-19-+0800.xcresult 和同目录 Test-TransferGenieSimulatorUITests-2026.10.28_02-07-49-+0800.xcresult。summary 均为0 passed / 1 runner failure / 0 skipped，exit65，不计通过。诊断导出到 /Volumes/VPhone/installers/tg-jam-media-bootstrap-diagnostics-20261028，显示 testmanagerd 初步连接成功，但 runner 会话过期、DTX XCTestDriverInterface channel 被拒并退出74；没有进入测试正文。
+- 当前 CoreDevice connectionProperties.transportType=localNetwork / tunnelTransportProtocol=tcp；IOUSB 仅显示 VPhone Research VM 与外置盘，未发现 Jam 的物理 USB 设备。不能据此断言唯一根因，但有线重连是下一项安全诊断。未卸载、覆盖或启动/终止 Jam 业务应用，未改网络/安全/账号设置。请求用户将 Jam 通过数据线接到 Mac 并保持解锁，再复跑 guard、原位更新和完整真机验收。整体仍48/59；本媒体候选包尚未完成 Jam 验收。
+
+## 2026-10-28 图片缩略图与详情内视频播放
+
+- VPhone 补充验收已完成：最新版 iPhoneOS Release archive 构建日志 /tmp/tg-vphone-media-build-20261028.log，平台 iphoneos 与 strict codesign 通过。tests/vphone/test_vphone_smoke.mjs 经空草稿保护、正常 installd 原位安装后完成 15 检查，包括两次冷启动、登录恢复和零新增 crash；报告 /Volumes/VPhone/installers/vphone-smoke/20261028-media/report.json 的 ok=true。
+- 新增只读 tests/vphone/test_vphone_media.mjs，使用已有 TG-IOS-PROBE 专用图片/视频，不发送或删除记录。/Volumes/VPhone/installers/vphone-media/20261028-backdrop/report.json 为 passed、5 检查：空草稿、图片 Quick Look 原图与返回、分享取消、实际内嵌播放时间推进和嵌套菜单保留详情。已人工查看 image-feed-thumbnail / image-detail-thumbnail / video-inline-played 截图，视频显示“已播放 1 秒”和原生播放控制条。VPhone compact share 没有 AX 关闭按钮；按截图确定的面板外空白处取消成功，未选择分享目标。此前 first/rerun/full/settled/ready 失败报告保留，不计通过，失败为面板取消自动化路径或时机，不据此改动产品分享逻辑。
+- Jam 尚未安装或验收本媒体版本；上述 VPhone 结果仅补充，不代替真机门槛。
+- 真机前置检查：Jam 已配对，现装应用版本 0.5.4；只读复制 messages.sqlite 时无 WAL/SHM，副本没有 mobile_composer_drafts 表，不能据此推断旧版内存草稿为空。进程列表确认 Transfer Genie 当时未运行。候选 archive 为 iphoneos，strict codesign 通过，ProvisionedDevices 含 Jam UDID。随后仅启动空草稿 guard 的 XCTest，Xcode 在执行测试前因自动锁屏提示 Unlock Jam to Continue；复查 passcodeRequired=true 后，对本次已核实的 xcodebuild PID 发送 SIGINT 取消等待，exit 75 / TEST INTERRUPTED，不计通过。日志 /Volumes/VPhone/installers/tg-jam-media-draftguard-20261028.log，xcresult /Volumes/VPhone/installers/tg-jam-media-draftguard-20261028/Logs/Test/Test-TransferGenieSimulatorUITests-2026.10.28_01-57-18-+0800.xcresult。未覆盖安装或终止 Jam 的业务应用，未改手机锁屏/网络/账号设置；需用户解锁后继续。UI shell 与 strict OpenSpec 校验复跑通过，真机验收仍开放。
+- 证据补强：backdrop 版本的列表截图曾抓到搜索回显而非结果，不能证明缩略图；现 search 等待“更多操作”结果出现并等待解码，再截图。VPhone 把 HTML img 报为 element 而非 image，故不使用错误角色过滤。最终 /Volumes/VPhone/installers/vphone-media/20261028-evidence/report.json 再次 passed、5 检查；已人工逐张查看该目录 image-feed-thumbnail.png 与 video-feed-poster.png，确认真实橙色图片与彩条视频封面均显示，详情/播放证据仍保留。thumbnail-verified 与 final 的脚本等待失败报告也保留，不计通过。
+
+- 根因：公共路径适配器只访问旧 path.convertFileSrc，Tauri 2 实际在 core.convertFileSrc，导致图片路径为 undefined。新增真实 API service 回归先失败后通过；保留旧命名空间兼容。搜索/历史预览改为更新 Vue 响应式实例，标记页也请求和显示缩略图。
+- 图片列表/详情显示 JPEG，“查看”走原件下载和系统预览。视频详情使用 controls/playsinline、poster 和本地原件，实际 timeupdate 显示小字进度；离开详情暂停，保留系统播放器备用入口。账号/空间 generation 与详情请求序号丢弃旧结果。缺少封面的历史媒体仍需明确打开后补全，列表不自动下载完整视频。未改数据库、Storage schema 或普通消息。
+- 通过 npm run build、node tests/test_mobile_ui_shell.js、test_mobile_draft_persistence.js，以及 feed/accessibility/media browser suites。新增 tests/test_mobile_media_browser.js 使用 MOBILE_TEST_VIDEO 专用三秒 H.264 文件，断言图片解码、真实 currentTime 推进、原图入口、嵌套菜单保留播放器与暂停/卸载；PLAYWRIGHT_MODULE 与 CHROME_PATH 使用现有 Edge 安装。截图 /tmp/tg-inline-media-20261028.png。
+- 官方 iPhone 12 Simulator / iOS 26.4 Release：CARGO_HOME=$PWD/.cargo-ios CARGO_NET_OFFLINE=true npx tauri ios build --target aarch64-sim --archive-only --ci --export-method debugging 成功，日志 /tmp/tg-ios-media-progress-build-20261028.log。平台和 strict codesign 核验后原位安装，保留登录数据；升级前空草稿 guard 为 1 passed / 0 failed / 0 skipped。generated project 的签名 Team 已恢复当前 HEAD。
+- 原生串行检查日志 /tmp/tg-media-progress-native-20261028.log；xcresult 为 /Volumes/VPhone/installers/tg-inline-media-serial-20261028/Logs/Test/Test-TransferGenieSimulatorUITests-2026.10.28_01-13-52-+0800.xcresult。xcresulttool summary 确认 2 passed / 0 failed / 0 skipped：图片列表缩略图、详情截图、查看原图/Quick Look 返回；视频真实 timeupdate 至少一秒，详情保留且没有独立系统播放器。截图与 AX 附件导出到同 derived-data 下 media-evidence。
+- 失败记录保留：文件名文本直接点击不可达；重叠重跑导致 runner signal kill；串行内置播放控件 AX 查找失败（截图已显示两秒视频片尾）。最终用真实播放进度检查而非不可定位的 WebKit 内置按钮。失败不计通过。没有发送/删除普通消息。既有真机待验收任务保持未完成。
+
 ## 2026-10-28 标记列表渐隐截断
 
 - 参考 PC 正文的 130px 上限和 36px 渐隐区，移动标记列表从三行硬截断改为实际高度测量。仅超限正文使用透明度遮罩并显示“查看全文”，点击继续打开已有全屏详情；短正文无渐隐。Markdown 与纯文本共用截断，纯文本保留换行，标签和截止日期不进入遮罩。ResizeObserver 随内容、宽度和字体变化重测；PC 样式和业务接口不变。
 - npm run build、mobile UI shell、feed 与 accessibility 浏览器回归通过；feed 覆盖 320/390/844px、2.2 倍文字、长 Markdown/纯文本、短内容取消遮罩、130px 上限、44px 标记操作和全文详情入口。浏览器预览 `/tmp/tg-marked-gradient.png`。本次渐隐样式尚未覆盖安装到 Simulator、VPhone 或 Jam。
 
 ## 2026-10-28 VPhone 安装协调与新版登录恢复
+
+- 后续已核对 /Volumes/VPhone/installers/vphone-composer/20261028-full-rerun/report.json：ok=true、6 检查通过。包括保存即标记/确认取消、WYSIWYG 与标记叠层、草稿终止恢复、真实 Markdown 发送同步与重启恢复、仅精确 UUID fixture 确认删除，以及独立附件菜单和最终空草稿。早先 90 秒 ui.wait 失败仍保留，已由完整重跑证据取代未完成结论；5.20 的 Jam 验收仍未完成。
 
 - 先前 smoke 在 300 秒安装超时，报告保留于 `/Volumes/VPhone/installers/vphone-smoke/20261027-latest-mark/report.json`，不计通过。只读检查设备/App 查询正常、installd 在运行、旧 binary 时间未更新、安装暂存文件 154946335 字节与新 IPA 相同；重试明确显示复制完成后等待安装协调。确认空草稿并退出仍运行的旧应用后，原请求返回 `InstallComplete (100%)`，exit 0。没有卸载、清空凭据、重启 guest 或变更安全策略，也未使用绕过 installd 的 apps.install。诊断 IPA 保存于 `/Volumes/VPhone/installers/tg-install-diagnostic.jKb8me/Transfer-Genie-VPhone.ipa`。
 - smoke 增加启动后等待移动 shell，以及通过草稿保护后退出旧应用再原位安装。修正后执行 `node tests/vphone/test_vphone_smoke.mjs --app '/Volumes/VPhone/installers/tg-install-diagnostic.jKb8me/Transfer-Genie-VPhone.ipa' --artifact-dir /Volumes/VPhone/installers/vphone-smoke/20261028-latest-mark-fixed --require-auth --reinstall-count 2 --cold-starts 2`：16 检查通过，真实 installd 连续两次安装、两次冷启动和登录恢复、截图及脱敏日志、零新增 crash。第一次新版检查因冷启动读取界面太早拒绝继续，失败报告保留 `20261028-latest-mark/report.json`。结果仅为补充环境验收，不代表 Jam。

@@ -31,6 +31,41 @@ const tap = (text) => rpc('ui.tap_element', { text, match: 'exact' });
 const wait = (text, seconds = 15, match = 'exact') => rpc('ui.wait', { text, match, timeout: seconds }, (seconds + 10) * 1000);
 const absent = (text) => assert(!labels().includes(text), `Unexpected control: ${text}`);
 const record = (name) => { report.checks.push({ name, ok: true }); console.log(`[vphone composer] PASS ${name}`); };
+function waitTree(predicate, description, seconds = 30) {
+  for (let attempt = 0; attempt < seconds; attempt++) {
+    const ui = tree();
+    if (predicate(ui.elements)) return ui.elements;
+    spawnSync('sleep', ['1']);
+  }
+  throw new Error(`Timed out waiting for ${description}`);
+}
+function openFixtureActions() {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const ui = tree();
+    if (ui.elements.some(e => e.label.includes('删除消息（同步到云端）'))) return;
+    const buttons = ui.elements.filter(e => e.label === '更多操作' && e.clickable);
+    assert.equal(buttons.length, 1, 'Fixture result must expose one actions button');
+    tap('更多操作');
+    try {
+      waitTree(elements => elements.some(e => e.label.includes('删除消息（同步到云端）')), 'fixture actions', 3);
+      return;
+    } catch { /* Retry after transient guest AX animation. */ }
+  }
+  throw new Error('Fixture actions did not open');
+}
+function dismissKeyboard() {
+  let ui = tree();
+  let dismiss = ui.elements.find(e => e.label === '收起键盘' && e.clickable);
+  if (!dismiss) dismiss = ui.elements.find(e => ['Done', '完成'].includes(e.label) && e.clickable);
+  if (!dismiss) return false;
+  tap(dismiss.label);
+  for (let attempt = 0; attempt < 15; attempt++) {
+    ui = tree();
+    if (!ui.elements.some(e => e.label === '收起键盘' || ['Done', '完成'].includes(e.label))) return true;
+    spawnSync('sleep', ['1']);
+  }
+  throw new Error('Keyboard did not dismiss');
+}
 function screenshot(name) {
   const result = spawnSync(cli, ['guest', 'send', machine, JSON.stringify({ t: 'screenshot', path: join(artifacts, `${name}.png`) }), '--root', root], { encoding: 'utf8', timeout: 30000 });
   assert.equal(result.status, 0, `screenshot: ${result.stderr}`);
@@ -62,6 +97,7 @@ try {
     assert(process.env.VPHONE_RESUME_FIXTURE, 'Existing editor requires exact fixture resume');
   }
   wait('消息内容');
+  dismissKeyboard();
   tap('文字');
   let source;
   if (process.env.VPHONE_RESUME_FIXTURE) {
@@ -72,6 +108,7 @@ try {
     assert(!verifiedTree.elements.some(e => e.label.includes('移除附件') || e.label.startsWith('已标记') || e.label.includes('草稿自动保存失败')), 'Fixture metadata or persistence cannot be verified');
     record('exact protected fixture resumed without clearing or rewriting');
   } else {
+  dismissKeyboard();
   assertEmptyComposer(tree());
   record('protected empty draft verified');
 
@@ -96,14 +133,18 @@ try {
 
   tap('Markdown');
   wait('粗体');
+  tap('消息内容');
+  wait('收起键盘');
   const controls = tree().elements;
+  const dismiss = controls.find(e => e.label === '收起键盘');
+  assert(dismiss && dismiss.frame.x === 0 && dismiss.frame.width >= 44 && dismiss.frame.height >= 44, 'Keyboard dismiss must be the first toolbar icon');
   for (const name of ['粗体', '斜体', '标题', '无序列表', '增加缩进', '减少缩进']) {
     const tool = controls.find(e => e.label === name);
     assert(tool && tool.frame.width >= 44 && tool.frame.height >= 44, `Missing touch target: ${name}`);
   }
-  assert.equal(controls.find(e => e.label === '粗体').frame.x, 0, 'Toolbar leading gutter');
+  assert.equal(controls.find(e => e.label === '粗体').frame.x, 44, 'Formatting follows the dismiss icon without a gutter');
+  for (const hidden of ['文字', 'Markdown', '照片', '文件', '标记', '发送']) absent(hidden);
   absent('预览');
-  tap('消息内容');
   rpc('input.type', { text: `${marker}\n`, delay_ms: 10 });
   tap('粗体');
   rpc('input.type', { text: 'bold', delay_ms: 30 });
@@ -112,6 +153,8 @@ try {
   tap('无序列表');
   rpc('input.type', { text: 'list END', delay_ms: 30 });
   screenshot('wysiwyg-keyboard-toolbar');
+  tap('收起键盘');
+  wait('标记');
   tap('标记');
   wait('保存标记');
   assert(!tree().elements.some(e => e.label === '关闭新消息' && e.clickable), 'Underlying composer exposed');
@@ -126,12 +169,14 @@ try {
   coldLaunch();
   tap('新消息');
   wait('消息内容');
+  dismissKeyboard();
   tap('文字');
   assert.equal(editorValue(), source, 'Persisted fixture draft changed after restart');
   record('WYSIWYG formatting, retained mark overlay and durable draft restart');
 
   tap('Markdown');
   wait('粗体');
+  dismissKeyboard();
   tap('发送');
   wait('新消息', 30);
   synced();
@@ -145,12 +190,11 @@ try {
   screenshot('rich-message-restored');
   record('real Markdown send converged and restored once after restart');
   // Only the unique UUID fixture from this run may be removed.
-  tap('更多操作');
-  wait('删除消息（同步到云端）', 15, 'contains');
+  openFixtureActions();
   rpc('ui.tap_element', { text: '删除消息（同步到云端）', match: 'contains' });
   wait('确认删除');
   tap('确认删除');
-  wait('没有找到相关内容', 30);
+  waitTree(elements => elements.some(e => e.label === '0 条 · 本机索引') && elements.some(e => e.label === '没有找到相关内容'), 'fixture deletion from the local index', 30);
   synced();
   tap('清除');
   record('only exact fixture deleted through confirmed synchronized action');
@@ -164,6 +208,7 @@ try {
   tap('关闭附件菜单');
   tap('新消息');
   wait('消息内容');
+  dismissKeyboard();
   tap('文字');
   assertEmptyComposer(tree());
   tap('关闭新消息');

@@ -44,6 +44,8 @@ try {
   assert.equal(await tools.getByRole('button').count(), 12);
   const toolbarGeometry = await tools.evaluate(el => ({ x: el.getBoundingClientRect().x, width: el.getBoundingClientRect().width, radius: getComputedStyle(el).borderRadius, border: getComputedStyle(el).borderTopWidth, padding: getComputedStyle(el).padding, firstButtonX: el.querySelector('button').getBoundingClientRect().x }));
   assert.deepEqual(toolbarGeometry, { x: 0, width: 390, radius: '0px', border: '0px', padding: '0px', firstButtonX: 0 }, 'toolbar and its buttons are straight-edged and flush with the screen');
+  const dockedGeometry = await tools.boundingBox();
+  assert.ok(dockedGeometry.y + dockedGeometry.height <= (await page.locator('.mobile-compose-actions').boundingBox()).y, 'format toolbar sits above the send actions');
   const select = async (selector, start, end = start) => editor.locator(selector).first().evaluate((el, range) => {
     const node = [...el.childNodes].find(node => node.nodeType === Node.TEXT_NODE);
     const selection = window.getSelection();
@@ -131,6 +133,8 @@ try {
     const box = await page.locator('.mobile-composer-sheet').boundingBox();
     assert.equal(box.height, viewport.height); assert.equal(box.width, viewport.width);
     assert.equal(await page.locator('.mobile-composer-sheet').evaluate(el => el.scrollWidth > el.clientWidth), false);
+    const toolbarBox = await tools.boundingBox();
+    assert.ok(toolbarBox.y + toolbarBox.height <= (await page.locator('.mobile-compose-actions').boundingBox()).y, 'toolbar stays above the send actions after rotation');
     await tools.evaluate(el => { el.scrollLeft = 0; });
     assert.equal(await tools.locator('button').first().evaluate(el => el.getBoundingClientRect().left), 0, 'first tool is flush at every viewport');
     for (const button of await tools.getByRole('button').all()) {

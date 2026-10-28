@@ -36,7 +36,16 @@ const activeSheet = ref<SheetName>(null);
 const detailUnderlay = ref(false);
 const viewportHeight = ref(window.visualViewport?.height || window.innerHeight);
 const viewportTop = ref(window.visualViewport?.offsetTop || 0);
-const keyboardVisible = ref(false);
+const viewportKeyboardVisible = ref(false);
+const composerTextInputFocused = ref(false);
+const useIOSKeyboardFocusFallback =
+  /iPhone|iPad|iPod/i.test(navigator.userAgent) ||
+  (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const keyboardVisible = computed(
+  () =>
+    viewportKeyboardVisible.value ||
+    (useIOSKeyboardFocusFallback && composerTextInputFocused.value),
+);
 const mobileDiagnostic = ref<MobileDiagnostic | null>(
   (window as any).__TRANSFER_GENIE_MOBILE_DIAGNOSTIC__ || null,
 );
@@ -62,9 +71,59 @@ function updateViewport() {
   viewportTop.value = viewport?.offsetTop || 0;
   // WKWebView may scroll the layout viewport when refocusing after a native
   // picker, reducing innerHeight by the same amount as the page scroll.
-  keyboardVisible.value = window.innerHeight + window.scrollY - viewportHeight.value > 100;
+  viewportKeyboardVisible.value =
+    window.innerHeight + window.scrollY - viewportHeight.value > 100;
+}
+function isComposerTextInput(element: EventTarget | null): element is HTMLElement {
+  return (
+    element instanceof HTMLElement &&
+    (element.matches("textarea, input") || element.isContentEditable)
+  );
+}
+function handleComposerFocusIn(event: FocusEvent) {
+  if (isComposerTextInput(event.target)) composerTextInputFocused.value = true;
+}
+function handleComposerFocusOut() {
+  window.requestAnimationFrame(() => {
+    const active = document.activeElement;
+    composerTextInputFocused.value =
+      isComposerTextInput(active) &&
+      Boolean(active.closest(".mobile-composer-sheet"));
+  });
+}
+function dismissComposerKeyboard() {
+  if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+  handleComposerFocusOut();
 }
 const selectedMessage = ref<MobileMessage | null>(null);
+const detailVideo = ref<HTMLVideoElement | null>(null);
+const detailVideoUrl = ref("");
+const detailVideoSeconds = ref(0);
+let videoRequest = 0;
+watch(() => selectedMessage.value, () => {
+  videoRequest += 1;
+  detailVideo.value?.pause();
+  detailVideoUrl.value = "";
+  detailVideoSeconds.value = 0;
+});
+watch(() => activeSheet.value, (sheet) => { if (sheet !== "detail") detailVideo.value?.pause(); });
+async function playDetailVideo() {
+  const message = selectedMessage.value;
+  if (!message || state.busy) return;
+  const request = ++videoRequest;
+  const url = await controller.prepareVideo(message);
+  if (!url || request !== videoRequest || selectedMessage.value !== message) return;
+  detailVideoUrl.value = url;
+  await nextTick();
+  if (request === videoRequest && activeSheet.value === "detail") {
+    try { await detailVideo.value?.play(); } catch { /* Native controls remain available when autoplay is denied. */ }
+  }
+}
+function detailVideoFailed() {
+  if (!selectedMessage.value) return;
+  selectedMessage.value.attachmentState = "unsupported";
+  selectedMessage.value.attachmentError = "此视频无法在详情中播放，可尝试系统播放器或分享导出";
+}
 const deleteConfirmation = ref<"single" | "selection" | null>(null);
 const cacheConfirmation = ref(false);
 const selectionMode = ref(false);
@@ -383,6 +442,7 @@ function openMessage(message: MobileMessage) {
   if (selectionMode.value) { toggleMessageSelection(message); return; }
   selectedMessage.value = message;
   openSheet("detail");
+  if (!message.previewUrl) void controller.retryPreview(message);
 }
 function beginLongPress(message: MobileMessage) {
   window.clearTimeout(longPressTimer);
@@ -963,7 +1023,7 @@ onBeforeUnmount(() => {
                 <img
                   v-if="message.previewUrl"
                   :src="message.previewUrl"
-                  alt=""
+                  :alt="message.originalName"
                   @error="controller.previewImageFailed(message)"
                 /><span v-else class="mobile-media-type">{{
                   message.kind === "video" ? "VIDEO" : "IMAGE"
@@ -1079,6 +1139,10 @@ onBeforeUnmount(() => {
                 type="button"
                 @click="openMessage(item)"
               >
+                <span v-if="item.previewUrl && (item.kind === 'image' || item.kind === 'video')" class="mobile-marked-media">
+                  <img :src="item.previewUrl" :alt="item.originalName" @error="controller.previewImageFailed(item)" />
+                  <span v-if="item.kind === 'video'" aria-label="视频">▶</span>
+                </span>
                 <strong v-if="item.kind !== 'text'">{{ item.title }}</strong>
                 <MobileMarkedExcerpt v-if="item.body" :text="item.body" :format="item.format" />
                 <strong v-else-if="item.kind === 'text'">{{ item.title }}</strong>
@@ -1271,12 +1335,15 @@ onBeforeUnmount(() => {
         <section
           v-if="activeSheet === 'composer' || composerUnderlay"
           class="mobile-sheet mobile-composer-sheet is-fullscreen-editor"
+          :class="{ 'has-markdown-tools': state.composer.format === 'markdown' }"
           role="dialog"
           :aria-modal="!composerUnderlay"
           :aria-hidden="composerUnderlay ? 'true' : undefined"
           :inert="composerUnderlay"
           aria-labelledby="mobile-composer-title"
           tabindex="-1"
+          @focusin="handleComposerFocusIn"
+          @focusout="handleComposerFocusOut"
         >
           <div class="mobile-sheet-grabber"></div>
           <header>
@@ -1286,7 +1353,7 @@ onBeforeUnmount(() => {
           </header>
           <div class="mobile-composer-content" role="region" aria-label="消息编辑与附件">
           <div class="mobile-compose-editor">
-          <MobileMarkdownEditor v-if="state.composer.format === 'markdown'" v-model="state.composer.text" :disabled="state.composer.sending || !state.composer.persistenceReady" />
+          <MobileMarkdownEditor v-if="state.composer.format === 'markdown'" v-model="state.composer.text" toolbar-target="#mobile-composer-toolbar-dock" :show-dismiss-keyboard="keyboardVisible" :disabled="state.composer.sending || !state.composer.persistenceReady" @dismiss-keyboard="dismissComposerKeyboard" />
           <textarea
             v-else
             v-model="state.composer.text"
@@ -1297,6 +1364,7 @@ onBeforeUnmount(() => {
             autofocus
           ></textarea>
           </div>
+          <div v-if="state.composer.format === 'markdown'" id="mobile-composer-toolbar-dock" class="mobile-composer-toolbar-dock"></div>
           <div class="mobile-compose-actions">
           <div
             v-if="state.composer.attachments.length"
@@ -1765,8 +1833,20 @@ onBeforeUnmount(() => {
               'is-loading': selectedMessage.previewState === 'loading',
             }"
           >
+            <video
+              v-if="selectedMessage.kind === 'video' && detailVideoUrl"
+              ref="detailVideo"
+              :src="detailVideoUrl"
+              :poster="selectedMessage.previewUrl"
+              controls
+              playsinline
+              preload="metadata"
+              aria-label="视频播放器"
+              @error="detailVideoFailed"
+              @timeupdate="detailVideoSeconds = Math.floor(($event.target as HTMLVideoElement).currentTime)"
+            ></video>
             <img
-              v-if="selectedMessage.previewUrl"
+              v-else-if="selectedMessage.previewUrl"
               :src="selectedMessage.previewUrl"
               :alt="selectedMessage.originalName"
               @error="controller.previewImageFailed(selectedMessage)"
@@ -1774,12 +1854,12 @@ onBeforeUnmount(() => {
               selectedMessage.kind === "video" ? "VIDEO" : "IMAGE"
             }}</span
             ><button
-              v-if="selectedMessage.kind === 'video'"
+              v-if="selectedMessage.kind === 'video' && !detailVideoUrl"
               class="mobile-media-play"
               type="button"
               aria-label="播放视频"
               :disabled="state.busy"
-              @click="controller.previewMessage(selectedMessage)"
+              @click="playDetailVideo"
             >
               ▶
             </button>
@@ -1807,6 +1887,7 @@ onBeforeUnmount(() => {
             role="status"
             aria-live="polite"
           >
+            <p v-if="detailVideoUrl && detailVideoSeconds > 0">已播放 {{ detailVideoSeconds }} 秒</p>
             <p v-if="previewStatus(selectedMessage)">
               {{ previewStatus(selectedMessage) }}
             </p>
@@ -1833,15 +1914,14 @@ onBeforeUnmount(() => {
               v-if="selectedMessage && selectedMessage.kind !== 'text'"
               type="button"
               :disabled="
-                state.busy || selectedMessage.attachmentState === 'unsupported'
+                state.busy || (selectedMessage.kind !== 'video' && selectedMessage.attachmentState === 'unsupported')
               "
               @click="controller.previewMessage(selectedMessage)"
             >
               {{
-                selectedMessage.kind === "video" ||
-                selectedMessage.kind === "audio"
+                selectedMessage.kind === "video" ? "系统播放器" : selectedMessage.kind === "audio"
                   ? "播放"
-                  : "系统预览"
+                  : selectedMessage.kind === "image" ? "查看" : "系统预览"
               }}</button
             ><button
               v-if="selectedMessage?.kind !== 'text'"

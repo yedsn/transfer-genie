@@ -11,7 +11,7 @@
   const openDialog = (...args) => { const fn = _getTauri().dialog?.open; return fn?.(...args); };
   const saveDialog = (...args) => { const fn = _getTauri().dialog?.save; return fn?.(...args); };
   const listen = (...args) => { const fn = _getTauri().event?.listen; return fn?.(...args); };
-  const convertFileSrc = (...args) => { const fn = _getTauri().path?.convertFileSrc; return fn?.(...args); };
+  const convertFileSrc = (path, ...args) => { const t = _getTauri(); const fn = t.core?.convertFileSrc || t.path?.convertFileSrc || t.tauri?.convertFileSrc; return fn ? fn(path, ...args) : path; };
 
   const mobileIntegrationApi = {
     async listenLifecycle(callback) {

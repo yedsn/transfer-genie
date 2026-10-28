@@ -673,6 +673,49 @@ fn ensure_local_first_sync_schema(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+fn repair_acknowledged_message_deletes(conn: &Connection) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE messages AS message
+         SET deleted_at_ms=(
+               SELECT deletion.updated_at_ms FROM sync_outbox deletion
+               WHERE deletion.endpoint_id=message.endpoint_id
+                 AND deletion.owner_scope=message.owner_scope
+                 AND deletion.entity_type='message'
+                 AND deletion.entity_id=message.message_id
+                 AND deletion.action='delete' AND deletion.state='acknowledged'
+               ORDER BY deletion.rowid DESC LIMIT 1
+             ),
+             remote_revision=max(remote_revision, coalesce((
+               SELECT deletion.base_revision + 1 FROM sync_outbox deletion
+               WHERE deletion.endpoint_id=message.endpoint_id
+                 AND deletion.owner_scope=message.owner_scope
+                 AND deletion.entity_type='message'
+                 AND deletion.entity_id=message.message_id
+                 AND deletion.action='delete' AND deletion.state='acknowledged'
+               ORDER BY deletion.rowid DESC LIMIT 1
+             ), remote_revision)),
+             sync_state='synced'
+         WHERE message.deleted_at_ms IS NULL
+           AND EXISTS (
+             SELECT 1 FROM sync_outbox deletion
+             WHERE deletion.endpoint_id=message.endpoint_id
+               AND deletion.owner_scope=message.owner_scope
+               AND deletion.entity_type='message'
+               AND deletion.entity_id=message.message_id
+               AND deletion.action='delete' AND deletion.state='acknowledged'
+               AND NOT EXISTS (
+                 SELECT 1 FROM sync_outbox later
+                 WHERE later.endpoint_id=deletion.endpoint_id
+                   AND later.owner_scope=deletion.owner_scope
+                   AND later.entity_type=deletion.entity_type
+                   AND later.entity_id=deletion.entity_id
+                   AND later.rowid>deletion.rowid AND later.state<>'superseded'
+               )
+           )",
+        [],
+    )
+}
+
 pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| format!("创建数据库目录失败: {err}"))?;
@@ -701,6 +744,8 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
             .map_err(|err| format!("初始化账号隔离主键失败: {err}"))?;
         ensure_local_first_sync_schema(&conn)
             .map_err(|err| format!("重建账号隔离索引失败: {err}"))?;
+        repair_acknowledged_message_deletes(&conn)
+            .map_err(|err| format!("修复已确认消息删除状态失败: {err}"))?;
         ensure_indexes(&conn).map_err(|err| format!("初始化数据库索引失败: {err}"))?;
         return Ok(());
     }
@@ -995,6 +1040,8 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
     ensure_account_scoped_business_keys(&mut conn)
         .map_err(|err| format!("初始化账号隔离主键失败: {err}"))?;
     ensure_local_first_sync_schema(&conn).map_err(|err| format!("重建账号隔离索引失败: {err}"))?;
+    repair_acknowledged_message_deletes(&conn)
+        .map_err(|err| format!("修复已确认消息删除状态失败: {err}"))?;
     ensure_indexes(&conn).map_err(|err| format!("初始化数据库索引失败: {err}"))?;
 
     Ok(())
@@ -2516,10 +2563,21 @@ fn apply_pulled_message(
     change: &PulledChange,
     now_ms: i64,
 ) -> rusqlite::Result<()> {
+    let known_revision = tx
+        .query_row(
+            "SELECT remote_revision FROM messages
+             WHERE endpoint_id=?1 AND owner_scope=?2 AND message_id=?3",
+            params![endpoint_id, owner_scope, change.entity_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    // History pages and a foreground pull can race an acknowledged local
+    // mutation. Never let an older (or identical) snapshot resurrect a
+    // tombstone or roll back a newer confirmed message revision.
+    if known_revision.is_some_and(|revision| revision > 0 && change.revision <= revision) {
+        return Ok(());
+    }
     if local_entity_has_work(tx, endpoint_id, owner_scope, "message", &change.entity_id)? {
-        if pulled_revision_is_known(tx, endpoint_id, owner_scope, change)? {
-            return Ok(());
-        }
         return insert_pull_conflict(tx, endpoint_id, owner_scope, change, now_ms);
     }
     let Some(snapshot) = change.snapshot.as_ref() else {
@@ -8158,6 +8216,130 @@ mod tests {
                 .marked
         );
         assert_eq!(count_open_conflicts(&path, "profile", "user-b").unwrap(), 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn acknowledged_delete_is_not_resurrected_by_an_old_history_snapshot() {
+        let path = temp_db_path("pull-after-acknowledged-delete");
+        init_db(&path, None).unwrap();
+        let snapshot = remote_message("message-a", "message.txt", 100);
+        apply_supabase_message_page(
+            &path,
+            "profile",
+            "user-a",
+            &[snapshot.clone()],
+            &[],
+            &[],
+            false,
+            true,
+            100,
+        )
+        .unwrap();
+        let operation = NewOutboxOperation {
+            operation_id: "delete-a".into(),
+            endpoint_id: "profile".into(),
+            owner_scope: "user-a".into(),
+            entity_type: "message".into(),
+            entity_id: "message-a".into(),
+            action: "delete".into(),
+            base_revision: 1,
+            payload_json: "{}".into(),
+            payload_hash: "delete-hash".into(),
+            created_at_ms: 101,
+        };
+        assert_eq!(
+            tombstone_messages_and_enqueue(
+                &path,
+                "profile",
+                "user-a",
+                &["message.txt".into()],
+                std::slice::from_ref(&operation),
+                102,
+            )
+            .unwrap(),
+            1
+        );
+        let claimed =
+            claim_outbox_operations(&path, "profile", "user-a", "worker", 103, 30_000, 1, false)
+                .unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert!(apply_outbox_success(&path, &claimed[0], "worker", 2, 104).unwrap());
+
+        // A window read that started before the delete may still return revision 1.
+        apply_supabase_message_page(
+            &path,
+            "profile",
+            "user-a",
+            &[snapshot],
+            &[],
+            &[],
+            false,
+            false,
+            105,
+        )
+        .unwrap();
+
+        let conn = Connection::open(&path).unwrap();
+        let state: (i64, i64, String) = conn
+            .query_row(
+                "SELECT remote_revision, deleted_at_ms IS NOT NULL, sync_state
+                 FROM messages WHERE endpoint_id='profile' AND owner_scope='user-a'
+                   AND message_id='message-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, (2, 1, "synced".into()));
+        drop(conn);
+
+        // Repair the exact legacy failure shape left by an older client.
+        Connection::open(&path)
+            .unwrap()
+            .execute(
+                "UPDATE messages SET remote_revision=1,deleted_at_ms=NULL,sync_state='synced'
+                 WHERE message_id='message-a'",
+                [],
+            )
+            .unwrap();
+        init_db(&path, None).unwrap();
+        let repaired: (i64, i64) = Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT remote_revision,deleted_at_ms IS NOT NULL FROM messages
+                 WHERE message_id='message-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(repaired, (2, 1));
+
+        // A later non-superseded mutation means delete is no longer final.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE messages SET deleted_at_ms=NULL WHERE message_id='message-a'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_outbox (operation_id,endpoint_id,owner_scope,entity_type,entity_id,
+               action,base_revision,payload_json,payload_hash,state,created_at_ms,updated_at_ms)
+             VALUES ('later-upsert','profile','user-a','message','message-a','upsert',2,
+               '{}','later-hash','pending',106,106)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        init_db(&path, None).unwrap();
+        let visible: i64 = Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT deleted_at_ms IS NULL FROM messages WHERE message_id='message-a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(visible, 1);
         let _ = std::fs::remove_file(path);
     }
 

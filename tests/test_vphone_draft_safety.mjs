@@ -12,9 +12,11 @@ assert.throws(() => assertNoActiveEditing(null), /Cannot verify/);
 assert.throws(() => assertNoActiveEditing(tree("文件", "取消")), /not at its idle/);
 const composer = (value, attachments = false) => ({ elements: [{ label: "消息内容", value }, ...(attachments ? [{ label: "移除附件" }] : [])] });
 assert.doesNotThrow(() => assertEmptyComposer(composer("")));
+assert.doesNotThrow(() => assertEmptyComposer(composer("\n")), "an empty ProseMirror document may expose a newline");
+assert.doesNotThrow(() => assertEmptyComposer(composer("  \n")), "whitespace-only rich text remains empty");
 assert.doesNotThrow(() => assertEmptyComposer(composer("输入文字，或加入照片和文件…")));
 assert.doesNotThrow(() => assertEmptyComposer(composer("写下你的想法…\n选中文字，用上方工具添加格式。")));
-for (const draft of [composer("unsent fixture"), composer(" "), composer("", true), composer(undefined), tree()]) {
+for (const draft of [composer("unsent fixture"), composer(" x "), composer("", true), composer(undefined), tree()]) {
   assert.throws(() => assertEmptyComposer(draft), /nonempty or unverifiable draft/);
 }
 for (const label of ["已标记 · 未分类 · 无截止日期", "已标记", "草稿自动保存失败"]) {

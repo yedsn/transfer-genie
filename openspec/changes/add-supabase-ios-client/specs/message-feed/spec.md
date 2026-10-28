@@ -21,7 +21,14 @@ iOS SHALL offer full-screen plain-text and WYSIWYG Markdown editing without a pr
 #### Scenario: Insert formatting while composing
 - **WHEN** the user selects text or positions the caret and taps a Markdown formatting action
 - **THEN** the action immediately applies the corresponding visible formatting without losing the remaining draft
-- **AND** the top translucent toolbar provides list indentation, outdent, undo and redo, and retains keyboard usability
+- **AND** the bottom translucent toolbar provides list indentation, outdent, undo and redo, and retains keyboard usability
+
+#### Scenario: Dock formatting above the keyboard
+- **WHEN** the user shows or dismisses the software keyboard or scrolls a long Markdown draft
+- **THEN** the formatting toolbar remains outside the editor scroll region at the visible viewport bottom, directly above the keyboard while it is present
+- **AND** the toolbar starts with a touch-sized downward-chevron action that dismisses the keyboard without closing or rebuilding the draft
+- **AND** Send, attachment, mark and format-selection controls do not follow the keyboard; they return unchanged below the toolbar after dismissal
+- **AND** formatting actions preserve the active selection and keyboard and remain reachable after rotation or Dynamic Type changes
 
 #### Scenario: Separate file selection from text editing
 - **WHEN** the user taps the plus button to the left of the feed input entry
@@ -142,11 +149,12 @@ iOS 消息流 SHALL 使用单击打开明确操作或详情，并 SHALL 使用�
 - **THEN** 客户端进入选择模式并选中目标消息
 
 ### Requirement: Mobile-safe composer layout
-iOS 输入与消息界面 SHALL 适配顶部和底部安全区以及软件键盘。键盘出现时输入框 MUST 保持可见，消息列表 MUST 保持可滚动，且发送、附件与取消操作 MUST 可达。
+iOS 输入与消息界面 SHALL 适配顶部和底部安全区以及软件键盘。键盘出现时输入框 MUST 保持可见，消息列表 MUST 保持可滚动，关闭操作和 Markdown 工具条 MUST 可达。发送、附件、标记与格式切换区域 MUST NOT 随键盘上移；键盘收起后 SHALL 恢复同一操作区及其草稿状态。
 
 #### Scenario: Compose while keyboard is visible
 - **WHEN** 用户在带 Home Indicator 的 iPhone 上打开键盘输入消息
-- **THEN** 输入框和发送操作位于键盘上方且可见
+- **THEN** 输入框与 Markdown 工具条位于键盘上方且可见，工具条首个图标可以收起键盘
+- **AND** 发送、附件、标记与格式切换区域在键盘显示期间不占用可视区域，收起后原样恢复
 - **AND** 最新消息区域不会被不可恢复地遮挡
 
 #### Scenario: Rotate or resize mobile view
@@ -155,6 +163,17 @@ iOS 输入与消息界面 SHALL 适配顶部和底部安全区以及软件键盘
 
 ### Requirement: Mobile attachment preview and sharing
 iOS 消息流 SHALL 为图片显示云端或本地 JPEG 预览，为视频显示封面和播放入口，为音频显示播放入口，并为文档与未知文件显示类型卡。完整文件 SHALL 按需下载到沙盒，并通过系统预览或分享动作打开；不支持的格式 SHALL 安全降级。
+
+#### Scenario: Display media in lists and details
+- **WHEN** 图片或视频具有可读取的本地或云端预览
+- **THEN** 消息列表、搜索结果、标记列表和详情 SHALL 显示真实缩略图
+- **AND** 图片详情的“查看”动作按需打开原图或系统预览
+
+#### Scenario: Play video inside message detail
+- **WHEN** 用户在视频详情点击播放
+- **THEN** 客户端按需准备本地原件并在详情内显示带控制条的内嵌播放器
+- **AND** 保留封面和独立系统播放器备用入口，切出详情时暂停播放
+- **AND** 账号或空间切换后旧请求不得显示在新作用域
 
 #### Scenario: Display cross-device preview
 - **WHEN** iOS 拉取到包含 `preview_object_path` 的图片或视频附件

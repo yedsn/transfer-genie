@@ -428,6 +428,35 @@ try {
   assert.equal(await page.locator('.mobile-task-list > article').count(), 100);
   await page.getByRole('button', { name: '加载更多标记', exact: true }).dispatchEvent('click');
   await page.waitForFunction(() => document.querySelectorAll('.mobile-task-list > article').length === 125);
+  for (const [width, height, scale] of [[320, 640, 1], [390, 844, 1], [844, 390, 2.2]]) {
+    await page.setViewportSize({ width, height });
+    await page.locator('.mobile-shell').evaluate((el, value) => el.style.setProperty('--mobile-text-scale', value), String(scale));
+    const cards = await page.locator('.mobile-task-list').evaluate(el => {
+      const rows = [...el.children];
+      const first = rows[0].getBoundingClientRect();
+      const next = rows[1].getBoundingClientRect();
+      const style = getComputedStyle(rows[0]);
+      return {
+        gap: next.top - first.bottom, radius: parseFloat(style.borderRadius),
+        border: parseFloat(style.borderBottomWidth), lastBorder: parseFloat(getComputedStyle(rows.at(-1)).borderBottomWidth),
+        surface: style.backgroundColor, listSurface: getComputedStyle(el).backgroundColor,
+        listBorder: parseFloat(getComputedStyle(el).borderWidth),
+        overflow: el.scrollWidth > el.clientWidth || document.documentElement.scrollWidth > innerWidth,
+        pin: rows[0].querySelector('.mobile-task-pin').getBoundingClientRect().width,
+      };
+    });
+    assert.ok(cards.gap >= 12, 'marked messages must have visible space between individual cards');
+    assert.ok(cards.radius >= 16 && cards.border >= 1, 'each message owns its rounded card border');
+    assert.equal(cards.lastBorder, cards.border, 'last card retains its complete border');
+    assert.notEqual(cards.surface, 'rgba(0, 0, 0, 0)');
+    assert.equal(cards.listSurface, 'rgba(0, 0, 0, 0)', 'list must not join the cards with a shared surface');
+    assert.equal(cards.listBorder, 0);
+    assert.equal(cards.overflow, false, `marked cards fit ${width}px at text scale ${scale}`);
+    assert.ok(cards.pin >= 44, 'card actions retain accessible touch targets');
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator('.mobile-shell').evaluate(el => el.style.removeProperty('--mobile-text-scale'));
+  await page.screenshot({ path: '/tmp/tg-marked-cards-20261028.png' });
   await page.getByRole('button', { name: '消息', exact: true }).dispatchEvent('click');
   // Rich text, mark dialogs and full-screen details: local fixtures only.
   await page.evaluate(() => {

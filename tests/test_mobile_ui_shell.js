@@ -9,6 +9,12 @@ const main = fs.readFileSync(new URL('../src-ui/src/main.ts', import.meta.url), 
 const shell = fs.readFileSync(new URL('../src-ui/src/mobile/MobileShell.vue', import.meta.url), 'utf8');
 const controller = fs.readFileSync(new URL('../src-ui/src/mobile/mobile-controller.ts', import.meta.url), 'utf8');
 const tauriApi = fs.readFileSync(new URL('../src-ui/src/services/tauri-api.js', import.meta.url), 'utf8');
+// Exercise the real helper rather than mocking the Tauri 2 URL conversion.
+const apiWindow = { __TAURI__: { core: { convertFileSrc: path => 'asset:' + path } } };
+vm.runInNewContext(tauriApi, { window: apiWindow });
+assert.equal(apiWindow.transferGenieApi.path.convertFileSrc('/sandbox/preview.jpg'), 'asset:/sandbox/preview.jpg');
+apiWindow.__TAURI__ = { path: { convertFileSrc: path => 'legacy:' + path } };
+assert.equal(apiWindow.transferGenieApi.path.convertFileSrc('/preview.jpg'), 'legacy:/preview.jpg');
 const styles = fs.readFileSync(new URL('../src-ui/src/mobile/mobile.css', import.meta.url), 'utf8');
 const accessibilityNative = fs.readFileSync(new URL('../plugins/mobile-integration/ios/Sources/MobileAccessibility.swift', import.meta.url), 'utf8');
 const pluginNative = fs.readFileSync(new URL('../plugins/mobile-integration/ios/Sources/ExamplePlugin.swift', import.meta.url), 'utf8');
@@ -119,6 +125,7 @@ assert.match(controller, /mobileIntegration.selectMedia/);
 assert.match(controller, /mobileIntegration.selectDocuments/);
 assert.match(controller, /message.sendText/);
 assert.match(controller, /message.sendFile/);
+assert.match(controller, /void Promise.allSettled([refreshMessages(), refreshMarked(), refreshStatus(), refreshTransfers()])/);
 assert.match(controller, /clientId: `mobile-\$\{crypto\.randomUUID\(\)\}`/);
 assert.match(controller, /clientId: attachment\.clientId/);
 assert.doesNotMatch(controller, /sendFile\(\{ path: attachment\.path, clientId: `mobile-\$\{crypto\.randomUUID/);
@@ -424,6 +431,21 @@ runtimeApi.message.getMediaPreview = async () => ({ state: 'failed', error: '预
 await runtime.retryPreview(photo);
 assert.equal(photo.previewState, 'missing');
 assert.equal(originalDownloads, 0, 'retry thumbnail must not download a historical original');
+
+const clip = { ...photo, kind: 'video', filename: 'clip.mp4', originalName: 'clip.mp4' };
+runtimeApi.message.completeMediaPreview = async () => ({ state: 'ready', path: '/sandbox/poster.jpg' });
+runtimeApi.message.downloadMessageFile = async () => ({ path: '/sandbox/clip.mp4' });
+assert.equal(await runtime.prepareVideo(clip), 'asset:/sandbox/clip.mp4');
+await settle();
+assert.equal(clip.previewUrl, 'asset:/sandbox/poster.jpg');
+assert.equal(clip.attachmentState, 'cached');
+const staleVideoDownload = deferred();
+runtimeApi.message.downloadMessageFile = async () => staleVideoDownload.promise;
+const staleVideo = runtime.prepareVideo(clip);
+await runtime.initialize();
+staleVideoDownload.resolve({ path: '/other-account.mp4' });
+assert.equal(await staleVideo, null, 'account switch must invalidate an in-flight video URL');
+runtime.state.busy = false;
 
 let nativePreviewCalls = 0;
 let nativeShareCalls = 0;
@@ -749,6 +771,21 @@ assert.equal(runtime.state.composer.marked, false);
 assert.equal(runtime.state.composer.tagIds.length, 0);
 assert.equal(runtime.state.composer.attachments.length, 0);
 
+// A committed send must leave the sending state even when post-send reads hang.
+const hangingPostSendRead = deferred();
+let committedWrites = 0;
+runtimeApi.message.listWindow = async () => hangingPostSendRead.promise;
+runtimeApi.message.sendText = async (input) => { textInput = input; committedWrites += 1; };
+runtime.state.composer.text = 'committed before a slow refresh';
+assert.equal(await Promise.race([runtime.sendDraft(), new Promise((_, reject) => setTimeout(() => reject(new Error('send waited for post-send refresh')), 250))]), true);
+assert.equal(runtime.state.composer.sending, false);
+assert.equal(runtime.state.composer.text, '');
+assert.equal(runtime.state.composer.savedLocally, true);
+assert.equal(committedWrites, 1, 'the slow refresh path must commit exactly once');
+hangingPostSendRead.resolve({ messages: [] });
+await settle();
+runtimeApi.message.listWindow = async () => ({ messages: [] });
+
 // Importing a selection blocks another native picker and sending the existing draft.
 runtime.state.composer.text = 'keep while importing';
 const importingDocuments = deferred();
@@ -819,5 +856,64 @@ newSelection.reject({ code: 'CANCELLED', message: 'The user cancelled the operat
 await currentSelection;
 assert.equal(runtime.state.composer.selecting, false);
 assert.equal(runtime.state.composer.error, '', 'cancelling the picker is not an import error');
+
+// Passive preview completion must update the actual reactive list row, not its raw source.
+runtimeApi.message.listWindow = async () => ({ messages: [imageRaw], hasMoreBefore: true });
+runtimeApi.marked.getMarkedMessages = async () => ({ messages: [] });
+runtimeApi.message.getMediaPreview = async () => ({ state: 'ready', path: '/sandbox/preview.jpg' });
+const mediaController = runtimeModule.exports.useMobileController();
+await mediaController.initialize();
+const reactiveChecks = [];
+const { watch } = createRequire(import.meta.url)('vue');
+async function resolveReactivePreview(row, pending, expectedPath) {
+  const observed = [];
+  const stop = watch(() => row.previewUrl, value => observed.push(value), { flush: 'sync' });
+  try {
+    pending.resolve({ state: 'ready', path: expectedPath });
+    await settle();
+    assert.equal(row.previewUrl, 'asset:' + expectedPath);
+    assert.deepEqual(observed, ['asset:' + expectedPath], 'Vue must observe asynchronous thumbnail completion');
+    reactiveChecks.push(row.filename);
+  } finally { stop(); }
+}
+const searchThumbnail = deferred();
+runtimeApi.message.getMediaPreview = async () => searchThumbnail.promise;
+runtimeApi.message.searchMessages = async () => ({ messages: [imageRaw] });
+await mediaController.searchMessages('photo');
+await resolveReactivePreview(mediaController.state.search.messages[0], searchThumbnail, '/sandbox/search-preview.jpg');
+await mediaController.searchMessages('');
+const historyThumbnail = deferred();
+runtimeApi.message.getMediaPreview = async () => historyThumbnail.promise;
+runtimeApi.message.listWindow = async () => ({ messages: [{ ...imageRaw, filename: 'older-photo', timestamp_ms: 1 }], hasMoreBefore: false });
+await mediaController.loadOlderMessages();
+await resolveReactivePreview(mediaController.state.messages.find(row => row.filename === 'older-photo'), historyThumbnail, '/sandbox/history-preview.jpg');
+const markThumbnail = deferred();
+runtimeApi.message.getMediaPreview = async () => markThumbnail.promise;
+runtimeApi.marked.getMarkedMessages = async () => ({ messages: [{ ...imageRaw, filename: 'marked-photo', marked: true }] });
+await mediaController.setMarkedFilter(true, '');
+await resolveReactivePreview(mediaController.state.markedView.messages[0], markThumbnail, '/sandbox/marked-preview.jpg');
+assert.equal(reactiveChecks.length, 3);
+
+// In-flight playback cannot start a second original download; failures unlock retry.
+let videoDownloads = 0;
+const pendingVideo = deferred();
+runtimeApi.message.downloadMessageFile = async () => { videoDownloads += 1; return pendingVideo.promise; };
+const videoRow = { ...mediaController.state.messages[0], kind: 'video', filename: 'retry.mp4', originalName: 'retry.mp4' };
+const preparingVideo = mediaController.prepareVideo(videoRow);
+assert.equal(await mediaController.prepareVideo(videoRow), null);
+assert.equal(videoDownloads, 1);
+pendingVideo.reject(new Error('传输已暂停，回到前台后重试'));
+assert.equal(await preparingVideo, null);
+assert.equal(videoRow.attachmentState, 'paused');
+assert.equal(mediaController.state.busy, false);
+runtimeApi.message.downloadMessageFile = async () => { throw new Error('network unavailable'); };
+assert.equal(await mediaController.prepareVideo(videoRow), null);
+assert.equal(videoRow.attachmentState, 'failed');
+assert.match(videoRow.attachmentError, /network unavailable/);
+assert.equal(mediaController.state.busy, false);
+runtimeApi.message.downloadMessageFile = async () => ({ path: '/sandbox/retry.mp4' });
+assert.equal(await mediaController.prepareVideo(videoRow), 'asset:/sandbox/retry.mp4');
+assert.equal(videoRow.attachmentState, 'cached');
+assert.equal(videoRow.attachmentError, undefined);
 
 console.log('mobile UI shell tests passed');

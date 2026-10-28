@@ -11,8 +11,8 @@ import { undo, redo } from '@milkdown/kit/prose/history';
 import { lift } from '@milkdown/kit/prose/commands';
 import '@milkdown/kit/prose/view/style/prosemirror.css';
 
-const props = defineProps<{ modelValue: string; disabled?: boolean }>();
-const emit = defineEmits<{ 'update:modelValue': [value: string] }>();
+const props = defineProps<{ modelValue: string; disabled?: boolean; toolbarTarget?: string; showDismissKeyboard?: boolean }>();
+const emit = defineEmits<{ 'update:modelValue': [value: string]; dismissKeyboard: [] }>();
 const host = ref<HTMLElement | null>(null);
 const ready = ref(false);
 const failed = ref(false);
@@ -168,7 +168,17 @@ onBeforeUnmount(() => { destroyed = true; if (ready.value) void editor?.destroy(
 
 <template>
   <div class="mobile-rich-editor">
+    <Teleport :to="toolbarTarget || 'body'" :disabled="!toolbarTarget" defer>
+    <div class="mobile-editor-format-bar">
+    <form v-if="linkOpen" class="mobile-editor-link-form" aria-label="设置链接" @submit.prevent="saveLink" @keydown.esc.stop.prevent="closeLink">
+      <input v-model="linkUrl" type="url" aria-label="链接地址" placeholder="https://…" :disabled="disabled" />
+      <button type="button" aria-label="取消链接" @click="closeLink">取消</button><button type="submit" :disabled="disabled">确定</button>
+      <p v-if="linkError" role="alert">{{ linkError }}</p>
+    </form>
     <div class="mobile-markdown-toolbar" role="toolbar" aria-label="Markdown 格式工具">
+      <button v-if="showDismissKeyboard" class="is-dismiss-keyboard" type="button" aria-label="收起键盘" title="收起键盘" @click="emit('dismissKeyboard')">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+      </button>
       <button v-for="tool in tools" :key="tool.id" type="button" :aria-label="tool.label" :title="tool.label" :aria-pressed="active.includes(tool.id)" :class="`is-${tool.id}`" :disabled="disabled || !ready || failed" @pointerdown.prevent @click="format(tool.id)">
         <svg v-if="['indent', 'outdent'].includes(tool.id)" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5h9M11 10h9M11 15h9M4 20h16"/><path :d="tool.id === 'indent' ? 'm4 7 3 4-3 4' : 'm7 7-3 4 3 4'"/></svg>
         <svg v-else-if="tool.id === 'link'" viewBox="0 0 24 24" aria-hidden="true"><path d="m10 13 4-4M8 15l-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0m2 3 1-1a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0"/></svg>
@@ -176,11 +186,8 @@ onBeforeUnmount(() => { destroyed = true; if (ready.value) void editor?.destroy(
         <span v-else aria-hidden="true">{{ tool.glyph }}</span>
       </button>
     </div>
-    <form v-if="linkOpen" class="mobile-editor-link-form" aria-label="设置链接" @submit.prevent="saveLink" @keydown.esc.stop.prevent="closeLink">
-      <input v-model="linkUrl" type="url" aria-label="链接地址" placeholder="https://…" :disabled="disabled" />
-      <button type="button" aria-label="取消链接" @click="closeLink">取消</button><button type="submit" :disabled="disabled">确定</button>
-      <p v-if="linkError" role="alert">{{ linkError }}</p>
-    </form>
+    </div>
+    </Teleport>
     <p v-if="failed" class="mobile-inline-error" role="status">此内容暂不能以富文本编辑，已保留原文。</p>
     <textarea v-if="failed" :value="modelValue" :disabled="disabled" aria-label="消息内容" @input="emit('update:modelValue', ($event.target as HTMLTextAreaElement).value)"></textarea>
     <div ref="host" v-show="!failed" class="mobile-rich-editor-host mobile-markdown" :aria-busy="!ready"></div>

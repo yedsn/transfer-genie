@@ -10,7 +10,8 @@
 | iOS SDK / Simulator Runtime | 26.4 |
 | 最低 iOS 版本 | 16.0 |
 | Tauri CLI | 2.11.3（Cargo 与 npm CLI 一致） |
-| 开发团队 | `LW6QTNHNV4` |
+| 真机 / VPhone 开发团队 | `9RV293JR6V`（当前已安装包） |
+| 官方 Simulator 模拟签名组 | `LW6QTNHNV4.com.transfergenie`（保留已有登录） |
 | 官方模拟器 | `Transfer Genie - iPhone 12` |
 | Bundle ID | `com.transfergenie` |
 
@@ -92,7 +93,7 @@ xcrun simctl spawn booted log stream \
 
 1. 用数据线连接并解锁 iPhone，在手机上选择“信任此电脑”。
 2. 在 iPhone 的“设置 → 隐私与安全性 → 开发者模式”中启用开发者模式并按提示重启。
-3. 确认 Xcode 已登录 Apple ID，并在 Signing & Capabilities 中选择团队 `LW6QTNHNV4`、启用 Automatically manage signing。
+3. 确认 Xcode 已登录 Apple ID，并在 Signing & Capabilities 中选择当前真机团队 `9RV293JR6V`、启用 Automatically manage signing。证书显示名括号中的标识不等于当前包的 `TeamIdentifier`，以实际签名与 provisioning profile 为准。
 4. 检查 CoreDevice 状态：
 
 ```bash
@@ -103,13 +104,72 @@ xcrun devicectl list devices
 
 ```bash
 ipconfig getifaddr en0
-CARGO_HOME="$PWD/.cargo-ios" \
+APPLE_DEVELOPMENT_TEAM=9RV293JR6V CARGO_HOME="$PWD/.cargo-ios" \
   npx tauri ios dev "Jam" --host "$(ipconfig getifaddr en0)"
 ```
 
 如果 Mac 使用有线网络或其他网卡，请把 `en0` 换成实际接口。Vite 会读取 `TAURI_DEV_HOST`，监听该地址并让 HMR 使用同一主机。首次启动时允许 iPhone 的“本地网络”权限，并确认 Mac 防火墙允许 Node/Vite 接收入站连接。
 
 当前 `Jam`（iPhone 17 Pro Max）若显示 `unavailable`，先完成解锁、重新插线、信任和开发者模式检查，再继续真机验收。
+
+`available (paired)` 不保证正在通过 USB 连接。测试 runner 在执行方法前退出时，可先只读检查实际链路：
+
+```bash
+xcrun devicectl device info details --device Jam
+xcrun devicectl device info lockState --device Jam
+ioreg -p IOUSB -l -w 0 | rg -i 'iPhone|USB Serial Number'
+```
+
+设备详情中的 `connectionProperties.transportType` 若是 `localNetwork`，表示正在使用局域网；只有 VPhone Research VM 出现在 IOUSB 列表，不能证明 Jam 已有线连接。2026-10-28 两次测试 runner 在连接建立前退出74，局域网隧道随后出现资源分配错误；当时没有检测到 Jam USB 设备。有线重连是下一项诊断，不把它直接认定为唯一根因，也不通过重启手机、重配账号或修改安全设置来绕过。
+
+### 真机 UI 测试 runner
+
+`tests/ios-ui` 工程默认面向 Simulator，关闭签名。用于真机时必须显式启用签名并生成 Info.plist，否则 Apple 内置 XCTest runner 身份可能保留，安装时报 `0xe8008018`；此时测试方法尚未执行，不计业务功能失败。保留工程默认值，通过一次性参数构建：
+
+```bash
+TG_PHYSICAL_TEST_DIR=$(mktemp -d /Volumes/VPhone/installers/tg-physical-ui.XXXXXX)
+xcodebuild build-for-testing \
+  -project tests/ios-ui/TransferGenieSimulatorUITests.xcodeproj \
+  -scheme TransferGenieSimulatorUITests \
+  -destination 'generic/platform=iOS' \
+  -derivedDataPath "$TG_PHYSICAL_TEST_DIR" \
+  CODE_SIGNING_ALLOWED=YES CODE_SIGN_STYLE=Automatic \
+  DEVELOPMENT_TEAM=9RV293JR6V \
+  PRODUCT_BUNDLE_IDENTIFIER=com.transfergenie.tests.physical-ui \
+  GENERATE_INFOPLIST_FILE=YES -allowProvisioningUpdates
+
+codesign --verify --deep --strict --verbose=2 \
+  "$TG_PHYSICAL_TEST_DIR/Build/Products/Debug-iphoneos/TransferGenieSimulatorUITests-Runner.app"
+```
+
+2026-10-28 已验证该构建及严格签名检查通过；构建通过不等于测试通过。执行前确认目标 iPhone 已解锁，使用生成的 `.xctestrun` 运行，并添加 `-collect-test-diagnostics never` 避免失败时自动收集诊断触发 Mac 管理员 `Password:` 提示。该提示不是手机密码；不要在聊天中提供密码。
+
+```bash
+rg --files "$TG_PHYSICAL_TEST_DIR/Build/Products" -g '*.xctestrun'
+# 将上一步确认的唯一文件路径替换到 -xctestrun，不使用模糊匹配执行。
+xcodebuild test-without-building \
+  -xctestrun <上一步的完整路径> \
+  -destination 'platform=iOS,id=00008150-00194D300A50C01C' \
+  -destination-timeout 30 -parallel-testing-enabled NO \
+  -collect-test-diagnostics never \
+  -only-testing:TransferGenieSimulatorUITests/TransferGenieSimulatorUITests/testComposerDraftIsEmptyBeforeUpgrade
+```
+
+本次真机 runner 已安装并启动，但在启用 UI 自动化时超时，测试正文仍未执行。随后只读复核确认 Jam 已解锁、开发者模式开启、DDI 可用、连接为 `wired` 且 USB 列表存在对应设备，因此不能把此超时归因于锁屏或局域网连接。导出的 `testmanagerd.log` 与 runner session log 进一步确认测试进程授权已成功、初始化在 `enabling automation mode` 等待60秒后失败；没有证据证明缺少授权提示。
+
+需要进一步检查时，先从已有 xcresult 导出诊断，避免重复收集全设备日志：
+
+```bash
+xcrun xcresulttool export diagnostics \
+  --path <失败的完整xcresult路径> \
+  --output-path <本次诊断输出目录>
+```
+
+后续在 Jam 已解锁时复测，短时定向日志得到 `testmanagerd(AutomationMode): Writer daemon requires authentication to enable automation mode.`，随后仍在初始化60秒后超时。测试进程的会话授权和自动化模式的手机端身份验证是两步，前者成功不代表后者已完成。需要机主在手机上完成系统要求的验证；不要把密码发到聊天中，也不通过命令绕过或修改该安全要求。日志不能证明提示当前在哪个页面，若看不到提示，应先由机主反馈手机当前画面再继续。验证可能在原测试的60秒窗口之后才到达：2026-10-28实测首次会话超时后日志才显示serialized authorization与自动化模式成功启用，紧接着重跑即正常进入UI测试。
+
+复测前也须保持手机解锁；另一轮在 Xcode preflight 阶段遇到 `Unlock Jam to Continue`，取消后未执行测试正文。不自动修改锁屏或其他设备安全设置，也不在草稿保护通过前覆盖业务 App。
+
+业务 App 覆盖安装或终止前，先单独执行 `testComposerDraftIsEmptyBeforeUpgrade`，只有实际通过且没有 skipped 才能继续；若发现编辑中状态或非空草稿，保留当前进程与内容。
 
 ## 5. 编译与回归检查
 
@@ -123,7 +183,7 @@ cargo test
 需要生成可覆盖安装、并验证 Keychain 会话恢复的 Simulator archive 时，使用保留 Xcode 模拟签名信息的构建：
 
 ```bash
-CARGO_HOME="$PWD/.cargo-ios" CARGO_NET_OFFLINE=true \
+APPLE_DEVELOPMENT_TEAM=LW6QTNHNV4 CARGO_HOME="$PWD/.cargo-ios" CARGO_NET_OFFLINE=true \
   npx tauri ios build --debug --target aarch64-sim \
   --archive-only --ci --export-method debugging
 
@@ -289,23 +349,25 @@ VPhone 独有失败必须在官方 Simulator 或 `Jam` 上复现后才能成为�
 
 ### 开发签名直装
 
-前提：`Jam` 已解锁并信任 Mac、已启用开发者模式，Xcode 登录的 Apple ID 对团队 `LW6QTNHNV4` 有开发证书和 `com.transfergenie` provisioning profile，工程启用 Automatically manage signing。
+前提：`Jam` 已解锁并信任 Mac、已启用开发者模式，Xcode 登录的 Apple ID 对当前真机团队 `9RV293JR6V` 有开发证书和 `com.transfergenie` provisioning profile，工程启用 Automatically manage signing。官方 Simulator 保留登录时使用的 `LW6QTNHNV4` 模拟签名组不能直接作为真机团队依据。
 
 ```bash
 xcrun devicectl list devices
-CARGO_HOME="$PWD/.cargo-ios" \
+APPLE_DEVELOPMENT_TEAM=9RV293JR6V CARGO_HOME="$PWD/.cargo-ios" \
   npx tauri ios build --debug --target aarch64 \
   --ci --export-method debugging
 ```
 
 成功后使用生成的 debugging IPA，或在 Xcode 的 Devices and Simulators 中选择 archive 的 `.app`/IPA 安装到 `Jam`。直装包的 provisioning profile 到期或设备未列入 profile 后将无法启动，需要重新签名安装。
 
+覆盖安装前必须检查当前草稿，确认没有未保存的文字或附件；无法确认时停止，不先终止进程或卸载。核对 archive 的 `Info.plist` 中 `DTPlatformName=iphoneos`，再检查 strict codesign、`TeamIdentifier`、Keychain access group 与 profile 的设备列表。Simulator 与真机构建共用 archive 输出路径，后一次构建会替换前一次包，不能只凭路径或版本号判断平台。原位更新保留沙盒，不卸载应用。
+
 ### Release / TestFlight
 
 TestFlight 需要付费 Apple Developer Program、有效 Distribution 证书、App Store Connect 中已创建的 `com.transfergenie` 应用记录，以及每次递增的 build number：
 
 ```bash
-CARGO_HOME="$PWD/.cargo-ios" \
+APPLE_DEVELOPMENT_TEAM=9RV293JR6V CARGO_HOME="$PWD/.cargo-ios" \
   npx tauri ios build --target aarch64 --ci \
   --build-number 1 --export-method app-store-connect
 ```
