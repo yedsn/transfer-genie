@@ -73,10 +73,12 @@ function updateViewport() {
   // Ignore unexpected browser scale changes; Dynamic Type is applied separately.
   if (viewport && Math.abs(viewport.scale - 1) > 0.01) return;
   const visualHeight = viewport?.height || window.innerHeight;
+  // UIKit already reports the keyboard boundary in WebView coordinates.
+  // Subtracting VisualViewport drag offsets again compresses the editor.
   viewportHeight.value = nativeKeyboardHeight.value === null
     ? visualHeight
-    : Math.min(visualHeight, Math.max(0, nativeKeyboardHeight.value - (viewport?.offsetTop || 0)));
-  viewportTop.value = viewport?.offsetTop || 0;
+    : Math.max(0, nativeKeyboardHeight.value);
+  viewportTop.value = nativeKeyboardHeight.value === null ? viewport?.offsetTop || 0 : 0;
   // WKWebView may scroll the layout viewport when refocusing after a native
   // picker, reducing innerHeight by the same amount as the page scroll.
   viewportKeyboardVisible.value =
@@ -1366,6 +1368,7 @@ onBeforeUnmount(() => {
             <button type="button" aria-label="关闭新消息" :disabled="state.composer.selecting" @click="closeSheet">×</button>
           </header>
           <div class="mobile-composer-content" role="region" aria-label="消息编辑与附件">
+          <div v-if="state.composer.format === 'markdown'" id="mobile-composer-toolbar-dock" class="mobile-composer-toolbar-dock"></div>
           <div class="mobile-compose-editor">
           <MobileMarkdownEditor v-if="state.composer.format === 'markdown'" v-model="state.composer.text" toolbar-target="#mobile-composer-toolbar-dock" :show-dismiss-keyboard="keyboardVisible" :disabled="state.composer.sending || !state.composer.persistenceReady" @dismiss-keyboard="dismissComposerKeyboard" />
           <textarea
@@ -1378,7 +1381,6 @@ onBeforeUnmount(() => {
             autofocus
           ></textarea>
           </div>
-          <div v-if="state.composer.format === 'markdown'" id="mobile-composer-toolbar-dock" class="mobile-composer-toolbar-dock"></div>
           <div class="mobile-compose-actions">
           <div
             v-if="state.composer.attachments.length"

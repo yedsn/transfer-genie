@@ -58,7 +58,7 @@ try {
         for (const control of [close]) {
           const box = await control.boundingBox();
           assert.ok(box.width >= 44 && box.height >= 44);
-          assert.ok(box.y >= shell.y && box.y + box.height <= shell.y + visibleHeight);
+          assert.ok(box.y >= shell.y && box.y + box.height <= shell.y + visibleHeight, JSON.stringify({ width, height, visibleHeight, large, format, shell, close: box }));
         }
         if (large) assert.ok(await editor.evaluate(el => parseFloat(getComputedStyle(el).fontSize)) > 45, 'preserve accessibility text');
         if (format === 'markdown') {
@@ -67,10 +67,12 @@ try {
           assert.ok(await dismiss.isVisible());
           const box = await tools.boundingBox();
           assert.equal(box.x, 0); assert.equal(box.width, width);
-          assert.equal(box.y + box.height, shell.y + visibleHeight, 'only the formatting toolbar docks to the keyboard');
+          const headerBox = await sheet.locator('header').boundingBox();
+          assert.ok(box.y >= headerBox.y + headerBox.height && box.y <= headerBox.y + headerBox.height + 8, 'toolbar stays directly below the quiet header');
           const host = sheet.locator('.mobile-rich-editor-host');
           const hostBox = await host.boundingBox();
-          assert.ok(hostBox.height > 0 && hostBox.y + hostBox.height <= box.y, 'writing area remains scrollable above tools');
+          assert.ok(hostBox.height > 0 && hostBox.y >= box.y + box.height, 'writing area remains scrollable below the top toolbar');
+          assert.ok(hostBox.y + hostBox.height <= shell.y + visibleHeight, 'writing area fits above the keyboard');
           await host.evaluate(el => { el.scrollTop = el.scrollHeight; });
           assert.deepEqual(await tools.boundingBox(), box);
           for (const label of ['粗体', '链接']) {
@@ -78,7 +80,7 @@ try {
             await tool.scrollIntoViewIfNeeded();
             assert.ok(await tool.evaluate(el => { const r = el.getBoundingClientRect(); return r.width >= 44 && r.height >= 44 && document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)?.closest('button') === el; }));
           }
-          if (!large && width === 390) await page.screenshot({ path: '/tmp/tg-toolbar-only-keyboard-20261028.png' });
+          if (!large && width === 390) await page.screenshot({ path: '/tmp/tg-toolbar-top-keyboard-20261028.png' });
         }
         await visibleViewport(100, 20, 2);
         assert.equal((await page.locator('.mobile-shell').boundingBox()).height, visibleHeight, 'ignore pinch zoom');
@@ -93,7 +95,8 @@ try {
         if (format === 'markdown') {
           const tools = await sheet.getByRole('toolbar', { name: 'Markdown 格式工具' }).boundingBox();
           const actions = await sheet.locator('.mobile-compose-actions').boundingBox();
-          assert.ok(tools.y + tools.height <= actions.y, 'toolbar returns above send controls');
+          const hostBox = await sheet.locator('.mobile-rich-editor-host').boundingBox();
+          assert.ok(tools.y + tools.height <= hostBox.y && hostBox.y + hostBox.height <= actions.y, 'toolbar stays above writing area; send controls return at the bottom');
         }
         assert.ok(await sheet.getByRole('button', { name: '发送', exact: true }).isVisible());
       }
@@ -101,7 +104,7 @@ try {
     }
   }
 
-  // The iOS floating input-assistant capsule is not reflected reliably in VisualViewport.
+  // Native geometry may resize the writing area, but never moves the top toolbar.
   await page.setViewportSize({ width: 440, height: 956 });
   await page.evaluate(() => {
     document.documentElement.style.setProperty('--mobile-text-scale', '1');
@@ -109,16 +112,26 @@ try {
   });
   await visibleViewport(620);
   await sheet.getByRole('textbox', { name: '消息内容', exact: true }).focus();
-  await page.evaluate(() => window.dispatchEvent(new CustomEvent('transfer-genie-keyboard-geometry', { detail: { visibleHeight: 548 } })));
   const nativeTools = sheet.getByRole('toolbar', { name: 'Markdown 格式工具' });
+  const beforeNativeBox = await nativeTools.boundingBox();
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent('transfer-genie-keyboard-geometry', { detail: { visibleHeight: 616 } })));
   const nativeBox = await nativeTools.boundingBox();
-  assert.equal(nativeBox.y + nativeBox.height, 548, 'native keyboard geometry keeps the toolbar above the 72pt assistant area');
+  assert.equal(nativeBox.y, beforeNativeBox.y, 'native keyboard geometry does not move the toolbar from the top');
+  const nativeHostBox = await sheet.locator('.mobile-rich-editor-host').boundingBox();
+  assert.ok(nativeHostBox.y >= nativeBox.y + nativeBox.height && nativeHostBox.y + nativeHostBox.height <= 616, 'native geometry only bounds the writing surface');
   assert.equal(await sheet.locator('.mobile-compose-actions').isVisible(), false);
   assert.equal(await sheet.getByRole('textbox', { name: '消息内容', exact: true }).getAttribute('contenteditable'), 'true');
+  await visibleViewport(540, 76);
+  const draggedShell = await page.locator('.mobile-shell').boundingBox();
+  assert.equal(draggedShell.height, 616, 'drag near the input assistant must not subtract the viewport offset from native height');
+  assert.equal(draggedShell.y, 0, 'native keyboard coordinates keep the editor canvas anchored');
+  assert.deepEqual(await nativeTools.boundingBox(), nativeBox, 'assistant-region drag does not move or shrink the top toolbar');
+  assert.deepEqual(await sheet.locator('.mobile-rich-editor-host').boundingBox(), nativeHostBox, 'assistant-region drag preserves the writing region');
   await nativeTools.getByRole('button', { name: '收起键盘', exact: true }).click();
   await visibleViewport(956);
   await page.evaluate(() => window.dispatchEvent(new CustomEvent('transfer-genie-keyboard-geometry', { detail: { visibleHeight: null } })));
   await page.waitForSelector('.mobile-shell:not(.is-keyboard-visible)');
+  assert.equal((await nativeTools.boundingBox()).y, nativeBox.y, 'keyboard dismissal keeps the toolbar at the same top position');
   assert.equal(await sheet.locator('.mobile-compose-actions').isVisible(), true, 'native hide restores send controls');
 
   const iosContext = await browser.newContext({
@@ -137,6 +150,7 @@ try {
     await plain.waitFor();
     await iosPage.waitForSelector('.mobile-shell.is-keyboard-visible');
     assert.equal(await iosSheet.locator('.mobile-compose-actions').isVisible(), false, 'iOS focus hides actions when WKWebView does not resize VisualViewport');
+    await iosPage.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     await plain.evaluate(el => el.blur());
     await iosPage.waitForSelector('.mobile-shell:not(.is-keyboard-visible)');
     await iosSheet.getByRole('button', { name: 'Markdown', exact: true }).click();
@@ -151,7 +165,7 @@ try {
   } finally {
     await iosContext.close();
   }
-  console.log('mobile keyboard browser tests passed: toolbar-only docking, hidden send/actions, dismiss and draft preservation, plain/Markdown, narrow/landscape/max text');
+  console.log('mobile keyboard browser tests passed: fixed top toolbar, hidden send/actions, dismiss and draft preservation, plain/Markdown, narrow/landscape/max text');
 } finally {
   await browser.close();
 }

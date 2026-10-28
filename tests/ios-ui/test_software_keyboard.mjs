@@ -38,11 +38,11 @@ const originalTextSize = contentSize();
 const derivedData = process.env.KEYBOARD_DERIVED_DATA || '/tmp/tg-ios-real-software-keyboard-20261027';
 const captureDirectory = join(derivedData, 'framebuffers');
 mkdirSync(captureDirectory, { recursive: true });
-const testName = process.env.KEYBOARD_ATTACHMENT
+const testName = process.env.KEYBOARD_TEST_NAME || (process.env.KEYBOARD_ATTACHMENT
   ? 'testAccessibilityComposerAttachmentWithSoftwareKeyboard'
   : process.env.KEYBOARD_PICKER_CANCEL
   ? (process.env.KEYBOARD_TEXT_SIZE ? 'testAccessibilityComposerPickersCanBeCancelledWithSoftwareKeyboard' : 'testComposerPickersCanBeCancelledWithSoftwareKeyboard')
-  : (process.env.KEYBOARD_TEXT_SIZE ? 'testAccessibilityComposerActionsRemainReachableWithSoftwareKeyboard' : 'testComposerActionsStayAboveSoftwareKeyboardInBothOrientations');
+  : (process.env.KEYBOARD_TEXT_SIZE ? 'testAccessibilityComposerActionsRemainReachableWithSoftwareKeyboard' : 'testComposerActionsStayAboveSoftwareKeyboardInBothOrientations'));
 let command;
 let timeout;
 let output = '';
@@ -64,6 +64,8 @@ try {
     '-scheme', 'TransferGenieSimulatorUITests',
     '-destination', 'platform=iOS Simulator,id=' + simulator,
     '-derivedDataPath', derivedData,
+    '-parallel-testing-enabled', 'NO',
+    '-collect-test-diagnostics', 'never',
     '-only-testing:TransferGenieSimulatorUITests/TransferGenieSimulatorUITests/' + testName,
     'COMPILATION_CACHE_ENABLE_CACHING=NO',
     'CODE_INDEX_ENABLE_BUILD_ARENA=NO',
@@ -92,7 +94,7 @@ try {
   assert.equal(code, 0, 'Both installed-app software-keyboard layouts must pass');
   assert.ok(!output.includes('Test skipped') && !output.includes('1 test skipped'), 'Skipped keyboard coverage is not a pass');
   assert.equal(captureError, undefined);
-  assert.ok(captured.has('READY_1') && captured.has('READY_3'), 'Capture both actual Simulator orientations');
+  if (!process.env.KEYBOARD_TEST_NAME) assert.ok(captured.has('READY_1') && captured.has('READY_3'), 'Capture both actual Simulator orientations');
   if (process.env.KEYBOARD_ATTACHMENT) assert.ok(captured.has('ATTACHMENT_1') && captured.has('ATTACHMENT_3'), 'Capture enabled send with the actual attachment in both orientations');
 } finally {
   clearTimeout(timeout);

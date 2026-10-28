@@ -16,11 +16,24 @@ class MobileIntegrationPlugin: Plugin {
   private let videoPosterLock = NSLock()
   private var lifecycleObservers: [NSObjectProtocol] = []
   private weak var accessibilityWebview: WKWebView?
+  private var canvasOffsetObservation: NSKeyValueObservation?
 
   override func load(webview: WKWebView) {
     super.load(webview: webview)
     // Keep app layout fixed; Dynamic Type is handled independently below.
     webview.scrollView.pinchGestureRecognizer?.isEnabled = false
+    // Nested message/editor regions scroll; the app canvas must not rubber-band.
+    webview.scrollView.bounces = false
+    webview.scrollView.alwaysBounceVertical = false
+    webview.scrollView.alwaysBounceHorizontal = false
+    webview.scrollView.isScrollEnabled = false
+    webview.scrollView.contentInsetAdjustmentBehavior = .never
+    // WebKit can still scroll the root programmatically when focusing a caret.
+    // The app uses nested CSS scroll regions, so the root always stays at zero.
+    canvasOffsetObservation = webview.scrollView.observe(\.contentOffset, options: [.new]) { scrollView, _ in
+      if scrollView.contentOffset != .zero { scrollView.setContentOffset(.zero, animated: false) }
+    }
+    webview.scrollView.setContentOffset(.zero, animated: false)
     #if DEBUG && targetEnvironment(simulator)
     if ProcessInfo.processInfo.environment["TRANSFER_GENIE_IOS_LAYOUT_PROBE"] == "1" {
       SimulatorLayoutProbe().install(in: webview)
@@ -79,6 +92,8 @@ class MobileIntegrationPlugin: Plugin {
 
   private func refreshAccessibility() {
     accessibilityWebview?.scrollView.pinchGestureRecognizer?.isEnabled = false
+    accessibilityWebview?.scrollView.bounces = false
+    accessibilityWebview?.scrollView.isScrollEnabled = false
     accessibilityWebview?.evaluateJavaScript(MobileAccessibility.currentScript(), completionHandler: nil)
   }
 
@@ -86,10 +101,10 @@ class MobileIntegrationPlugin: Plugin {
     guard let webview = accessibilityWebview,
           let frame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
     let localFrame = webview.convert(frame, from: nil)
-    // iOS 26+ floats the previous/next/Done assistant above the keyboard.
-    // Keep it and predictive input intact, reserving its full touch area.
+    // iOS 26+ includes the floating previous/next/Done assistant in the
+    // reported keyboard frame. Keep only a minimal visual gap above that frame.
     let clearance: CGFloat
-    if #available(iOS 26.0, *) { clearance = 72 } else { clearance = 0 }
+    if #available(iOS 26.0, *) { clearance = 4 } else { clearance = 0 }
     let height = MobileKeyboard.visibleHeight(bounds: webview.bounds, keyboardFrame: localFrame, clearance: clearance)
     webview.evaluateJavaScript(MobileKeyboard.script(visibleHeight: height), completionHandler: nil)
   }

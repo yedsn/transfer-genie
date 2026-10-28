@@ -13,11 +13,11 @@ import WebKit
 final class MobileIntegrationPluginTests: XCTestCase {
     func testKeyboardGeometryReservesFloatingAssistantAndIgnoresUndockedKeyboards() {
         let bounds = CGRect(x: 0, y: 0, width: 440, height: 956)
-        XCTAssertEqual(MobileKeyboard.visibleHeight(bounds: bounds, keyboardFrame: CGRect(x: 0, y: 620, width: 440, height: 336), clearance: 72), 548)
+        XCTAssertEqual(MobileKeyboard.visibleHeight(bounds: bounds, keyboardFrame: CGRect(x: 0, y: 620, width: 440, height: 336), clearance: 4), 616)
         XCTAssertEqual(MobileKeyboard.visibleHeight(bounds: bounds, keyboardFrame: CGRect(x: 0, y: 620, width: 440, height: 336), clearance: 0), 620)
-        XCTAssertNil(MobileKeyboard.visibleHeight(bounds: bounds, keyboardFrame: CGRect(x: 0, y: 956, width: 440, height: 336), clearance: 72))
-        XCTAssertNil(MobileKeyboard.visibleHeight(bounds: bounds, keyboardFrame: CGRect(x: 100, y: 400, width: 250, height: 200), clearance: 72))
-        XCTAssertNil(MobileKeyboard.visibleHeight(bounds: bounds, keyboardFrame: CGRect(x: 0, y: 912, width: 440, height: 44), clearance: 72))
+        XCTAssertNil(MobileKeyboard.visibleHeight(bounds: bounds, keyboardFrame: CGRect(x: 0, y: 956, width: 440, height: 336), clearance: 4))
+        XCTAssertNil(MobileKeyboard.visibleHeight(bounds: bounds, keyboardFrame: CGRect(x: 100, y: 400, width: 250, height: 200), clearance: 4))
+        XCTAssertNil(MobileKeyboard.visibleHeight(bounds: bounds, keyboardFrame: CGRect(x: 0, y: 912, width: 440, height: 44), clearance: 4))
         XCTAssertTrue(MobileKeyboard.script(visibleHeight: nil).contains("visibleHeight: null"))
     }
     func testPluginCanBeCreated() throws {
@@ -44,7 +44,7 @@ final class MobileIntegrationPluginTests: XCTestCase {
             userInfo: [UIResponder.keyboardFrameEndUserInfoKey: CGRect(x: 0, y: 620, width: 440, height: 336)])
         webview.evaluateJavaScript("window.__TRANSFER_GENIE_KEYBOARD_HEIGHT__") { result, error in
             XCTAssertNil(error)
-            XCTAssertEqual((result as? NSNumber)?.doubleValue, 548)
+            XCTAssertEqual((result as? NSNumber)?.doubleValue, 616)
             shown.fulfill()
         }
         wait(for: [shown], timeout: 10)
@@ -59,15 +59,26 @@ final class MobileIntegrationPluginTests: XCTestCase {
         withExtendedLifetime((plugin, delegate)) {}
     }
 
-    func testAppWebViewDisablesPinchWithoutDisablingScrolling() {
+    func testAppCanvasDoesNotScrollOrBounceWhileNestedRegionsRemainAvailable() {
         let webview = WKWebView()
         let plugin = MobileIntegrationPlugin()
         plugin.load(webview: webview)
         // An unattached WebView can have no pinch recognizer yet.
         XCTAssertNotEqual(webview.scrollView.pinchGestureRecognizer?.isEnabled, true)
-        XCTAssertTrue(webview.scrollView.isScrollEnabled)
+        XCTAssertFalse(webview.scrollView.isScrollEnabled)
+        XCTAssertEqual(webview.scrollView.contentInsetAdjustmentBehavior, .never)
+        XCTAssertFalse(webview.scrollView.bounces)
+        XCTAssertFalse(webview.scrollView.alwaysBounceVertical)
+        XCTAssertFalse(webview.scrollView.alwaysBounceHorizontal)
+        webview.scrollView.contentSize = CGSize(width: 440, height: 1200)
+        webview.scrollView.setContentOffset(CGPoint(x: 0, y: 180), animated: false)
+        XCTAssertEqual(webview.scrollView.contentOffset, .zero, "System caret scrolling must not displace the app canvas")
+        webview.scrollView.bounces = true
+        webview.scrollView.isScrollEnabled = true
         NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
         XCTAssertNotEqual(webview.scrollView.pinchGestureRecognizer?.isEnabled, true)
+        XCTAssertFalse(webview.scrollView.bounces)
+        XCTAssertFalse(webview.scrollView.isScrollEnabled)
         XCTAssertGreaterThan(MobileAccessibility.textScale(for: .accessibilityExtraExtraExtraLarge), 3)
         withExtendedLifetime(plugin) {}
     }

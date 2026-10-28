@@ -45,7 +45,9 @@ try {
   const toolbarGeometry = await tools.evaluate(el => ({ x: el.getBoundingClientRect().x, width: el.getBoundingClientRect().width, radius: getComputedStyle(el).borderRadius, border: getComputedStyle(el).borderTopWidth, padding: getComputedStyle(el).padding, firstButtonX: el.querySelector('button').getBoundingClientRect().x }));
   assert.deepEqual(toolbarGeometry, { x: 0, width: 390, radius: '0px', border: '0px', padding: '0px', firstButtonX: 0 }, 'toolbar and its buttons are straight-edged and flush with the screen');
   const dockedGeometry = await tools.boundingBox();
-  assert.ok(dockedGeometry.y + dockedGeometry.height <= (await page.locator('.mobile-compose-actions').boundingBox()).y, 'format toolbar sits above the send actions');
+  const headerGeometry = await page.locator('.mobile-composer-sheet header').boundingBox();
+  assert.ok(dockedGeometry.y >= headerGeometry.y + headerGeometry.height && dockedGeometry.y <= headerGeometry.y + headerGeometry.height + 8, 'format toolbar sits directly below the header');
+  assert.ok(dockedGeometry.y + dockedGeometry.height <= (await page.locator('.mobile-rich-editor-host').boundingBox()).y, 'format toolbar sits above the writing surface');
   const select = async (selector, start, end = start) => editor.locator(selector).first().evaluate((el, range) => {
     const node = [...el.childNodes].find(node => node.nodeType === Node.TEXT_NODE);
     const selection = window.getSelection();
@@ -134,7 +136,10 @@ try {
     assert.equal(box.height, viewport.height); assert.equal(box.width, viewport.width);
     assert.equal(await page.locator('.mobile-composer-sheet').evaluate(el => el.scrollWidth > el.clientWidth), false);
     const toolbarBox = await tools.boundingBox();
-    assert.ok(toolbarBox.y + toolbarBox.height <= (await page.locator('.mobile-compose-actions').boundingBox()).y, 'toolbar stays above the send actions after rotation');
+    const host = page.locator('.mobile-rich-editor-host');
+    assert.ok(toolbarBox.y + toolbarBox.height <= (await host.boundingBox()).y, 'toolbar stays above the writing surface after rotation');
+    await host.evaluate(el => { el.scrollTop = el.scrollHeight; });
+    assert.deepEqual(await tools.boundingBox(), toolbarBox, 'writing scroll never moves the top toolbar');
     await tools.evaluate(el => { el.scrollLeft = 0; });
     assert.equal(await tools.locator('button').first().evaluate(el => el.getBoundingClientRect().left), 0, 'first tool is flush at every viewport');
     for (const button of await tools.getByRole('button').all()) {

@@ -21,14 +21,19 @@ iOS SHALL offer full-screen plain-text and WYSIWYG Markdown editing without a pr
 #### Scenario: Insert formatting while composing
 - **WHEN** the user selects text or positions the caret and taps a Markdown formatting action
 - **THEN** the action immediately applies the corresponding visible formatting without losing the remaining draft
-- **AND** the bottom translucent toolbar provides list indentation, outdent, undo and redo, and retains keyboard usability
+- **AND** the top translucent toolbar provides list indentation, outdent, undo and redo, and retains keyboard usability
 
-#### Scenario: Dock formatting above the keyboard
+#### Scenario: Keep formatting at the editor top
 - **WHEN** the user shows or dismisses the software keyboard or scrolls a long Markdown draft
-- **THEN** the formatting toolbar remains outside the editor scroll region at the visible viewport bottom, directly above the keyboard while it is present
+- **THEN** the formatting toolbar remains outside the editor scroll region directly below the quiet header and above the writing surface, without following the keyboard
 - **AND** the toolbar starts with a touch-sized downward-chevron action that dismisses the keyboard without closing or rebuilding the draft
-- **AND** Send, attachment, mark and format-selection controls do not follow the keyboard; they return unchanged below the toolbar after dismissal
+- **AND** Send, attachment, mark and format-selection controls do not follow the keyboard; they return unchanged at the bottom below the writing surface after dismissal
 - **AND** formatting actions preserve the active selection and keyboard and remain reachable after rotation or Dynamic Type changes
+
+#### Scenario: Drag near the native keyboard input assistant
+- **WHEN** the user drags upward near the native previous/next/Done capsule while the software keyboard is visible
+- **THEN** the editor canvas does not expose an outside blank region or shrink its writing area from the drag offset
+- **AND** native keyboard geometry anchors the canvas, while long draft content remains independently scrollable
 
 #### Scenario: Separate file selection from text editing
 - **WHEN** the user taps the plus button to the left of the feed input entry
@@ -153,7 +158,7 @@ iOS 输入与消息界面 SHALL 适配顶部和底部安全区以及软件键盘
 
 #### Scenario: Compose while keyboard is visible
 - **WHEN** 用户在带 Home Indicator 的 iPhone 上打开键盘输入消息
-- **THEN** 输入框与 Markdown 工具条位于键盘上方且可见，工具条首个图标可以收起键盘
+- **THEN** 输入框保持可见并独立滚动，Markdown 工具条固定在编辑器顶部标题下方，首个图标可以收起键盘
 - **AND** 发送、附件、标记与格式切换区域在键盘显示期间不占用可视区域，收起后原样恢复
 - **AND** 最新消息区域不会被不可恢复地遮挡
 

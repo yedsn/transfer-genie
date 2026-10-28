@@ -37,7 +37,7 @@ final class SimulatorLayoutProbe: NSObject, WKScriptMessageHandler {
       function capture(event) {
         const viewport = window.visualViewport;
         const rects = {};
-        for (const selector of ['.mobile-shell', '.mobile-composer-sheet', '.mobile-composer-content', '.mobile-compose-actions', '.mobile-composer-sheet textarea', '.mobile-composer-sheet .mobile-primary-button', '.mobile-compose-tools button:nth-child(1)', '.mobile-compose-tools button:nth-child(2)', '.mobile-compose-tools button:nth-child(3)', '.mobile-attachment-strip', '.mobile-attachment-strip .mobile-draft-open', '.mobile-attachment-strip button[aria-label="移除附件"]']) {
+        for (const selector of ['.mobile-shell', '.mobile-composer-sheet', '.mobile-composer-content', '.mobile-composer-toolbar-dock', '.mobile-rich-editor-host', '.mobile-compose-actions', '.mobile-composer-sheet textarea', '.mobile-composer-sheet .mobile-primary-button', '.mobile-compose-tools button:nth-child(1)', '.mobile-compose-tools button:nth-child(2)', '.mobile-compose-tools button:nth-child(3)', '.mobile-attachment-strip', '.mobile-attachment-strip .mobile-draft-open', '.mobile-attachment-strip button[aria-label="移除附件"]']) {
           const el = document.querySelector(selector);
           if (!el) continue;
           const r = el.getBoundingClientRect(), css = getComputedStyle(el);

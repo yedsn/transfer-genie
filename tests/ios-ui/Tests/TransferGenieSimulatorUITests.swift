@@ -7,11 +7,38 @@ final class TransferGenieSimulatorUITests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = false
         app = XCUIApplication(bundleIdentifier: bundleIdentifier)
+        if name.contains("testMarkdownWritingRegionScrollsWithoutMovingCanvas") {
+            app.launchEnvironment["TRANSFER_GENIE_IOS_LAYOUT_PROBE"] = "1"
+        }
         // This pre-upgrade guard must inspect an already-running draft without
         // launch() terminating its process before the check can protect it.
         if name.contains("testComposerDraftIsEmptyBeforeUpgrade") { app.activate() }
         else { app.launch() }
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 20))
+        // The old canvas can scroll its composer offscreen on focus. Dismiss
+        // the OS keyboard without typing or changing any draft before inspection.
+        if name.contains("testComposerDraftIsEmptyBeforeUpgrade"), app.keyboards.firstMatch.exists,
+           !app.buttons["关闭新消息"].exists {
+            dismissKeyboardIfNeeded()
+        }
+        if name.contains("testComposerDraftIsEmptyBeforeUpgrade"),
+           app.buttons["关闭新消息"].waitForExistence(timeout: 3) {
+            let editor = composerEditor()
+            let value = editor.value as? String ?? ""
+            let normalizedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            let emptyEditorValues = ["", "输入文字，或加入照片和文件…", "写下你的想法…\n选中文字，用上方工具添加格式。"]
+            guard emptyEditorValues.contains(normalizedValue),
+                  app.buttons.matching(identifier: "移除附件").count == 0,
+                  !app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "已标记")).firstMatch.exists,
+                  !app.staticTexts["草稿自动保存失败"].exists else {
+                throw XCTSkip("Preserve the editor already open before replacement installation")
+            }
+            if app.buttons["收起键盘"].exists {
+                app.buttons["收起键盘"].tap()
+                XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
+            }
+            app.buttons["关闭新消息"].tap()
+        }
         XCTAssertTrue(app.buttons["消息"].waitForExistence(timeout: 30), "The signed-in mobile shell did not become ready")
     }
 
@@ -29,7 +56,7 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         let value = editor.value as? String
         defer { if app.buttons["关闭新消息"].exists { app.buttons["关闭新消息"].tap() } }
         let emptyEditorValues = ["", "输入文字，或加入照片和文件…", "写下你的想法…\n选中文字，用上方工具添加格式。"]
-        guard let value, emptyEditorValues.contains(value),
+        guard let value, emptyEditorValues.contains(value.trimmingCharacters(in: .whitespacesAndNewlines)),
               app.buttons.matching(identifier: "移除附件").count == 0,
               !app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "已标记")).firstMatch.exists,
               !app.staticTexts["草稿自动保存失败"].exists else {
@@ -41,15 +68,23 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         if !app.buttons["关闭新消息"].exists, app.buttons["新消息"].isHittable { app.buttons["新消息"].tap() }
         let editor = composerEditor()
         XCTAssertTrue(editor.waitForExistence(timeout: 5))
-        let fixture = "# TG Markdown UI\n\n**bold fixture** and `code`"
-        let value = (editor.value as? String ?? "").trimmingCharacters(in: .newlines)
-        guard value == fixture, app.buttons.matching(identifier: "移除附件").count == 0 else {
-            throw XCTSkip("Only the exact attachment-free toolbar fixture may be removed")
+        let value = (editor.value as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let isKnownFixture = value.contains("TG Markdown UI")
+            && value.contains("bold fixture")
+            && value.contains("code")
+        let isKnownCleanupResidue = value == "#"
+        guard isKnownFixture || isKnownCleanupResidue,
+              app.buttons.matching(identifier: "移除附件").count == 0,
+              !app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "已标记")).firstMatch.exists,
+              !app.staticTexts["草稿自动保存失败"].exists else {
+            throw XCTSkip("Only the uniquely identified attachment-free, unmarked toolbar fixture may be removed")
         }
         clearVerifiedComposerFixture(editor)
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+        let emptyEditorValues = ["", "输入文字，或加入照片和文件…", "写下你的想法…\n选中文字，用上方工具添加格式。"]
         XCTAssertTrue(NSPredicate { _, _ in
-            let current = editor.value as? String ?? ""
-            return current.isEmpty || current == "输入文字，或加入照片和文件…"
+            let current = (editor.value as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return emptyEditorValues.contains(current)
         }.evaluate(with: nil))
         dismissKeyboardIfNeeded()
         app.buttons["关闭新消息"].tap()
@@ -110,7 +145,14 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         XCTAssertTrue(editor.waitForExistence(timeout: 5))
         let original = editor.value as? String ?? ""
         let draft = "# TG Markdown UI\n\n**bold fixture** and `code`"
-        guard (original.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || original == "输入文字，或加入照片和文件…" || original.trimmingCharacters(in: .newlines) == draft), app.buttons.matching(identifier: "移除附件").count == 0 else {
+        let normalizedOriginal = original.trimmingCharacters(in: .whitespacesAndNewlines)
+        let emptyEditorValues = ["", "输入文字，或加入照片和文件…", "写下你的想法…\n选中文字，用上方工具添加格式。"]
+        let isKnownFixture = normalizedOriginal == draft
+        let hasNoAttachments = app.buttons.matching(identifier: "移除附件").count == 0
+        let hasNoMark = !app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "已标记")).firstMatch.exists
+        let hasNoSaveFailure = !app.staticTexts["草稿自动保存失败"].exists
+        let isEmptyComposer = emptyEditorValues.contains(normalizedOriginal)
+        guard (isEmptyComposer || isKnownFixture), hasNoAttachments, hasNoMark, hasNoSaveFailure else {
             throw XCTSkip("Preserve an existing unsent draft")
         }
         defer {
@@ -121,12 +163,20 @@ final class TransferGenieSimulatorUITests: XCTestCase {
             editor = composerEditor()
             if editor.exists {
                 editor.tap()
-                if let value = editor.value as? String, value.trimmingCharacters(in: .newlines) == draft {
-                    clearVerifiedComposerFixture(editor)
+                if let value = editor.value as? String {
+                    let normalizedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let isKnownFixture = normalizedValue == draft
+                    if isKnownFixture {
+                        clearVerifiedComposerFixture(editor)
+                        RunLoop.current.run(until: Date().addingTimeInterval(1))
+                    }
                 }
             }
             if app.switches["文字"].exists { app.switches["文字"].tap() }
             if app.buttons["关闭新消息"].exists { app.buttons["关闭新消息"].tap() }
+        }
+        if isKnownFixture && original.trimmingCharacters(in: .newlines) != draft {
+            clearVerifiedComposerFixture(editor)
         }
         editor.tap()
         if original.trimmingCharacters(in: .newlines) != draft { editor.typeText(draft) }
@@ -143,6 +193,9 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         XCTAssertFalse(app.switches["预览"].exists)
         let richEditor = composerEditor()
         XCTAssertTrue(richEditor.waitForExistence(timeout: 5))
+        let toolbarTop = firstTool.frame.minY
+        XCTAssertGreaterThanOrEqual(toolbarTop, app.buttons["关闭新消息"].frame.maxY, "Formatting tools belong below the quiet header")
+        XCTAssertLessThanOrEqual(firstTool.frame.maxY, richEditor.frame.minY + 1, "Formatting tools belong above the writing surface")
         richEditor.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "The rendered editor must keep the software keyboard open")
         let dismissTool = app.buttons["收起键盘"]
@@ -152,17 +205,16 @@ final class TransferGenieSimulatorUITests: XCTestCase {
             dismissTool.frame.maxY <= self.app.keyboards.firstMatch.frame.minY
         }
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: aboveKeyboard, object: nil)], timeout: 5), .completed, "The formatting toolbar must stay above the software keyboard")
-        let assistantButtons = app.buttons.matching(NSPredicate(format: "label IN %@", ["Previous", "Next", "上一个", "下一个", "上一项", "下一项"]))
-        for index in 0..<assistantButtons.count {
-            let assistant = assistantButtons.element(boundBy: index)
-            if assistant.isHittable && assistant.frame.minY > richEditor.frame.minY {
-                XCTAssertLessThanOrEqual(dismissTool.frame.maxY, assistant.frame.minY - 4, "Formatting tools must not overlap the system input assistant")
-            }
-        }
-        attachScreenshot(named: "fullscreen-wysiwyg-keyboard-toolbar")
-        XCTAssertFalse(app.buttons["发送"].isHittable, "Only formatting tools follow the software keyboard")
+        XCTAssertEqual(dismissTool.frame.minY, toolbarTop, accuracy: 1, "Keyboard appearance must not move the top toolbar")
+        XCTAssertGreaterThanOrEqual(dismissTool.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(dismissTool.frame.height, 44)
+        attachScreenshot(named: "fullscreen-wysiwyg-top-toolbar-keyboard")
+        // WebKit reports the contenteditable AX frame up to 2pt outside its host.
+        XCTAssertLessThanOrEqual(dismissTool.frame.maxY, richEditor.frame.minY + 2)
+        XCTAssertFalse(app.buttons["发送"].isHittable, "Send actions stay hidden rather than following the software keyboard")
         app.buttons["收起键盘"].tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5), "Dismiss the keyboard without closing the draft")
+        XCTAssertEqual(firstTool.frame.minY, toolbarTop, accuracy: 1, "Keyboard dismissal keeps formatting tools at the top")
         button(containing: "标记").tap()
         XCTAssertTrue(app.staticTexts["标记设置"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["保存标记"].exists)
@@ -178,6 +230,150 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         XCTAssertEqual((editor.value as? String)?.trimmingCharacters(in: .newlines), draft)
         XCTAssertTrue(app.buttons["发送"].exists)
         // No send/save/confirm action is taken: all user messages stay unchanged.
+    }
+
+    func testMarkdownTopToolbarWithSoftwareKeyboardInBothOrientations() throws {
+        app.buttons["新消息"].tap()
+        dismissKeyboardIfNeeded()
+        app.switches["文字"].tap()
+        let plain = composerEditor()
+        XCTAssertTrue(plain.waitForExistence(timeout: 5))
+        let emptyValues = ["", "输入文字，或加入照片和文件…", "写下你的想法…\n选中文字，用上方工具添加格式。"]
+        guard emptyValues.contains((plain.value as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)),
+              app.buttons.matching(identifier: "移除附件").count == 0,
+              !app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "已标记")).firstMatch.exists,
+              !app.staticTexts["草稿自动保存失败"].exists else {
+            throw XCTSkip("Preserve existing unsent content")
+        }
+        defer {
+            if app.buttons["收起键盘"].exists { app.buttons["收起键盘"].tap() }
+            else { dismissKeyboardIfNeeded() }
+            if app.switches["文字"].exists { app.switches["文字"].tap() }
+            if app.buttons["关闭新消息"].exists { app.buttons["关闭新消息"].tap() }
+            XCUIDevice.shared.orientation = .portrait
+        }
+        app.switches["Markdown"].tap()
+        for orientation in [UIDeviceOrientation.portrait, .landscapeLeft] {
+            XCUIDevice.shared.orientation = orientation
+            let rich = composerEditor()
+            XCTAssertTrue(rich.waitForExistence(timeout: 5))
+            rich.tap()
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+            let dismiss = app.buttons["收起键盘"]
+            XCTAssertTrue(dismiss.waitForExistence(timeout: 5))
+            let close = app.buttons["关闭新消息"]
+            for control in [close, dismiss, app.switches["粗体"]] {
+                XCTAssertTrue(control.isHittable)
+                XCTAssertGreaterThanOrEqual(control.frame.width, 44)
+                XCTAssertGreaterThanOrEqual(control.frame.height, 44)
+                XCTAssertGreaterThanOrEqual(control.frame.minY, app.frame.minY)
+                XCTAssertLessThanOrEqual(control.frame.maxY, app.keyboards.firstMatch.frame.minY)
+            }
+            XCTAssertGreaterThanOrEqual(dismiss.frame.minY, close.frame.maxY)
+            XCTAssertLessThanOrEqual(dismiss.frame.maxY, rich.frame.minY + 2)
+            XCTAssertGreaterThan(rich.frame.height, 0)
+            XCTAssertEqual(dismiss.frame.minX, app.frame.minX, accuracy: 1)
+            XCTAssertFalse(app.buttons["发送"].isHittable)
+            let toolbarTop = dismiss.frame.minY
+            let writingHeight = rich.frame.height
+            let assistants = app.buttons.matching(NSPredicate(format: "label IN %@", ["Previous", "Next", "上一个", "下一个", "上一项", "下一项"]))
+            var assistantY = app.keyboards.firstMatch.frame.minY - 24
+            for index in 0..<assistants.count {
+                let assistant = assistants.element(boundBy: index)
+                if assistant.isHittable && assistant.frame.minY > rich.frame.minY {
+                    assistantY = assistant.frame.midY
+                    break
+                }
+            }
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            let assistantStart = origin.withOffset(CGVector(dx: app.frame.width / 2, dy: assistantY - app.frame.minY))
+            let assistantFinish = origin.withOffset(CGVector(dx: app.frame.width / 2, dy: max(rich.frame.minY + 12, assistantY - 120) - app.frame.minY))
+            assistantStart.press(forDuration: 0.05, thenDragTo: assistantFinish)
+            attachScreenshot(named: "top-toolbar-assistant-up-drag-orientation-\(orientation.rawValue)")
+            XCTAssertTrue(app.keyboards.firstMatch.exists)
+            XCTAssertEqual(dismiss.frame.minY, toolbarTop, accuracy: 1, "Input assistant drag must not move the editor canvas")
+            XCTAssertEqual(rich.frame.height, writingHeight, accuracy: 2, "Input assistant drag must not compress the writing region")
+            for upward in [true, false] {
+                if upward { rich.swipeUp() } else { rich.swipeDown() }
+                attachScreenshot(named: "top-toolbar-keyboard-drag-\(upward)-orientation-\(orientation.rawValue)")
+                XCTAssertTrue(app.keyboards.firstMatch.exists)
+                XCTAssertEqual(dismiss.frame.minY, toolbarTop, accuracy: 1, "Writing gestures must not move the top toolbar")
+                XCTAssertTrue(close.isHittable)
+            }
+            dismiss.tap()
+            XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
+            XCTAssertGreaterThanOrEqual(app.switches["粗体"].frame.minY, close.frame.maxY, "Keyboard dismissal restores safe-area spacing without moving tools below the editor")
+            XCTAssertTrue(app.buttons["发送"].isHittable)
+            let closedKeyboardTop = app.switches["粗体"].frame.minY
+            // Drag the empty writing surface past both boundaries without focusing it.
+            for upward in [false, true] {
+                let start = rich.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: upward ? 0.75 : 0.25))
+                let finish = rich.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: upward ? 0.25 : 0.75))
+                start.press(forDuration: 0.05, thenDragTo: finish)
+                attachScreenshot(named: "top-toolbar-no-keyboard-drag-\(upward)-orientation-\(orientation.rawValue)")
+                XCTAssertEqual(app.switches["粗体"].frame.minY, closedKeyboardTop, accuracy: 1)
+                XCTAssertTrue(close.isHittable)
+                XCTAssertTrue(app.buttons["发送"].isHittable)
+            }
+        }
+    }
+
+    func testMarkdownWritingRegionScrollsWithoutMovingCanvas() throws {
+        app.buttons["新消息"].tap()
+        dismissKeyboardIfNeeded()
+        app.switches["文字"].tap()
+        var editor = composerEditor()
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        let emptyValues = ["", "输入文字，或加入照片和文件…", "写下你的想法…\n选中文字，用上方工具添加格式。"]
+        let fixture = (1...32).map { "TG-SCROLL-LINE-\($0) content content content" }.joined(separator: "\n\n")
+        let initialValue = (editor.value as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if initialValue == fixture, app.buttons.matching(identifier: "移除附件").count == 0 {
+            clearVerifiedComposerFixture(editor)
+            RunLoop.current.run(until: Date().addingTimeInterval(1))
+        }
+        guard emptyValues.contains((editor.value as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)),
+              app.buttons.matching(identifier: "移除附件").count == 0 else {
+            throw XCTSkip("Preserve existing unsent content")
+        }
+        defer {
+            if app.buttons["收起键盘"].exists { app.buttons["收起键盘"].tap() }
+            else { dismissKeyboardIfNeeded() }
+            if app.switches["文字"].exists { app.switches["文字"].tap() }
+            editor = composerEditor()
+            if editor.exists, (editor.value as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines) == fixture {
+                clearVerifiedComposerFixture(editor)
+            }
+            dismissKeyboardIfNeeded()
+            if app.buttons["关闭新消息"].exists { app.buttons["关闭新消息"].tap() }
+        }
+        editor.tap()
+        editor.typeText(fixture)
+        dismissKeyboardIfNeeded()
+        app.switches["Markdown"].tap()
+        let rich = composerEditor()
+        XCTAssertTrue(rich.waitForExistence(timeout: 5))
+        rich.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.12)).tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        let geometry = app.descendants(matching: .any)["Simulator layout geometry"]
+        XCTAssertTrue(geometry.waitForExistence(timeout: 5), "Debug layout probe must be available")
+        let toolbarTop = app.buttons["收起键盘"].frame.minY
+        let before = try layoutGeometry(geometry)
+        let beforeScroll = try XCTUnwrap((before["rects"] as? [String: Any])?[".mobile-rich-editor-host"] as? [String: Any])
+        XCTAssertEqual(try XCTUnwrap((before["scrollY"] as? NSNumber)?.doubleValue), 0, accuracy: 0.5)
+        XCTAssertEqual(try XCTUnwrap((beforeScroll["scrollTop"] as? NSNumber)?.doubleValue), 0, accuracy: 1)
+        rich.swipeUp()
+        let scrolled = NSPredicate { _, _ in
+            guard let geometry = try? self.layoutGeometry(geometry),
+                  let rects = geometry["rects"] as? [String: Any],
+                  let host = rects[".mobile-rich-editor-host"] as? [String: Any],
+                  let scrollTop = (host["scrollTop"] as? NSNumber)?.doubleValue else { return false }
+            return scrollTop > 20
+        }
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: scrolled, object: nil)], timeout: 5), .completed, "Long Markdown must scroll inside the writing region")
+        let after = try layoutGeometry(geometry)
+        XCTAssertEqual(try XCTUnwrap((after["scrollY"] as? NSNumber)?.doubleValue), 0, accuracy: 0.5, "Root canvas stays pinned while the document scrolls")
+        XCTAssertEqual(app.buttons["收起键盘"].frame.minY, toolbarTop, accuracy: 1)
+        attachScreenshot(named: "long-markdown-nested-scroll")
     }
 
     func testComposerMarkSettingsSaveAndConfirmedRemoval() throws {
@@ -2541,6 +2737,12 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    private func layoutGeometry(_ element: XCUIElement) throws -> [String: Any] {
+        let value = try XCTUnwrap(element.value as? String)
+        let data = try XCTUnwrap(value.data(using: .utf8))
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 }
 
