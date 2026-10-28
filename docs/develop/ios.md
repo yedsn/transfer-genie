@@ -362,6 +362,22 @@ APPLE_DEVELOPMENT_TEAM=9RV293JR6V CARGO_HOME="$PWD/.cargo-ios" \
 
 覆盖安装前必须检查当前草稿，确认没有未保存的文字或附件；无法确认时停止，不先终止进程或卸载。核对 archive 的 `Info.plist` 中 `DTPlatformName=iphoneos`，再检查 strict codesign、`TeamIdentifier`、Keychain access group 与 profile 的设备列表。Simulator 与真机构建共用 archive 输出路径，后一次构建会替换前一次包，不能只凭路径或版本号判断平台。原位更新保留沙盒，不卸载应用。
 
+日常可以在 VS Code 的“运行和调试”中选择 `iOS: 无线静默更新 Jam`，或在终端执行：
+
+```bash
+npm run ios:update:jam
+```
+
+默认流程不会打开系统“设置”，也不会在安装完成后主动启动 App 或抢占手机前台。如果希望更新后立即打开 Transfer Genie，可以选择 `iOS: 无线更新并打开 Jam`，或执行：
+
+```bash
+npm run ios:update:jam:launch
+```
+
+脚本要求 Mac 与 `Jam` 位于同一可用 Bonjour/IPv6 的局域网，手机已配对、解锁并开启 Developer Mode。它会从当前源码重新构建签名真机 archive，先等待现有的 350ms 草稿自动保存稳定，再连续两次通过 CoreDevice 无线复制 SQLite/WAL 并执行只读完整性与空草稿检查；随后核对 `iphoneos` 平台、strict codesign、Team、profile 有效期和设备 UDID。只有门禁通过才会原位覆盖安装，最后再次确认数据库完整。脚本不卸载 App、不清空容器，发现任何草稿或无法验证时都会停止。
+
+当前免费 Personal Team 的本地 development provisioning profile 通常只有约 7 天有效期。到期后 App 可能无法启动，需要再次运行上述命令，让 Xcode 自动签发/选用新的 profile 并覆盖安装；不需要每次修改应用版本号。脚本每次都会显示本次 profile 的准确到期时间，并在剩余不足 48 小时时提示。付费 Apple Developer Program 的开发 profile 周期通常更长；TestFlight build 的测试有效期为 90 天，正式 App Store 安装不受这类本地开发签名 7 天限制。
+
 ### Release / TestFlight
 
 TestFlight 需要付费 Apple Developer Program、有效 Distribution 证书、App Store Connect 中已创建的 `com.transfergenie` 应用记录，以及每次递增的 build number：

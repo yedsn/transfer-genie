@@ -20,6 +20,20 @@
       "type": "node-terminal"
     },
     {
+      "command": "npm run ios:update:jam",
+      "cwd": "${workspaceFolder}",
+      "name": "iOS: 无线静默更新 Jam",
+      "request": "launch",
+      "type": "node-terminal"
+    },
+    {
+      "command": "npm run ios:update:jam:launch",
+      "cwd": "${workspaceFolder}",
+      "name": "iOS: 无线更新并打开 Jam",
+      "request": "launch",
+      "type": "node-terminal"
+    },
+    {
       "command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/release.ps1 -Push",
       "cwd": "${workspaceFolder}",
       "name": "release",

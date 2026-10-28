@@ -1,0 +1,296 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+project_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+device_name="${TRANSFER_GENIE_IOS_DEVICE:-Jam}"
+development_team="${APPLE_DEVELOPMENT_TEAM:-9RV293JR6V}"
+bundle_id="com.transfergenie"
+build_mode="release"
+skip_build=false
+check_only=false
+launch_after_install=false
+temp_root=""
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/ios-wireless-update.sh [options]
+
+Build, verify, and update Transfer Genie on a paired iPhone over the local
+network. The update is in-place and keeps the app data container.
+
+Options:
+  --device <name-or-id>  CoreDevice target (default: Jam)
+  --team <team-id>       Apple development team (default: 9RV293JR6V)
+  --debug                Build a Debug archive instead of Release
+  --skip-build           Reuse gen/apple/build/transfer-genie_iOS.xcarchive
+  --check-only           Run all safety checks but do not install or launch
+  --launch               Open Transfer Genie after the update
+  -h, --help             Show this help
+
+Environment equivalents:
+  TRANSFER_GENIE_IOS_DEVICE, APPLE_DEVELOPMENT_TEAM,
+  TRANSFER_GENIE_IOS_CARGO_HOME
+EOF
+}
+
+log() {
+  printf '[ios-wifi] %s\n' "$*"
+}
+
+fail() {
+  printf '[ios-wifi] Error: %s\n' "$*" >&2
+  exit 1
+}
+
+cleanup() {
+  if [[ -n "$temp_root" && -d "$temp_root" ]]; then
+    rm -rf -- "$temp_root"
+  fi
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "Missing required command: $1"
+}
+
+copy_container_file() {
+  local source_path="$1"
+  local destination_path="$2"
+  local required="${3:-false}"
+
+  if xcrun devicectl device copy from \
+    --device "$device_name" \
+    --domain-type appDataContainer \
+    --domain-identifier "$bundle_id" \
+    --source "$source_path" \
+    --destination "$destination_path" \
+    --timeout 60 >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if [[ "$required" == "true" ]]; then
+    fail "Unable to copy $source_path from $device_name"
+  fi
+  return 1
+}
+
+inspect_drafts() {
+  local label="$1"
+  local snapshot_dir="$temp_root/$label"
+  local remote_dir="Library/Application Support/com.transfergenie"
+  local database_path="$snapshot_dir/messages.sqlite"
+  local table_count
+  local draft_count
+
+  mkdir -p "$snapshot_dir"
+  copy_container_file "$remote_dir/messages.sqlite" "$database_path" true
+  copy_container_file "$remote_dir/messages.sqlite-wal" "$snapshot_dir/messages.sqlite-wal" false || true
+  copy_container_file "$remote_dir/messages.sqlite-shm" "$snapshot_dir/messages.sqlite-shm" false || true
+
+  [[ "$(sqlite3 -readonly "$database_path" 'PRAGMA integrity_check;')" == "ok" ]] \
+    || fail "The copied messages database failed its integrity check"
+
+  table_count="$(sqlite3 -readonly "$database_path" \
+    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='mobile_composer_drafts';")"
+  [[ "$table_count" == "1" ]] \
+    || fail "The installed app does not expose a verifiable mobile draft table"
+
+  draft_count="$(sqlite3 -readonly "$database_path" \
+    'SELECT COUNT(*) FROM mobile_composer_drafts;')"
+  [[ "$draft_count" == "0" ]] \
+    || fail "$device_name has $draft_count saved mobile draft(s). Finish or clear them before updating"
+
+  log "$label draft guard passed: SQLite ok, saved drafts=0"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --device)
+      [[ $# -ge 2 ]] || fail "--device requires a value"
+      device_name="$2"
+      shift 2
+      ;;
+    --team)
+      [[ $# -ge 2 ]] || fail "--team requires a value"
+      development_team="$2"
+      shift 2
+      ;;
+    --debug)
+      build_mode="debug"
+      shift
+      ;;
+    --skip-build)
+      skip_build=true
+      shift
+      ;;
+    --check-only)
+      check_only=true
+      shift
+      ;;
+    --launch)
+      launch_after_install=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "Unknown option: $1"
+      ;;
+  esac
+done
+
+for command_name in jq sqlite3 security plutil codesign npm xcrun; do
+  require_command "$command_name"
+done
+
+temp_root="$(mktemp -d /tmp/transfer-genie-ios-wifi.XXXXXX)"
+trap cleanup EXIT INT TERM
+
+cd "$project_root"
+
+details_json="$temp_root/device-details.json"
+xcrun devicectl device info details \
+  --device "$device_name" \
+  --timeout 60 \
+  --json-output "$details_json" >/dev/null
+
+device_udid="$(jq -r '.result.hardwareProperties.udid // empty' "$details_json")"
+pairing_state="$(jq -r '.result.connectionProperties.pairingState // empty' "$details_json")"
+transport_type="$(jq -r '.result.connectionProperties.transportType // empty' "$details_json")"
+tunnel_state="$(jq -r '.result.connectionProperties.tunnelState // empty' "$details_json")"
+developer_mode="$(jq -r '.result.deviceProperties.developerModeStatus // empty' "$details_json")"
+ddi_available="$(jq -r '.result.deviceProperties.ddiServicesAvailable // false' "$details_json")"
+
+[[ -n "$device_udid" ]] || fail "Could not read the UDID for $device_name"
+[[ "$pairing_state" == "paired" ]] || fail "$device_name is not paired with this Mac"
+[[ "$transport_type" == "localNetwork" ]] \
+  || fail "$device_name is using '$transport_type', not the local-network transport"
+[[ "$tunnel_state" == "connected" ]] || fail "The Wi-Fi developer tunnel is not connected"
+[[ "$developer_mode" == "enabled" ]] || fail "Developer Mode is not enabled on $device_name"
+[[ "$ddi_available" == "true" ]] || fail "Developer disk image services are unavailable"
+log "Connected to $device_name over Wi-Fi ($device_udid)"
+
+apps_before_json="$temp_root/apps-before.json"
+xcrun devicectl device info apps \
+  --device "$device_name" \
+  --bundle-id "$bundle_id" \
+  --timeout 60 \
+  --json-output "$apps_before_json" >/dev/null
+installed_before="$(jq -r '[.result.apps[]? | select(.bundleIdentifier == "com.transfergenie")] | length' "$apps_before_json")"
+
+if [[ "$installed_before" == "1" ]]; then
+  # Do not foreground Settings or another app. The composer saves 350 ms after
+  # each mutation, so wait for the debounce and verify twice before replacing
+  # the installed bundle. Any saved draft blocks the update.
+  sleep 2
+  inspect_drafts "preinstall-1"
+  sleep 1
+  inspect_drafts "preinstall-2"
+else
+  log "$bundle_id is not installed yet; the draft guard is not applicable"
+fi
+
+archive_path="$project_root/gen/apple/build/transfer-genie_iOS.xcarchive"
+if [[ "$skip_build" != "true" ]]; then
+  build_args=(ios build --target aarch64 --archive-only --ci --export-method debugging)
+  if [[ "$build_mode" == "debug" ]]; then
+    build_args+=(--debug)
+  fi
+
+  log "Building a signed $build_mode iPhone archive"
+  APPLE_DEVELOPMENT_TEAM="$development_team" \
+  CARGO_HOME="${TRANSFER_GENIE_IOS_CARGO_HOME:-$project_root/.cargo-ios}" \
+    npx tauri "${build_args[@]}"
+else
+  log "Reusing the existing archive (--skip-build)"
+fi
+
+[[ -d "$archive_path" ]] || fail "Archive not found: $archive_path"
+application_path="$(/usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:ApplicationPath' "$archive_path/Info.plist")"
+app_path="$archive_path/Products/$application_path"
+[[ -d "$app_path" ]] || fail "App bundle not found in the archive: $app_path"
+
+platform_name="$(/usr/libexec/PlistBuddy -c 'Print :DTPlatformName' "$app_path/Info.plist")"
+candidate_bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app_path/Info.plist")"
+candidate_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app_path/Info.plist")"
+candidate_build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app_path/Info.plist")"
+[[ "$platform_name" == "iphoneos" ]] || fail "Archive targets '$platform_name', not iphoneos"
+[[ "$candidate_bundle_id" == "$bundle_id" ]] || fail "Unexpected bundle ID: $candidate_bundle_id"
+codesign --verify --deep --strict --verbose=2 "$app_path"
+
+profile_path="$app_path/embedded.mobileprovision"
+profile_plist="$temp_root/profile.plist"
+[[ -f "$profile_path" ]] || fail "The app does not contain an embedded provisioning profile"
+security cms -D -i "$profile_path" >"$profile_plist"
+profile_team="$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' "$profile_plist" 2>/dev/null || true)"
+profile_expiration="$(plutil -extract ExpirationDate raw -o - "$profile_plist")"
+if /usr/libexec/PlistBuddy -c 'Print :ProvisionedDevices' "$profile_plist" 2>/dev/null \
+  | grep -Fqx "    $device_udid"; then
+  profile_has_device=true
+else
+  profile_has_device=false
+fi
+[[ "$profile_team" == "$development_team" ]] || fail "Profile team '$profile_team' does not match '$development_team'"
+[[ "$profile_has_device" == "true" ]] || fail "The provisioning profile does not include $device_udid"
+
+expiration_epoch="$(date -j -f '%Y-%m-%dT%H:%M:%SZ' "$profile_expiration" '+%s' 2>/dev/null || true)"
+[[ -n "$expiration_epoch" ]] || fail "Could not parse profile expiration: $profile_expiration"
+now_epoch="$(date '+%s')"
+(( expiration_epoch > now_epoch )) || fail "The provisioning profile expired at $profile_expiration"
+remaining_hours=$(( (expiration_epoch - now_epoch) / 3600 ))
+if (( remaining_hours < 48 )); then
+  log "Warning: the development profile expires in about $remaining_hours hour(s)"
+fi
+
+executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_path/Info.plist")"
+candidate_uuid="$(dwarfdump --uuid "$app_path/$executable_name" | awk '{print $2}')"
+log "Candidate $candidate_version ($candidate_build), UUID $candidate_uuid"
+log "Development profile expires at $profile_expiration"
+
+if [[ "$check_only" == "true" ]]; then
+  log "Check-only completed; no app was installed"
+  exit 0
+fi
+
+install_json="$temp_root/install.json"
+log "Installing $bundle_id in place over Wi-Fi"
+xcrun devicectl device install app \
+  --device "$device_name" \
+  "$app_path" \
+  --timeout 120 \
+  --json-output "$install_json"
+[[ "$(jq -r '.info.outcome // empty' "$install_json")" == "success" ]] \
+  || fail "CoreDevice did not report a successful install"
+
+if [[ "$installed_before" == "1" ]]; then
+  inspect_drafts "postinstall"
+fi
+
+installed_path="$(jq -r '.result.installedApplications[0].installationURL // empty' "$install_json")"
+database_uuid="$(jq -r '.result.installedApplications[0].databaseUUID // empty' "$install_json")"
+if [[ "$launch_after_install" == "true" ]]; then
+  launch_json="$temp_root/launch.json"
+  xcrun devicectl device process launch \
+    --device "$device_name" \
+    --activate \
+    --terminate-existing \
+    "$bundle_id" \
+    --timeout 60 \
+    --json-output "$launch_json" >/dev/null
+  process_id="$(jq -r '.result.process.processIdentifier // empty' "$launch_json")"
+  [[ -n "$process_id" ]] || fail "The updated app did not return a process ID"
+  sleep 5
+  process_list="$(xcrun lldb -b \
+    -o "device select $device_name" \
+    -o 'device process list' \
+    -o 'quit' 2>/dev/null)"
+  printf '%s\n' "$process_list" | awk -v pid="$process_id" '$1 == pid { found=1 } END { exit found ? 0 : 1 }' \
+    || fail "The updated app process $process_id was not running after 5 seconds"
+  log "Update complete: $device_name is running PID $process_id"
+else
+  log "Silent update complete; no app was opened on $device_name"
+fi
+log "Installed bundle: $installed_path"
+log "Preserved data container UUID: $database_uuid"
