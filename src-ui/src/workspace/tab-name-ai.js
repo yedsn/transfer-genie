@@ -2,6 +2,7 @@
 (function bootstrapTabNameAi(globalScope) {
   "use strict";
   if (!globalScope) return;
+  var DEFAULT_PROMPT = "阅读以下草稿，生成一个不超过 16 个汉字的标签名称。只输出名称，不要引号、解释、标点结尾或换行。\n\n<draft>\n{{text}}\n</draft>";
 
   function availability(draft, settings) {
     if (!draft || !String(draft.text || "").trim()) {
@@ -14,7 +15,8 @@
     return { available: true, status: "loading", message: "正在根据草稿生成名称…" };
   }
 
-  function buildRequest(draft) {
+  function buildRequest(draft, prompt) {
+    var userPrompt = String(prompt || "").trim() || DEFAULT_PROMPT;
     return {
       text: String(draft.text || ""),
       format: draft.format === "markdown" ? "markdown" : "text",
@@ -22,7 +24,7 @@
         name: "生成标签名称",
         category: "命名",
         systemPrompt: "你负责为编辑器草稿生成简洁、准确、便于识别的中文标签名称。",
-        userPrompt: "阅读以下草稿，生成一个不超过 16 个汉字的标签名称。只输出名称，不要引号、解释、标点结尾或换行。\n\n<draft>\n{{text}}\n</draft>",
+        userPrompt: userPrompt,
         outputMode: "preview_replace",
       },
     };
@@ -41,7 +43,7 @@
       return { available: false, status: "unavailable", message: "当前环境无法调用 AI" };
     }
     try {
-      var result = await processText(buildRequest(draft));
+      var result = await processText(buildRequest(draft, settings.aiTabNamePrompt));
       var suggestion = normalizeSuggestion(result && result.outputText);
       if (!suggestion) throw new Error("AI 未返回可用名称");
       return { available: true, status: "ready", message: "AI 建议", suggestion: suggestion };
@@ -59,7 +61,7 @@
     };
   }
 
-  var api = { availability: availability, buildRequest: buildRequest, normalizeSuggestion: normalizeSuggestion, generate: generate, createRequestSession: createRequestSession };
+  var api = { DEFAULT_PROMPT: DEFAULT_PROMPT, availability: availability, buildRequest: buildRequest, normalizeSuggestion: normalizeSuggestion, generate: generate, createRequestSession: createRequestSession };
   globalScope.transferGenieTabNameAi = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof window !== "undefined" ? window : globalThis);

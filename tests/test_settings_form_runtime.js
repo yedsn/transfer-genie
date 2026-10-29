@@ -325,6 +325,10 @@ function testShortcutSettingsMarkup() {
   assert.match(shortcuts, /name="send-hotkey" value="ctrl_enter"/);
   assert.match(shortcuts, /id="send-hotkey-clear"/);
   assert.match(shortcuts, /id="send-hotkey-reset"/);
+  const aiSection = sectionHtml(html, 'settings-section-ai');
+  assert.match(aiSection, /id="ai-tab-name-prompt"/);
+  assert.match(aiSection, /aiTabNamePrompt/);
+  assert.match(aiSection, /\{\{text\}\}/);
 
   assert.doesNotMatch(sectionHtml(html, 'settings-section-send'), /name="send-hotkey"|发送快捷键/);
   assert.doesNotMatch(sectionHtml(html, 'settings-section-system'), /global-hotkey|全局快捷键|启用全局快捷键/);
@@ -428,6 +432,8 @@ function testShortcutSettingsMarkup() {
   assert.match(legacyMain, /全部保留本地/);
   assert.match(legacyMain, /resolve_all_sync_conflicts/);
   assert.match(legacyMain, /retry_all_pending_operations/);
+  assert.match(legacyMain, /aiTabNamePrompt: ai.tab_name_prompt/);
+  assert.ok(legacyMain.includes("tab_name_prompt: (currentSettingsFormState.aiTabNamePrompt"));
   assert.match(legacyMain, /是否立即重试全部待同步项目/);
   assert.doesNotMatch(legacyMain, /是否立即重试第一项/);
   assert.doesNotMatch(legacyMain, /window\.prompt\([\s\S]*输入 local 保留本机内容/);
