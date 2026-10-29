@@ -27,16 +27,44 @@
       "type": "node-terminal"
     },
     {
+      "command": "npm run ios:simulator:dev",
+      "cwd": "${workspaceFolder}",
+      "name": "ios-simulator:dev",
+      "request": "launch",
+      "type": "node-terminal"
+    },
+    {
+      "command": "npm run ios:simulator:deploy",
+      "cwd": "${workspaceFolder}",
+      "name": "ios-simulator:deploy",
+      "request": "launch",
+      "type": "node-terminal"
+    },
+    {
+      "command": "npm run ios:vphone:dev",
+      "cwd": "${workspaceFolder}",
+      "name": "ios:vphone:dev",
+      "request": "launch",
+      "type": "node-terminal"
+    },
+    {
+      "command": "npm run ios:vphone:deploy",
+      "cwd": "${workspaceFolder}",
+      "name": "ios:vphone:deploy",
+      "request": "launch",
+      "type": "node-terminal"
+    },
+    {
       "command": "npm run ios:update",
       "cwd": "${workspaceFolder}",
-      "name": "iOS: 无线更新",
+      "name": "ios:wireless-update",
       "request": "launch",
       "type": "node-terminal"
     },
     {
       "command": "npm run ios:update:launch",
       "cwd": "${workspaceFolder}",
-      "name": "iOS: 无线更新并打开",
+      "name": "ios:wireless-update:launch",
       "request": "launch",
       "type": "node-terminal"
     }

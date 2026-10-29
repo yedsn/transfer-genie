@@ -55,6 +55,45 @@ xcodebuild -list -project gen/apple/transfer-genie.xcodeproj
 
 ## 3. 官方 Simulator 日常开发
 
+### VS Code 一键构建、部署和开发
+
+在“运行和调试”中选择下列入口。它们只操作官方 Simulator 或 VPhone，不选择真实 iPhone，也不会卸载应用或清空数据。
+
+| 启动项 | 终端命令 | 行为 |
+| --- | --- | --- |
+| `iOS Simulator: 打包部署并打开` | `npm run ios:simulator:deploy` | Release archive，内置前端，覆盖安装并打开；不依赖 Vite |
+| `iOS Simulator: dev 热更新` | `npm run ios:simulator:dev` | 官方 `tauri ios dev`，Vue/Vite HMR；Rust 变更由 Tauri 监听重建 |
+| `iOS VPhone: 打包部署并打开` | `npm run ios:vphone:deploy` | Release iPhoneOS archive，ad-hoc 签名，受保护的 IPA 覆盖安装与最小 smoke |
+| `iOS VPhone: dev Debug 重新部署（非热更新）` | `npm run ios:vphone:dev` | Debug 构建并重复上述部署；修改后需要重新执行，不是 HMR |
+
+首次使用将 `.env.example` 复制为被 Git 忽略的 `.env`，保留既有真机配置并补充：
+
+| 配置项 | 说明 |
+| --- | --- |
+| `TRANSFER_GENIE_IOS_SIMULATOR` | `simctl list devices available` 中的名称或 UDID；缺省只接受唯一已启动 iPhone，或唯一可用 iPhone |
+| `TRANSFER_GENIE_IOS_SIMULATOR_TEAM` | 可选；保持与已有 Simulator App 的签名/Keychain 组一致，缺省使用 `APPLE_DEVELOPMENT_TEAM` |
+| `VPHONE_MACHINE` | `vphone-launchpad-cli vm list` 中的准确机器名，必填 |
+| `VPHONE_LIBRARY_ROOT` | 同一列表中的 `libraryRoot`，必填；外置盘必须已挂载 |
+| `VPHONE_CLI` | 可选；缺省为 `/Applications/vphone-launchpad.app/Contents/MacOS/vphone-launchpad-cli` |
+| `VPHONE_ARTIFACT_DIR` | 可选；报告根目录，缺省为 `gen/apple/build/vphone-smoke/<timestamp>/` |
+
+配置文件按字面值读取，不执行 shell；进程环境变量优先于 `.env`。迁移外置盘后，如果终端或 VS Code 仍继承旧的 `VPHONE_LIBRARY_ROOT`，应先取消该环境变量再启动入口，或同步修改它，避免覆盖 `.env` 的新路径。共用脚本为 `scripts/ios-virtual-deploy.mjs`，支持 `--help`、`--debug` 和 `--check-only`。例如只检查目标、不构建或安装：
+
+```bash
+npm run ios:simulator:deploy -- --check-only
+npm run ios:vphone:deploy -- --check-only
+```
+
+Simulator 部署前只读检查数据库完整性和已保存草稿；VPhone 复用 `tests/vphone/test_vphone_smoke.mjs` 的编辑器/草稿门禁。非空或无法确认的草稿会阻止替换，不自动清除；VPhone UI 变化导致门禁无法识别时也会停止。安装后 VPhone 检查冷启动、登录恢复、日志和新增 crash，不发送测试消息。VPhone ad-hoc 包仅用于虚拟环境，不能安装到真实 iPhone，也不能替代真机签名/Keychain 验收。
+
+Simulator 的 dev 终端必须保持运行；Vue/CSS 通过 HMR 更新，Rust 修改会重建并重启，Swift 插件修改建议停止后重新运行。已有本项目 Vite 监听开发端口时会复用，因此原 Vite 终端也要保持运行；其他项目占用同端口时会停止并提示。Tauri dev 按名称优先模糊匹配连接的 iOS 设备，因此名称可能与连接设备混淆时会拒绝启动，请给 Simulator 改用独特名称。VPhone 的标准 `ios dev` 会进入 Apple provisioning/export 流程，本项目当前 ad-hoc 路径尚未验证 HMR，因此 Debug 入口明确使用重新部署。
+
+两个环境共用生成工程和 archive，入口通过 `gen/apple/build/.virtual-deploy.lock` 避免同时运行，退出时恢复 Tauri 临时改写的 Team 字段。不要与另一个 Tauri iOS 构建或真机无线更新并行运行。异常断电遗留锁时，先确认没有相关构建/dev 进程，再删除该锁目录。部署失败不卸载 App；需要回退时使用兼容旧包原位安装，保留数据。
+
+外置盘迁移后，先挂载数据卷再启动；拔盘前关闭 Simulator 并停止 VPhone。`~/Library/Developer/CoreSimulator` 可以指向外置盘设备数据，但系统级 Runtime 仍由 Xcode 在内置盘管理。
+
+### 手动启动与诊断
+
 查看并启动模拟器：
 
 ```bash
