@@ -34,6 +34,21 @@ const controller = useMobileController();
 const { state, currentSpace, pendingCount, activeTransfers } = controller;
 const activeTab = ref<MobileTab>("feed");
 const activeSheet = ref<SheetName>(null);
+const swipeOffset = ref(0);
+const swipeDragging = ref(false);
+const swipeSaving = ref(false);
+const swipeError = ref("");
+let sheetGeneration = 0;
+const composerComposing = ref(false);
+let swipeGesture: { sheet: "detail" | "composer"; generation: number; x: number; y: number; time: number; locked: boolean } | null = null;
+watch(activeSheet, (sheet) => {
+  sheetGeneration += 1;
+  if (sheet !== "composer") composerComposing.value = false;
+  swipeGesture = null;
+  swipeDragging.value = false;
+  swipeOffset.value = 0;
+  swipeError.value = "";
+}, { flush: "sync" });
 const connectionRemoveEscalated = ref(false);
 const detailUnderlay = ref(false);
 const viewportHeight = ref(window.visualViewport?.height || window.innerHeight);
@@ -355,6 +370,7 @@ function openSheet(name: SheetName) {
   });
 }
 function closeSheet() {
+  if (swipeSaving.value) return;
   if (activeSheet.value === "connection-remove") {
     connectionRemoveEscalated.value = false;
     state.connectionEditor.error = "";
@@ -416,9 +432,10 @@ async function chooseAttachment(kind: 'media' | 'document') {
   if (kind === 'media') await controller.selectMedia();
   else await controller.selectDocuments();
 }
-function dismissSheets() {
+function dismissSheets(draftAlreadySaved = false) {
+  if (swipeSaving.value) return;
   if (activeSheet.value === "composer" && state.composer.selecting) return;
-  if (activeSheet.value === "composer" && !state.composer.sending) void controller.persistComposerDraft(true);
+  if (activeSheet.value === "composer" && !state.composer.sending && !draftAlreadySaved) void controller.persistComposerDraft(true);
   window.clearTimeout(composerCloseTimer);
   activeSheet.value = null;
   detailUnderlay.value = false;
@@ -430,6 +447,77 @@ function dismissSheets() {
   const opener = sheetOpener;
   sheetOpener = null;
   void nextTick(() => opener?.focus({ preventScroll: true }));
+}
+
+function swipeStart(event: TouchEvent, sheet: "detail" | "composer") {
+  if (swipeGesture || event.touches.length !== 1) { cancelSwipe(); return; }
+  if (activeSheet.value !== sheet || swipeSaving.value) return;
+  const touch = event.touches[0];
+  if (touch.clientX < window.innerWidth - 32) return;
+  const target = event.target instanceof Element ? event.target : null;
+  if (target?.closest("button, a, video, audio, select, .mobile-markdown-toolbar, .mobile-attachment-strip")) return;
+  if ((target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) && target.selectionStart !== target.selectionEnd) return;
+  if (window.getSelection()?.toString()) return;
+  for (let element = target; element && !element.classList.contains("mobile-sheet"); element = element.parentElement) {
+    const overflow = getComputedStyle(element).overflowX;
+    if ((overflow === "auto" || overflow === "scroll") && element.scrollWidth > element.clientWidth + 1) return;
+  }
+  swipeError.value = "";
+  swipeGesture = { sheet, generation: sheetGeneration, x: touch.clientX, y: touch.clientY, time: performance.now(), locked: false };
+}
+
+function cancelSwipe() {
+  swipeGesture = null;
+  swipeDragging.value = false;
+  swipeOffset.value = 0;
+}
+
+function swipeMove(event: TouchEvent) {
+  const gesture = swipeGesture;
+  if (!gesture) return;
+  if (event.touches.length !== 1 || gesture.generation !== sheetGeneration || activeSheet.value !== gesture.sheet) { cancelSwipe(); return; }
+  const dx = event.touches[0].clientX - gesture.x;
+  const dy = event.touches[0].clientY - gesture.y;
+  if (!gesture.locked) {
+    if (Math.hypot(dx, dy) < 10) return;
+    if (dx >= 0 || -dx < Math.abs(dy) * 1.4) { cancelSwipe(); return; }
+    gesture.locked = true;
+    swipeDragging.value = true;
+  }
+  if (event.cancelable) event.preventDefault();
+  swipeOffset.value = Math.min(0, dx);
+}
+
+async function swipeEnd(event: TouchEvent) {
+  const gesture = swipeGesture;
+  if (!gesture) return;
+  if (event.touches.length || gesture.generation !== sheetGeneration || activeSheet.value !== gesture.sheet) { cancelSwipe(); return; }
+  const distance = -swipeOffset.value;
+  const elapsed = Math.max(1, performance.now() - gesture.time);
+  const complete = gesture.locked && (distance >= Math.min(110, window.innerWidth * .25) || (distance >= 45 && distance / elapsed > .55));
+  if (gesture.locked && event.cancelable) event.preventDefault();
+  cancelSwipe();
+  if (!complete) return;
+  if (gesture.sheet === "detail") { closeSheet(); return; }
+  if (state.composer.sending || state.composer.selecting) {
+    swipeError.value = "请等待当前操作完成后再返回";
+    return;
+  }
+  if (!state.composer.persistenceReady || composerComposing.value) {
+    swipeError.value = composerComposing.value ? "请先完成当前输入再返回" : "草稿尚未准备好，请稍后重试";
+    return;
+  }
+  swipeSaving.value = true;
+  let saved = false;
+  try { saved = await controller.persistComposerDraftForSwipe(); }
+  catch { saved = false; }
+  finally { swipeSaving.value = false; }
+  if (gesture.generation !== sheetGeneration || activeSheet.value !== "composer") return;
+  if (!saved) {
+    swipeError.value = state.composer.error || "草稿保存未完成，请重试";
+    return;
+  }
+  dismissSheets(true);
 }
 function trapSheetFocus(event: KeyboardEvent) {
   const sheet = document.querySelector<HTMLElement>(
@@ -1368,7 +1456,8 @@ onBeforeUnmount(() => {
         <section
           v-if="activeSheet === 'composer' || composerUnderlay"
           class="mobile-sheet mobile-composer-sheet is-fullscreen-editor"
-          :class="{ 'has-markdown-tools': state.composer.format === 'markdown' }"
+          :class="{ 'has-markdown-tools': state.composer.format === 'markdown', 'is-swipe-dragging': activeSheet === 'composer' && swipeDragging }"
+          :style="activeSheet === 'composer' ? { '--swipe-offset': `${swipeOffset}px` } : undefined"
           role="dialog"
           :aria-modal="!composerUnderlay"
           :aria-hidden="composerUnderlay ? 'true' : undefined"
@@ -1377,14 +1466,21 @@ onBeforeUnmount(() => {
           tabindex="-1"
           @focusin="handleComposerFocusIn"
           @focusout="handleComposerFocusOut"
+          @compositionstart="composerComposing = true"
+          @compositionend="composerComposing = false"
+          @touchstart="swipeStart($event, 'composer')"
+          @touchmove="swipeMove"
+          @touchend="swipeEnd"
+          @touchcancel="cancelSwipe"
         >
           <div class="mobile-sheet-grabber"></div>
           <header>
             <h2 id="mobile-composer-title" class="mobile-visually-hidden">新消息</h2>
             <span class="mobile-editor-destination">{{ currentSpace?.name }}</span>
-            <button type="button" aria-label="关闭新消息" :disabled="state.composer.selecting" @click="closeSheet">×</button>
+            <button type="button" aria-label="关闭新消息" :disabled="state.composer.selecting || swipeSaving" @click="closeSheet">×</button>
           </header>
-          <div class="mobile-composer-content" role="region" aria-label="消息编辑与附件">
+          <p v-if="swipeError || swipeSaving" class="mobile-swipe-status" :role="swipeError ? 'alert' : 'status'">{{ swipeError || '正在保存草稿…' }}</p>
+          <div class="mobile-composer-content" role="region" aria-label="消息编辑与附件" :inert="swipeSaving">
           <div v-if="state.composer.format === 'markdown'" id="mobile-composer-toolbar-dock" class="mobile-composer-toolbar-dock"></div>
           <div class="mobile-compose-editor">
           <MobileMarkdownEditor v-if="state.composer.format === 'markdown'" v-model="state.composer.text" toolbar-target="#mobile-composer-toolbar-dock" :show-dismiss-keyboard="keyboardVisible" :disabled="state.composer.sending || !state.composer.persistenceReady" @dismiss-keyboard="dismissComposerKeyboard" />
@@ -1902,12 +1998,18 @@ onBeforeUnmount(() => {
         <section
           v-if="activeSheet === 'detail' || detailUnderlay"
           class="mobile-sheet mobile-detail-sheet"
+          :class="{ 'is-swipe-dragging': activeSheet === 'detail' && swipeDragging }"
+          :style="activeSheet === 'detail' ? { '--swipe-offset': `${swipeOffset}px` } : undefined"
           role="dialog"
           :aria-modal="!detailUnderlay"
           :aria-hidden="detailUnderlay ? 'true' : undefined"
           :inert="detailUnderlay"
           aria-labelledby="mobile-detail-title"
           tabindex="-1"
+          @touchstart="swipeStart($event, 'detail')"
+          @touchmove="swipeMove"
+          @touchend="swipeEnd"
+          @touchcancel="cancelSwipe"
         >
           <div class="mobile-sheet-grabber"></div>
           <header>

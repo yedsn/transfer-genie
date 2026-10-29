@@ -274,6 +274,16 @@ export function useMobileController() {
     return draftWrite;
   }
 
+  async function persistComposerDraftForSwipe() {
+    const snapshot = () => JSON.stringify({
+      generation: viewGeneration,
+      scope: [state.activeProfile?.id, state.account?.userId, state.activeProfile?.supabase?.space_id],
+      payload: composerDraftPayload(),
+    });
+    const before = snapshot();
+    return await persistComposerDraft(true) && snapshot() === before;
+  }
+
   async function restoreComposerDraft() {
     const generation = viewGeneration;
     state.composer.persistenceReady = false;
@@ -1617,7 +1627,7 @@ export function useMobileController() {
 
   return {
     state, currentSpace, selectableProfiles, pendingCount, activeTransfers, signedIn, initialize, refreshAll, refreshRuntimeState, refreshAfterForeground, refreshMessages, loadOlderMessages, searchMessages, loadMoreSearch, setMarkedFilter, loadMoreMarked, loadConflicts, resolveConflict, retryTransfer,
-    selectMedia, selectDocuments, removeAttachment, sendDraft, persistComposerDraft, deactivateComposerPersistence, toggleMark, copyMessage, updateMarkedMetadata, createMarkedTag, deleteMessage, applyMessageSelection, previewMessage, prepareVideo, shareMessage, retryPreview, previewImageFailed, previewDraftAttachment,
+    selectMedia, selectDocuments, removeAttachment, sendDraft, persistComposerDraft, persistComposerDraftForSwipe, deactivateComposerPersistence, toggleMark, copyMessage, updateMarkedMetadata, createMarkedTag, deleteMessage, applyMessageSelection, previewMessage, prepareVideo, shareMessage, retryPreview, previewImageFailed, previewDraftAttachment,
     signIn, logout, chooseProfile, diagnoseProfile, setProfileEnabled, beginConnectionEdit, renameProfile, signInProfile, logoutProfile, removeProfile, loadSpaces, switchSpace, testSetupConnection, setupSignIn, completeSetup, resetWizardDownstream, openConnectionWizard, openConnectionRepair, cancelConnectionWizard, selectWizardSpace, backConnectionWizard, createWizardSpace, installTransferListeners, refreshCache, clearCache, clearFeedback, saveSenderName,
   };
 }

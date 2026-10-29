@@ -173,4 +173,28 @@ controller = await makeController();
 assert.equal(controller.state.composer.text, 'retain-after-write-failure');
 await terminate(controller);
 
+// Swipe waits for the exact saved snapshot and refuses a stale completion.
+controller = await makeController();
+let resolveSave;
+let notifyStarted;
+const started = new Promise(resolve => { notifyStarted = resolve; });
+api.mobileDraft.save = async payload => {
+  notifyStarted();
+  await new Promise(resolve => { resolveSave = resolve; });
+  return { ...payload, updatedAtMs: Date.now() };
+};
+controller.state.composer.text = "before swipe";
+const pendingSwipeSave = controller.persistComposerDraftForSwipe();
+await started;
+controller.state.composer.text = "changed while saving";
+resolveSave();
+assert.equal(await pendingSwipeSave, false, "a changed draft cannot be closed on an older save");
+api.mobileDraft.save = realSave;
+assert.equal(await controller.persistComposerDraftForSwipe(), true);
+assert.equal(draftRows.get(key()).text, "changed while saving");
+controller.state.composer.text = "";
+assert.equal(await controller.persistComposerDraftForSwipe(), true, "empty-draft deletion is successful without a timestamp");
+assert.equal(draftRows.has(key()), false);
+await terminate(controller);
+
 console.log('mobile draft persistence passed: restart restore, Profile/Auth/Space isolation, immediate picker save, debounce/status, missing-file guard, save/restore failure protection, partial retry identity and successful cleanup');

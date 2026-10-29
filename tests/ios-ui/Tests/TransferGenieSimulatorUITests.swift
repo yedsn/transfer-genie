@@ -498,6 +498,68 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         XCTAssertTrue(app.buttons["新消息"].waitForExistence(timeout: 5))
     }
 
+    func testSwipeBackDetailAndDurableComposerDraft() throws {
+        XCUIDevice.shared.orientation = .portrait
+        func swipeBack(at y: CGFloat) {
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            let start = origin.withOffset(CGVector(dx: app.frame.width - 12, dy: y))
+            let end = origin.withOffset(CGVector(dx: app.frame.width - 160, dy: y))
+            start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.1)
+        }
+        app.buttons["搜索消息"].tap()
+        let search = app.searchFields["搜索文本、文件名"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap()
+        search.typeText("TG-IOS-PROBE-20261027-document")
+        let document = app.staticTexts["TG-IOS-PROBE-20261027-document.txt"]
+        XCTAssertTrue(document.waitForExistence(timeout: 15))
+        dismissSearchKeyboard()
+        document.tap()
+        XCTAssertTrue(app.buttons["关闭详情"].waitForExistence(timeout: 5))
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        origin.withOffset(CGVector(dx: app.frame.width - 12, dy: app.frame.height * 0.4))
+            .press(forDuration: 0.05, thenDragTo: origin.withOffset(CGVector(dx: app.frame.width - 12, dy: app.frame.height * 0.65)))
+        XCTAssertTrue(app.buttons["关闭详情"].exists, "Vertical scroll must not close detail")
+        app.buttons["更多"].tap()
+        XCTAssertTrue(app.buttons["取消"].waitForExistence(timeout: 5))
+        swipeBack(at: app.frame.height * 0.8)
+        XCTAssertTrue(app.buttons["取消"].exists, "Swipe cannot pass through a nested action menu")
+        app.buttons["取消"].tap()
+        XCTAssertTrue(app.buttons["关闭详情"].waitForExistence(timeout: 5))
+        swipeBack(at: app.frame.height * 0.45)
+        XCTAssertTrue(app.buttons["关闭详情"].waitForNonExistence(timeout: 5), "Right-edge left swipe must return from detail")
+        if app.buttons["清除"].exists { app.buttons["清除"].tap() }
+        app.buttons["新消息"].tap()
+        var editor = composerEditor()
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        let original = (editor.value as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard ["", "输入文字，或加入照片和文件…", "写下你的想法…\n选中文字，用上方工具添加格式。"].contains(original),
+              app.buttons.matching(identifier: "移除附件").count == 0,
+              !app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "已标记")).firstMatch.exists else {
+            throw XCTSkip("Preserve an existing unsent draft")
+        }
+        let fixture = "TG-SWIPE-DRAFT-" + UUID().uuidString
+        defer {
+            if app.buttons["新消息"].exists { app.buttons["新消息"].tap() }
+            editor = composerEditor()
+            if editor.exists, (editor.value as? String)?.trimmingCharacters(in: .newlines) == fixture {
+                clearVerifiedComposerFixture(editor)
+            }
+            if app.buttons["关闭新消息"].exists { app.buttons["关闭新消息"].tap() }
+        }
+        editor.tap()
+        editor.typeText(fixture)
+        swipeBack(at: app.frame.height * 0.22)
+        XCTAssertTrue(app.buttons["新消息"].waitForExistence(timeout: 10), "Draft swipe must close only after saving")
+        app.terminate()
+        app.launch()
+        XCTAssertTrue(app.buttons["新消息"].waitForExistence(timeout: 30))
+        app.buttons["新消息"].tap()
+        editor = composerEditor()
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        XCTAssertEqual((editor.value as? String)?.trimmingCharacters(in: .newlines), fixture, "Swiped draft survives cold start")
+    }
+
     func testFullScreenDetailMoreRowInBothOrientations() throws {
         app.buttons["搜索消息"].tap()
         let search = app.searchFields["搜索文本、文件名"]
