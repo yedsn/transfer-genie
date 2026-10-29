@@ -43,6 +43,10 @@ interface DraftAttachment {
 }
 
 const previewMode = new URLSearchParams(window.location.search).get("mobile-preview") === "1";
+const nativeComposerPage = new URLSearchParams(window.location.search).get("tg-mobile-page") === "composer";
+const nativeComposerFormat = nativeComposerPage && sessionStorage.getItem("transfer-genie:native-composer-format") === "markdown"
+  ? "markdown"
+  : "text";
 const api = () => (window as any).transferGenieApi as MobileApi;
 
 function errorText(error: unknown) {
@@ -181,7 +185,7 @@ export function useMobileController() {
     composer: {
       text: "",
       textClientId: `mobile-text-${crypto.randomUUID()}`,
-      format: "text",
+      format: nativeComposerFormat as "text" | "markdown",
       marked: false,
       tagIds: [] as string[],
       dueDate: "",
@@ -190,6 +194,7 @@ export function useMobileController() {
       sending: false,
       savedLocally: false,
       persistenceReady: false,
+      draftPersisted: false,
       draftStatus: "idle" as "idle" | "saving" | "saved" | "restored" | "error",
       draftUpdatedAt: 0,
       error: "",
@@ -222,6 +227,7 @@ export function useMobileController() {
   let draftSaveTimer: number | undefined;
   let restoringComposerDraft = false;
   let composerMutationVersion = 0;
+  let persistedDraftFingerprint = "";
 
   function composerDraftPayload() {
     return {
@@ -242,15 +248,24 @@ export function useMobileController() {
     };
   }
 
+  function composerDraftFingerprint() {
+    return JSON.stringify({
+      scope: [state.activeProfile?.id, state.account?.userId, state.activeProfile?.supabase?.space_id],
+      payload: composerDraftPayload(),
+    });
+  }
+
   async function persistComposerDraft(force = false) {
     if (!state.composer.persistenceReady || (!force && (state.composer.sending || state.composer.selecting))) return false;
     if (force) window.clearTimeout(draftSaveTimer);
     const generation = viewGeneration;
     const mutationVersion = composerMutationVersion;
     const payload = composerDraftPayload();
+    const fingerprint = composerDraftFingerprint();
     const scope = { profileId: state.activeProfile?.id, userId: state.account?.userId, spaceId: state.activeProfile?.supabase?.space_id };
     const write = async () => {
       if (generation !== viewGeneration || mutationVersion !== composerMutationVersion) return false;
+      state.composer.draftPersisted = false;
       state.composer.draftStatus = "saving";
       try {
         if (previewMode) {
@@ -260,10 +275,16 @@ export function useMobileController() {
           if (generation !== viewGeneration || mutationVersion !== composerMutationVersion) return false;
           state.composer.draftUpdatedAt = Number(result?.updatedAtMs || 0);
         }
-        if (generation === viewGeneration && mutationVersion === composerMutationVersion) state.composer.draftStatus = state.composer.draftUpdatedAt ? "saved" : "idle";
-        return generation === viewGeneration && mutationVersion === composerMutationVersion;
+        const persisted = generation === viewGeneration && mutationVersion === composerMutationVersion;
+        if (persisted) {
+          persistedDraftFingerprint = fingerprint;
+          state.composer.draftPersisted = composerDraftFingerprint() === fingerprint;
+          state.composer.draftStatus = state.composer.draftUpdatedAt ? "saved" : "idle";
+        }
+        return persisted;
       } catch (error) {
         if (generation === viewGeneration) {
+          state.composer.draftPersisted = false;
           state.composer.draftStatus = "error";
           state.composer.error = `草稿自动保存失败：${errorText(error)}`;
         }
@@ -274,7 +295,7 @@ export function useMobileController() {
     return draftWrite;
   }
 
-  async function persistComposerDraftForSwipe() {
+  async function persistComposerDraftForNavigation() {
     const snapshot = () => JSON.stringify({
       generation: viewGeneration,
       scope: [state.activeProfile?.id, state.account?.userId, state.activeProfile?.supabase?.space_id],
@@ -287,10 +308,14 @@ export function useMobileController() {
   async function restoreComposerDraft() {
     const generation = viewGeneration;
     state.composer.persistenceReady = false;
+    state.composer.draftPersisted = false;
+    persistedDraftFingerprint = "";
     state.composer.draftStatus = "idle";
     state.composer.draftUpdatedAt = 0;
     if (previewMode) {
       state.composer.persistenceReady = true;
+      persistedDraftFingerprint = composerDraftFingerprint();
+      state.composer.draftPersisted = true;
       return;
     }
     try {
@@ -323,6 +348,8 @@ export function useMobileController() {
       const restored = !!draft?.updatedAtMs;
       state.composer.draftStatus = restored ? "restored" : "idle";
       state.composer.persistenceReady = true;
+      persistedDraftFingerprint = composerDraftFingerprint();
+      state.composer.draftPersisted = true;
       restoringComposerDraft = false;
       for (const attachment of state.composer.attachments) {
         if (attachment.available !== false && ["image", "video"].includes(attachment.mediaType)) void loadDraftAttachmentPreview(attachment);
@@ -332,6 +359,7 @@ export function useMobileController() {
         restoringComposerDraft = false;
         // Do not overwrite an unreadable persisted draft with an empty editor.
         state.composer.persistenceReady = false;
+        state.composer.draftPersisted = false;
         state.composer.draftStatus = "error";
         state.composer.error = `草稿恢复失败：${errorText(error)}`;
       }
@@ -341,18 +369,11 @@ export function useMobileController() {
   async function deactivateComposerPersistence() {
     window.clearTimeout(draftSaveTimer);
     state.composer.persistenceReady = false;
+    state.composer.draftPersisted = false;
+    persistedDraftFingerprint = "";
     composerMutationVersion += 1;
     await draftWrite;
   }
-
-  watch(
-    () => [state.composer.text, state.composer.format],
-    () => {
-      if (state.composer.persistenceReady && !restoringComposerDraft && !state.composer.sending)
-        state.composer.textClientId = `mobile-text-${crypto.randomUUID()}`;
-    },
-    { flush: "sync" },
-  );
 
   watch(
     () => [
@@ -363,8 +384,17 @@ export function useMobileController() {
       state.composer.dueDate,
       state.composer.attachments.map((item) => `${item.clientId}\u0000${item.path}\u0000${item.available !== false}`).join("\u0001"),
     ],
-    () => {
-      if (restoringComposerDraft || !state.composer.persistenceReady || state.composer.sending || state.composer.selecting) return;
+    (_, previous) => {
+      if (restoringComposerDraft) return;
+      if (state.composer.persistenceReady && !state.composer.sending && previous) {
+        const [previousText, previousFormat] = previous;
+        if (state.composer.text !== previousText || state.composer.format !== previousFormat) {
+          state.composer.textClientId = `mobile-text-${crypto.randomUUID()}`;
+        }
+      }
+      state.composer.draftPersisted = composerDraftFingerprint() === persistedDraftFingerprint;
+      if (!state.composer.persistenceReady || state.composer.sending || state.composer.selecting) return;
+      if (state.composer.draftPersisted) return;
       window.clearTimeout(draftSaveTimer);
       state.composer.draftStatus = "idle";
       draftSaveTimer = window.setTimeout(() => void persistComposerDraft(), 350);
@@ -375,6 +405,8 @@ export function useMobileController() {
   async function initialize() {
     window.clearTimeout(draftSaveTimer);
     state.composer.persistenceReady = false;
+    state.composer.draftPersisted = false;
+    persistedDraftFingerprint = "";
     composerMutationVersion += 1;
     viewGeneration += 1;
     const generation = viewGeneration;
@@ -402,7 +434,7 @@ export function useMobileController() {
     state.composer.attachments = [];
     state.composer.text = "";
     state.composer.textClientId = `mobile-text-${crypto.randomUUID()}`;
-    state.composer.format = "text";
+    state.composer.format = nativeComposerFormat;
     state.composer.marked = false;
     state.composer.tagIds = [];
     state.composer.dueDate = "";
@@ -433,6 +465,8 @@ export function useMobileController() {
       state.appVersion = "preview";
       state.boot = "ready";
       state.composer.persistenceReady = true;
+      persistedDraftFingerprint = composerDraftFingerprint();
+      state.composer.draftPersisted = true;
       return;
     }
 
@@ -1627,7 +1661,7 @@ export function useMobileController() {
 
   return {
     state, currentSpace, selectableProfiles, pendingCount, activeTransfers, signedIn, initialize, refreshAll, refreshRuntimeState, refreshAfterForeground, refreshMessages, loadOlderMessages, searchMessages, loadMoreSearch, setMarkedFilter, loadMoreMarked, loadConflicts, resolveConflict, retryTransfer,
-    selectMedia, selectDocuments, removeAttachment, sendDraft, persistComposerDraft, persistComposerDraftForSwipe, deactivateComposerPersistence, toggleMark, copyMessage, updateMarkedMetadata, createMarkedTag, deleteMessage, applyMessageSelection, previewMessage, prepareVideo, shareMessage, retryPreview, previewImageFailed, previewDraftAttachment,
+    selectMedia, selectDocuments, removeAttachment, sendDraft, persistComposerDraft, persistComposerDraftForNavigation, deactivateComposerPersistence, toggleMark, copyMessage, updateMarkedMetadata, createMarkedTag, deleteMessage, applyMessageSelection, previewMessage, prepareVideo, shareMessage, retryPreview, previewImageFailed, previewDraftAttachment,
     signIn, logout, chooseProfile, diagnoseProfile, setProfileEnabled, beginConnectionEdit, renameProfile, signInProfile, logoutProfile, removeProfile, loadSpaces, switchSpace, testSetupConnection, setupSignIn, completeSetup, resetWizardDownstream, openConnectionWizard, openConnectionRepair, cancelConnectionWizard, selectWizardSpace, backConnectionWizard, createWizardSpace, installTransferListeners, refreshCache, clearCache, clearFeedback, saveSenderName,
   };
 }

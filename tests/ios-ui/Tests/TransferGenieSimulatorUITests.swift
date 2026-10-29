@@ -498,13 +498,54 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         XCTAssertTrue(app.buttons["新消息"].waitForExistence(timeout: 5))
     }
 
-    func testSwipeBackDetailAndDurableComposerDraft() throws {
+    func testNativeEdgeBackOnCurrentMessageWithoutMutation() throws {
         XCUIDevice.shared.orientation = .portrait
-        func swipeBack(at y: CGFloat) {
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        origin.withOffset(CGVector(dx: app.frame.width * 0.3, dy: app.frame.height * 0.3)).tap()
+        XCTAssertTrue(app.buttons["关闭详情"].waitForExistence(timeout: 5))
+        defer {
+            if app.buttons["关闭详情"].exists { app.buttons["关闭详情"].tap() }
+        }
+        attachScreenshot(named: "native-edge-before-drag")
+        let start = origin.withOffset(CGVector(dx: 2, dy: app.frame.height * 0.45))
+        let end = origin.withOffset(CGVector(dx: app.frame.width * 0.85, dy: app.frame.height * 0.45))
+        start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0)
+        attachScreenshot(named: "native-edge-after-drag")
+        XCTAssertTrue(app.buttons["关闭详情"].waitForNonExistence(timeout: 5), "Real UIKit left-edge gesture must return")
+        XCTAssertTrue(app.buttons["新消息"].waitForExistence(timeout: 5))
+    }
+
+    func testUIKitPageReturnCancelAndRepeatedHandoff() throws {
+        XCUIDevice.shared.orientation = .portrait
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        func drag(_ fraction: CGFloat, hold: TimeInterval = 0) {
+            let y = app.frame.height * 0.45
+            origin.withOffset(CGVector(dx: 2, dy: y)).press(forDuration: 0.05,
+                thenDragTo: origin.withOffset(CGVector(dx: app.frame.width * fraction, dy: y)),
+                withVelocity: .slow, thenHoldForDuration: hold)
+        }
+        for index in 0..<3 {
+            origin.withOffset(CGVector(dx: app.frame.width * 0.3, dy: app.frame.height * 0.3)).tap()
+            XCTAssertTrue(app.buttons["关闭详情"].waitForExistence(timeout: 5))
+            attachScreenshot(named: "uikit-detail-before-\(index)")
+            drag(0.15, hold: 0.5)
+            XCTAssertTrue(app.buttons["关闭详情"].exists, "Short edge drag cancels without closing")
+            if index == 1 { app.buttons["关闭详情"].tap() }
+            else { drag(0.85) }
+            XCTAssertTrue(app.buttons["关闭详情"].waitForNonExistence(timeout: 5))
+            XCTAssertTrue(app.buttons["新消息"].waitForExistence(timeout: 5))
+            attachScreenshot(named: "uikit-root-after-\(index)")
+        }
+    }
+
+    func testSwipeBackDetailAndDurableComposerDraft() throws {
+        continueAfterFailure = true
+        XCUIDevice.shared.orientation = .portrait
+        func nativeSwipeBack(at y: CGFloat) {
             let origin = app.coordinate(withNormalizedOffset: .zero)
-            let start = origin.withOffset(CGVector(dx: app.frame.width - 12, dy: y))
-            let end = origin.withOffset(CGVector(dx: app.frame.width - 160, dy: y))
-            start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.1)
+            origin.withOffset(CGVector(dx: 2, dy: y)).press(forDuration: 0.05,
+                thenDragTo: origin.withOffset(CGVector(dx: app.frame.width * 0.85, dy: y)),
+                withVelocity: .slow, thenHoldForDuration: 0)
         }
         app.buttons["搜索消息"].tap()
         let search = app.searchFields["搜索文本、文件名"]
@@ -522,16 +563,21 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         XCTAssertTrue(app.buttons["关闭详情"].exists, "Vertical scroll must not close detail")
         app.buttons["更多"].tap()
         XCTAssertTrue(app.buttons["取消"].waitForExistence(timeout: 5))
-        swipeBack(at: app.frame.height * 0.8)
+        nativeSwipeBack(at: app.frame.height * 0.8)
         XCTAssertTrue(app.buttons["取消"].exists, "Swipe cannot pass through a nested action menu")
         app.buttons["取消"].tap()
         XCTAssertTrue(app.buttons["关闭详情"].waitForExistence(timeout: 5))
-        swipeBack(at: app.frame.height * 0.45)
-        XCTAssertTrue(app.buttons["关闭详情"].waitForNonExistence(timeout: 5), "Right-edge left swipe must return from detail")
+        nativeSwipeBack(at: app.frame.height * 0.45)
+        XCTAssertTrue(app.buttons["关闭详情"].waitForNonExistence(timeout: 5), "System left-edge back gesture must return from detail")
         if app.buttons["清除"].exists { app.buttons["清除"].tap() }
         app.buttons["新消息"].tap()
         var editor = composerEditor()
         XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        // Recover only this run's exact fixture left by an earlier assertion
+        // abort, never clear any unknown user draft.
+        if (editor.value as? String)?.trimmingCharacters(in: .newlines) == "TG-SWIPE-DRAFT-71F37704-D1E5-414E-B0B0-98C09B69A431" {
+            clearVerifiedComposerFixture(editor)
+        }
         let original = (editor.value as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard ["", "输入文字，或加入照片和文件…", "写下你的想法…\n选中文字，用上方工具添加格式。"].contains(original),
               app.buttons.matching(identifier: "移除附件").count == 0,
@@ -549,8 +595,14 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         }
         editor.tap()
         editor.typeText(fixture)
-        swipeBack(at: app.frame.height * 0.22)
-        XCTAssertTrue(app.buttons["新消息"].waitForExistence(timeout: 10), "Draft swipe must close only after saving")
+        dismissKeyboardIfNeeded()
+        guard app.staticTexts["草稿已自动保存"].waitForExistence(timeout: 10) else {
+            XCTFail("Draft must be saved before native return")
+            return
+        }
+        editor.tap()
+        nativeSwipeBack(at: app.frame.height * 0.22)
+        XCTAssertTrue(app.buttons["新消息"].waitForExistence(timeout: 10), "Native back opens only after the draft is durable")
         app.terminate()
         app.launch()
         XCTAssertTrue(app.buttons["新消息"].waitForExistence(timeout: 30))

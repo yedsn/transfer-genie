@@ -2397,10 +2397,10 @@
           "markdownDescription": "Denies the log command without any pre-configured scope."
         },
         {
-          "description": "Allows the Transfer Genie mobile integration diagnostic command.\n#### This default permission set includes:\n\n- `allow-diagnostic`\n- `allow-select-media`\n- `allow-select-documents`\n- `allow-preview-file`\n- `allow-share-file`\n- `allow-generate-image-thumbnail`\n- `allow-generate-video-poster`\n- `allow-cancel-video-poster`",
+          "description": "Allows the Transfer Genie mobile integration diagnostic command.\n#### This default permission set includes:\n\n- `allow-diagnostic`\n- `allow-set-navigation-gestures-enabled`\n- `allow-navigate-native-page`\n- `allow-select-media`\n- `allow-select-documents`\n- `allow-preview-file`\n- `allow-share-file`\n- `allow-generate-image-thumbnail`\n- `allow-generate-video-poster`\n- `allow-cancel-video-poster`",
           "type": "string",
           "const": "mobile-integration:default",
-          "markdownDescription": "Allows the Transfer Genie mobile integration diagnostic command.\n#### This default permission set includes:\n\n- `allow-diagnostic`\n- `allow-select-media`\n- `allow-select-documents`\n- `allow-preview-file`\n- `allow-share-file`\n- `allow-generate-image-thumbnail`\n- `allow-generate-video-poster`\n- `allow-cancel-video-poster`"
+          "markdownDescription": "Allows the Transfer Genie mobile integration diagnostic command.\n#### This default permission set includes:\n\n- `allow-diagnostic`\n- `allow-set-navigation-gestures-enabled`\n- `allow-navigate-native-page`\n- `allow-select-media`\n- `allow-select-documents`\n- `allow-preview-file`\n- `allow-share-file`\n- `allow-generate-image-thumbnail`\n- `allow-generate-video-poster`\n- `allow-cancel-video-poster`"
         },
         {
           "description": "Enables the cancel_video_poster command without any pre-configured scope.",
@@ -2427,6 +2427,12 @@
           "markdownDescription": "Enables the generate_video_poster command without any pre-configured scope."
         },
         {
+          "description": "Enables the navigate_native_page command without any pre-configured scope.",
+          "type": "string",
+          "const": "mobile-integration:allow-navigate-native-page",
+          "markdownDescription": "Enables the navigate_native_page command without any pre-configured scope."
+        },
+        {
           "description": "Enables the preview_file command without any pre-configured scope.",
           "type": "string",
           "const": "mobile-integration:allow-preview-file",
@@ -2443,6 +2449,12 @@
           "type": "string",
           "const": "mobile-integration:allow-select-media",
           "markdownDescription": "Enables the select_media command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_navigation_gestures_enabled command without any pre-configured scope.",
+          "type": "string",
+          "const": "mobile-integration:allow-set-navigation-gestures-enabled",
+          "markdownDescription": "Enables the set_navigation_gestures_enabled command without any pre-configured scope."
         },
         {
           "description": "Enables the share_file command without any pre-configured scope.",
@@ -2475,6 +2487,12 @@
           "markdownDescription": "Denies the generate_video_poster command without any pre-configured scope."
         },
         {
+          "description": "Denies the navigate_native_page command without any pre-configured scope.",
+          "type": "string",
+          "const": "mobile-integration:deny-navigate-native-page",
+          "markdownDescription": "Denies the navigate_native_page command without any pre-configured scope."
+        },
+        {
           "description": "Denies the preview_file command without any pre-configured scope.",
           "type": "string",
           "const": "mobile-integration:deny-preview-file",
@@ -2491,6 +2509,12 @@
           "type": "string",
           "const": "mobile-integration:deny-select-media",
           "markdownDescription": "Denies the select_media command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_navigation_gestures_enabled command without any pre-configured scope.",
+          "type": "string",
+          "const": "mobile-integration:deny-set-navigation-gestures-enabled",
+          "markdownDescription": "Denies the set_navigation_gestures_enabled command without any pre-configured scope."
         },
         {
           "description": "Denies the share_file command without any pre-configured scope.",

@@ -17,6 +17,10 @@ export interface MobileDiagnostic {
   platform: string
   nativePlugin: boolean
   mainThread: boolean
+  canGoBack: boolean
+  navigationGesturesEnabled: boolean
+  rootScrollEnabled: boolean
+  rootPanEnabled: boolean
 }
 
 export async function diagnostic(requestId: string): Promise<MobileDiagnostic> {
@@ -24,6 +28,34 @@ export async function diagnostic(requestId: string): Promise<MobileDiagnostic> {
     payload: {
       requestId,
     },
+  })
+}
+
+export interface NavigationGesturesResponse {
+  enabled: boolean
+  supported: boolean
+  canGoBack: boolean
+  rootScrollEnabled: boolean
+  rootPanEnabled: boolean
+}
+
+export async function setNavigationGesturesEnabled(
+  enabled: boolean,
+  revision: number,
+): Promise<NavigationGesturesResponse> {
+  return await invoke<NavigationGesturesResponse>(
+    'plugin:mobile-integration|set_navigation_gestures_enabled',
+    { payload: { enabled, revision } },
+  )
+}
+
+export async function navigateNativePage(
+  page: 'detail' | 'composer',
+  action: 'prepare' | 'show' | 'close' | 'finish' | 'cancel' | 'resume',
+  requestId: string,
+): Promise<{ accepted: boolean; supported: boolean }> {
+  return await invoke('plugin:mobile-integration|navigate_native_page', {
+    payload: { page, action, requestId },
   })
 }
 

@@ -5,6 +5,8 @@ Allows the Transfer Genie mobile integration diagnostic command.
 #### This default permission set includes the following:
 
 - `allow-diagnostic`
+- `allow-set-navigation-gestures-enabled`
+- `allow-navigate-native-page`
 - `allow-select-media`
 - `allow-select-documents`
 - `allow-preview-file`
@@ -129,6 +131,32 @@ Denies the generate_video_poster command without any pre-configured scope.
 <tr>
 <td>
 
+`mobile-integration:allow-navigate-native-page`
+
+</td>
+<td>
+
+Enables the navigate_native_page command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mobile-integration:deny-navigate-native-page`
+
+</td>
+<td>
+
+Denies the navigate_native_page command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `mobile-integration:allow-preview-file`
 
 </td>
@@ -200,6 +228,32 @@ Enables the select_media command without any pre-configured scope.
 <td>
 
 Denies the select_media command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mobile-integration:allow-set-navigation-gestures-enabled`
+
+</td>
+<td>
+
+Enables the set_navigation_gestures_enabled command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mobile-integration:deny-set-navigation-gestures-enabled`
+
+</td>
+<td>
+
+Denies the set_navigation_gestures_enabled command without any pre-configured scope.
 
 </td>
 </tr>

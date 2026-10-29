@@ -75,6 +75,7 @@ controller = await makeController();
 assert.equal(controller.state.composer.text, '# restart-safe');
 assert.equal(controller.state.composer.format, 'markdown');
 assert.equal(controller.state.composer.draftStatus, 'restored');
+assert.equal(controller.state.composer.draftPersisted, true, 'restored draft starts safe for native navigation');
 assert.deepEqual(Array.from(controller.state.composer.tagIds), ['work']);
 assert.equal(controller.state.composer.attachments[0].clientId, 'stable-client');
 
@@ -140,9 +141,11 @@ assert.equal(controller.state.composer.text, '');
 assert.equal(controller.state.composer.attachments.length, 0);
 controller.state.composer.text = 'profile-b-only';
 assert.equal(controller.state.composer.draftStatus, 'idle');
+assert.equal(controller.state.composer.draftPersisted, false, 'editing immediately disables native navigation');
 await new Promise(resolve => setTimeout(resolve, 450));
 assert.equal(draftRows.get(key()).text, 'profile-b-only');
 assert.equal(controller.state.composer.draftStatus, 'saved');
+assert.equal(controller.state.composer.draftPersisted, true, 'successful automatic save re-enables native navigation');
 
 // A failed save must not fall through to sending or silently discard the draft.
 const realSave = api.mobileDraft.save;
@@ -153,6 +156,7 @@ assert.equal(await controller.sendDraft(), false);
 assert.equal(textSends, sendsBeforeFailure);
 assert.equal(controller.state.composer.text, 'retain-after-write-failure');
 assert.equal(controller.state.composer.draftStatus, 'error');
+assert.equal(controller.state.composer.draftPersisted, false);
 assert.equal(controller.state.composer.sending, false);
 api.mobileDraft.save = realSave;
 assert.equal(await controller.persistComposerDraft(true), true);
@@ -184,16 +188,20 @@ api.mobileDraft.save = async payload => {
   return { ...payload, updatedAtMs: Date.now() };
 };
 controller.state.composer.text = "before swipe";
-const pendingSwipeSave = controller.persistComposerDraftForSwipe();
+const pendingSwipeSave = controller.persistComposerDraftForNavigation();
 await started;
 controller.state.composer.text = "changed while saving";
+assert.equal(controller.state.composer.draftPersisted, false);
 resolveSave();
 assert.equal(await pendingSwipeSave, false, "a changed draft cannot be closed on an older save");
+assert.equal(controller.state.composer.draftPersisted, false);
 api.mobileDraft.save = realSave;
-assert.equal(await controller.persistComposerDraftForSwipe(), true);
+assert.equal(await controller.persistComposerDraftForNavigation(), true);
+assert.equal(controller.state.composer.draftPersisted, true);
 assert.equal(draftRows.get(key()).text, "changed while saving");
 controller.state.composer.text = "";
-assert.equal(await controller.persistComposerDraftForSwipe(), true, "empty-draft deletion is successful without a timestamp");
+assert.equal(await controller.persistComposerDraftForNavigation(), true, "empty-draft deletion is successful without a timestamp");
+assert.equal(controller.state.composer.draftPersisted, true);
 assert.equal(draftRows.has(key()), false);
 await terminate(controller);
 

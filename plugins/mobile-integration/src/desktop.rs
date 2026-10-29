@@ -20,6 +20,33 @@ impl<R: Runtime> MobileIntegration<R> {
             platform: std::env::consts::OS.into(),
             native_plugin: false,
             main_thread: true,
+            can_go_back: false,
+            navigation_gestures_enabled: false,
+            root_scroll_enabled: false,
+            root_pan_enabled: false,
+        })
+    }
+
+    pub fn set_navigation_gestures_enabled(
+        &self,
+        _payload: NavigationGesturesRequest,
+    ) -> crate::Result<NavigationGesturesResponse> {
+        Ok(NavigationGesturesResponse {
+            enabled: false,
+            supported: false,
+            can_go_back: false,
+            root_scroll_enabled: false,
+            root_pan_enabled: false,
+        })
+    }
+
+    pub fn navigate_native_page(
+        &self,
+        _payload: NativePageNavigationRequest,
+    ) -> crate::Result<NativePageNavigationResponse> {
+        Ok(NativePageNavigationResponse {
+            accepted: false,
+            supported: false,
         })
     }
 

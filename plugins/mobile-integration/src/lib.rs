@@ -37,6 +37,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("mobile-integration")
         .invoke_handler(tauri::generate_handler![
             commands::diagnostic,
+            commands::set_navigation_gestures_enabled,
+            commands::navigate_native_page,
             commands::select_media,
             commands::select_documents,
             commands::preview_file,

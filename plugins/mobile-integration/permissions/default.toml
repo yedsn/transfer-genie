@@ -2,6 +2,8 @@
 description = "Allows the Transfer Genie mobile integration diagnostic command."
 permissions = [
   "allow-diagnostic",
+  "allow-set-navigation-gestures-enabled",
+  "allow-navigate-native-page",
   "allow-select-media",
   "allow-select-documents",
   "allow-preview-file",

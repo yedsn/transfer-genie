@@ -26,6 +26,16 @@
         payload: { requestId },
       });
     },
+    async setNavigationGesturesEnabled(enabled, revision) {
+      return invoke('plugin:mobile-integration|set_navigation_gestures_enabled', {
+        payload: { enabled: Boolean(enabled), revision },
+      });
+    },
+    async navigateNativePage(page, action, requestId) {
+      return invoke('plugin:mobile-integration|navigate_native_page', {
+        payload: { page: String(page), action: String(action), requestId: String(requestId) },
+      });
+    },
     async selectMedia(selectionLimit = 10) {
       return invoke('plugin:mobile-integration|select_media', {
         payload: { selectionLimit },

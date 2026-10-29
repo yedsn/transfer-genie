@@ -65,7 +65,8 @@ final class MobileIntegrationPluginTests: XCTestCase {
         plugin.load(webview: webview)
         // An unattached WebView can have no pinch recognizer yet.
         XCTAssertNotEqual(webview.scrollView.pinchGestureRecognizer?.isEnabled, true)
-        XCTAssertFalse(webview.scrollView.isScrollEnabled)
+        XCTAssertTrue(webview.scrollView.isScrollEnabled)
+        XCTAssertTrue(webview.scrollView.panGestureRecognizer.isEnabled)
         XCTAssertEqual(webview.scrollView.contentInsetAdjustmentBehavior, .never)
         XCTAssertFalse(webview.scrollView.bounces)
         XCTAssertFalse(webview.scrollView.alwaysBounceVertical)
@@ -78,9 +79,86 @@ final class MobileIntegrationPluginTests: XCTestCase {
         NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
         XCTAssertNotEqual(webview.scrollView.pinchGestureRecognizer?.isEnabled, true)
         XCTAssertFalse(webview.scrollView.bounces)
-        XCTAssertFalse(webview.scrollView.isScrollEnabled)
+        XCTAssertTrue(webview.scrollView.isScrollEnabled)
         XCTAssertGreaterThan(MobileAccessibility.textScale(for: .accessibilityExtraExtraExtraLarge), 3)
         withExtendedLifetime(plugin) {}
+    }
+
+    func testUIKitReturnGateDoesNotEnableWebKitHistory() {
+        let webview = WKWebView()
+        let plugin = MobileIntegrationPlugin()
+        plugin.load(webview: webview)
+        XCTAssertFalse(webview.allowsBackForwardNavigationGestures)
+        webview.scrollView.isScrollEnabled = false
+        XCTAssertFalse(webview.scrollView.isScrollEnabled)
+
+        let enabled = expectation(description: "Native navigation gesture enabled")
+        var payload = ""
+        let invoke = Invoke(
+            command: "setNavigationGesturesEnabled",
+            callback: 1,
+            error: 2,
+            sendResponse: { callback, response in
+                if callback == 1 { payload = response ?? "" }
+                enabled.fulfill()
+            },
+            sendChannelData: { _, _ in },
+            data: "{\"enabled\":true,\"revision\":1}"
+        )
+        plugin.setNavigationGesturesEnabled(invoke)
+        wait(for: [enabled], timeout: 5)
+
+        XCTAssertFalse(webview.allowsBackForwardNavigationGestures)
+        XCTAssertTrue(webview.scrollView.isScrollEnabled)
+        XCTAssertTrue(webview.scrollView.panGestureRecognizer.isEnabled)
+        XCTAssertTrue(payload.contains("supported"))
+        XCTAssertTrue(payload.contains("true"))
+        withExtendedLifetime(plugin) {}
+    }
+
+    func testNativeReturnGateRejectsStaleEnableAndInvalidNavigation() {
+        let navigation = MobileNavigation(webview: WKWebView())
+        navigation.setReturnEnabled(true, revision: 1)
+        XCTAssertTrue(navigation.returnEnabled)
+        navigation.setReturnEnabled(false, revision: 3)
+        navigation.setReturnEnabled(true, revision: 2)
+        XCTAssertFalse(navigation.returnEnabled)
+        XCTAssertFalse(navigation.canGoBack)
+        XCTAssertFalse(navigation.perform(page: "invalid", action: "prepare", requestId: "fixture"))
+        XCTAssertFalse(navigation.perform(page: "detail", action: "show", requestId: "fixture"))
+    }
+
+    func testDocumentNavigationCreatesNativeBackItem() {
+        let rootReady = expectation(description: "Root fixture loaded")
+        let detailReady = expectation(description: "Detail fixture loaded")
+        final class NavigationDelegate: NSObject, WKNavigationDelegate {
+            let rootReady: XCTestExpectation
+            let detailReady: XCTestExpectation
+            var loadCount = 0
+            init(rootReady: XCTestExpectation, detailReady: XCTestExpectation) {
+                self.rootReady = rootReady
+                self.detailReady = detailReady
+            }
+            func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+                loadCount += 1
+                if loadCount == 1 { rootReady.fulfill() }
+                if loadCount == 2 { detailReady.fulfill() }
+            }
+        }
+        let webview = WKWebView(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let delegate = NavigationDelegate(rootReady: rootReady, detailReady: detailReady)
+        let plugin = MobileIntegrationPlugin()
+        webview.navigationDelegate = delegate
+        plugin.load(webview: webview)
+        webview.load(URLRequest(url: URL(string: "data:text/html,%3Cmain%3Eroot%3C/main%3E")!))
+        wait(for: [rootReady], timeout: 10)
+        webview.load(URLRequest(url: URL(string: "data:text/html,%3Cmain%3Edetail%3C/main%3E")!))
+        wait(for: [detailReady], timeout: 10)
+
+        XCTAssertTrue(webview.canGoBack)
+        XCTAssertTrue(webview.scrollView.isScrollEnabled)
+        XCTAssertTrue(webview.scrollView.panGestureRecognizer.isEnabled)
+        withExtendedLifetime((plugin, delegate)) {}
     }
 
     func testSystemTextScaleCoversStandardAndAccessibilityCategories() {

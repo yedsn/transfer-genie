@@ -31,6 +31,24 @@ impl<R: Runtime> MobileIntegration<R> {
             .map_err(Into::into)
     }
 
+    pub fn set_navigation_gestures_enabled(
+        &self,
+        payload: NavigationGesturesRequest,
+    ) -> crate::Result<NavigationGesturesResponse> {
+        self.0
+            .run_mobile_plugin("setNavigationGesturesEnabled", payload)
+            .map_err(Into::into)
+    }
+
+    pub fn navigate_native_page(
+        &self,
+        payload: NativePageNavigationRequest,
+    ) -> crate::Result<NativePageNavigationResponse> {
+        self.0
+            .run_mobile_plugin("navigateNativePage", payload)
+            .map_err(Into::into)
+    }
+
     pub fn select_media(&self, payload: SelectMediaRequest) -> crate::Result<SelectMediaResponse> {
         self.0
             .run_mobile_plugin("selectMedia", payload)

@@ -21,6 +21,23 @@ pub(crate) async fn diagnostic<R: Runtime>(
 }
 
 #[command]
+pub(crate) async fn set_navigation_gestures_enabled<R: Runtime>(
+    app: AppHandle<R>,
+    payload: NavigationGesturesRequest,
+) -> Result<NavigationGesturesResponse> {
+    app.mobile_integration()
+        .set_navigation_gestures_enabled(payload)
+}
+
+#[command]
+pub(crate) async fn navigate_native_page<R: Runtime>(
+    app: AppHandle<R>,
+    payload: NativePageNavigationRequest,
+) -> Result<NativePageNavigationResponse> {
+    app.mobile_integration().navigate_native_page(payload)
+}
+
+#[command]
 pub(crate) async fn select_media<R: Runtime>(
     app: AppHandle<R>,
     payload: SelectMediaRequest,

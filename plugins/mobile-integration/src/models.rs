@@ -13,6 +13,42 @@ pub struct DiagnosticResponse {
     pub platform: String,
     pub native_plugin: bool,
     pub main_thread: bool,
+    pub can_go_back: bool,
+    pub navigation_gestures_enabled: bool,
+    pub root_scroll_enabled: bool,
+    pub root_pan_enabled: bool,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NavigationGesturesRequest {
+    pub enabled: bool,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NavigationGesturesResponse {
+    pub enabled: bool,
+    pub supported: bool,
+    pub can_go_back: bool,
+    pub root_scroll_enabled: bool,
+    pub root_pan_enabled: bool,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePageNavigationRequest {
+    pub page: String,
+    pub action: String,
+    pub request_id: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePageNavigationResponse {
+    pub accepted: bool,
+    pub supported: bool,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]

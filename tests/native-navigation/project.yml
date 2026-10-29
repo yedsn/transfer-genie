@@ -1,0 +1,38 @@
+name: NativeNavigationProbe
+options:
+  bundleIdPrefix: com.transfergenie.tests
+  deploymentTarget:
+    iOS: '16.0'
+packages:
+  MobileIntegration:
+    path: ../../plugins/mobile-integration/ios
+settings:
+  base:
+    SWIFT_VERSION: '5.0'
+    CODE_SIGNING_ALLOWED: NO
+    GENERATE_INFOPLIST_FILE: YES
+targets:
+  NativeNavigationProbe:
+    type: application
+    platform: iOS
+    sources: [App]
+    dependencies:
+      - package: MobileIntegration
+        product: tauri-plugin-mobile-integration
+    settings:
+      base:
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+  NativeNavigationProbeUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [Tests]
+    dependencies:
+      - target: NativeNavigationProbe
+schemes:
+  NativeNavigationProbe:
+    build:
+      targets:
+        NativeNavigationProbe: all
+        NativeNavigationProbeUITests: [test]
+    test:
+      targets: [NativeNavigationProbeUITests]

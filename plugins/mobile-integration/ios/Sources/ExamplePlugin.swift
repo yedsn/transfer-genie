@@ -7,6 +7,17 @@ class DiagnosticArgs: Decodable {
   let requestId: String
 }
 
+class NavigationGesturesArgs: Decodable {
+  let enabled: Bool
+  let revision: UInt64
+}
+
+class NativePageNavigationArgs: Decodable {
+  let page: String
+  let action: String
+  let requestId: String
+}
+
 class MobileIntegrationPlugin: Plugin {
   private var mediaPickerCoordinators: [UUID: MediaPickerCoordinator] = [:]
   private var documentPickerCoordinators: [UUID: DocumentPickerCoordinator] = [:]
@@ -17,16 +28,20 @@ class MobileIntegrationPlugin: Plugin {
   private var lifecycleObservers: [NSObjectProtocol] = []
   private weak var accessibilityWebview: WKWebView?
   private var canvasOffsetObservation: NSKeyValueObservation?
+  private var mobileNavigation: MobileNavigation?
 
   override func load(webview: WKWebView) {
     super.load(webview: webview)
+    webview.allowsBackForwardNavigationGestures = false
     // Keep app layout fixed; Dynamic Type is handled independently below.
     webview.scrollView.pinchGestureRecognizer?.isEnabled = false
     // Nested message/editor regions scroll; the app canvas must not rubber-band.
     webview.scrollView.bounces = false
     webview.scrollView.alwaysBounceVertical = false
     webview.scrollView.alwaysBounceHorizontal = false
-    webview.scrollView.isScrollEnabled = false
+    // Keep nested scroll recognition available; UIKit owns edge navigation.
+    webview.scrollView.panGestureRecognizer.isEnabled = true
+    webview.scrollView.isScrollEnabled = true
     webview.scrollView.contentInsetAdjustmentBehavior = .never
     // WebKit can still scroll the root programmatically when focusing a caret.
     // The app uses nested CSS scroll regions, so the root always stays at zero.
@@ -40,6 +55,7 @@ class MobileIntegrationPlugin: Plugin {
     }
     #endif
     accessibilityWebview = webview
+    mobileNavigation = MobileNavigation(webview: webview)
     webview.configuration.userContentController.addUserScript(WKUserScript(
       source: MobileAccessibility.currentScript(),
       injectionTime: .atDocumentEnd,
@@ -93,7 +109,8 @@ class MobileIntegrationPlugin: Plugin {
   private func refreshAccessibility() {
     accessibilityWebview?.scrollView.pinchGestureRecognizer?.isEnabled = false
     accessibilityWebview?.scrollView.bounces = false
-    accessibilityWebview?.scrollView.isScrollEnabled = false
+    accessibilityWebview?.scrollView.panGestureRecognizer.isEnabled = true
+    accessibilityWebview?.scrollView.isScrollEnabled = true
     accessibilityWebview?.evaluateJavaScript(MobileAccessibility.currentScript(), completionHandler: nil)
   }
 
@@ -136,7 +153,54 @@ class MobileIntegrationPlugin: Plugin {
         "platform": "ios",
         "nativePlugin": true,
         "mainThread": Thread.isMainThread,
+        "canGoBack": self?.mobileNavigation?.canGoBack ?? false,
+        "navigationGesturesEnabled": self?.mobileNavigation?.returnEnabled ?? false,
+        "rootScrollEnabled": self?.accessibilityWebview?.scrollView.isScrollEnabled ?? false,
+        "rootPanEnabled": self?.accessibilityWebview?.scrollView.panGestureRecognizer.isEnabled ?? false,
       ])
+    }
+  }
+
+  @objc public func setNavigationGesturesEnabled(_ invoke: Invoke) {
+    let args: NavigationGesturesArgs
+    do {
+      args = try invoke.parseArgs(NavigationGesturesArgs.self)
+    } catch {
+      MobileInvocation(invoke).reject(.invalidArguments(error))
+      return
+    }
+
+    let reply = MobileInvocation(invoke)
+    DispatchQueue.main.async { [weak self] in
+      guard let webview = self?.accessibilityWebview else {
+        reply.resolve(["enabled": false, "supported": false])
+        return
+      }
+      webview.scrollView.panGestureRecognizer.isEnabled = true
+      webview.scrollView.isScrollEnabled = true
+      self?.mobileNavigation?.setReturnEnabled(args.enabled, revision: args.revision)
+      reply.resolve([
+        "enabled": self?.mobileNavigation?.returnEnabled ?? false,
+        "supported": true,
+        "canGoBack": self?.mobileNavigation?.canGoBack ?? false,
+        "rootScrollEnabled": webview.scrollView.isScrollEnabled,
+        "rootPanEnabled": webview.scrollView.panGestureRecognizer.isEnabled,
+      ])
+    }
+  }
+
+  @objc public func navigateNativePage(_ invoke: Invoke) {
+    let args: NativePageNavigationArgs
+    do {
+      args = try invoke.parseArgs(NativePageNavigationArgs.self)
+    } catch {
+      MobileInvocation(invoke).reject(.invalidArguments(error))
+      return
+    }
+    let reply = MobileInvocation(invoke)
+    DispatchQueue.main.async { [weak self] in
+      let accepted = self?.mobileNavigation?.perform(page: args.page, action: args.action, requestId: args.requestId) ?? false
+      reply.resolve(["accepted": accepted, "supported": self?.mobileNavigation != nil])
     }
   }
 

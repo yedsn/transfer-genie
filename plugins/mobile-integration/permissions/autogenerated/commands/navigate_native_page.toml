@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-navigate-native-page"
+description = "Enables the navigate_native_page command without any pre-configured scope."
+commands.allow = ["navigate_native_page"]
+
+[[permission]]
+identifier = "deny-navigate-native-page"
+description = "Denies the navigate_native_page command without any pre-configured scope."
+commands.deny = ["navigate_native_page"]

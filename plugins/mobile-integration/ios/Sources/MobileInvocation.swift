@@ -150,6 +150,9 @@ enum ActiveScenePresenter {
        let last = split.viewControllers.last {
       return topViewController(from: last)
     }
+    if let navigation = root.children.last(where: { $0 is UINavigationController }) {
+      return topViewController(from: navigation)
+    }
     return root
   }
 

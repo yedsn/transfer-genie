@@ -5,8 +5,22 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" href="data:," />
     <title>Transfer Genie</title>
+    <script>
+      // Native detail/composer pages are internal transitions. Mark them before
+      // the first paint so the app-wide startup card never flashes between pages.
+      var nativePage = new URLSearchParams(window.location.search).get('tg-mobile-page');
+      if (nativePage === 'detail' || nativePage === 'composer') {
+        document.documentElement.classList.add('is-mobile-native-page');
+      }
+    </script>
     <style>
       [v-cloak] { display: none !important; }
+      html.is-mobile-native-page,
+      html.is-mobile-native-page body {
+        margin: 0;
+        background: #faf9f5;
+      }
+      html.is-mobile-native-page #app-boot-screen { display: none !important; }
       #app-boot-screen {
         position: fixed;
         inset: 0;

@@ -343,6 +343,18 @@
           "markdownDescription": "Denies the generate_video_poster command without any pre-configured scope."
         },
         {
+          "description": "Enables the navigate_native_page command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-navigate-native-page",
+          "markdownDescription": "Enables the navigate_native_page command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the navigate_native_page command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-navigate-native-page",
+          "markdownDescription": "Denies the navigate_native_page command without any pre-configured scope."
+        },
+        {
           "description": "Enables the preview_file command without any pre-configured scope.",
           "type": "string",
           "const": "allow-preview-file",
@@ -379,6 +391,18 @@
           "markdownDescription": "Denies the select_media command without any pre-configured scope."
         },
         {
+          "description": "Enables the set_navigation_gestures_enabled command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-navigation-gestures-enabled",
+          "markdownDescription": "Enables the set_navigation_gestures_enabled command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_navigation_gestures_enabled command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-navigation-gestures-enabled",
+          "markdownDescription": "Denies the set_navigation_gestures_enabled command without any pre-configured scope."
+        },
+        {
           "description": "Enables the share_file command without any pre-configured scope.",
           "type": "string",
           "const": "allow-share-file",
@@ -391,10 +415,10 @@
           "markdownDescription": "Denies the share_file command without any pre-configured scope."
         },
         {
-          "description": "Allows the Transfer Genie mobile integration diagnostic command.\n#### This default permission set includes:\n\n- `allow-diagnostic`\n- `allow-select-media`\n- `allow-select-documents`\n- `allow-preview-file`\n- `allow-share-file`\n- `allow-generate-image-thumbnail`\n- `allow-generate-video-poster`\n- `allow-cancel-video-poster`",
+          "description": "Allows the Transfer Genie mobile integration diagnostic command.\n#### This default permission set includes:\n\n- `allow-diagnostic`\n- `allow-set-navigation-gestures-enabled`\n- `allow-navigate-native-page`\n- `allow-select-media`\n- `allow-select-documents`\n- `allow-preview-file`\n- `allow-share-file`\n- `allow-generate-image-thumbnail`\n- `allow-generate-video-poster`\n- `allow-cancel-video-poster`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Allows the Transfer Genie mobile integration diagnostic command.\n#### This default permission set includes:\n\n- `allow-diagnostic`\n- `allow-select-media`\n- `allow-select-documents`\n- `allow-preview-file`\n- `allow-share-file`\n- `allow-generate-image-thumbnail`\n- `allow-generate-video-poster`\n- `allow-cancel-video-poster`"
+          "markdownDescription": "Allows the Transfer Genie mobile integration diagnostic command.\n#### This default permission set includes:\n\n- `allow-diagnostic`\n- `allow-set-navigation-gestures-enabled`\n- `allow-navigate-native-page`\n- `allow-select-media`\n- `allow-select-documents`\n- `allow-preview-file`\n- `allow-share-file`\n- `allow-generate-image-thumbnail`\n- `allow-generate-video-poster`\n- `allow-cancel-video-poster`"
         }
       ]
     }

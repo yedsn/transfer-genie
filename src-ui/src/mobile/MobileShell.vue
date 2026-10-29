@@ -19,36 +19,62 @@ import MobileMessageBody from "./MobileMessageBody.vue";
 import MobileMarkedExcerpt from "./MobileMarkedExcerpt.vue";
 import MobileText from "./MobileText.vue";
 import MobileConnectionWizard from "./MobileConnectionWizard.vue";
-const MobileMarkdownEditor = defineAsyncComponent(() => import('./MobileMarkdownEditor.vue'));
+const loadMobileMarkdownEditor = () => import("./MobileMarkdownEditor.vue");
+const MobileMarkdownEditor = defineAsyncComponent(loadMobileMarkdownEditor);
+let editorWarmTimer: number | undefined;
+let editorWarmIdle: number | undefined;
 
 type MobileTab = "feed" | "marked" | "profile";
 type MobileDiagnostic = {
   platform?: string;
   nativePlugin?: boolean;
   mainThread?: boolean;
+  canGoBack?: boolean;
+  navigationGesturesEnabled?: boolean;
+  rootScrollEnabled?: boolean;
+  rootPanEnabled?: boolean;
 };
 type SheetName =
   "composer" | "attach" | "actions" | "transfer" | "connections" | "connection-manager" | "connection-edit" | "connection-remove" | "detail" | "cache" | "sender" | "about" | "marked-edit" | "unmark-confirm" | "conflicts" | "delete-confirm" | null;
 
 const controller = useMobileController();
 const { state, currentSpace, pendingCount, activeTransfers } = controller;
+type NativeHistorySheet = "detail" | "composer";
+const mobileRoute = new URL(window.location.href).searchParams.get("tg-mobile-page");
+const initialNativeSheet: NativeHistorySheet | null =
+  mobileRoute === "detail" || mobileRoute === "composer" ? mobileRoute : null;
+const nativeMessageStorageKey = "transfer-genie:native-detail-message";
+const nativePickerStorageKey = "transfer-genie:native-composer-picker";
+const nativeComposerFormatKey = "transfer-genie:native-composer-format";
+function readNativeDetailSnapshot(): MobileMessage | null {
+  if (initialNativeSheet !== "detail") return null;
+  try {
+    const raw = sessionStorage.getItem(nativeMessageStorageKey);
+    return raw ? JSON.parse(raw) as MobileMessage : null;
+  } catch {
+    return null;
+  }
+}
 const activeTab = ref<MobileTab>("feed");
-const activeSheet = ref<SheetName>(null);
-const swipeOffset = ref(0);
-const swipeDragging = ref(false);
-const swipeSaving = ref(false);
-const swipeError = ref("");
-let sheetGeneration = 0;
+// A native child page must exist on the first Vue render. Waiting for the
+// controller would expose the app initialization screen during every push.
+const activeSheet = ref<SheetName>(initialNativeSheet);
+const selectedMessage = ref<MobileMessage | null>(readNativeDetailSnapshot());
+const navigationSaving = ref(false);
+const navigationError = ref("");
 const composerComposing = ref(false);
-let swipeGesture: { sheet: "detail" | "composer"; generation: number; x: number; y: number; time: number; locked: boolean } | null = null;
 watch(activeSheet, (sheet) => {
-  sheetGeneration += 1;
   if (sheet !== "composer") composerComposing.value = false;
-  swipeGesture = null;
-  swipeDragging.value = false;
-  swipeOffset.value = 0;
-  swipeError.value = "";
+  navigationError.value = "";
 }, { flush: "sync" });
+const managedHistorySheet = ref<NativeHistorySheet | null>(null);
+const nativePageRequestId = ref("");
+const nativePagePresented = ref(false);
+const nativePagePreparing = ref(false);
+let explicitNativeClose = false;
+let explicitCloseFingerprint = "";
+let nativePickerAfterShow: "media" | "document" | undefined;
+let nativeGestureRequest = 0;
 const connectionRemoveEscalated = ref(false);
 const detailUnderlay = ref(false);
 const viewportHeight = ref(window.visualViewport?.height || window.innerHeight);
@@ -122,7 +148,6 @@ function dismissComposerKeyboard() {
   if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
   handleComposerFocusOut();
 }
-const selectedMessage = ref<MobileMessage | null>(null);
 const detailVideo = ref<HTMLVideoElement | null>(null);
 const detailVideoUrl = ref("");
 const detailVideoSeconds = ref(0);
@@ -334,6 +359,168 @@ const cacheSize = computed(() => {
   return `${(bytes / 1024 ** index).toFixed(index === 0 || bytes / 1024 ** index >= 100 ? 0 : 1)} ${units[index]}`;
 });
 
+const composerNativeBackSafe = computed(() =>
+  activeSheet.value === "composer" &&
+  state.composer.persistenceReady &&
+  state.composer.draftPersisted &&
+  !state.composer.sending &&
+  !state.composer.selecting &&
+  !composerComposing.value &&
+  !navigationSaving.value,
+);
+const nativeBackEnabled = computed(() =>
+  nativePagePresented.value && (
+    (activeSheet.value === "detail" && managedHistorySheet.value === "detail" && !detailUnderlay.value) ||
+    (composerNativeBackSafe.value && managedHistorySheet.value === "composer" && !composerUnderlay.value)
+  ),
+);
+
+function setNativeNavigationGestures(enabled: boolean) {
+  if (state.previewMode && !(window as any).__TRANSFER_GENIE_NATIVE_GESTURE_SPY__) return;
+  const request = ++nativeGestureRequest;
+  // Do not queue a disable behind an in-flight enable. Swift rejects stale
+  // revisions; completion is also revalidated before Vue closes the page.
+  void (async () => {
+    try {
+      const result = await (window as any).transferGenieApi?.mobileIntegration?.setNavigationGesturesEnabled(enabled, request);
+      if (request !== nativeGestureRequest) return;
+      if (enabled && result?.supported === false) navigationError.value = "此环境暂不支持系统返回手势";
+    } catch {
+      if (request === nativeGestureRequest && enabled) navigationError.value = "系统返回手势暂时不可用";
+    }
+  })();
+}
+
+watch(nativeBackEnabled, (enabled) => { setNativeNavigationGestures(enabled); }, { flush: "sync", immediate: true });
+
+function clearTopLevelSheet() {
+  window.clearTimeout(composerCloseTimer);
+  activeSheet.value = null;
+  detailUnderlay.value = false;
+  markReturnSheet.value = null;
+  markOpener = null;
+  deleteConfirmation.value = null;
+  cacheConfirmation.value = false;
+  selectedMessage.value = null;
+  const opener = sheetOpener;
+  sheetOpener = null;
+  void nextTick(() => opener?.focus({ preventScroll: true }));
+}
+
+const hasNativeNavigation = () => !state.previewMode || Boolean((window as any).__TRANSFER_GENIE_NATIVE_GESTURE_SPY__);
+const nativePageCommand = (page: NativeHistorySheet, action: string, requestId: string) =>
+  (window as any).transferGenieApi?.mobileIntegration?.navigateNativePage(page, action, requestId);
+async function waitForNavigationPaint() {
+  await nextTick();
+  // nextTick flushes Vue's DOM, not WebKit's rendering transaction. Keep the
+  // native cover until a full paint opportunity has followed that update.
+  await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+}
+
+async function openNativeSheet(sheet: NativeHistorySheet, options: { message?: MobileMessage; picker?: "media" | "document" } = {}) {
+  if (nativePagePreparing.value || managedHistorySheet.value) return;
+  const requestId = crypto.randomUUID();
+  const previousSheet = activeSheet.value;
+  nativePagePreparing.value = true;
+  let prepared = false;
+  try {
+    if (hasNativeNavigation()) {
+      const result = await nativePageCommand(sheet, "prepare", requestId);
+      if (!result?.accepted) throw new Error("原生页面暂时无法打开，请重试");
+      prepared = true;
+    }
+    if (options.message) selectedMessage.value = options.message;
+    managedHistorySheet.value = sheet;
+    nativePageRequestId.value = requestId;
+    nativePickerAfterShow = options.picker;
+    openSheet(sheet);
+    await waitForNavigationPaint();
+    if (prepared) {
+      const result = await nativePageCommand(sheet, "show", requestId);
+      if (!result?.accepted) throw new Error("原生页面转场未完成，请重试");
+    }
+    nativePagePresented.value = true;
+    if (options.message && !options.message.previewUrl) void controller.retryPreview(options.message);
+    if (options.picker && !prepared) {
+      if (options.picker === "media") await controller.selectMedia();
+      else await controller.selectDocuments();
+    }
+  } catch (error) {
+    activeSheet.value = previousSheet;
+    managedHistorySheet.value = null;
+    nativePageRequestId.value = "";
+    nativePagePresented.value = false;
+    if (prepared) await nativePageCommand(sheet, "cancel", requestId);
+    state.error = String(error);
+  } finally {
+    nativePagePreparing.value = false;
+  }
+}
+
+async function requestNativeHistoryBack() {
+  if (!managedHistorySheet.value) {
+    clearTopLevelSheet();
+    return;
+  }
+  const page = managedHistorySheet.value;
+  const requestId = nativePageRequestId.value;
+  explicitNativeClose = true;
+  explicitCloseFingerprint = returnFingerprint();
+  if (!hasNativeNavigation()) {
+    await handleNativePageReturned(new CustomEvent("transfer-genie-navigation-returned", { detail: { page, requestId } }));
+    return;
+  }
+  try {
+    const result = await nativePageCommand(page, "close", requestId);
+    if (!result?.accepted) {
+      explicitNativeClose = false;
+      navigationError.value = "页面正在切换，请稍后重试";
+    }
+  } catch {
+    explicitNativeClose = false;
+    navigationError.value = "暂时无法返回，请重试";
+  }
+}
+
+async function handleNativePageReturned(event: Event) {
+  const { page, requestId } = (event as CustomEvent).detail || {};
+  if (page !== managedHistorySheet.value || requestId !== nativePageRequestId.value) return;
+  const safe = activeSheet.value === page && !detailUnderlay.value && !composerUnderlay.value &&
+    (page === "detail" || composerNativeBackSafe.value);
+  if (!safe && !(explicitNativeClose && explicitCloseFingerprint === returnFingerprint())) {
+    setNativeNavigationGestures(false);
+    if (hasNativeNavigation()) await nativePageCommand(page, "resume", requestId);
+    navigationError.value = "当前操作尚未完成，请稍后返回";
+    return;
+  }
+  explicitNativeClose = false;
+  nativePagePresented.value = false;
+  managedHistorySheet.value = null;
+  nativePageRequestId.value = "";
+  clearTopLevelSheet();
+  await waitForNavigationPaint();
+  if (hasNativeNavigation()) await nativePageCommand(page, "finish", requestId);
+}
+function returnFingerprint() {
+  return JSON.stringify([activeSheet.value, state.boot, state.activeProfile?.id, state.account?.userId,
+    state.activeProfile?.supabase?.space_id, state.composer.text, state.composer.format,
+    state.composer.marked, state.composer.tagIds, state.composer.dueDate,
+    state.composer.attachments.map(item => [item.clientId, item.path]),
+    state.composer.selecting, state.composer.sending, composerComposing.value]);
+}
+async function handleNativePageShown(event: Event) {
+  const { page, requestId } = (event as CustomEvent).detail || {};
+  if (page !== managedHistorySheet.value || requestId !== nativePageRequestId.value) return;
+  const picker = nativePickerAfterShow;
+  nativePickerAfterShow = undefined;
+  if (picker === "media") await controller.selectMedia();
+  else if (picker === "document") await controller.selectDocuments();
+  else {
+    const selector = page === "composer" ? '.mobile-compose-editor textarea, .mobile-compose-editor [contenteditable="true"]' : '.mobile-detail-sheet header button';
+    document.querySelector<HTMLElement>(selector)?.focus({ preventScroll: true });
+  }
+}
+
 function openSheet(name: SheetName) {
   window.clearTimeout(composerCloseTimer);
   window.clearTimeout(draftStatusTimer);
@@ -358,6 +545,7 @@ function openSheet(name: SheetName) {
   if (name === "about" && !state.previewMode)
     void refreshMobileDiagnostic();
   void nextTick(() => {
+    if (nativePagePreparing.value && hasNativeNavigation()) return;
     const sheet = document.querySelector<HTMLElement>(
       ".mobile-sheet-layer .mobile-sheet:not([aria-hidden='true'])",
     );
@@ -370,7 +558,7 @@ function openSheet(name: SheetName) {
   });
 }
 function closeSheet() {
-  if (swipeSaving.value) return;
+  if (navigationSaving.value) return;
   if (activeSheet.value === "connection-remove") {
     connectionRemoveEscalated.value = false;
     state.connectionEditor.error = "";
@@ -400,7 +588,40 @@ function closeSheet() {
     void nextTick(() => document.querySelector<HTMLElement>(".mobile-detail-more")?.focus({ preventScroll: true }));
     return;
   }
+  if (managedHistorySheet.value && (activeSheet.value === "detail" || activeSheet.value === "composer")) {
+    void closeNativeSheetSafely();
+    return;
+  }
   dismissSheets();
+}
+async function closeNativeSheetSafely() {
+  if (managedHistorySheet.value === "detail") {
+    requestNativeHistoryBack();
+    return;
+  }
+  if (managedHistorySheet.value !== "composer" || activeSheet.value !== "composer") return;
+  if (state.composer.sending || state.composer.selecting) {
+    navigationError.value = "请等待当前操作完成后再返回";
+    return;
+  }
+  if (!state.composer.persistenceReady || composerComposing.value) {
+    navigationError.value = composerComposing.value ? "请先完成当前输入再返回" : "草稿尚未准备好，请稍后重试";
+    return;
+  }
+  if (!state.composer.draftPersisted) {
+    navigationSaving.value = true;
+    navigationError.value = "";
+    let saved = false;
+    try { saved = await controller.persistComposerDraftForNavigation(); }
+    catch { saved = false; }
+    finally { navigationSaving.value = false; }
+    if (managedHistorySheet.value !== "composer" || activeSheet.value !== "composer") return;
+    if (!saved) {
+      navigationError.value = state.composer.error || "草稿保存未完成，请重试";
+      return;
+    }
+  }
+  requestNativeHistoryBack();
 }
 const editedConnection = computed(() => state.profiles.find((profile: any) => profile.id === state.connectionEditor.profileId) || null);
 function openConnectionEdit(profile: any) {
@@ -427,97 +648,24 @@ async function removeConnection(abandonWork = false) {
   if (!abandonWork && /待上传|冲突|未完成|传输/.test(state.connectionEditor.error)) connectionRemoveEscalated.value = true;
 }
 async function chooseAttachment(kind: 'media' | 'document') {
-  openSheet('composer');
+  if (managedHistorySheet.value !== 'composer') {
+    openNativeSheet('composer', { picker: kind });
+    return;
+  }
+  activeSheet.value = 'composer';
   await nextTick();
   if (kind === 'media') await controller.selectMedia();
   else await controller.selectDocuments();
 }
 function dismissSheets(draftAlreadySaved = false) {
-  if (swipeSaving.value) return;
+  if (navigationSaving.value) return;
   if (activeSheet.value === "composer" && state.composer.selecting) return;
-  if (activeSheet.value === "composer" && !state.composer.sending && !draftAlreadySaved) void controller.persistComposerDraft(true);
-  window.clearTimeout(composerCloseTimer);
-  activeSheet.value = null;
-  detailUnderlay.value = false;
-  markReturnSheet.value = null;
-  markOpener = null;
-  deleteConfirmation.value = null;
-  cacheConfirmation.value = false;
-  selectedMessage.value = null;
-  const opener = sheetOpener;
-  sheetOpener = null;
-  void nextTick(() => opener?.focus({ preventScroll: true }));
-}
-
-function swipeStart(event: TouchEvent, sheet: "detail" | "composer") {
-  if (swipeGesture || event.touches.length !== 1) { cancelSwipe(); return; }
-  if (activeSheet.value !== sheet || swipeSaving.value) return;
-  const touch = event.touches[0];
-  if (touch.clientX < window.innerWidth - 32) return;
-  const target = event.target instanceof Element ? event.target : null;
-  if (target?.closest("button, a, video, audio, select, .mobile-markdown-toolbar, .mobile-attachment-strip")) return;
-  if ((target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) && target.selectionStart !== target.selectionEnd) return;
-  if (window.getSelection()?.toString()) return;
-  for (let element = target; element && !element.classList.contains("mobile-sheet"); element = element.parentElement) {
-    const overflow = getComputedStyle(element).overflowX;
-    if ((overflow === "auto" || overflow === "scroll") && element.scrollWidth > element.clientWidth + 1) return;
-  }
-  swipeError.value = "";
-  swipeGesture = { sheet, generation: sheetGeneration, x: touch.clientX, y: touch.clientY, time: performance.now(), locked: false };
-}
-
-function cancelSwipe() {
-  swipeGesture = null;
-  swipeDragging.value = false;
-  swipeOffset.value = 0;
-}
-
-function swipeMove(event: TouchEvent) {
-  const gesture = swipeGesture;
-  if (!gesture) return;
-  if (event.touches.length !== 1 || gesture.generation !== sheetGeneration || activeSheet.value !== gesture.sheet) { cancelSwipe(); return; }
-  const dx = event.touches[0].clientX - gesture.x;
-  const dy = event.touches[0].clientY - gesture.y;
-  if (!gesture.locked) {
-    if (Math.hypot(dx, dy) < 10) return;
-    if (dx >= 0 || -dx < Math.abs(dy) * 1.4) { cancelSwipe(); return; }
-    gesture.locked = true;
-    swipeDragging.value = true;
-  }
-  if (event.cancelable) event.preventDefault();
-  swipeOffset.value = Math.min(0, dx);
-}
-
-async function swipeEnd(event: TouchEvent) {
-  const gesture = swipeGesture;
-  if (!gesture) return;
-  if (event.touches.length || gesture.generation !== sheetGeneration || activeSheet.value !== gesture.sheet) { cancelSwipe(); return; }
-  const distance = -swipeOffset.value;
-  const elapsed = Math.max(1, performance.now() - gesture.time);
-  const complete = gesture.locked && (distance >= Math.min(110, window.innerWidth * .25) || (distance >= 45 && distance / elapsed > .55));
-  if (gesture.locked && event.cancelable) event.preventDefault();
-  cancelSwipe();
-  if (!complete) return;
-  if (gesture.sheet === "detail") { closeSheet(); return; }
-  if (state.composer.sending || state.composer.selecting) {
-    swipeError.value = "请等待当前操作完成后再返回";
+  if (managedHistorySheet.value) {
+    if (activeSheet.value === "composer" && !state.composer.sending && !draftAlreadySaved) void controller.persistComposerDraft(true);
+    requestNativeHistoryBack();
     return;
   }
-  if (!state.composer.persistenceReady || composerComposing.value) {
-    swipeError.value = composerComposing.value ? "请先完成当前输入再返回" : "草稿尚未准备好，请稍后重试";
-    return;
-  }
-  swipeSaving.value = true;
-  let saved = false;
-  try { saved = await controller.persistComposerDraftForSwipe(); }
-  catch { saved = false; }
-  finally { swipeSaving.value = false; }
-  if (gesture.generation !== sheetGeneration || activeSheet.value !== "composer") return;
-  if (!saved) {
-    swipeError.value = state.composer.error || "草稿保存未完成，请重试";
-    return;
-  }
-  dismissSheets(true);
+  clearTopLevelSheet();
 }
 function trapSheetFocus(event: KeyboardEvent) {
   const sheet = document.querySelector<HTMLElement>(
@@ -553,7 +701,7 @@ function handleGlobalKeydown(event: KeyboardEvent) {
 watch(
   () => state.boot,
   (boot) => {
-    if (boot !== "ready") {
+    if (boot !== "ready" && !managedHistorySheet.value) {
       dismissSheets();
       searchQuery.value = "";
       activeTag.value = "";
@@ -577,9 +725,7 @@ function openMessage(message: MobileMessage) {
   }
   if (longPressTriggered) { longPressTriggered = false; return; }
   if (selectionMode.value) { toggleMessageSelection(message); return; }
-  selectedMessage.value = message;
-  openSheet("detail");
-  if (!message.previewUrl) void controller.retryPreview(message);
+  openNativeSheet("detail", { message });
 }
 function beginLongPress(message: MobileMessage) {
   window.clearTimeout(longPressTimer);
@@ -831,6 +977,15 @@ async function confirmCacheClear() {
 }
 
 onMounted(async () => {
+  // Warm the editor chunk while the user is reading the feed. Its code remains
+  // split out of detail pages, but opening a Markdown draft usually hits cache.
+  if (!initialNativeSheet) {
+    // Prefetch is optional; a failed idle request must not break navigation.
+    const warmEditor = () => { void loadMobileMarkdownEditor().catch(() => undefined); };
+    const requestIdle = (window as any).requestIdleCallback as undefined | ((callback: () => void, options: { timeout: number }) => number);
+    if (requestIdle) editorWarmIdle = requestIdle(warmEditor, { timeout: 1800 });
+    else editorWarmTimer = window.setTimeout(warmEditor, 600);
+  }
   updateViewport();
   window.visualViewport?.addEventListener("resize", updateViewport);
   window.visualViewport?.addEventListener("scroll", updateViewport);
@@ -845,8 +1000,28 @@ onMounted(async () => {
     controller.refreshAfterForeground,
   );
   window.addEventListener("keydown", handleGlobalKeydown);
+  window.addEventListener("transfer-genie-navigation-returned", handleNativePageReturned);
+  window.addEventListener("transfer-genie-navigation-shown", handleNativePageShown);
   window.addEventListener("transfer-genie-mobile-backgrounding", persistDraftBeforeBackground);
   await controller.initialize();
+  if (initialNativeSheet && state.boot !== "ready") {
+    navigationError.value = state.error || "当前连接暂不可用，请返回消息列表重试";
+  }
+  if (initialNativeSheet === "detail") {
+    if (selectedMessage.value) {
+      if (!selectedMessage.value.previewUrl) void controller.retryPreview(selectedMessage.value);
+    } else {
+      navigationError.value = "消息详情已失效，请返回消息列表重试";
+    }
+  } else if (initialNativeSheet === "composer") {
+    const picker = sessionStorage.getItem(nativePickerStorageKey);
+    sessionStorage.removeItem(nativePickerStorageKey);
+    if (picker === "media" || picker === "document") {
+      await nextTick();
+      if (picker === "media") await controller.selectMedia();
+      else await controller.selectDocuments();
+    }
+  }
   removeTransferListeners = await controller.installTransferListeners();
   statusTimer = window.setInterval(() => {
     if (state.boot === "ready" && !state.previewMode)
@@ -854,7 +1029,10 @@ onMounted(async () => {
   }, 30000);
 });
 onBeforeUnmount(() => {
+  window.clearTimeout(editorWarmTimer);
+  if (editorWarmIdle !== undefined) (window as any).cancelIdleCallback?.(editorWarmIdle);
   void controller.deactivateComposerPersistence();
+  setNativeNavigationGestures(false);
   window.visualViewport?.removeEventListener("resize", updateViewport);
   window.visualViewport?.removeEventListener("scroll", updateViewport);
   window.removeEventListener("resize", updateViewport);
@@ -869,6 +1047,8 @@ onBeforeUnmount(() => {
     controller.refreshAfterForeground,
   );
   window.removeEventListener("keydown", handleGlobalKeydown);
+  window.removeEventListener("transfer-genie-navigation-returned", handleNativePageReturned);
+  window.removeEventListener("transfer-genie-navigation-shown", handleNativePageShown);
   window.removeEventListener("transfer-genie-mobile-backgrounding", persistDraftBeforeBackground);
   window.clearTimeout(longPressTimer);
   window.clearTimeout(composerCloseTimer);
@@ -887,7 +1067,7 @@ onBeforeUnmount(() => {
     <div class="mobile-ambient mobile-ambient-two"></div>
 
     <main
-      v-if="state.boot !== 'ready'"
+      v-if="state.boot !== 'ready' && !initialNativeSheet"
       class="mobile-onboarding"
       :inert="activeSheet !== null"
       :aria-hidden="activeSheet ? 'true' : undefined"
@@ -1016,7 +1196,7 @@ onBeforeUnmount(() => {
       </p>
     </main>
 
-    <template v-else>
+    <template v-else-if="!initialNativeSheet">
       <main
         class="mobile-main"
         :inert="activeSheet !== null"
@@ -1389,7 +1569,7 @@ onBeforeUnmount(() => {
           <button class="mobile-composer-entry"
           type="button"
           aria-label="新消息"
-          @click="openSheet('composer')"
+          @click="openNativeSheet('composer')"
         >
           <span>{{ state.composer.text || state.composer.attachments.length ? '继续编辑草稿…' : '写消息…' }}</span>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 4 5 5-11 11H4v-5L15 4ZM12 7l5 5"/></svg>
@@ -1447,7 +1627,7 @@ onBeforeUnmount(() => {
     <div
         v-if="activeSheet"
         class="mobile-sheet-layer"
-        :class="{ 'has-detail-underlay': detailUnderlay, 'has-mark-underlay': composerUnderlay || actionsUnderlay }"
+        :class="{ 'has-detail-underlay': detailUnderlay, 'has-mark-underlay': composerUnderlay || actionsUnderlay, 'is-native-navigation': managedHistorySheet !== null }"
         role="presentation"
         @click.self="closeSheet"
       >
@@ -1456,8 +1636,7 @@ onBeforeUnmount(() => {
         <section
           v-if="activeSheet === 'composer' || composerUnderlay"
           class="mobile-sheet mobile-composer-sheet is-fullscreen-editor"
-          :class="{ 'has-markdown-tools': state.composer.format === 'markdown', 'is-swipe-dragging': activeSheet === 'composer' && swipeDragging }"
-          :style="activeSheet === 'composer' ? { '--swipe-offset': `${swipeOffset}px` } : undefined"
+          :class="{ 'has-markdown-tools': state.composer.format === 'markdown' }"
           role="dialog"
           :aria-modal="!composerUnderlay"
           :aria-hidden="composerUnderlay ? 'true' : undefined"
@@ -1468,19 +1647,15 @@ onBeforeUnmount(() => {
           @focusout="handleComposerFocusOut"
           @compositionstart="composerComposing = true"
           @compositionend="composerComposing = false"
-          @touchstart="swipeStart($event, 'composer')"
-          @touchmove="swipeMove"
-          @touchend="swipeEnd"
-          @touchcancel="cancelSwipe"
         >
           <div class="mobile-sheet-grabber"></div>
           <header>
             <h2 id="mobile-composer-title" class="mobile-visually-hidden">新消息</h2>
             <span class="mobile-editor-destination">{{ currentSpace?.name }}</span>
-            <button type="button" aria-label="关闭新消息" :disabled="state.composer.selecting || swipeSaving" @click="closeSheet">×</button>
+            <button type="button" aria-label="关闭新消息" :disabled="state.composer.selecting || navigationSaving" @click="closeSheet">×</button>
           </header>
-          <p v-if="swipeError || swipeSaving" class="mobile-swipe-status" :role="swipeError ? 'alert' : 'status'">{{ swipeError || '正在保存草稿…' }}</p>
-          <div class="mobile-composer-content" role="region" aria-label="消息编辑与附件" :inert="swipeSaving">
+          <p v-if="navigationError || navigationSaving" class="mobile-navigation-status" :role="navigationError ? 'alert' : 'status'">{{ navigationError || '正在保存草稿…' }}</p>
+          <div class="mobile-composer-content" role="region" aria-label="消息编辑与附件" :inert="navigationSaving">
           <div v-if="state.composer.format === 'markdown'" id="mobile-composer-toolbar-dock" class="mobile-composer-toolbar-dock"></div>
           <div class="mobile-compose-editor">
           <MobileMarkdownEditor v-if="state.composer.format === 'markdown'" v-model="state.composer.text" toolbar-target="#mobile-composer-toolbar-dock" :show-dismiss-keyboard="keyboardVisible" :disabled="state.composer.sending || !state.composer.persistenceReady" @dismiss-keyboard="dismissComposerKeyboard" />
@@ -1491,7 +1666,7 @@ onBeforeUnmount(() => {
             rows="6"
             aria-label="消息内容"
             placeholder="输入文字，或加入照片和文件…"
-            autofocus
+            :autofocus="!hasNativeNavigation()"
           ></textarea>
           </div>
           <div class="mobile-compose-actions">
@@ -1566,8 +1741,8 @@ onBeforeUnmount(() => {
           </p>
           <div class="mobile-compose-bottom">
           <div class="mobile-composer-format" aria-label="消息格式">
-            <button type="button" :aria-pressed="state.composer.format === 'text'" :disabled="state.composer.sending" @click="state.composer.format = 'text'">文字</button>
-            <button type="button" :aria-pressed="state.composer.format === 'markdown'" :disabled="state.composer.sending" @click="state.composer.format = 'markdown'">Markdown</button>
+            <button type="button" :aria-pressed="state.composer.format === 'text'" :disabled="state.composer.sending || !state.composer.persistenceReady" @click="state.composer.format = 'text'">文字</button>
+            <button type="button" :aria-pressed="state.composer.format === 'markdown'" :disabled="state.composer.sending || !state.composer.persistenceReady" @click="state.composer.format = 'markdown'">Markdown</button>
           </div>
           <div class="mobile-compose-tools">
             <button type="button" aria-label="照片" :disabled="state.busy || state.composer.sending || state.composer.selecting" @click="controller.selectMedia"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="8.5" cy="9" r="1.5"/><path d="m4 18 5-5 3 3 3-4 5 6"/></svg><span class="mobile-visually-hidden">照片</span></button>
@@ -1998,18 +2173,12 @@ onBeforeUnmount(() => {
         <section
           v-if="activeSheet === 'detail' || detailUnderlay"
           class="mobile-sheet mobile-detail-sheet"
-          :class="{ 'is-swipe-dragging': activeSheet === 'detail' && swipeDragging }"
-          :style="activeSheet === 'detail' ? { '--swipe-offset': `${swipeOffset}px` } : undefined"
           role="dialog"
           :aria-modal="!detailUnderlay"
           :aria-hidden="detailUnderlay ? 'true' : undefined"
           :inert="detailUnderlay"
           aria-labelledby="mobile-detail-title"
           tabindex="-1"
-          @touchstart="swipeStart($event, 'detail')"
-          @touchmove="swipeMove"
-          @touchend="swipeEnd"
-          @touchcancel="cancelSwipe"
         >
           <div class="mobile-sheet-grabber"></div>
           <header>
@@ -2024,6 +2193,7 @@ onBeforeUnmount(() => {
               ×
             </button>
           </header>
+          <p v-if="navigationError" class="mobile-navigation-status" role="alert">{{ navigationError }}</p>
           <div class="mobile-detail-scroll">
           <div
             v-if="
