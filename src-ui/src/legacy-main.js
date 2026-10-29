@@ -12837,8 +12837,10 @@ async function sendText() {
   let text = '';
   const cw = window.transferGenieComposer;
   const usesWorkspaceComposer = !!(cw && cw.isActive && cw.isActive() && cw.getActiveDraft);
+  let sendingDraft = null;
   if (usesWorkspaceComposer) {
     const draft = cw.getActiveDraft();
+    sendingDraft = draft ? { ...draft } : null;
     if (draft && draft.format) currentFormat = draft.format;
     text = draft ? (draft.text || '') : '';
   } else if (currentFormat === 'markdown' && mdEditor) {
@@ -12891,11 +12893,9 @@ async function sendText() {
       marked_due_date: activeMarkedOptions.dueDate || null,
     });
 
-    if (usesWorkspaceComposer) {
-      if (cw && cw.clearActiveDraftAfterSend) cw.clearActiveDraftAfterSend();
-    } else if (formatToSend === 'markdown' && mdEditor) {
+    if (!usesWorkspaceComposer && formatToSend === 'markdown' && mdEditor) {
       mdEditor.setMarkdown('');
-    } else {
+    } else if (!usesWorkspaceComposer) {
       textInput.value = '';
     }
   }
@@ -12997,6 +12997,7 @@ async function sendText() {
 
     if (!hadSendFailure) {
       setSuccessStatus('发送成功');
+      if (sendingDraft) cw.promptCloseSentDraft?.(sendingDraft);
     }
   })();
 }

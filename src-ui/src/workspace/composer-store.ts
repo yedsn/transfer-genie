@@ -128,7 +128,9 @@ export const composerStore = {
     const idx = tabs.findIndex((t: any) => t.id === tabId);
     return ccore.countNonEmpty(idx >= 0 ? tabs.slice(0, idx) : []);
   },
-  removeDraftConfirmed(tabId: string) { commit(core.closeTab(state, tabId)); },
+  removeDraftConfirmed(tabId: string) {
+    commit(ccore.closeDraftWithBlankFallback(state, tabId, { format: getDefaultDraftFormat() }));
+  },
   closeOthersInPaneConfirmed(paneId: string, keepTabId: string) { commit(ccore.closeOtherTabsInPane(state, paneId, keepTabId)); },
   closeAllInPaneConfirmed(paneId: string) {
     commit(ccore.closeAllTabsInPane(state, paneId, { format: getDefaultDraftFormat() }));
