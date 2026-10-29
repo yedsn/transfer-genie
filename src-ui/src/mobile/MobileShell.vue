@@ -1072,11 +1072,17 @@ onBeforeUnmount(() => {
       :inert="activeSheet !== null"
       :aria-hidden="activeSheet ? 'true' : undefined"
     >
-      <section v-if="state.boot === 'loading'" class="mobile-gate-card">
-        <span class="mobile-gate-logo">TG</span>
-        <h1>正在打开口袋中转站</h1>
-        <p>读取本机 SQLite、Keychain 会话与 Supabase 空间。</p>
-        <div class="mobile-gate-loader"></div>
+      <section
+        v-if="state.boot === 'loading'"
+        class="mobile-gate-card mobile-loading-gate"
+        role="status"
+        aria-live="polite"
+        aria-busy="true"
+      >
+        <img class="mobile-loading-logo" src="/icons/transfer-genie-logo.svg" alt="" />
+        <h1>Transfer Genie</h1>
+        <p>正在准备你的空间</p>
+        <div class="mobile-loading-dots" aria-hidden="true"><i></i><i></i><i></i></div>
       </section>
       <section
         v-else-if="state.connectionWizard.open"

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">Transfer Genie</title>
+  <path fill="#20bf61" d="M44 48h177c13 0 23 5 33 14l48 44c9 8 18 12 31 12h127c29 0 52 23 52 52v280c0 34-28 62-62 62H62C28 512 0 484 0 450V110c0-34 18-62 44-62Z"/>
+  <path fill="#fff" d="M131 247h130v-43c0-13 15-20 25-12l91 70c9 7 9 21 0 28l-91 70c-10 8-25 1-25-12v-43H131c-10 0-18-8-18-18v-22c0-10 8-18 18-18Z"/>
+</svg>

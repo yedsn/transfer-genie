@@ -12,6 +12,9 @@
       if (nativePage === 'detail' || nativePage === 'composer') {
         document.documentElement.classList.add('is-mobile-native-page');
       }
+      if (/iPhone|iPad|iPod/i.test(navigator.userAgent) || new URLSearchParams(window.location.search).get('mobile-preview') === '1') {
+        document.documentElement.classList.add('is-mobile-entry');
+      }
     </script>
     <style>
       [v-cloak] { display: none !important; }
@@ -60,8 +63,74 @@
         color: rgba(47, 42, 37, 0.62);
       }
       @keyframes boot-spin { to { transform: rotate(360deg); } }
+      .boot-mobile-brand,
+      .boot-mobile-dots { display: none; }
+      html.is-mobile-entry #app-boot-screen {
+        overflow: hidden;
+        background:
+          radial-gradient(circle at 84% 7%, rgba(32, 191, 97, 0.10), transparent 27%),
+          radial-gradient(circle at 4% 78%, rgba(244, 91, 34, 0.06), transparent 25%),
+          #f8f6f1;
+        color: #1d1c19;
+        font-family: "Avenir Next", "PingFang SC", "Hiragino Sans GB", sans-serif;
+      }
+      html.is-mobile-entry .boot-card {
+        display: grid;
+        justify-items: center;
+        gap: 0;
+        width: min(100%, 260px);
+        padding: 0 24px;
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+        box-shadow: none;
+        text-align: center;
+      }
+      html.is-mobile-entry .boot-spinner,
+      html.is-mobile-entry .boot-copy { display: none; }
+      html.is-mobile-entry .boot-mobile-brand {
+        display: grid;
+        justify-items: center;
+      }
+      html.is-mobile-entry .boot-mobile-logo {
+        width: 76px;
+        height: 76px;
+        object-fit: contain;
+        filter: drop-shadow(0 12px 22px rgba(26, 123, 68, 0.13));
+      }
+      html.is-mobile-entry .boot-mobile-title {
+        margin-top: 20px;
+        font-size: 19px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+      }
+      html.is-mobile-entry .boot-mobile-status {
+        margin-top: 8px;
+        color: #817a70;
+        font-size: 12px;
+        letter-spacing: 0.02em;
+      }
+      html.is-mobile-entry .boot-mobile-dots {
+        display: flex;
+        gap: 6px;
+        margin-top: 18px;
+      }
+      html.is-mobile-entry .boot-mobile-dots i {
+        width: 5px;
+        height: 5px;
+        border-radius: 50%;
+        background: #20a958;
+        animation: boot-dot 1.15s ease-in-out infinite;
+      }
+      html.is-mobile-entry .boot-mobile-dots i:nth-child(2) { animation-delay: 140ms; }
+      html.is-mobile-entry .boot-mobile-dots i:nth-child(3) { animation-delay: 280ms; }
+      @keyframes boot-dot {
+        0%, 70%, 100% { opacity: 0.24; transform: translateY(0); }
+        35% { opacity: 1; transform: translateY(-3px); }
+      }
       @media (prefers-reduced-motion: reduce) {
         .boot-spinner { animation: none; }
+        html.is-mobile-entry .boot-mobile-dots i { animation: none; opacity: 0.55; }
       }
     </style>
   </head>
@@ -69,10 +138,16 @@
     <div id="app-boot-screen" role="status" aria-live="polite">
       <div class="boot-card">
         <div class="boot-spinner" aria-hidden="true"></div>
-        <div>
+        <div class="boot-copy">
           <div class="boot-title">Transfer Genie</div>
           <div class="boot-subtitle" id="app-boot-subtitle">正在加载...</div>
         </div>
+        <div class="boot-mobile-brand">
+          <img class="boot-mobile-logo" src="icons/transfer-genie-logo.svg" alt="" />
+          <div class="boot-mobile-title">Transfer Genie</div>
+          <div class="boot-mobile-status">正在准备你的空间</div>
+        </div>
+        <div class="boot-mobile-dots" aria-hidden="true"><i></i><i></i><i></i></div>
       </div>
     </div>
     <script>

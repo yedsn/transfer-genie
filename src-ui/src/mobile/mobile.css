@@ -418,7 +418,36 @@ html[data-mobile-accessibility-text="true"] .is-keyboard-visible .mobile-compose
 .mobile-gate-card input, .mobile-gate-card textarea { width: 100%; padding: 12px 13px; border: 1px solid var(--mobile-line); border-radius: 13px; outline: none; color: var(--mobile-ink); background: #fff; font-size: calc(14px * var(--mobile-text-scale, 1)); line-height: 1.4; }
 .mobile-gate-card input:focus, .mobile-gate-card textarea:focus { border-color: rgba(244,91,34,.48); box-shadow: 0 0 0 3px rgba(244,91,34,.08); }
 .mobile-gate-card .mobile-primary-button { margin-top: 14px; }
-.mobile-gate-loader { width: 34px; height: 34px; margin-top: 22px; border: 3px solid #eadfd4; border-top-color: var(--mobile-orange); border-radius: 50%; animation: mobile-spin .9s linear infinite; }
+.mobile-loading-gate {
+  display: grid;
+  justify-items: center;
+  width: min(100%, 260px);
+  padding: 0 24px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  text-align: center;
+}
+.mobile-loading-logo {
+  width: 76px;
+  height: 76px;
+  object-fit: contain;
+  filter: drop-shadow(0 12px 22px rgba(26, 123, 68, .13));
+}
+.mobile-loading-gate h1 { margin: 20px 0 0; font: 700 calc(19px * var(--mobile-text-scale, 1))/1.25 "Avenir Next", "PingFang SC", sans-serif; letter-spacing: -.02em; }
+.mobile-loading-gate > p { margin: 8px 0 0; color: #817a70; font-size: calc(12px * var(--mobile-text-scale, 1)); line-height: 1.5; letter-spacing: .02em; }
+.mobile-loading-dots { display: flex; gap: 6px; margin-top: 18px; }
+.mobile-loading-dots i { width: 5px; height: 5px; border-radius: 50%; background: #20a958; animation: mobile-loading-dot 1.15s ease-in-out infinite; }
+.mobile-loading-dots i:nth-child(2) { animation-delay: 140ms; }
+.mobile-loading-dots i:nth-child(3) { animation-delay: 280ms; }
+@keyframes mobile-loading-dot {
+  0%, 70%, 100% { opacity: .24; transform: translateY(0); }
+  35% { opacity: 1; transform: translateY(-3px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mobile-loading-dots i { animation: none; opacity: .55; }
+}
 .mobile-gate-empty, .mobile-inline-error { color: var(--mobile-red) !important; font-size: calc(11px * var(--mobile-text-scale, 1)) !important; line-height: 1.5; }
 .mobile-inline-error { width: min(100%,430px); margin: 12px auto 0; padding: 10px 12px; border-radius: 12px; background: rgba(201,71,50,.08); text-align: center; }
 .mobile-feedback { margin: 10px 0 -9px; padding: 9px 11px; border-radius: 12px; color: #39754c; background: rgba(65,139,90,.09); font-size: calc(10px * var(--mobile-text-scale, 1)); line-height: 1.45; }
