@@ -39,7 +39,20 @@ pub fn resolve_active_provider(settings: &Settings) -> Result<ProviderConfig, St
     if active_id.is_empty() {
         return Err("请先选择存储空间".to_string());
     }
-    resolve_provider_by_id(settings, active_id)
+    let provider = resolve_provider_by_id(settings, active_id)?;
+    require_bound_provider(&provider)?;
+    Ok(provider)
+}
+
+pub fn require_bound_provider(provider: &ProviderConfig) -> Result<(), String> {
+    if let ProviderConfig::Supabase(profile) = provider {
+        profile
+            .supabase
+            .as_ref()
+            .ok_or_else(|| "Supabase 存储空间配置不完整".to_string())?
+            .require_bound()?;
+    }
+    Ok(())
 }
 
 pub fn resolve_provider_by_id(
@@ -130,7 +143,8 @@ mod tests {
                 supabase: Some(SupabaseStorageConfig {
                     api_url: "https://example.com".into(),
                     anon_key: "public".into(),
-                    space_id: String::new(),
+                    space_id: "00000000-0000-4000-8000-000000000001".into(),
+                    binding_state: Default::default(),
                 }),
             }],
             active_storage_profile_id: Some("cloud".into()),

@@ -343,6 +343,7 @@ pub async fn create_space(
     client: &Client,
     config: &SupabaseStorageConfig,
     session: &SupabaseSession,
+    operation_id: &str,
     name: &str,
 ) -> Result<(), String> {
     let response = client
@@ -354,7 +355,11 @@ pub async fn create_space(
         .bearer_auth(&session.access_token)
         .header("Accept-Profile", APP_SCHEMA)
         .header("Content-Profile", APP_SCHEMA)
-        .json(&json!({"p_space_id":config.space_id,"p_name":name}))
+        .json(&json!({
+            "p_operation_id": operation_id,
+            "p_space_id": config.space_id,
+            "p_name": name
+        }))
         .send()
         .await
         .map_err(|error| format!("创建 Supabase 存储空间失败: {error}"))?;
@@ -369,6 +374,8 @@ pub async fn create_space(
         ))
     }
 }
+
+pub const SPACE_ACCESS_DENIED: &str = "当前 Supabase 存储空间不存在或账号无权访问";
 
 pub async fn validate_space_access(
     client: &Client,
@@ -401,7 +408,7 @@ pub async fn validate_space_access(
     {
         Ok(())
     } else {
-        Err("当前 Supabase 存储空间不存在或账号无权访问".to_string())
+        Err(SPACE_ACCESS_DENIED.to_string())
     }
 }
 
@@ -807,6 +814,7 @@ pub async fn connect_realtime(
     config: &SupabaseStorageConfig,
     session: &SupabaseSession,
 ) -> Result<RealtimeSubscription, String> {
+    config.require_bound()?;
     let scheme = if config.api_url.starts_with("https://") {
         "wss://"
     } else {
@@ -824,7 +832,7 @@ pub async fn connect_realtime(
     let (mut socket, _) = timeout(Duration::from_secs(10), connect_async(url))
         .await
         .map_err(|_| "连接 Supabase Realtime 超时".to_string())?
-        .map_err(|error| format!("连接 Supabase Realtime 失败: {error}"))?;
+        .map_err(|_| "连接 Supabase Realtime 失败".to_string())?;
     socket
         .send(Message::Text(
             json!({
@@ -838,13 +846,13 @@ pub async fn connect_realtime(
             .to_string(),
         ))
         .await
-        .map_err(|error| format!("订阅 Supabase Realtime 失败: {error}"))?;
+        .map_err(|_| "订阅 Supabase Realtime 失败".to_string())?;
     loop {
         let message = timeout(Duration::from_secs(10), socket.next())
             .await
             .map_err(|_| "等待 Supabase Realtime 订阅确认超时".to_string())?
             .ok_or_else(|| "Supabase Realtime 连接已关闭".to_string())?
-            .map_err(|error| format!("读取 Supabase Realtime 失败: {error}"))?;
+            .map_err(|_| "读取 Supabase Realtime 失败".to_string())?;
         if let Message::Text(text) = message {
             let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
             if value["event"] == "phx_reply" && value["ref"] == "1" {
@@ -989,6 +997,7 @@ mod tests {
             api_url: "https://example.invalid".into(),
             anon_key: "anon".into(),
             space_id: "space-a".into(),
+            binding_state: Default::default(),
         };
         let query = build_message_page_query(
             &config,

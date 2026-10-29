@@ -21,6 +21,7 @@ const api = {
       { id: 'space-a', name: 'A', current: activeProfile.supabase.space_id === 'space-a' },
       { id: 'space-b', name: 'B', current: activeProfile.supabase.space_id === 'space-b' },
     ],
+    activateStorageProfile: async (profileId) => { activeProfile = { ...activeProfile, id: profileId }; },
     switchSupabaseSpace: async ({ spaceId }) => { activeProfile = { ...activeProfile, supabase: { ...activeProfile.supabase, space_id: spaceId } }; },
   },
   sync: {

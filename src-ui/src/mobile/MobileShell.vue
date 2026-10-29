@@ -18,6 +18,7 @@ import {
 import MobileMessageBody from "./MobileMessageBody.vue";
 import MobileMarkedExcerpt from "./MobileMarkedExcerpt.vue";
 import MobileText from "./MobileText.vue";
+import MobileConnectionWizard from "./MobileConnectionWizard.vue";
 const MobileMarkdownEditor = defineAsyncComponent(() => import('./MobileMarkdownEditor.vue'));
 
 type MobileTab = "feed" | "marked" | "profile";
@@ -27,12 +28,13 @@ type MobileDiagnostic = {
   mainThread?: boolean;
 };
 type SheetName =
-  "composer" | "attach" | "actions" | "transfer" | "spaces" | "detail" | "cache" | "sender" | "about" | "marked-edit" | "unmark-confirm" | "conflicts" | "delete-confirm" | null;
+  "composer" | "attach" | "actions" | "transfer" | "connections" | "connection-manager" | "connection-edit" | "connection-remove" | "detail" | "cache" | "sender" | "about" | "marked-edit" | "unmark-confirm" | "conflicts" | "delete-confirm" | null;
 
 const controller = useMobileController();
 const { state, currentSpace, pendingCount, activeTransfers } = controller;
 const activeTab = ref<MobileTab>("feed");
 const activeSheet = ref<SheetName>(null);
+const connectionRemoveEscalated = ref(false);
 const detailUnderlay = ref(false);
 const viewportHeight = ref(window.visualViewport?.height || window.innerHeight);
 const viewportTop = ref(window.visualViewport?.offsetTop || 0);
@@ -332,8 +334,6 @@ function openSheet(name: SheetName) {
     senderNameDraft.value = state.settings?.sender_name || "";
     state.sender.error = "";
   }
-  if (name === "spaces" && !state.previewMode)
-    void controller.loadSpaces().catch(() => undefined);
   if (name === "transfer" && !state.previewMode)
     void controller.refreshRuntimeState();
   if (name === "conflicts" && !state.previewMode)
@@ -355,6 +355,21 @@ function openSheet(name: SheetName) {
   });
 }
 function closeSheet() {
+  if (activeSheet.value === "connection-remove") {
+    connectionRemoveEscalated.value = false;
+    state.connectionEditor.error = "";
+    activeSheet.value = "connection-edit";
+    void nextTick(() => document.querySelector<HTMLElement>(".mobile-connection-edit-sheet .mobile-danger-button")?.focus({ preventScroll: true }));
+    return;
+  }
+  if (activeSheet.value === "connection-edit") {
+    const profileId = state.connectionEditor.profileId;
+    connectionRemoveEscalated.value = false;
+    state.connectionEditor.error = "";
+    activeSheet.value = "connection-manager";
+    void nextTick(() => document.querySelector<HTMLElement>(`[data-profile-id="${CSS.escape(profileId)}"] .mobile-connection-actions button:last-child`)?.focus({ preventScroll: true }));
+    return;
+  }
   if (state.boot === "ready" && activeSheet.value === "delete-confirm" && detailUnderlay.value) {
     cancelDeletion();
     return;
@@ -370,6 +385,30 @@ function closeSheet() {
     return;
   }
   dismissSheets();
+}
+const editedConnection = computed(() => state.profiles.find((profile: any) => profile.id === state.connectionEditor.profileId) || null);
+function openConnectionEdit(profile: any) {
+  controller.beginConnectionEdit(profile);
+  connectionRemoveEscalated.value = false;
+  activeSheet.value = "connection-edit";
+  void nextTick(() => document.querySelector<HTMLElement>(".mobile-connection-edit-sheet header button")?.focus({ preventScroll: true }));
+}
+function openConnectionRemove() {
+  connectionRemoveEscalated.value = false;
+  state.connectionEditor.error = "";
+  activeSheet.value = "connection-remove";
+  void nextTick(() => document.querySelector<HTMLElement>(".mobile-delete-sheet header button")?.focus({ preventScroll: true }));
+}
+async function saveConnectionName() {
+  if (await controller.renameProfile(state.connectionEditor.name)) activeSheet.value = "connection-manager";
+}
+async function removeConnection(abandonWork = false) {
+  if (!editedConnection.value) return;
+  if (await controller.removeProfile(editedConnection.value, {
+    confirmActiveRemoval: true,
+    abandonWork,
+  })) { activeSheet.value = null; connectionRemoveEscalated.value = false; return; }
+  if (!abandonWork && /待上传|冲突|未完成|传输/.test(state.connectionEditor.error)) connectionRemoveEscalated.value = true;
 }
 async function chooseAttachment(kind: 'media' | 'document') {
   openSheet('composer');
@@ -679,11 +718,23 @@ function conflictSummary(conflict: any, side: "local" | "remote") {
   return String(payload.content || payload.originalName || payload.name || payload.filename || conflict.entityId || "同步项目").slice(0, 90);
 }
 async function chooseSpace(space: any) {
-  if (state.boot === "needs-space" && state.setup.flowId)
+  if ((state.boot === "needs-space" || state.connectionWizard.open) && state.connectionWizard.flowId)
     await controller.completeSetup(space);
   else await controller.switchSpace(space);
   if (state.boot === "ready") closeSheet();
 }
+const connectionStatusText = (profile: any) => ({
+  ready: "连接正常",
+  checking: "正在检查…",
+  "signed-out": "需要登录",
+  "network-error": "网络状态未知",
+  "needs-attention": "需要处理",
+  disabled: "已停用",
+  unknown: "尚未检查",
+}[state.connectionStates[profile.id] || "unknown"]);
+const canActivateConnection = (profile: any) => profile.enabled !== false
+  && (profile.supabase?.binding_state || "bound") === "bound"
+  && !!profile.supabase?.space_id;
 async function clearCache() {
   if (!state.cache.clearing && !state.busy) cacheConfirmation.value = true;
 }
@@ -747,7 +798,12 @@ onBeforeUnmount(() => {
     <div class="mobile-ambient mobile-ambient-one"></div>
     <div class="mobile-ambient mobile-ambient-two"></div>
 
-    <main v-if="state.boot !== 'ready'" class="mobile-onboarding">
+    <main
+      v-if="state.boot !== 'ready'"
+      class="mobile-onboarding"
+      :inert="activeSheet !== null"
+      :aria-hidden="activeSheet ? 'true' : undefined"
+    >
       <section v-if="state.boot === 'loading'" class="mobile-gate-card">
         <span class="mobile-gate-logo">TG</span>
         <h1>正在打开口袋中转站</h1>
@@ -755,63 +811,10 @@ onBeforeUnmount(() => {
         <div class="mobile-gate-loader"></div>
       </section>
       <section
-        v-else-if="state.boot === 'no-profile'"
+        v-else-if="state.connectionWizard.open"
         class="mobile-gate-card mobile-setup-card"
       >
-        <span class="mobile-gate-kicker">SUPABASE ONLY</span>
-        <h1>连接你的云端空间</h1>
-        <p>连接、登录和选择 Space 是三个独立步骤；这里不会自动创建远端空间。</p>
-        <label
-          ><span>连接名称</span
-          ><input v-model="state.setup.profileName" autocomplete="off" /></label
-        ><label
-          ><span>API URL</span
-          ><input
-            v-model="state.setup.apiUrl"
-            type="url"
-            inputmode="url"
-            placeholder="https://…"
-            autocapitalize="none" /></label
-        ><label
-          ><span>公开 anon key</span
-          ><textarea
-            v-model="state.setup.anonKey"
-            rows="3"
-            autocomplete="off"
-          ></textarea></label
-        ><button
-          class="mobile-primary-button"
-          type="button"
-          :disabled="
-            state.setup.sending || !state.setup.apiUrl || !state.setup.anonKey
-          "
-          @click="controller.testSetupConnection"
-        >
-          {{ state.setup.tested ? "连接已验证" : "测试连接" }}</button
-        ><template v-if="state.setup.tested"
-          ><label
-            ><span>邮箱</span
-            ><input
-              v-model="state.setup.email"
-              type="email"
-              autocomplete="username" /></label
-          ><label
-            ><span>密码</span
-            ><input
-              v-model="state.setup.password"
-              type="password"
-              autocomplete="current-password" /></label
-          ><button
-            class="mobile-primary-button"
-            type="button"
-            :disabled="
-              state.setup.sending || !state.setup.email || !state.setup.password
-            "
-            @click="controller.setupSignIn"
-          >
-            登录并读取已有 Space
-          </button></template
-        >
+        <MobileConnectionWizard :state="state" :controller="controller" :cancellable="state.profiles.length > 0" @close="state.boot = state.activeProfile ? state.boot : 'choose-profile'" />
       </section>
       <section
         v-else-if="state.boot === 'choose-profile'"
@@ -825,6 +828,7 @@ onBeforeUnmount(() => {
           :key="profile.id"
           class="mobile-space-option"
           type="button"
+          :disabled="!canActivateConnection(profile) || state.busy"
           @click="controller.chooseProfile(profile)"
         >
           <span>{{ profile.name.slice(0, 1) }}</span>
@@ -832,8 +836,10 @@ onBeforeUnmount(() => {
             <strong>{{ profile.name }}</strong
             ><small>{{ profile.supabase?.api_url }}</small>
           </div>
-          <b>›</b>
+          <b>{{ canActivateConnection(profile) ? "›" : connectionStatusText(profile) }}</b>
         </button>
+        <button class="mobile-secondary-button" type="button" @click="openSheet('connection-manager')">管理连接</button>
+        <button class="mobile-secondary-button" type="button" @click="controller.openConnectionWizard">新增连接</button>
       </section>
       <section v-else-if="state.boot === 'signed-out'" class="mobile-gate-card">
         <span class="mobile-gate-kicker">{{ state.activeProfile?.name }}</span>
@@ -866,6 +872,9 @@ onBeforeUnmount(() => {
         >
           {{ state.login.sending ? "正在登录…" : "登录" }}
         </button>
+        <button class="mobile-secondary-button" type="button" @click="state.boot = 'choose-profile'">选择其他连接</button>
+        <button class="mobile-secondary-button" type="button" @click="openSheet('connection-manager')">管理连接</button>
+        <button class="mobile-secondary-button" type="button" @click="controller.openConnectionWizard">新增连接</button>
       </section>
       <section
         v-else-if="state.boot === 'needs-space'"
@@ -891,6 +900,10 @@ onBeforeUnmount(() => {
         <p v-if="!state.spaces.length" class="mobile-gate-empty">
           当前账号没有可绑定的 Space，请先在已配置的客户端中创建。
         </p>
+        <button v-if="state.activeProfile" class="mobile-primary-button" type="button" @click="controller.openConnectionRepair(state.activeProfile)">修复此连接</button>
+        <button v-if="state.profiles.length > 1" class="mobile-secondary-button" type="button" @click="state.boot = 'choose-profile'">选择其他连接</button>
+        <button class="mobile-secondary-button" type="button" @click="openSheet('connection-manager')">管理连接</button>
+        <button class="mobile-secondary-button" type="button" @click="controller.openConnectionWizard">新增连接</button>
       </section>
       <section v-else class="mobile-gate-card">
         <span class="mobile-gate-logo">!</span>
@@ -903,6 +916,9 @@ onBeforeUnmount(() => {
         >
           重试
         </button>
+        <button v-if="state.profiles.length" class="mobile-secondary-button" type="button" @click="state.boot = 'choose-profile'; state.error = ''">选择其他连接</button>
+        <button v-if="state.profiles.length" class="mobile-secondary-button" type="button" @click="openSheet('connection-manager')">管理连接</button>
+        <button class="mobile-secondary-button" type="button" @click="controller.openConnectionWizard">新增连接</button>
       </section>
       <p
         v-if="state.error && state.boot !== 'error'"
@@ -927,9 +943,9 @@ onBeforeUnmount(() => {
             <button
               class="mobile-space-switcher"
               type="button"
-              :aria-label="`切换 Supabase 存储空间，${compactSyncTitle}`"
+              :aria-label="`切换 Supabase 连接，${compactSyncTitle}`"
               :disabled="selectionMode || state.busy || state.composer.sending || state.sender.saving"
-              @click="openSheet('spaces')"
+              @click="openSheet('connections')"
             >
               <span class="mobile-space-mark">TG</span
               ><span
@@ -1188,11 +1204,11 @@ onBeforeUnmount(() => {
           </header>
           <section class="mobile-settings-group">
             <h2>云端与存储</h2>
-            <button type="button" @click="openSheet('spaces')">
+            <button type="button" @click="openSheet('connection-manager')">
               <span class="mobile-setting-icon is-orange">S</span
               ><span
                 ><strong>存储空间</strong
-                ><small>{{ currentSpace?.name || state.activeProfile?.name }} · Supabase</small
+                ><small>{{ state.activeProfile?.name }} · {{ state.profiles.length }} 个连接</small
                 ></span
               ><svg viewBox="0 0 20 20"><path d="m8 5 5 5-5 5" /></svg></button
             ><button type="button" @click="openSheet('transfer')">
@@ -1338,8 +1354,9 @@ onBeforeUnmount(() => {
           ><span>我的</span>
         </button>
       </nav>
+    </template>
 
-      <div
+    <div
         v-if="activeSheet"
         class="mobile-sheet-layer"
         :class="{ 'has-detail-underlay': detailUnderlay, 'has-mark-underlay': composerUnderlay || actionsUnderlay }"
@@ -1606,8 +1623,80 @@ onBeforeUnmount(() => {
           </button>
         </section>
         <section
-          v-else-if="activeSheet === 'spaces'"
-          class="mobile-sheet mobile-space-sheet"
+          v-else-if="activeSheet === 'connection-manager'"
+          class="mobile-sheet mobile-connection-manager"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="mobile-connection-manager-title"
+          tabindex="-1"
+        >
+          <MobileConnectionWizard v-if="state.connectionWizard.open" :state="state" :controller="controller" cancellable @close="controller.clearFeedback" />
+          <template v-else><header>
+            <div>
+              <small>SUPABASE CONNECTIONS</small>
+              <h2 id="mobile-connection-manager-title">存储空间</h2>
+              <p>一个连接对应一个 Supabase 服务、账号和已绑定 Space。</p>
+            </div>
+            <button type="button" aria-label="关闭连接管理" @click="closeSheet">×</button>
+          </header>
+          <button class="mobile-add-connection" type="button" @click="controller.openConnectionWizard">＋ 新增连接</button>
+          <div v-if="state.profiles.length" class="mobile-connection-list">
+            <article
+              v-for="profile in state.profiles"
+              :key="profile.id"
+              class="mobile-connection-card"
+              :data-profile-id="profile.id"
+              :class="{ 'is-current': profile.id === state.activeProfile?.id, 'is-disabled': profile.enabled === false }"
+            >
+              <div class="mobile-connection-card-heading">
+                <span>{{ profile.name.slice(0, 1) }}</span>
+                <div>
+                  <div><strong>{{ profile.name }}</strong><em v-if="profile.id === state.activeProfile?.id">当前</em></div>
+                  <p>{{ profile.supabase?.api_url }}</p>
+                </div>
+              </div>
+              <div class="mobile-connection-meta">
+                <span :class="`is-${state.connectionStates[profile.id] || 'unknown'}`">{{ connectionStatusText(profile) }}</span>
+                <small>Space {{ profile.supabase?.space_id ? profile.supabase.space_id.slice(0, 8) : '未绑定' }}</small>
+              </div>
+              <div class="mobile-connection-actions">
+                <button v-if="profile.id !== state.activeProfile?.id" type="button" :disabled="!canActivateConnection(profile) || state.busy" @click="controller.chooseProfile(profile).then(() => { if (!state.error) closeSheet() })">选择</button>
+                <button type="button" :disabled="profile.enabled === false || state.connectionStates[profile.id] === 'checking'" @click="controller.diagnoseProfile(profile)">{{ state.connectionStates[profile.id] === 'checking' ? '检查中…' : '诊断' }}</button>
+                <button type="button" @click="openConnectionEdit(profile)">管理</button>
+              </div>
+            </article>
+          </div>
+          <div v-else class="mobile-empty-state mobile-empty-compact"><span>S</span><strong>还没有 Supabase 连接</strong><p>新增连接后会在这里独立显示。</p></div>
+          <p class="mobile-sheet-footnote">列表不会显示公开 Key、密码或会话 Token。切换连接不会重绑 Space。</p></template>
+        </section>
+        <section v-else-if="activeSheet === 'connection-edit'" class="mobile-sheet mobile-connection-edit-sheet" role="dialog" aria-modal="true" aria-labelledby="mobile-connection-edit-title" tabindex="-1">
+          <div class="mobile-sheet-grabber"></div>
+          <header><div><small>SUPABASE CONNECTION</small><h2 id="mobile-connection-edit-title">管理连接</h2></div><button type="button" aria-label="关闭连接设置" @click="closeSheet">×</button></header>
+          <label><span>连接名称</span><input v-model="state.connectionEditor.name" autocomplete="off" /></label>
+          <button class="mobile-primary-button" type="button" :disabled="state.connectionEditor.sending || !state.connectionEditor.name.trim()" @click="saveConnectionName">保存名称</button>
+          <div class="mobile-connection-session">
+            <template v-if="state.connectionStates[state.connectionEditor.profileId] === 'signed-out'">
+              <label><span>邮箱</span><input v-model="state.connectionEditor.email" type="email" autocomplete="username" /></label><label><span>密码</span><input v-model="state.connectionEditor.password" type="password" autocomplete="current-password" /></label>
+              <button class="mobile-secondary-button" type="button" :disabled="state.connectionEditor.sending || !state.connectionEditor.email || !state.connectionEditor.password" @click="controller.signInProfile(editedConnection, state.connectionEditor.email, state.connectionEditor.password)">登录此连接</button>
+            </template>
+            <button v-else class="mobile-secondary-button" type="button" :disabled="state.connectionEditor.sending" @click="controller.logoutProfile(editedConnection)">退出此连接账号</button>
+          </div>
+          <button class="mobile-secondary-button" type="button" :disabled="state.connectionEditor.sending" @click="controller.openConnectionRepair(editedConnection); activeSheet = 'connection-manager'">修改服务或更换 Space</button>
+          <button class="mobile-secondary-button" type="button" :disabled="state.connectionEditor.sending" @click="controller.setProfileEnabled(editedConnection, editedConnection?.enabled === false)">{{ editedConnection?.enabled === false ? '启用连接' : '停用连接' }}</button>
+          <button class="mobile-danger-button" type="button" :disabled="state.connectionEditor.sending" @click="openConnectionRemove">移除连接…</button>
+          <p v-if="state.connectionEditor.error" class="mobile-feedback is-error" role="alert">{{ state.connectionEditor.error }}</p>
+        </section>
+        <section v-else-if="activeSheet === 'connection-remove'" class="mobile-sheet mobile-delete-sheet" role="dialog" aria-modal="true" aria-labelledby="mobile-connection-remove-title" tabindex="-1">
+          <div class="mobile-sheet-grabber"></div><header><div><small>远端 Space 不会被删除</small><h2 id="mobile-connection-remove-title">移除“{{ editedConnection?.name }}”？</h2></div><button type="button" aria-label="取消移除连接" @click="closeSheet">×</button></header>
+          <p>普通移除会先检查当前连接和未完成任务。本地历史仍按原 profile 保留，不会自动归到其他连接。</p>
+          <p v-if="state.connectionEditor.error" class="mobile-feedback is-error" role="alert">{{ state.connectionEditor.error }}</p>
+          <button v-if="!connectionRemoveEscalated" class="mobile-danger-button" type="button" :disabled="state.connectionEditor.sending" @click="removeConnection(false)">确认移除</button>
+          <button v-else class="mobile-danger-button is-destructive" type="button" :disabled="state.connectionEditor.sending" @click="removeConnection(true)">放弃未完成工作并移除</button>
+          <button class="mobile-sheet-cancel" type="button" @click="closeSheet">取消</button>
+        </section>
+        <section
+          v-else-if="activeSheet === 'connections'"
+          class="mobile-sheet mobile-connections-sheet"
           role="dialog"
           aria-modal="true"
           aria-labelledby="mobile-space-title"
@@ -1617,36 +1706,33 @@ onBeforeUnmount(() => {
           <header>
             <div>
               <small>Supabase</small>
-              <h2 id="mobile-space-title">选择存储空间</h2>
+              <h2 id="mobile-space-title">切换连接</h2>
             </div>
-            <button type="button" aria-label="关闭存储空间选择" @click="closeSheet">×</button>
+            <button type="button" aria-label="关闭连接选择" @click="closeSheet">×</button>
           </header>
           <button
-            v-for="space in state.spaces"
-            :key="space.id"
+            v-for="profile in state.profiles"
+            :key="profile.id"
             class="mobile-space-option"
             :class="{
               'is-current':
-                space.current ||
-                space.id === state.activeProfile?.supabase?.space_id,
+                profile.id === state.activeProfile?.id,
             }"
             type="button"
-            :disabled="state.busy || state.composer.sending || state.sender.saving"
-            @click="chooseSpace(space)"
+            :disabled="!canActivateConnection(profile) || state.busy || state.composer.sending || state.sender.saving"
+            @click="controller.chooseProfile(profile).then(() => { if (!state.error) closeSheet() })"
           >
-            <span>{{ space.name.slice(0, 1) }}</span>
+            <span>{{ profile.name.slice(0, 1) }}</span>
             <div>
-              <strong>{{ space.name }}</strong
+              <strong>{{ profile.name }}</strong
               ><small
-                >{{ state.account?.email }} ·
-                {{ space.messageCount }} 条消息</small
+                >{{ profile.supabase?.api_url }} · {{ connectionStatusText(profile) }}</small
               >
             </div>
-            <b>{{ space.current ? "✓" : "" }}</b>
+            <b>{{ profile.id === state.activeProfile?.id ? "✓" : canActivateConnection(profile) ? "" : "—" }}</b>
           </button>
           <p class="mobile-sheet-footnote">
-            移动端不会自动创建
-            Space，只展示当前账号已有空间；有待同步任务时后端会阻止切换。
+            这里只切换已保存连接，不会更换连接内绑定的 Space，也不会清除原连接的草稿、缓存或待同步队列。
           </p>
         </section>
         <section
@@ -1957,7 +2043,6 @@ onBeforeUnmount(() => {
             </button>
           </div>
         </section>
-      </div>
-    </template>
+    </div>
   </div>
 </template>

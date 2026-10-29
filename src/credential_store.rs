@@ -1,10 +1,15 @@
 use crate::supabase_auth::SupabaseSession;
 
 #[cfg(test)]
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex, MutexGuard, OnceLock,
+};
 
 #[cfg(test)]
 static CREDENTIAL_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+#[cfg(test)]
+static FAIL_NEXT_SAVE: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
 pub(crate) fn credential_test_guard() -> MutexGuard<'static, ()> {
@@ -14,6 +19,11 @@ pub(crate) fn credential_test_guard() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+#[cfg(test)]
+pub(crate) fn fail_next_save_for_test() {
+    FAIL_NEXT_SAVE.store(true, Ordering::SeqCst);
+}
+
 const SERVICE: &str = "transfer-genie";
 
 fn account(profile_id: &str) -> String {
@@ -21,6 +31,10 @@ fn account(profile_id: &str) -> String {
 }
 
 pub fn save_session(profile_id: &str, session: &SupabaseSession) -> Result<(), String> {
+    #[cfg(test)]
+    if FAIL_NEXT_SAVE.swap(false, Ordering::SeqCst) {
+        return Err("保存系统凭据失败: 测试注入".to_string());
+    }
     let value = serde_json::to_string(session).map_err(|err| format!("序列化会话失败: {err}"))?;
     keyring::Entry::new(SERVICE, &account(profile_id))
         .map_err(|err| format!("打开系统凭据库失败: {err}"))?

@@ -38,9 +38,9 @@ use crate::telegram_bridge_runtime::{TelegramBridgeManager, TelegramBridgeStatus
 use crate::types::{
     AiProviderSettings, AiSettings, AiTextAction, BackupSettings, DownloadHistoryRecord,
     LocalHttpApiSettings, MarkedTag, Message, SendSettings, Settings, SpeechToTextSettings,
-    StorageProfile, StorageProviderKind, SupabaseStorageConfig, SyncStatus, TelegramBridgeSettings,
-    UploadHistoryRecord, WebDavConflict, WebDavEndpoint, DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS,
-    DEFAULT_LOCAL_HTTP_API_BIND_PORT,
+    StorageProfile, StorageProviderKind, SupabaseBindingState, SupabaseStorageConfig, SyncStatus,
+    TelegramBridgeSettings, UploadHistoryRecord, WebDavConflict, WebDavEndpoint,
+    DEFAULT_LOCAL_HTTP_API_BIND_ADDRESS, DEFAULT_LOCAL_HTTP_API_BIND_PORT,
 };
 use crate::webdav_sync_runtime::WebDavSyncRuntimeAdapter;
 use crate::workspace::WorkspaceLayout;
@@ -229,6 +229,8 @@ struct SupabaseBindingFlowInput {
 struct CreateSupabaseSpaceInput {
     flow_id: Option<String>,
     profile_id: Option<String>,
+    operation_id: String,
+    space_id: String,
     name: String,
 }
 
@@ -239,6 +241,19 @@ struct CompleteSupabaseBindingInput {
     original_profile_id: Option<String>,
     profile: StorageProfile,
     space_id: String,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ActivateStorageProfileInput {
+    profile_id: String,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetStorageProfileEnabledInput {
+    profile_id: String,
+    enabled: bool,
 }
 
 #[derive(Serialize)]
@@ -282,6 +297,10 @@ struct RemoveStorageProfileInput {
     profile_id: String,
     #[serde(default)]
     force: bool,
+    #[serde(default)]
+    confirm_active_removal: bool,
+    #[serde(default)]
+    abandon_work: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1323,6 +1342,14 @@ fn ios_settings_view(settings: &Settings) -> Settings {
     }
     view.webdav_endpoints.clear();
     view.active_webdav_id = None;
+    // Desktop integrations can contain WebDAV passwords, API keys or bot
+    // tokens. They are preserved in authoritative settings but must never
+    // cross the Rust -> mobile WebView boundary.
+    view.local_http_api = LocalHttpApiSettings::default();
+    view.telegram = TelegramBridgeSettings::default();
+    view.backup = BackupSettings::default();
+    view.ai = AiSettings::default();
+    view.speech_to_text = SpeechToTextSettings::default();
     view
 }
 
@@ -1383,12 +1410,21 @@ fn supabase_profile_config(
     settings: &Settings,
     profile_id: &str,
 ) -> Result<crate::types::SupabaseStorageConfig, String> {
-    match storage_provider::resolve_provider_by_id(settings, profile_id)? {
-        storage_provider::ProviderConfig::Supabase(profile) => profile
-            .supabase
-            .ok_or_else(|| "Supabase 存储空间配置不完整".to_string()),
-        storage_provider::ProviderConfig::Webdav(_) => Err("该存储空间不是 Supabase".to_string()),
+    // Management/Auth remains available for disabled and unresolved profiles.
+    let profile = settings
+        .storage_profiles
+        .iter()
+        .find(|profile| profile.id == profile_id.trim())
+        .ok_or_else(|| "Supabase 存储空间不存在".to_string())?;
+    if profile.provider_kind != StorageProviderKind::Supabase {
+        return Err("该存储空间不是 Supabase".into());
     }
+    let config = profile
+        .supabase
+        .clone()
+        .ok_or_else(|| "Supabase 存储空间配置不完整".to_string())?;
+    supabase_connection::validate_public_config(&config.api_url, &config.anon_key)?;
+    Ok(config)
 }
 
 fn account_status(
@@ -2291,6 +2327,8 @@ async fn storage_transfer_context(
     let settings = current_settings(state)?;
     let source = storage_provider::resolve_provider_by_id(&settings, &input.source_profile_id)?;
     let target = storage_provider::resolve_provider_by_id(&settings, &input.target_profile_id)?;
+    storage_provider::require_bound_provider(&source)?;
+    storage_provider::require_bound_provider(&target)?;
     let source_session = match &source {
         storage_provider::ProviderConfig::Supabase(profile) => {
             valid_supabase_session(state, &profile.id, false)
@@ -4486,7 +4524,8 @@ async fn push_supabase_outbox(
         .supabase
         .as_ref()
         .ok_or_else(|| "Supabase 存储空间配置不完整".to_string())?;
-    supabase_sync::validate_space_access(&state.http, config, session).await?;
+    config.require_bound()?;
+    validate_supabase_binding_access(state, profile, session).await?;
     let worker_id = uuid::Uuid::new_v4().to_string();
     let mut applied = 0;
     loop {
@@ -4880,7 +4919,78 @@ async fn push_supabase_outbox(
     Ok(applied)
 }
 
+fn record_supabase_binding_access(
+    state: &AppState,
+    observed_profile: &StorageProfile,
+    accessible: bool,
+) -> Result<(), String> {
+    if accessible {
+        return Ok(());
+    }
+    let observed = observed_profile
+        .supabase
+        .as_ref()
+        .ok_or_else(|| "Supabase 存储空间配置不完整".to_string())?;
+    let mut guard = state
+        .settings
+        .lock()
+        .map_err(|_| "读取设置失败".to_string())?;
+    let mut settings = guard.clone();
+    let Some(current) = settings
+        .storage_profiles
+        .iter_mut()
+        .find(|profile| profile.id == observed_profile.id)
+    else {
+        return Ok(());
+    };
+    let Some(config) = current.supabase.as_mut() else {
+        return Ok(());
+    };
+    if config.api_url != observed.api_url
+        || config.anon_key != observed.anon_key
+        || config.space_id != observed.space_id
+    {
+        return Ok(());
+    }
+    config.binding_state = SupabaseBindingState::NeedsAttention;
+    write_settings_audited(&state.settings_path, &settings)?;
+    *guard = settings;
+    drop(guard);
+    signal_sync_loop_reset(state);
+    Ok(())
+}
+
+async fn validate_supabase_binding_access(
+    state: &AppState,
+    profile: &StorageProfile,
+    session: &supabase_auth::SupabaseSession,
+) -> Result<(), String> {
+    let config = profile
+        .supabase
+        .as_ref()
+        .ok_or_else(|| "Supabase 存储空间配置不完整".to_string())?;
+    config.require_bound()?;
+    match supabase_sync::validate_space_access(&state.http, config, session).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if error == supabase_sync::SPACE_ACCESS_DENIED {
+                record_supabase_binding_access(state, profile, false)?;
+            }
+            Err(error)
+        }
+    }
+}
+
 async fn pull_supabase_changes(
+    state: &AppState,
+    profile: &StorageProfile,
+    session: &supabase_auth::SupabaseSession,
+) -> Result<usize, String> {
+    validate_supabase_binding_access(state, profile, session).await?;
+    pull_supabase_changes_after_validation(state, profile, session).await
+}
+
+async fn pull_supabase_changes_after_validation(
     state: &AppState,
     profile: &StorageProfile,
     session: &supabase_auth::SupabaseSession,
@@ -4973,7 +5083,7 @@ async fn sync_supabase_profile(
     manual: bool,
 ) -> Result<(usize, usize), String> {
     let pushed = push_supabase_outbox(state, profile, session, manual, None).await?;
-    let pulled = pull_supabase_changes(state, profile, session).await?;
+    let pulled = pull_supabase_changes_after_validation(state, profile, session).await?;
     let _ = cleanup_supabase_orphan_objects(state, profile, session).await;
     Ok((pushed, pulled))
 }
@@ -5790,7 +5900,14 @@ async fn supabase_sign_in(
     state: State<'_, AppState>,
     input: SupabaseSignInInput,
 ) -> Result<SupabaseAccountStatus, supabase_auth::SupabaseAuthError> {
-    let config = current_settings(&state)
+    supabase_sign_in_impl(&state, input).await
+}
+
+async fn supabase_sign_in_impl(
+    state: &AppState,
+    input: SupabaseSignInInput,
+) -> Result<SupabaseAccountStatus, supabase_auth::SupabaseAuthError> {
+    let config = current_settings(state)
         .and_then(|settings| supabase_profile_config(&settings, &input.profile_id))
         .map_err(|message| supabase_auth::SupabaseAuthError {
             kind: supabase_auth::SupabaseAuthErrorKind::InvalidResponse,
@@ -5804,6 +5921,37 @@ async fn supabase_sign_in(
         &input.password,
     )
     .await?;
+    let previous = state
+        .supabase_sessions
+        .lock()
+        .map_err(|_| {
+            auth_error(
+                supabase_auth::SupabaseAuthErrorKind::Service,
+                "读取 Supabase 会话失败",
+            )
+        })?
+        .get(&input.profile_id)
+        .cloned()
+        .or_else(|| {
+            credential_store::load_session(&input.profile_id)
+                .ok()
+                .flatten()
+        });
+    if previous
+        .as_ref()
+        .is_some_and(|previous| previous.user_id != session.user_id)
+        && db::has_pending_profile_work(&state.db_path, &input.profile_id).map_err(|error| {
+            auth_error(
+                supabase_auth::SupabaseAuthErrorKind::Service,
+                format!("检查原账号未完成任务失败: {error}"),
+            )
+        })?
+    {
+        return Err(auth_error(
+            supabase_auth::SupabaseAuthErrorKind::Service,
+            "该连接的原账号仍有待同步、冲突或传输任务，请先处理后再登录其他账号",
+        ));
+    }
     let status = account_status(&input.profile_id, Some(&session));
     credential_store::save_session(&input.profile_id, &session).map_err(|message| {
         supabase_auth::SupabaseAuthError {
@@ -5819,7 +5967,7 @@ async fn supabase_sign_in(
             message: "保存 Supabase 会话失败".to_string(),
         })?
         .insert(input.profile_id, session);
-    signal_sync_loop_reset(&state);
+    signal_sync_loop_reset(state);
     Ok(status)
 }
 
@@ -5909,7 +6057,9 @@ async fn switch_supabase_space(
     state: State<'_, AppState>,
     input: SwitchSupabaseSpaceInput,
 ) -> Result<Settings, String> {
-    switch_supabase_space_impl(&state, input).await
+    switch_supabase_space_impl(&state, input)
+        .await
+        .map(|settings| platform_settings_view(&settings))
 }
 
 async fn switch_supabase_space_impl(
@@ -5945,6 +6095,13 @@ async fn switch_supabase_space_impl(
     {
         return Err(
             "当前存储空间仍有待上传、同步冲突或未完成的数据传输，请先处理后再切换".to_string(),
+        );
+    }
+    if db::has_mobile_composer_drafts(&state.db_path, &source.id)
+        .map_err(|error| format!("检查存储空间草稿失败: {error}"))?
+    {
+        return Err(
+            "当前存储空间仍有未处理草稿或附件，请先发送或清空草稿后再更换 Space".to_string(),
         );
     }
 
@@ -6047,9 +6204,7 @@ async fn test_supabase_draft_connection(
 ) -> Result<supabase_connection::SupabaseConnectionCheck, String> {
     let api_url = input.api_url.trim().trim_end_matches('/');
     let anon_key = input.anon_key.trim();
-    if api_url.is_empty() || anon_key.is_empty() {
-        return Err("请填写 Supabase API URL 和公开 Key".to_string());
-    }
+    supabase_connection::validate_public_config(api_url, anon_key)?;
     let access_token = input
         .profile_id
         .as_deref()
@@ -6061,6 +6216,12 @@ async fn test_supabase_draft_connection(
                 .lock()
                 .ok()?
                 .get(profile_id)
+                .filter(|_| {
+                    current_settings(&state)
+                        .ok()
+                        .and_then(|settings| supabase_profile_config(&settings, profile_id).ok())
+                        .is_some_and(|saved| saved.api_url == api_url && saved.anon_key == anon_key)
+                })
                 .map(|session| session.access_token.clone())
         });
     Ok(supabase_connection::check(&state.http, api_url, anon_key, access_token.as_deref()).await)
@@ -6072,13 +6233,12 @@ fn normalize_supabase_draft_config(
 ) -> Result<SupabaseStorageConfig, String> {
     let api_url = api_url.trim().trim_end_matches('/').to_string();
     let anon_key = anon_key.trim().to_string();
-    if api_url.is_empty() || anon_key.is_empty() {
-        return Err("请填写 Supabase API URL 和公开 Key".to_string());
-    }
+    supabase_connection::validate_public_config(&api_url, &anon_key)?;
     Ok(SupabaseStorageConfig {
         api_url,
         anon_key,
         space_id: String::new(),
+        binding_state: SupabaseBindingState::Unbound,
     })
 }
 
@@ -6091,6 +6251,22 @@ async fn supabase_draft_sign_in(
     state: State<'_, AppState>,
     input: SupabaseDraftSignInInput,
 ) -> Result<SupabaseAccountStatus, supabase_auth::SupabaseAuthError> {
+    supabase_draft_sign_in_impl(&state, input).await
+}
+
+async fn supabase_draft_sign_in_impl(
+    state: &AppState,
+    input: SupabaseDraftSignInInput,
+) -> Result<SupabaseAccountStatus, supabase_auth::SupabaseAuthError> {
+    if let Some(flow_id) = input.flow_id.as_deref() {
+        cancel_supabase_binding_flow_impl(
+            state,
+            SupabaseBindingFlowInput {
+                flow_id: flow_id.to_string(),
+            },
+        )
+        .map_err(|message| auth_error(supabase_auth::SupabaseAuthErrorKind::Service, message))?;
+    }
     let config =
         normalize_supabase_draft_config(&input.api_url, &input.anon_key).map_err(|message| {
             auth_error(
@@ -6112,13 +6288,7 @@ async fn supabase_draft_sign_in(
         &input.password,
     )
     .await?;
-    let flow_id = input
-        .flow_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let flow_id = uuid::Uuid::new_v4().to_string();
     let flow = SupabaseBindingFlow {
         api_url: config.api_url,
         anon_key: config.anon_key,
@@ -6163,11 +6333,19 @@ async fn list_supabase_draft_spaces(
     state: State<'_, AppState>,
     input: SupabaseBindingFlowInput,
 ) -> Result<Vec<SupabaseSpaceOption>, String> {
+    list_supabase_draft_spaces_impl(&state, input).await
+}
+
+async fn list_supabase_draft_spaces_impl(
+    state: &AppState,
+    input: SupabaseBindingFlowInput,
+) -> Result<Vec<SupabaseSpaceOption>, String> {
     let flow = binding_flow(&state, &input.flow_id)?;
     let config = SupabaseStorageConfig {
         api_url: flow.api_url,
         anon_key: flow.anon_key,
         space_id: String::new(),
+        binding_state: Default::default(),
     };
     let spaces = supabase_sync::list_spaces(&state.http, &config, &flow.session).await?;
     Ok(spaces
@@ -6188,6 +6366,13 @@ fn cancel_supabase_binding_flow(
     state: State<'_, AppState>,
     input: SupabaseBindingFlowInput,
 ) -> Result<(), String> {
+    cancel_supabase_binding_flow_impl(&state, input)
+}
+
+fn cancel_supabase_binding_flow_impl(
+    state: &AppState,
+    input: SupabaseBindingFlowInput,
+) -> Result<(), String> {
     state
         .supabase_binding_flows
         .lock()
@@ -6201,9 +6386,21 @@ async fn create_supabase_space(
     state: State<'_, AppState>,
     input: CreateSupabaseSpaceInput,
 ) -> Result<SupabaseSpaceOption, String> {
+    create_supabase_space_impl(&state, input).await
+}
+
+async fn create_supabase_space_impl(
+    state: &AppState,
+    input: CreateSupabaseSpaceInput,
+) -> Result<SupabaseSpaceOption, String> {
     let name = input.name.trim();
     if name.is_empty() {
         return Err("请输入新空间名称".to_string());
+    }
+    let operation_id = input.operation_id.trim();
+    let space_id = input.space_id.trim();
+    if uuid::Uuid::parse_str(operation_id).is_err() || uuid::Uuid::parse_str(space_id).is_err() {
+        return Err("新建空间请求已失效，请重新打开创建表单".to_string());
     }
     let (mut config, session) = if let Some(flow_id) = input
         .flow_id
@@ -6217,6 +6414,7 @@ async fn create_supabase_space(
                 api_url: flow.api_url,
                 anon_key: flow.anon_key,
                 space_id: String::new(),
+                binding_state: Default::default(),
             },
             flow.session,
         )
@@ -6230,8 +6428,8 @@ async fn create_supabase_space(
             .ok_or_else(|| "请先登录当前 Supabase 账号".to_string())?;
         (config, session)
     };
-    config.space_id = uuid::Uuid::new_v4().to_string();
-    supabase_sync::create_space(&state.http, &config, &session, name).await?;
+    config.space_id = space_id.to_string();
+    supabase_sync::create_space(&state.http, &config, &session, operation_id, name).await?;
     Ok(SupabaseSpaceOption {
         id: config.space_id,
         name: name.to_string(),
@@ -6247,7 +6445,9 @@ async fn complete_supabase_binding(
     state: State<'_, AppState>,
     input: CompleteSupabaseBindingInput,
 ) -> Result<Settings, String> {
-    complete_supabase_binding_impl(&state, input).await
+    complete_supabase_binding_impl(&state, input)
+        .await
+        .map(|settings| platform_settings_view(&settings))
 }
 
 async fn complete_supabase_binding_impl(
@@ -6276,6 +6476,23 @@ async fn complete_supabase_binding_impl(
     if !available.iter().any(|space| space.id == config.space_id) {
         return Err("所选 Supabase 空间不存在或当前账号无权访问".to_string());
     }
+    // Cancellation/expiry while the remote permission query was in flight must
+    // still win. Serialize the final local commit with flow cancellation.
+    let mut flows = state
+        .supabase_binding_flows
+        .lock()
+        .map_err(|_| "读取临时登录状态失败".to_string())?;
+    flows.retain(|_, candidate| now_ms().saturating_sub(candidate.updated_at_ms) < 30 * 60 * 1000);
+    if !flows.get(input.flow_id.trim()).is_some_and(|current| {
+        current.api_url == flow.api_url
+            && current.anon_key == flow.anon_key
+            && current.session.user_id == flow.session.user_id
+            && current.session.access_token == flow.session.access_token
+            && current.session.refresh_token == flow.session.refresh_token
+    }) {
+        return Err("Supabase 绑定流程已失效，请重新登录".to_string());
+    }
+    config.binding_state = SupabaseBindingState::Bound;
     // A retry after profile creation must reuse the same destination, never duplicate it.
     let settings = current_settings(state)?;
     let existing = settings
@@ -6301,7 +6518,17 @@ async fn complete_supabase_binding_impl(
         }
         profile = existing.clone();
         profile.enabled = true;
+        if let Some(config) = profile.supabase.as_mut() {
+            config.binding_state = SupabaseBindingState::Bound;
+        }
     }
+    let previous_profile = original_profile_id.as_deref().and_then(|profile_id| {
+        settings
+            .storage_profiles
+            .iter()
+            .find(|candidate| candidate.id == profile_id)
+            .cloned()
+    });
     let updated = save_storage_profile_impl(
         &state,
         SaveStorageProfileInput {
@@ -6316,23 +6543,64 @@ async fn complete_supabase_binding_impl(
         .unwrap_or(&profile.id)
         .to_string();
     if let Err(error) = credential_store::save_session(&saved_profile_id, &flow.session) {
-        if original_profile_id.is_none() {
-            let _ = remove_storage_profile_impl(&state, &saved_profile_id, true);
-        }
-        return Err(error);
+        let rollback = rollback_binding_profile_save(
+            state,
+            &saved_profile_id,
+            &profile,
+            previous_profile.as_ref(),
+        );
+        return match rollback {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(format!("{error}；连接配置回滚失败: {rollback_error}")),
+        };
     }
     state
         .supabase_sessions
         .lock()
         .map_err(|_| "保存 Supabase 会话失败".to_string())?
         .insert(saved_profile_id, flow.session);
-    state
-        .supabase_binding_flows
-        .lock()
-        .map_err(|_| "清理临时登录状态失败".to_string())?
-        .remove(input.flow_id.trim());
+    flows.remove(input.flow_id.trim());
     signal_sync_loop_reset(&state);
     Ok(updated)
+}
+
+fn rollback_binding_profile_save(
+    state: &AppState,
+    profile_id: &str,
+    saved_profile: &StorageProfile,
+    previous_profile: Option<&StorageProfile>,
+) -> Result<(), String> {
+    let mut guard = state
+        .settings
+        .lock()
+        .map_err(|_| "读取设置失败".to_string())?;
+    let mut settings = guard.clone();
+    let Some(index) = settings
+        .storage_profiles
+        .iter()
+        .position(|candidate| candidate.id == profile_id)
+    else {
+        return Ok(());
+    };
+    if &settings.storage_profiles[index] != saved_profile {
+        return Err("连接已被其他操作修改，未覆盖较新的配置".to_string());
+    }
+    if let Some(previous) = previous_profile {
+        settings.storage_profiles[index] = previous.clone();
+    } else {
+        settings.storage_profiles.remove(index);
+    }
+    settings.webdav_endpoints = settings
+        .storage_profiles
+        .iter()
+        .filter_map(StorageProfile::to_webdav)
+        .collect();
+    let normalized = normalize_settings(settings, &state.default_download_dir)?;
+    write_settings_audited(&state.settings_path, &normalized)?;
+    *guard = normalized;
+    drop(guard);
+    signal_sync_loop_reset(state);
+    Ok(())
 }
 
 #[tauri::command]
@@ -6995,6 +7263,98 @@ async fn save_settings(
     Ok(platform_settings_view(&normalized))
 }
 
+fn activate_storage_profile_impl(
+    state: &AppState,
+    input: ActivateStorageProfileInput,
+) -> Result<Settings, String> {
+    let profile_id = input.profile_id.trim();
+    let mut guard = state
+        .settings
+        .lock()
+        .map_err(|_| "读取设置失败".to_string())?;
+    let mut settings = guard.clone();
+    let provider = storage_provider::resolve_provider_by_id(&settings, profile_id)?;
+    storage_provider::require_bound_provider(&provider)?;
+    if settings.active_storage_profile_id.as_deref() == Some(profile_id) {
+        return Ok(platform_settings_view(&settings));
+    }
+    cancel_active_sync(state)?;
+    settings.active_storage_profile_id = Some(profile_id.to_string());
+    settings.active_webdav_id = matches!(provider, storage_provider::ProviderConfig::Webdav(_))
+        .then(|| profile_id.to_string());
+    write_settings_audited(&state.settings_path, &settings)?;
+    *guard = settings.clone();
+    drop(guard);
+    signal_sync_loop_reset(state);
+    Ok(platform_settings_view(&settings))
+}
+
+#[tauri::command]
+fn activate_storage_profile(
+    state: State<'_, AppState>,
+    input: ActivateStorageProfileInput,
+) -> Result<Settings, String> {
+    activate_storage_profile_impl(&state, input)
+}
+
+fn set_storage_profile_enabled_impl(
+    state: &AppState,
+    input: SetStorageProfileEnabledInput,
+) -> Result<Settings, String> {
+    let profile_id = input.profile_id.trim();
+    if profile_id.is_empty() {
+        return Err("未指定要启停的存储空间".to_string());
+    }
+    let mut guard = state
+        .settings
+        .lock()
+        .map_err(|_| "读取设置失败".to_string())?;
+    let mut settings = guard.clone();
+    let profile = settings
+        .storage_profiles
+        .iter_mut()
+        .find(|profile| profile.id == profile_id)
+        .ok_or_else(|| "存储空间不存在".to_string())?;
+    if input.enabled {
+        if profile.provider_kind == StorageProviderKind::Supabase {
+            let config = profile
+                .supabase
+                .as_ref()
+                .ok_or_else(|| "Supabase 存储空间配置不完整".to_string())?;
+            supabase_connection::validate_public_config(&config.api_url, &config.anon_key)?;
+            config.require_bound()?;
+        }
+        profile.enabled = true;
+    } else {
+        profile.enabled = false;
+        if settings.active_storage_profile_id.as_deref() == Some(profile_id)
+            || settings.active_webdav_id.as_deref() == Some(profile_id)
+        {
+            cancel_active_sync(state)?;
+            settings.active_storage_profile_id = None;
+            settings.active_webdav_id = None;
+        }
+    }
+    settings.webdav_endpoints = settings
+        .storage_profiles
+        .iter()
+        .filter_map(StorageProfile::to_webdav)
+        .collect();
+    write_settings_audited(&state.settings_path, &settings)?;
+    *guard = settings.clone();
+    drop(guard);
+    signal_sync_loop_reset(state);
+    Ok(platform_settings_view(&settings))
+}
+
+#[tauri::command]
+fn set_storage_profile_enabled(
+    state: State<'_, AppState>,
+    input: SetStorageProfileEnabledInput,
+) -> Result<Settings, String> {
+    set_storage_profile_enabled_impl(&state, input)
+}
+
 fn storage_profile_destination_changed(old: &StorageProfile, new: &StorageProfile) -> bool {
     if old.provider_kind != new.provider_kind {
         return true;
@@ -7042,7 +7402,11 @@ fn save_storage_profile_impl(
     state: &AppState,
     input: SaveStorageProfileInput,
 ) -> Result<Settings, String> {
-    let mut settings = current_settings(state)?;
+    let mut guard = state
+        .settings
+        .lock()
+        .map_err(|_| "读取设置失败".to_string())?;
+    let mut settings = guard.clone();
     let original_profile_id = input
         .original_profile_id
         .as_deref()
@@ -7111,10 +7475,8 @@ fn save_storage_profile_impl(
         .collect();
     let normalized = normalize_settings(settings, &state.default_download_dir)?;
     write_settings_audited(&state.settings_path, &normalized)?;
-    *state
-        .settings
-        .lock()
-        .map_err(|_| "写入设置失败".to_string())? = normalized.clone();
+    *guard = normalized.clone();
+    drop(guard);
     signal_sync_loop_reset(state);
     Ok(normalized)
 }
@@ -7124,7 +7486,7 @@ fn save_storage_profile(
     state: State<'_, AppState>,
     input: SaveStorageProfileInput,
 ) -> Result<Settings, String> {
-    save_storage_profile_impl(&state, input)
+    save_storage_profile_impl(&state, input).map(|settings| platform_settings_view(&settings))
 }
 
 #[tauri::command]
@@ -7132,22 +7494,35 @@ fn remove_storage_profile(
     state: State<'_, AppState>,
     input: RemoveStorageProfileInput,
 ) -> Result<Settings, String> {
-    remove_storage_profile_impl(&state, &input.profile_id, input.force)
+    let confirm_active_removal = input.confirm_active_removal || input.force;
+    let abandon_work = input.abandon_work || input.force;
+    remove_storage_profile_impl(
+        &state,
+        &input.profile_id,
+        confirm_active_removal,
+        abandon_work,
+    )
+    .map(|settings| platform_settings_view(&settings))
 }
 
 fn remove_storage_profile_impl(
     state: &AppState,
     profile_id: &str,
-    force: bool,
+    confirm_active_removal: bool,
+    abandon_work: bool,
 ) -> Result<Settings, String> {
     let profile_id = profile_id.trim();
     if profile_id.is_empty() {
         return Err("未指定要移除的存储空间".to_string());
     }
-    let mut settings = current_settings(&state)?;
+    let mut guard = state
+        .settings
+        .lock()
+        .map_err(|_| "读取设置失败".to_string())?;
+    let mut settings = guard.clone();
     let is_active = settings.active_storage_profile_id.as_deref() == Some(profile_id)
         || settings.active_webdav_id.as_deref() == Some(profile_id);
-    if is_active && !force {
+    if is_active && !confirm_active_removal {
         return Err("当前正在使用的存储空间不能移除，请先切换到其他空间".to_string());
     }
     if is_active {
@@ -7157,7 +7532,7 @@ fn remove_storage_profile_impl(
     }
     let has_pending_work = db::has_pending_profile_work(&state.db_path, profile_id)
         .map_err(|error| format!("检查存储空间未完成任务失败: {error}"))?;
-    if has_pending_work && !force {
+    if has_pending_work && !abandon_work {
         return Err("该存储空间仍有待上传、冲突或未完成的数据传输任务".to_string());
     }
     let removed = settings
@@ -7180,10 +7555,8 @@ fn remove_storage_profile_impl(
         remove_supabase_session(&state, profile_id).map_err(|error| error.message)?;
     }
     write_settings_audited(&state.settings_path, &settings)?;
-    *state
-        .settings
-        .lock()
-        .map_err(|_| "写入设置失败".to_string())? = settings.clone();
+    *guard = settings.clone();
+    drop(guard);
     signal_sync_loop_reset(&state);
     Ok(settings)
 }
@@ -10161,6 +10534,7 @@ async fn hydrate_supabase_message_history(
         .supabase
         .as_ref()
         .ok_or_else(|| "Supabase 存储空间配置不完整".to_string())?;
+    config.require_bound()?;
     let mut cursor = db::get_supabase_history_cursor(&state.db_path, &profile.id, &session.user_id)
         .map_err(|error| format!("读取 Supabase 历史游标失败: {error}"))?;
 
@@ -10212,6 +10586,13 @@ async fn hydrate_supabase_message_history(
 #[tauri::command]
 async fn list_messages_window(
     state: State<'_, AppState>,
+    input: Option<ListMessagesWindowInput>,
+) -> Result<MessagesWindowResult, String> {
+    list_messages_window_impl(&state, input).await
+}
+
+async fn list_messages_window_impl(
+    state: &AppState,
     input: Option<ListMessagesWindowInput>,
 ) -> Result<MessagesWindowResult, String> {
     let settings = current_settings(&state)?;
@@ -10595,15 +10976,28 @@ async fn send_text_to_context(
     {
         let _guard = state.sync_guard.lock().await;
         ensure_integration_context(state, context)?;
-        let stable_ids = client_id.as_deref().map(str::trim).filter(|value| !value.is_empty())
+        let stable_ids = client_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
             .map(|value| supabase_client_send_ids(&profile.id, &session.user_id, value));
-        let message_id = stable_ids.as_ref().map(|ids| ids.message_id.clone())
+        let message_id = stable_ids
+            .as_ref()
+            .map(|ids| ids.message_id.clone())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         if stable_ids.is_some() {
             if let Some((existing, _)) = db::get_message_by_id_for_scope(
-                &state.db_path, &profile.id, &session.user_id, &message_id,
-            ).map_err(|error| format!("读取已有文本发送记录失败: {error}"))? {
-                if existing.kind == "text" && existing.content.as_deref() == Some(text.as_str()) && existing.format == format {
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                &message_id,
+            )
+            .map_err(|error| format!("读取已有文本发送记录失败: {error}"))?
+            {
+                if existing.kind == "text"
+                    && existing.content.as_deref() == Some(text.as_str())
+                    && existing.format == format
+                {
                     return Ok(supabase_send_result(&profile.id, &existing));
                 }
                 return Err("该文本发送请求已用于其他内容，请重新编辑后发送".into());
@@ -10644,18 +11038,26 @@ async fn send_text_to_context(
         )?;
         let operation = if let Some(ids) = stable_ids.as_ref() {
             outbox_operation_with_id(
-                &ids.message_operation_id, &profile.id, &session.user_id, "message",
-                &message_id, "upsert", 0, supabase_message_payload(&message),
+                &ids.message_operation_id,
+                &profile.id,
+                &session.user_id,
+                "message",
+                &message_id,
+                "upsert",
+                0,
+                supabase_message_payload(&message),
             )?
-        } else { outbox_operation(
-            &profile.id,
-            &session.user_id,
-            "message",
-            &message_id,
-            "upsert",
-            0,
-            supabase_message_payload(&message),
-        )? };
+        } else {
+            outbox_operation(
+                &profile.id,
+                &session.user_id,
+                "message",
+                &message_id,
+                "upsert",
+                0,
+                supabase_message_payload(&message),
+            )?
+        };
         db::save_message_with_marked_changes_and_enqueue(
             &state.db_path,
             &message,
@@ -11031,13 +11433,16 @@ fn mobile_composer_draft_is_empty(payload: &MobileComposerDraftPayload) -> bool 
 fn mobile_draft_import_path(root: &Path, raw: &str) -> Result<PathBuf, String> {
     let path = Path::new(raw);
     let relative = if path.is_absolute() {
-        path.strip_prefix(root).map_err(|_| "草稿附件不在应用导入沙盒中")?
+        path.strip_prefix(root)
+            .map_err(|_| "草稿附件不在应用导入沙盒中")?
     } else {
         path
     };
     let parts: Vec<_> = relative.components().collect();
     if parts.len() != 2
-        || parts.iter().any(|part| !matches!(part, std::path::Component::Normal(_)))
+        || parts
+            .iter()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
         || uuid::Uuid::parse_str(&parts[0].as_os_str().to_string_lossy()).is_err()
     {
         return Err("草稿附件路径无效".into());
@@ -11054,7 +11459,10 @@ fn mobile_draft_import_root(state: &AppState) -> Result<PathBuf, String> {
     // Tauri app_data_dir is Application Support/<bundle id>; Swift uses
     // Application Support/TransferGenie/MobileImports. Store paths relative
     // to this root so a replacement installation can relocate its container.
-    state.settings_path.parent().and_then(Path::parent)
+    state
+        .settings_path
+        .parent()
+        .and_then(Path::parent)
         .map(|support| support.join("TransferGenie/MobileImports"))
         .ok_or_else(|| "无法定位移动端导入沙盒".into())
 }
@@ -11073,17 +11481,11 @@ fn mobile_composer_scope(
     Ok((profile, session, space_id))
 }
 
-fn get_mobile_composer_draft_impl(
-    state: &AppState,
-) -> Result<MobileComposerDraftResult, String> {
+fn get_mobile_composer_draft_impl(state: &AppState) -> Result<MobileComposerDraftResult, String> {
     let (profile, session, space_id) = mobile_composer_scope(state)?;
-    let Some(record) = db::get_mobile_composer_draft(
-        &state.db_path,
-        &profile.id,
-        &session.user_id,
-        &space_id,
-    )
-    .map_err(|error| format!("读取移动端草稿失败: {error}"))?
+    let Some(record) =
+        db::get_mobile_composer_draft(&state.db_path, &profile.id, &session.user_id, &space_id)
+            .map_err(|error| format!("读取移动端草稿失败: {error}"))?
     else {
         return Ok(MobileComposerDraftResult {
             payload: MobileComposerDraftPayload::default(),
@@ -11098,7 +11500,10 @@ fn get_mobile_composer_draft_impl(
         {
             match mobile_draft_import_path(&mobile_draft_import_root(state)?, &attachment.path) {
                 Ok(path) => attachment.path = path.to_string_lossy().into_owned(),
-                Err(_) => { attachment.available = false; continue; }
+                Err(_) => {
+                    attachment.available = false;
+                    continue;
+                }
             }
         }
         attachment.available = Path::new(&attachment.path).is_file();
@@ -11115,9 +11520,15 @@ fn save_mobile_composer_draft_impl(
     payload: MobileComposerDraftPayload,
 ) -> Result<MobileComposerDraftResult, String> {
     let (profile, session, space_id) = mobile_composer_scope(state)?;
-    save_mobile_composer_draft_for_scope(state, payload, MobileComposerDraftScope {
-        profile_id: profile.id, user_id: session.user_id, space_id,
-    })
+    save_mobile_composer_draft_for_scope(
+        state,
+        payload,
+        MobileComposerDraftScope {
+            profile_id: profile.id,
+            user_id: session.user_id,
+            space_id,
+        },
+    )
 }
 
 fn save_mobile_composer_draft_for_scope(
@@ -11134,7 +11545,11 @@ fn save_mobile_composer_draft_for_scope(
         let root = mobile_draft_import_root(state)?;
         for attachment in &mut payload.attachments {
             let path = mobile_draft_import_path(&root, &attachment.path)?;
-            attachment.path = path.strip_prefix(&root).unwrap().to_string_lossy().into_owned();
+            attachment.path = path
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
         }
     }
     if mobile_composer_draft_is_empty(&payload) {
@@ -11145,7 +11560,10 @@ fn save_mobile_composer_draft_for_scope(
             &scope.space_id,
         )
         .map_err(|error| format!("清除移动端草稿失败: {error}"))?;
-        return Ok(MobileComposerDraftResult { payload, updated_at_ms: None });
+        return Ok(MobileComposerDraftResult {
+            payload,
+            updated_at_ms: None,
+        });
     }
     let updated_at_ms = now_ms();
     let payload_json = serde_json::to_string(&payload)
@@ -11187,7 +11605,10 @@ fn save_mobile_composer_draft(
         return Err("此操作仅适用于 iOS 草稿".into());
     }
     let (profile, session, space_id) = mobile_composer_scope(&state)?;
-    if profile.id != scope.profile_id || session.user_id != scope.user_id || space_id != scope.space_id {
+    if profile.id != scope.profile_id
+        || session.user_id != scope.user_id
+        || space_id != scope.space_id
+    {
         return Err("账号或空间已切换，旧草稿保存已取消".into());
     }
     save_mobile_composer_draft_for_scope(&state, payload, scope)
@@ -12497,6 +12918,11 @@ async fn resolve_media_playback_source_impl(
             String::new(),
         ),
         storage_provider::ProviderConfig::Supabase(profile) => {
+            profile
+                .supabase
+                .as_ref()
+                .ok_or_else(|| "Supabase 存储空间配置不完整".to_string())?
+                .require_bound()?;
             let session = state
                 .supabase_sessions
                 .lock()
@@ -16866,7 +17292,14 @@ fn normalize_settings(
                 {
                     return Err("启用的 Supabase 存储空间必须填写 API URL 和公开 Key".to_string());
                 }
+                if !supabase.api_url.is_empty() && !supabase.anon_key.is_empty() {
+                    supabase_connection::validate_public_config(
+                        &supabase.api_url,
+                        &supabase.anon_key,
+                    )?;
+                }
                 if supabase.space_id.is_empty() {
+                    supabase.binding_state = SupabaseBindingState::Unbound;
                     profile.enabled = false;
                 }
                 profile.webdav = None;
@@ -16883,7 +17316,14 @@ fn normalize_settings(
     settings.active_storage_profile_id = settings
         .storage_profiles
         .iter()
-        .any(|profile| profile.id == active_profile_id && profile.enabled)
+        .any(|profile| {
+            profile.id == active_profile_id
+                && profile.enabled
+                && profile
+                    .supabase
+                    .as_ref()
+                    .is_none_or(|config| config.require_bound().is_ok())
+        })
         .then_some(active_profile_id);
 
     settings.webdav_endpoints = settings
@@ -21454,6 +21894,19 @@ fn start_sync_loop(app_handle: AppHandle) {
                     continue;
                 }
             };
+            {
+                let state = app_handle.state::<AppState>();
+                if validate_supabase_binding_access(&state, &profile, &session)
+                    .await
+                    .is_err()
+                {
+                    initialized_scope = None;
+                    if sync_signal.changed().await.is_err() {
+                        return;
+                    }
+                    continue;
+                }
+            }
             let scope = (profile.clone(), session.user_id.clone());
             if initialized_scope.as_ref() != Some(&scope) {
                 let state = app_handle.state::<AppState>();
@@ -22242,6 +22695,8 @@ pub fn run() {
             discover_telegram_chats,
             save_settings,
             save_storage_profile,
+            activate_storage_profile,
+            set_storage_profile_enabled,
             remove_storage_profile,
             paste_dictation_text,
             copy_dictation_text,
@@ -22607,6 +23062,30 @@ mod tests {
         Query(query): Query<HashMap<String, String>>,
         Json(body): Json<serde_json::Value>,
     ) -> (HttpStatusCode, Json<serde_json::Value>) {
+        if query.get("grant_type").map(String::as_str) == Some("password") {
+            if body["password"] == "invalid-fixture" {
+                return (
+                    HttpStatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"message":"invalid login"})),
+                );
+            }
+            let email = body["email"].as_str().unwrap_or_default();
+            let user_id = match email {
+                "a@example.invalid" => "user-a",
+                "b@example.invalid" => "user-b",
+                "replacement@example.invalid" => "user-replacement",
+                _ => "user-test",
+            };
+            return (
+                HttpStatusCode::OK,
+                Json(serde_json::json!({
+                    "access_token":format!("access-{user_id}"),
+                    "refresh_token":format!("refresh-{user_id}"),
+                    "expires_in":3600,
+                    "user":{"id":user_id,"email":email}
+                })),
+            );
+        }
         if query.get("grant_type").map(String::as_str) == Some("refresh_token")
             && body["refresh_token"] == "saved-refresh-token"
         {
@@ -22661,6 +23140,11 @@ mod tests {
     struct TestSupabaseState {
         snapshots: Arc<Mutex<TestHashMap<String, serde_json::Value>>>,
         remote_changes: Arc<Mutex<Vec<serde_json::Value>>>,
+        rpc_counts: Arc<Mutex<TestHashMap<String, usize>>>,
+        rpc_requests: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+        rpc_gate: Arc<Mutex<Option<(String, Arc<Notify>, Arc<Notify>)>>>,
+        space_create_operations: Arc<Mutex<TestHashMap<String, (String, String)>>>,
+        space_read_gate: Arc<Mutex<Option<(Arc<Notify>, Arc<Notify>)>>>,
         objects: Arc<Mutex<TestHashMap<String, Vec<u8>>>>,
         storage_get_counts: Arc<Mutex<TestHashMap<String, usize>>>,
         storage_put_counts: Arc<Mutex<TestHashMap<String, usize>>>,
@@ -22672,6 +23156,10 @@ mod tests {
     }
 
     impl TestSupabaseState {
+        fn rpc_count(&self, rpc: &str) -> usize {
+            *self.rpc_counts.lock().unwrap().get(rpc).unwrap_or(&0)
+        }
+
         fn storage_get_count(&self, path: &str) -> usize {
             *self
                 .storage_get_counts
@@ -22725,6 +23213,11 @@ mod tests {
         Query(query): Query<TestHashMap<String, String>>,
     ) -> AxumResponse {
         if table == "spaces" {
+            let gate = state.space_read_gate.lock().unwrap().clone();
+            if let Some((started, resume)) = gate {
+                started.notify_one();
+                resume.notified().await;
+            }
             let requested_id = query.get("id").and_then(|value| value.strip_prefix("eq."));
             let mut rows = state
                 .snapshots
@@ -22838,6 +23331,17 @@ mod tests {
         AxumPath(rpc): AxumPath<String>,
         Json(body): Json<serde_json::Value>,
     ) -> AxumResponse {
+        *state
+            .rpc_counts
+            .lock()
+            .unwrap()
+            .entry(rpc.clone())
+            .or_default() += 1;
+        state
+            .rpc_requests
+            .lock()
+            .unwrap()
+            .push((rpc.clone(), body.clone()));
         if rpc == "pull_changes" {
             let after_seq = body["p_after_seq"].as_i64().unwrap_or(0);
             let limit = body["p_limit"].as_u64().unwrap_or(200) as usize;
@@ -22853,6 +23357,32 @@ mod tests {
             return test_json_response(HttpStatusCode::OK, &serde_json::json!(changes), None);
         }
         if rpc == "space_upsert" {
+            let operation_id = body["p_operation_id"].as_str().unwrap_or_default();
+            let space_id = body["p_space_id"].as_str().unwrap_or_default();
+            let name = body["p_name"].as_str().unwrap_or_default();
+            let mut operations = state.space_create_operations.lock().unwrap();
+            if let Some((existing_space_id, existing_name)) = operations.get(operation_id) {
+                if existing_space_id != space_id || existing_name != name {
+                    return test_json_response(
+                        HttpStatusCode::CONFLICT,
+                        &serde_json::json!({"message":"operation parameters changed"}),
+                        None,
+                    );
+                }
+            } else {
+                operations.insert(
+                    operation_id.to_string(),
+                    (space_id.to_string(), name.to_string()),
+                );
+                state.snapshots.lock().unwrap().insert(
+                    format!("spaces/{space_id}"),
+                    serde_json::json!({
+                        "id": space_id,
+                        "name": name,
+                        "updated_at": "2026-10-29T00:00:00Z"
+                    }),
+                );
+            }
             return test_json_response(
                 HttpStatusCode::OK,
                 &serde_json::json!({"status":"applied"}),
@@ -22931,6 +23461,13 @@ mod tests {
             .lock()
             .unwrap()
             .insert(format!("{table}/{id}"), snapshot);
+        let gate = state.rpc_gate.lock().unwrap().clone();
+        if let Some((gated_rpc, started, resume)) = gate {
+            if gated_rpc == rpc {
+                started.notify_one();
+                resume.notified().await;
+            }
+        }
         test_json_response(
             HttpStatusCode::OK,
             &serde_json::json!({
@@ -23069,6 +23606,7 @@ mod tests {
         let state = TestSupabaseState::default();
         seed_test_supabase_space(&state, "00000000-0000-4000-8000-000000000001");
         let app = TestRouter::new()
+            .route("/auth/v1/token", post(test_auth_refresh))
             .route("/auth/v1/user", get(test_supabase_current_user))
             .route("/rest/v1/:table", get(test_supabase_snapshot))
             .route("/rest/v1/rpc/:rpc", post(test_supabase_rpc))
@@ -23176,6 +23714,7 @@ mod tests {
                 api_url: "https://example.invalid".to_string(),
                 anon_key: "public-test-key".to_string(),
                 space_id: "00000000-0000-4000-8000-000000000001".to_string(),
+                binding_state: Default::default(),
             }),
         }];
         settings.active_storage_profile_id = Some("supabase-1".to_string());
@@ -23209,6 +23748,27 @@ mod tests {
             .unwrap()
             .api_url = api_url;
         settings
+    }
+
+    #[test]
+    fn supabase_account_status_serialization_exposes_only_account_summary() {
+        let session = supabase_auth::SupabaseSession {
+            access_token: "access-secret-fixture".into(),
+            refresh_token: "refresh-secret-fixture".into(),
+            user_id: "user-a".into(),
+            email: "user@example.invalid".into(),
+            expires_at: 1234,
+        };
+        let value = serde_json::to_value(account_status("flow-summary", Some(&session))).unwrap();
+        let serialized = value.to_string();
+        assert_eq!(value["profileId"], "flow-summary");
+        assert_eq!(value["userId"], "user-a");
+        assert_eq!(value["email"], "user@example.invalid");
+        assert!(!serialized.contains("access-secret-fixture"));
+        assert!(!serialized.contains("refresh-secret-fixture"));
+        assert!(!serialized.contains("accessToken"));
+        assert!(!serialized.contains("refreshToken"));
+        assert!(!serialized.contains("password"));
     }
 
     #[tokio::test]
@@ -23380,6 +23940,121 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn profile_sessions_restore_independently_and_account_replacement_preserves_pending_owner(
+    ) {
+        let _credential_guard = credential_store::credential_test_guard();
+        let api_url = spawn_test_auth().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-profile-sessions-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let mut settings = test_supabase_settings_with_url(api_url);
+        let profile_a = format!("session-a-{}", uuid::Uuid::new_v4());
+        let profile_b = format!("session-b-{}", uuid::Uuid::new_v4());
+        settings.storage_profiles[0].id = profile_a.clone();
+        let mut secondary = settings.storage_profiles[0].clone();
+        secondary.id = profile_b.clone();
+        secondary.supabase.as_mut().unwrap().space_id =
+            "00000000-0000-4000-8000-000000000002".into();
+        settings.storage_profiles.push(secondary);
+        settings.active_storage_profile_id = Some(profile_a.clone());
+        let state = test_app_state(&temp_dir, settings.clone());
+        db::init_db(&state.db_path, Some(&profile_a)).unwrap();
+        let fixture_password = uuid::Uuid::new_v4().to_string();
+
+        supabase_sign_in_impl(
+            &state,
+            SupabaseSignInInput {
+                profile_id: profile_a.clone(),
+                email: "a@example.invalid".into(),
+                password: fixture_password.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        supabase_sign_in_impl(
+            &state,
+            SupabaseSignInInput {
+                profile_id: profile_b.clone(),
+                email: "b@example.invalid".into(),
+                password: fixture_password.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            credential_store::load_session(&profile_a)
+                .unwrap()
+                .unwrap()
+                .user_id,
+            "user-a"
+        );
+        assert_eq!(
+            credential_store::load_session(&profile_b)
+                .unwrap()
+                .unwrap()
+                .user_id,
+            "user-b"
+        );
+
+        let restarted = test_app_state(&temp_dir, settings);
+        *restarted.supabase_sessions.lock().unwrap() =
+            credential_store::restore_sessions([profile_a.clone(), profile_b.clone()]);
+        assert_eq!(restarted.supabase_sessions.lock().unwrap().len(), 2);
+        supabase_logout_impl(&restarted, profile_b.clone())
+            .await
+            .unwrap();
+        assert!(restarted
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .contains_key(&profile_a));
+        assert!(!restarted
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .contains_key(&profile_b));
+
+        rusqlite::Connection::open(&restarted.db_path)
+            .unwrap()
+            .execute(
+                "INSERT INTO sync_outbox (operation_id,endpoint_id,owner_scope,entity_type,
+                 entity_id,action,base_revision,payload_json,payload_hash,state,attempt_count,
+                 next_attempt_at_ms,created_at_ms,updated_at_ms)
+                 VALUES ('pending-old-owner',?1,'user-a','message','message-a',
+                 'upsert',0,'{}','hash','pending',0,0,1,1)",
+                rusqlite::params![profile_a],
+            )
+            .unwrap();
+        let error = match supabase_sign_in_impl(
+            &restarted,
+            SupabaseSignInInput {
+                profile_id: profile_a.clone(),
+                email: "replacement@example.invalid".into(),
+                password: fixture_password,
+            },
+        )
+        .await
+        {
+            Ok(_) => panic!("account replacement with pending work must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.message.contains("原账号"));
+        assert_eq!(
+            credential_store::load_session(&profile_a)
+                .unwrap()
+                .unwrap()
+                .user_id,
+            "user-a"
+        );
+
+        credential_store::delete_session(&profile_a).unwrap();
+        credential_store::delete_session(&profile_b).unwrap();
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
     async fn supabase_account_spaces_switch_in_place_without_adding_profiles() {
         let _credential_guard = credential_store::credential_test_guard();
         let server = spawn_test_supabase().await;
@@ -23466,6 +24141,37 @@ mod tests {
 
         let cached_message = test_db_message(&source_profile_id, "cached.bin", "cached.bin", 1, 10);
         db::upsert_message(&state.db_path, &cached_message).unwrap();
+        db::upsert_mobile_composer_draft(
+            &state.db_path,
+            &db::MobileComposerDraftRecord {
+                endpoint_id: source_profile_id.clone(),
+                owner_scope: "user-a".into(),
+                space_id: source_space_id.clone(),
+                payload_json: serde_json::json!({"text":"unsent","attachments":[]}).to_string(),
+                updated_at_ms: 1,
+            },
+        )
+        .unwrap();
+        let draft_blocked = match switch_supabase_space_impl(
+            &state,
+            SwitchSupabaseSpaceInput {
+                source_profile_id: source_profile_id.clone(),
+                space_id: remote_space_id.clone(),
+            },
+        )
+        .await
+        {
+            Ok(_) => panic!("switching with an unsent mobile draft should be blocked"),
+            Err(error) => error,
+        };
+        assert!(draft_blocked.contains("未处理草稿"));
+        db::delete_mobile_composer_draft(
+            &state.db_path,
+            &source_profile_id,
+            "user-a",
+            &source_space_id,
+        )
+        .unwrap();
 
         let switched = switch_supabase_space_impl(
             &state,
@@ -23529,7 +24235,7 @@ mod tests {
             &state,
             SwitchSupabaseSpaceInput {
                 source_profile_id: source_profile_id.clone(),
-                space_id: source_space_id,
+                space_id: source_space_id.clone(),
             },
         )
         .await
@@ -23546,8 +24252,481 @@ mod tests {
                 .space_id,
             "00000000-0000-4000-8000-000000000002"
         );
+        let conn = rusqlite::Connection::open(&state.db_path).unwrap();
+        conn.execute(
+            "UPDATE sync_outbox SET state='applied' WHERE operation_id='pending-switch'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_conflicts (endpoint_id,owner_scope,entity_type,entity_id,
+             local_payload_json,local_revision,status,created_at_ms)
+             VALUES(?1,'user-a','message','blocked-conflict','{}',0,'unresolved',1)",
+            rusqlite::params![source_profile_id],
+        )
+        .unwrap();
+        drop(conn);
+        assert!(
+            switch_supabase_space_impl(
+                &state,
+                SwitchSupabaseSpaceInput {
+                    source_profile_id: source_profile_id.clone(),
+                    space_id: source_space_id.clone(),
+                },
+            )
+            .await
+            .is_err(),
+            "unresolved conflicts block rebind even without pending uploads"
+        );
+        assert_eq!(
+            db::count_open_conflicts(&state.db_path, &source_profile_id, "user-a").unwrap(),
+            1
+        );
+        let conn = rusqlite::Connection::open(&state.db_path).unwrap();
+        conn.execute(
+            "UPDATE sync_conflicts SET status='resolved' WHERE endpoint_id=?1",
+            rusqlite::params![source_profile_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO storage_import_batches (batch_id,source_profile_id,target_profile_id,
+             target_owner_scope,status,total_items,applied_items,failed_items,created_at_ms,updated_at_ms)
+             VALUES('blocked-transfer',?1,'target-fixture','user-a','running',1,0,0,1,1)",
+            rusqlite::params![source_profile_id],
+        )
+        .unwrap();
+        drop(conn);
+        assert!(
+            switch_supabase_space_impl(
+                &state,
+                SwitchSupabaseSpaceInput {
+                    source_profile_id: source_profile_id.clone(),
+                    space_id: source_space_id.clone(),
+                },
+            )
+            .await
+            .is_err(),
+            "unfinished transfers block rebind independently"
+        );
+        assert!(db::has_pending_profile_work(&state.db_path, &source_profile_id).unwrap());
+        let retained = current_settings(&state).unwrap();
+        assert_eq!(retained.storage_profiles.len(), 1);
+        assert_eq!(
+            retained.storage_profiles[0].supabase.as_ref().unwrap().space_id,
+            "00000000-0000-4000-8000-000000000002"
+        );
+        assert_eq!(
+            state.supabase_sessions.lock().unwrap()[&source_profile_id].user_id,
+            session.user_id
+        );
+        assert_eq!(
+            credential_store::load_session(&source_profile_id).unwrap().unwrap().user_id,
+            session.user_id
+        );
+        assert_eq!(server.state.rpc_count("space_create"), 0);
+        assert!(server.state.snapshots.lock().unwrap().contains_key(&format!("spaces/{source_space_id}")));
 
         credential_store::delete_session(&source_profile_id).unwrap();
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_binding_guards_reject_unbound_business_entries_without_remote_creation() {
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-binding-guards-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let mut settings = test_supabase_settings_with_url(server.base_url.clone());
+        settings.storage_profiles[0]
+            .supabase
+            .as_mut()
+            .unwrap()
+            .binding_state = SupabaseBindingState::Unbound;
+        let mut target = settings.storage_profiles[0].clone();
+        target.id = "supabase-2".into();
+        target.supabase.as_mut().unwrap().binding_state = SupabaseBindingState::Bound;
+        settings.storage_profiles.push(target);
+        let state = test_app_state(&temp_dir, settings);
+        db::init_db(&state.db_path, None).unwrap();
+        install_test_supabase_session(&state);
+        let current = current_settings(&state).unwrap();
+        let profile = &current.storage_profiles[0];
+        let session = state.supabase_sessions.lock().unwrap()["supabase-1"].clone();
+        assert!(send_text_impl(&state, "blocked".into(), None, None)
+            .await
+            .is_err());
+        assert!(send_file_data_impl(
+            &state,
+            None,
+            b"blocked".to_vec(),
+            "blocked.bin".into(),
+            None,
+            None
+        )
+        .await
+        .is_err());
+        assert!(list_messages_window_impl(&state, None).await.is_err());
+        assert!(
+            hydrate_supabase_message_history(&state, profile, &session, false, 50)
+                .await
+                .is_err()
+        );
+        assert!(push_supabase_outbox(&state, profile, &session, false, None)
+            .await
+            .is_err());
+        assert!(
+            supabase_sync::connect_realtime(profile.supabase.as_ref().unwrap(), &session)
+                .await
+                .is_err()
+        );
+        assert!(get_media_preview_impl(
+            &state,
+            MediaPreviewInput {
+                endpoint_id: profile.id.clone(),
+                filename: "blocked.jpg".into(),
+                original_name: "blocked.jpg".into()
+            }
+        )
+        .await
+        .is_err());
+        assert!(storage_transfer_context(
+            &state,
+            &StorageTransferRequest {
+                source_profile_id: profile.id.clone(),
+                target_profile_id: "supabase-2".into()
+            }
+        )
+        .await
+        .is_err());
+        assert!(
+            active_supabase_context(&state, &current).is_err(),
+            "download entry rejects unbound active context"
+        );
+        assert_eq!(server.state.rpc_requests.lock().unwrap().len(), 0);
+        assert_eq!(server.state.storage_put_counts.lock().unwrap().len(), 0);
+        assert_eq!(server.state.storage_get_counts.lock().unwrap().len(), 0);
+        assert!(!db::has_profile_business_data(&state.db_path, &profile.id).unwrap());
+        assert!(!db::has_pending_profile_work(&state.db_path, &profile.id).unwrap());
+        // A missing bound Space is also a read-only failure, retaining durable work.
+        let mut bound = profile.clone();
+        bound.supabase.as_mut().unwrap().binding_state = SupabaseBindingState::Bound;
+        state.settings.lock().unwrap().storage_profiles[0] = bound.clone();
+        let mut message = test_db_message(&bound.id, "retained.txt", "retained.txt", 1, 5);
+        message.content = Some("retained".into());
+        let operation = outbox_operation_with_id(
+            "retained-operation",
+            &bound.id,
+            &session.user_id,
+            "message",
+            "retained-id",
+            "upsert",
+            0,
+            supabase_message_payload(&message),
+        )
+        .unwrap();
+        db::save_message_and_enqueue(&state.db_path, &message, &operation).unwrap();
+        server.state.snapshots.lock().unwrap().clear();
+        assert!(run_sync(&state, REALTIME_SYNC_SOURCE, false).await.is_err());
+        assert!(db::has_pending_profile_work(&state.db_path, &bound.id).unwrap());
+        assert!(db::has_profile_business_data(&state.db_path, &bound.id).unwrap());
+        assert_eq!(
+            current_settings(&state).unwrap().storage_profiles[0]
+                .supabase
+                .as_ref()
+                .unwrap()
+                .binding_state,
+            SupabaseBindingState::NeedsAttention
+        );
+        assert_eq!(server.state.rpc_count("space_upsert"), 0);
+        assert_eq!(server.state.rpc_count("message_apply"), 0);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_binding_flow_lifecycle_is_temporary_and_read_only() {
+        let _credential_guard = credential_store::credential_test_guard();
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-binding-lifecycle-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(
+            &temp_dir,
+            test_supabase_settings_with_url(server.base_url.clone()),
+        );
+        db::init_db(&state.db_path, None).unwrap();
+        let settings_before = serde_json::to_value(current_settings(&state).unwrap()).unwrap();
+        let login = |flow_id, password: &str| SupabaseDraftSignInInput {
+            flow_id,
+            api_url: server.base_url.clone(),
+            anon_key: "public-fixture".into(),
+            email: "a@example.invalid".into(),
+            password: password.into(),
+        };
+        let status = supabase_draft_sign_in_impl(&state, login(None, "fixture"))
+            .await
+            .unwrap();
+        assert!(state.supabase_sessions.lock().unwrap().is_empty());
+        assert!(credential_store::load_session(&status.profile_id)
+            .unwrap()
+            .is_none());
+        let payload = serde_json::to_string(&status).unwrap();
+        assert!(!payload.contains("access-user-a"));
+        assert!(!payload.contains("refresh-user-a"));
+        for expected in 0..=2 {
+            server
+                .state
+                .snapshots
+                .lock()
+                .unwrap()
+                .retain(|key, _| !key.starts_with("spaces/"));
+            for index in 0..expected {
+                seed_test_supabase_space(
+                    &server.state,
+                    &format!("00000000-0000-4000-8000-{index:012}"),
+                );
+            }
+            let listed = list_supabase_draft_spaces_impl(
+                &state,
+                SupabaseBindingFlowInput {
+                    flow_id: status.profile_id.clone(),
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(listed.len(), expected);
+            assert_eq!(server.state.rpc_count("space_upsert"), 0);
+        }
+        cancel_supabase_binding_flow_impl(
+            &state,
+            SupabaseBindingFlowInput {
+                flow_id: status.profile_id.clone(),
+            },
+        )
+        .unwrap();
+        assert!(binding_flow(&state, &status.profile_id).is_err());
+        // Cancellation is idempotent and cannot write formal settings or credentials.
+        cancel_supabase_binding_flow_impl(
+            &state,
+            SupabaseBindingFlowInput {
+                flow_id: status.profile_id.clone(),
+            },
+        )
+        .unwrap();
+        let expired = supabase_draft_sign_in_impl(&state, login(None, "fixture"))
+            .await
+            .unwrap();
+        state
+            .supabase_binding_flows
+            .lock()
+            .unwrap()
+            .get_mut(&expired.profile_id)
+            .unwrap()
+            .updated_at_ms = now_ms() - 30 * 60 * 1000 - 1;
+        assert!(binding_flow(&state, &expired.profile_id)
+            .err()
+            .unwrap()
+            .contains("过期"));
+        assert!(!state
+            .supabase_binding_flows
+            .lock()
+            .unwrap()
+            .contains_key(&expired.profile_id));
+        let previous = supabase_draft_sign_in_impl(&state, login(None, "fixture"))
+            .await
+            .unwrap();
+        let error = supabase_draft_sign_in_impl(
+            &state,
+            login(Some(previous.profile_id.clone()), "invalid-fixture"),
+        )
+        .await
+        .err()
+        .expect("invalid credentials must reject draft login");
+        assert_eq!(
+            error.kind,
+            supabase_auth::SupabaseAuthErrorKind::InvalidCredentials
+        );
+        assert!(binding_flow(&state, &previous.profile_id).is_err());
+        assert!(state.supabase_binding_flows.lock().unwrap().is_empty());
+        assert_eq!(
+            serde_json::to_value(current_settings(&state).unwrap()).unwrap(),
+            settings_before
+        );
+        assert_eq!(server.state.rpc_count("space_upsert"), 0);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_binding_rejects_changed_parameters_revoked_permission_and_late_cancel() {
+        let _credential_guard = credential_store::credential_test_guard();
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-binding-stale-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = Arc::new(test_app_state(
+            &temp_dir,
+            test_supabase_settings_with_url(server.base_url.clone()),
+        ));
+        db::init_db(&state.db_path, None).unwrap();
+        let settings_before = serde_json::to_value(current_settings(&state).unwrap()).unwrap();
+        let status = supabase_draft_sign_in_impl(
+            &state,
+            SupabaseDraftSignInInput {
+                flow_id: None,
+                api_url: server.base_url.clone(),
+                anon_key: "public-fixture".into(),
+                email: "a@example.invalid".into(),
+                password: "fixture".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let mut profile = test_supabase_settings_with_url(server.base_url.clone())
+            .storage_profiles
+            .remove(0);
+        profile.id = format!("binding-stale-{}", uuid::Uuid::new_v4());
+        profile.supabase.as_mut().unwrap().anon_key = "public-fixture".into();
+        let input = CompleteSupabaseBindingInput {
+            flow_id: status.profile_id.clone(),
+            original_profile_id: None,
+            space_id: profile.supabase.as_ref().unwrap().space_id.clone(),
+            profile,
+        };
+        for change_url in [true, false] {
+            let mut changed = input.clone();
+            if change_url {
+                changed.profile.supabase.as_mut().unwrap().api_url =
+                    "https://other.fixture.invalid".into();
+            } else {
+                changed.profile.supabase.as_mut().unwrap().anon_key = "public-other".into();
+            }
+            assert!(complete_supabase_binding_impl(&state, changed)
+                .await
+                .err()
+                .unwrap()
+                .contains("配置已改变"));
+        }
+        server
+            .state
+            .snapshots
+            .lock()
+            .unwrap()
+            .remove(&format!("spaces/{}", input.space_id));
+        assert!(complete_supabase_binding_impl(&state, input.clone())
+            .await
+            .err()
+            .unwrap()
+            .contains("无权访问"));
+        seed_test_supabase_space(&server.state, &input.space_id);
+        let started = Arc::new(Notify::new());
+        let resume = Arc::new(Notify::new());
+        *server.state.space_read_gate.lock().unwrap() = Some((started.clone(), resume.clone()));
+        let target = state.clone();
+        let pending_input = input.clone();
+        let pending =
+            tokio::spawn(
+                async move { complete_supabase_binding_impl(&target, pending_input).await },
+            );
+        tokio::time::timeout(TokioDuration::from_secs(5), started.notified())
+            .await
+            .unwrap();
+        cancel_supabase_binding_flow_impl(
+            &state,
+            SupabaseBindingFlowInput {
+                flow_id: status.profile_id,
+            },
+        )
+        .unwrap();
+        resume.notify_one();
+        assert!(pending.await.unwrap().err().unwrap().contains("流程已失效"));
+        assert_eq!(
+            serde_json::to_value(current_settings(&state).unwrap()).unwrap(),
+            settings_before
+        );
+        assert!(credential_store::load_session(&input.profile.id)
+            .unwrap()
+            .is_none());
+        assert!(state.supabase_sessions.lock().unwrap().is_empty());
+        assert_eq!(server.state.rpc_count("space_upsert"), 0);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_binding_explicit_create_retries_keep_one_space_and_cancel_keeps_remote() {
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-binding-create-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(
+            &temp_dir,
+            test_supabase_settings_with_url(server.base_url.clone()),
+        );
+        let status = supabase_draft_sign_in_impl(
+            &state,
+            SupabaseDraftSignInInput {
+                flow_id: None,
+                api_url: server.base_url.clone(),
+                anon_key: "public-fixture".into(),
+                email: "a@example.invalid".into(),
+                password: "fixture".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let input = CreateSupabaseSpaceInput {
+            flow_id: Some(status.profile_id.clone()),
+            profile_id: None,
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            space_id: uuid::Uuid::new_v4().to_string(),
+            name: "Explicit fixture".into(),
+        };
+        let created = create_supabase_space_impl(&state, input.clone())
+            .await
+            .unwrap();
+        let retry = create_supabase_space_impl(&state, input.clone())
+            .await
+            .unwrap();
+        assert_eq!(created.id, retry.id);
+        assert_eq!(server.state.rpc_count("space_upsert"), 2);
+        assert_eq!(
+            server.state.space_create_operations.lock().unwrap().len(),
+            1
+        );
+        let mut changed = input.clone();
+        changed.space_id = uuid::Uuid::new_v4().to_string();
+        assert!(create_supabase_space_impl(&state, changed).await.is_err());
+        cancel_supabase_binding_flow_impl(
+            &state,
+            SupabaseBindingFlowInput {
+                flow_id: status.profile_id,
+            },
+        )
+        .unwrap();
+        assert!(server
+            .state
+            .snapshots
+            .lock()
+            .unwrap()
+            .contains_key(&format!("spaces/{}", input.space_id)));
+        assert_eq!(
+            server
+                .state
+                .snapshots
+                .lock()
+                .unwrap()
+                .keys()
+                .filter(|key| key.starts_with("spaces/"))
+                .count(),
+            2
+        );
+        assert_eq!(current_settings(&state).unwrap().storage_profiles.len(), 1);
         let _ = fs::remove_dir_all(temp_dir);
     }
 
@@ -23564,6 +24743,11 @@ mod tests {
         let mut settings = test_supabase_settings_with_url(server.base_url.clone());
         settings.storage_profiles[0].id = profile_id.clone();
         settings.active_storage_profile_id = None;
+        settings.storage_profiles[0]
+            .supabase
+            .as_mut()
+            .unwrap()
+            .binding_state = SupabaseBindingState::NeedsAttention;
         let existing = settings.storage_profiles[0].clone();
         let state = test_app_state(&temp_dir, settings);
         db::init_db(&state.db_path, None).unwrap();
@@ -23603,6 +24787,14 @@ mod tests {
         assert_eq!(updated.storage_profiles[0].id, profile_id);
         assert_eq!(updated.storage_profiles[0].name, existing.name);
         assert_eq!(
+            updated.storage_profiles[0]
+                .supabase
+                .as_ref()
+                .unwrap()
+                .binding_state,
+            SupabaseBindingState::Bound
+        );
+        assert_eq!(
             credential_store::load_session(&profile_id)
                 .unwrap()
                 .unwrap()
@@ -23623,6 +24815,205 @@ mod tests {
             .lock()
             .unwrap()
             .contains_key("retry-flow"));
+
+        credential_store::delete_session(&profile_id).unwrap();
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_binding_credential_failure_rolls_back_new_profile_and_remains_retryable() {
+        let _credential_guard = credential_store::credential_test_guard();
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-binding-credential-new-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(&temp_dir, test_settings());
+        db::init_db(&state.db_path, None).unwrap();
+        let profile_id = format!("supabase-new-{}", uuid::Uuid::new_v4());
+        let profile = StorageProfile {
+            id: profile_id.clone(),
+            name: "New Supabase".into(),
+            provider_kind: StorageProviderKind::Supabase,
+            enabled: true,
+            webdav: None,
+            supabase: Some(crate::types::SupabaseStorageConfig {
+                api_url: server.base_url.clone(),
+                anon_key: "public-test-key".into(),
+                space_id: "00000000-0000-4000-8000-000000000001".into(),
+                binding_state: SupabaseBindingState::Bound,
+            }),
+        };
+        let session = supabase_auth::SupabaseSession {
+            access_token: "new-access".into(),
+            refresh_token: "new-refresh".into(),
+            user_id: "user-a".into(),
+            email: "user@example.invalid".into(),
+            expires_at: i64::MAX,
+        };
+        state.supabase_binding_flows.lock().unwrap().insert(
+            "credential-new-flow".into(),
+            SupabaseBindingFlow {
+                api_url: server.base_url.clone(),
+                anon_key: "public-test-key".into(),
+                session,
+                updated_at_ms: now_ms(),
+            },
+        );
+
+        credential_store::fail_next_save_for_test();
+        let input = CompleteSupabaseBindingInput {
+            flow_id: "credential-new-flow".into(),
+            original_profile_id: None,
+            space_id: "00000000-0000-4000-8000-000000000001".into(),
+            profile: profile.clone(),
+        };
+        let error = match complete_supabase_binding_impl(&state, input.clone()).await {
+            Ok(_) => panic!("credential failure must reject binding"),
+            Err(error) => error,
+        };
+        assert!(error.contains("保存系统凭据失败"));
+        assert!(!error.contains("new-access"));
+        assert!(!error.contains("new-refresh"));
+        assert!(current_settings(&state)
+            .unwrap()
+            .storage_profiles
+            .iter()
+            .all(|candidate| candidate.id != profile_id));
+        assert!(credential_store::load_session(&profile_id)
+            .unwrap()
+            .is_none());
+        assert!(state
+            .supabase_binding_flows
+            .lock()
+            .unwrap()
+            .contains_key("credential-new-flow"));
+
+        let updated = complete_supabase_binding_impl(&state, input)
+            .await
+            .expect("the retained flow can be retried");
+        assert!(updated
+            .storage_profiles
+            .iter()
+            .any(|candidate| candidate.id == profile_id));
+        assert!(credential_store::load_session(&profile_id)
+            .unwrap()
+            .is_some());
+
+        credential_store::delete_session(&profile_id).unwrap();
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_binding_credential_failure_restores_existing_profile_and_session() {
+        let _credential_guard = credential_store::credential_test_guard();
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-binding-credential-existing-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let profile_id = format!("supabase-existing-{}", uuid::Uuid::new_v4());
+        let mut settings = test_supabase_settings_with_url(server.base_url.clone());
+        settings.storage_profiles[0].id = profile_id.clone();
+        settings.storage_profiles[0].name = "Original".into();
+        settings.storage_profiles[0]
+            .supabase
+            .as_mut()
+            .unwrap()
+            .space_id
+            .clear();
+        settings.storage_profiles[0]
+            .supabase
+            .as_mut()
+            .unwrap()
+            .binding_state = SupabaseBindingState::Unbound;
+        settings.storage_profiles[0].enabled = false;
+        let state = test_app_state(&temp_dir, settings);
+        db::init_db(&state.db_path, None).unwrap();
+        let original = current_settings(&state).unwrap().storage_profiles[0].clone();
+        let old_session = supabase_auth::SupabaseSession {
+            access_token: "old-access".into(),
+            refresh_token: "old-refresh".into(),
+            user_id: "user-a".into(),
+            email: "old@example.invalid".into(),
+            expires_at: i64::MAX,
+        };
+        credential_store::save_session(&profile_id, &old_session).unwrap();
+        state
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .insert(profile_id.clone(), old_session.clone());
+        let new_session = supabase_auth::SupabaseSession {
+            access_token: "new-access".into(),
+            refresh_token: "new-refresh".into(),
+            user_id: "user-a".into(),
+            email: "new@example.invalid".into(),
+            expires_at: i64::MAX,
+        };
+        state.supabase_binding_flows.lock().unwrap().insert(
+            "credential-existing-flow".into(),
+            SupabaseBindingFlow {
+                api_url: server.base_url.clone(),
+                anon_key: original.supabase.as_ref().unwrap().anon_key.clone(),
+                session: new_session,
+                updated_at_ms: now_ms(),
+            },
+        );
+        let mut repaired = original.clone();
+        repaired.name = "Repaired".into();
+        repaired.enabled = true;
+        repaired.supabase.as_mut().unwrap().space_id =
+            "00000000-0000-4000-8000-000000000001".into();
+        repaired.supabase.as_mut().unwrap().binding_state = SupabaseBindingState::Bound;
+
+        credential_store::fail_next_save_for_test();
+        let error = match complete_supabase_binding_impl(
+            &state,
+            CompleteSupabaseBindingInput {
+                flow_id: "credential-existing-flow".into(),
+                original_profile_id: Some(profile_id.clone()),
+                space_id: "00000000-0000-4000-8000-000000000001".into(),
+                profile: repaired,
+            },
+        )
+        .await
+        {
+            Ok(_) => panic!("credential failure must restore the original profile"),
+            Err(error) => error,
+        };
+        assert!(error.contains("保存系统凭据失败"));
+        assert!(!error.contains("old-access"));
+        assert!(!error.contains("old-refresh"));
+        assert!(!error.contains("new-access"));
+        assert!(!error.contains("new-refresh"));
+        assert_eq!(
+            current_settings(&state).unwrap().storage_profiles[0],
+            original
+        );
+        assert_eq!(
+            credential_store::load_session(&profile_id)
+                .unwrap()
+                .unwrap()
+                .refresh_token,
+            "old-refresh"
+        );
+        assert_eq!(
+            state
+                .supabase_sessions
+                .lock()
+                .unwrap()
+                .get(&profile_id)
+                .map(|session| session.refresh_token.as_str()),
+            Some("old-refresh")
+        );
+        assert!(state
+            .supabase_binding_flows
+            .lock()
+            .unwrap()
+            .contains_key("credential-existing-flow"));
 
         credential_store::delete_session(&profile_id).unwrap();
         let _ = fs::remove_dir_all(temp_dir);
@@ -23716,6 +25107,7 @@ mod tests {
 
     #[test]
     fn storage_profile_edit_updates_in_place_and_rejects_duplicate_supabase_destination() {
+        let _credential_guard = credential_store::credential_test_guard();
         let temp_dir = std::env::temp_dir().join(format!(
             "transfer-genie-profile-edit-{}",
             uuid::Uuid::new_v4()
@@ -23724,6 +25116,20 @@ mod tests {
         let settings = test_supabase_settings();
         let original = settings.storage_profiles[0].clone();
         let state = test_app_state(&temp_dir, settings);
+        db::init_db(&state.db_path, Some(&original.id)).unwrap();
+        let session = supabase_auth::SupabaseSession {
+            access_token: "edit-access".into(),
+            refresh_token: "edit-refresh".into(),
+            user_id: "edit-user".into(),
+            email: "edit@example.invalid".into(),
+            expires_at: i64::MAX,
+        };
+        credential_store::save_session(&original.id, &session).unwrap();
+        state
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .insert(original.id.clone(), session);
 
         let mut renamed = original.clone();
         renamed.id = "unexpected-new-profile-id".into();
@@ -23739,6 +25145,42 @@ mod tests {
         assert_eq!(updated.storage_profiles.len(), 1);
         assert_eq!(updated.storage_profiles[0].id, original.id);
         assert_eq!(updated.storage_profiles[0].name, "Renamed Supabase");
+        assert!(state
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .contains_key(&original.id));
+        assert!(credential_store::load_session(&original.id)
+            .unwrap()
+            .is_some());
+
+        db::upsert_message(
+            &state.db_path,
+            &test_db_message(&original.id, "edit-data.bin", "edit-data.bin", 1, 10),
+        )
+        .unwrap();
+        let mut unsafe_destination = updated.storage_profiles[0].clone();
+        unsafe_destination.supabase.as_mut().unwrap().api_url =
+            "https://replacement.example.invalid".into();
+        let unsafe_error = match save_storage_profile_impl(
+            &state,
+            SaveStorageProfileInput {
+                original_profile_id: Some(original.id.clone()),
+                profile: unsafe_destination,
+            },
+        ) {
+            Ok(_) => panic!("editing a destination with business data should be rejected"),
+            Err(error) => error,
+        };
+        assert!(unsafe_error.contains("已有数据"));
+        assert_ne!(
+            current_settings(&state).unwrap().storage_profiles[0]
+                .supabase
+                .as_ref()
+                .unwrap()
+                .api_url,
+            "https://replacement.example.invalid"
+        );
 
         let duplicate = StorageProfile {
             id: "supabase-duplicate".into(),
@@ -23758,6 +25200,462 @@ mod tests {
         assert!(error.contains("已经添加"));
         assert_eq!(current_settings(&state).unwrap().storage_profiles.len(), 1);
 
+        credential_store::delete_session(&original.id).unwrap();
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn storage_profile_activation_uses_latest_target_and_preserves_unrelated_state() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-profile-activate-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let mut settings = test_supabase_settings();
+        let mut secondary = settings.storage_profiles[0].clone();
+        secondary.id = "supabase-2".into();
+        secondary.name = "Secondary".into();
+        secondary.supabase.as_mut().unwrap().api_url = "https://secondary.example.invalid".into();
+        secondary.supabase.as_mut().unwrap().space_id =
+            "00000000-0000-4000-8000-000000000002".into();
+        settings.storage_profiles.push(secondary);
+        settings.sender_name = "preserve-concurrent-value".into();
+        settings.webdav_endpoints = vec![WebDavEndpoint {
+            id: "legacy-webdav".into(),
+            name: "Legacy".into(),
+            url: "https://webdav.example.invalid".into(),
+            username: "user".into(),
+            password: "password".into(),
+            enabled: true,
+        }];
+        let state = test_app_state(&temp_dir, settings);
+        db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+        rusqlite::Connection::open(&state.db_path)
+            .unwrap()
+            .execute(
+                "INSERT INTO sync_outbox (operation_id,endpoint_id,owner_scope,entity_type,
+                 entity_id,action,base_revision,payload_json,payload_hash,state,attempt_count,
+                 next_attempt_at_ms,created_at_ms,updated_at_ms)
+                 VALUES ('pending-before-switch','supabase-1','user-a','message','message-a',
+                 'upsert',0,'{}','hash','pending',0,0,1,1)",
+                [],
+            )
+            .unwrap();
+
+        let signal_before = *state.sync_loop_signal.borrow();
+        let updated = activate_storage_profile_impl(
+            &state,
+            ActivateStorageProfileInput {
+                profile_id: "supabase-2".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            updated.active_storage_profile_id.as_deref(),
+            Some("supabase-2")
+        );
+        assert_eq!(updated.sender_name, "preserve-concurrent-value");
+        assert_eq!(updated.webdav_endpoints.len(), 1);
+        assert!(state.supabase_sessions.lock().unwrap().is_empty());
+        assert!(db::has_pending_profile_work(&state.db_path, "supabase-1").unwrap());
+        assert_eq!(*state.sync_loop_signal.borrow(), signal_before + 1);
+
+        let persisted = current_settings(&state).unwrap();
+        assert_eq!(
+            persisted.active_storage_profile_id,
+            updated.active_storage_profile_id
+        );
+        assert_eq!(persisted.storage_profiles.len(), 2);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn storage_profile_activation_preserves_old_inflight_scope_and_only_syncs_new_target() {
+        let server_a = spawn_test_supabase().await;
+        let server_b = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-active-sync-isolation-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let mut settings = test_supabase_settings_with_url(server_a.base_url.clone());
+        let mut profile_b = settings.storage_profiles[0].clone();
+        profile_b.id = "supabase-2".into();
+        profile_b.supabase.as_mut().unwrap().api_url = server_b.base_url.clone();
+        profile_b.supabase.as_mut().unwrap().space_id =
+            "00000000-0000-4000-8000-000000000002".into();
+        seed_test_supabase_space(
+            &server_b.state,
+            &profile_b.supabase.as_ref().unwrap().space_id,
+        );
+        settings.storage_profiles.push(profile_b.clone());
+        let state = Arc::new(test_app_state(&temp_dir, settings));
+        db::init_db(&state.db_path, None).unwrap();
+        install_test_supabase_session(&state);
+        let session_a = state.supabase_sessions.lock().unwrap()["supabase-1"].clone();
+        let mut session_b = session_a.clone();
+        session_b.user_id = "user-b".into();
+        state
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .insert(profile_b.id.clone(), session_b.clone());
+        let profile_a = current_settings(&state).unwrap().storage_profiles[0].clone();
+        for (id, owner, message_id) in [
+            ("supabase-1", "user-a", "message-a"),
+            ("supabase-2", "user-b", "message-b"),
+        ] {
+            let mut message = test_db_message(
+                id,
+                &format!("{message_id}.txt"),
+                &format!("{message_id}.txt"),
+                1,
+                5,
+            );
+            message.content = Some(message_id.into());
+            let operation = outbox_operation_with_id(
+                &format!("operation-{message_id}"),
+                id,
+                owner,
+                "message",
+                message_id,
+                "upsert",
+                0,
+                supabase_message_payload(&message),
+            )
+            .unwrap();
+            db::save_message_and_enqueue(&state.db_path, &message, &operation).unwrap();
+        }
+        db::apply_pulled_changes(&state.db_path, "supabase-1", "user-a", &[], 42, 1).unwrap();
+        let started = Arc::new(Notify::new());
+        let resume = Arc::new(Notify::new());
+        *server_a.state.rpc_gate.lock().unwrap() =
+            Some(("message_apply".into(), started.clone(), resume.clone()));
+        let old_state = state.clone();
+        let old_sync =
+            tokio::spawn(async move { run_sync(&old_state, REALTIME_SYNC_SOURCE, false).await });
+        tokio::time::timeout(TokioDuration::from_secs(5), started.notified())
+            .await
+            .unwrap();
+        activate_storage_profile_impl(
+            &state,
+            ActivateStorageProfileInput {
+                profile_id: profile_b.id.clone(),
+            },
+        )
+        .unwrap();
+        assert!(old_sync.await.unwrap().is_err());
+        assert!(!supabase_sync_context_matches(
+            &state, &profile_a, &session_a
+        ));
+        assert!(supabase_sync_context_matches(
+            &state, &profile_b, &session_b
+        ));
+        assert!(db::has_pending_profile_work(&state.db_path, "supabase-1").unwrap());
+        assert_eq!(
+            db::get_sync_checkpoint(&state.db_path, "supabase-1", "user-a").unwrap(),
+            42
+        );
+        assert!(db::has_profile_business_data(&state.db_path, "supabase-1").unwrap());
+        run_sync(&state, REALTIME_SYNC_SOURCE, false).await.unwrap();
+        assert_eq!(
+            server_a.state.rpc_count("message_apply"),
+            1,
+            "B sync never schedules A work"
+        );
+        assert_eq!(server_b.state.rpc_count("message_apply"), 1);
+        assert!(server_b
+            .state
+            .snapshots
+            .lock()
+            .unwrap()
+            .contains_key("messages/message-b"));
+        assert!(!server_b
+            .state
+            .snapshots
+            .lock()
+            .unwrap()
+            .contains_key("messages/message-a"));
+        resume.notify_one();
+        tokio::time::timeout(TokioDuration::from_secs(5), async {
+            loop {
+                if server_a
+                    .state
+                    .snapshots
+                    .lock()
+                    .unwrap()
+                    .contains_key("messages/message-a")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        *server_a.state.rpc_gate.lock().unwrap() = None;
+        assert_eq!(
+            db::get_sync_checkpoint(&state.db_path, "supabase-1", "user-a").unwrap(),
+            42
+        );
+        assert!(db::has_pending_profile_work(&state.db_path, "supabase-1").unwrap());
+        activate_storage_profile_impl(
+            &state,
+            ActivateStorageProfileInput {
+                profile_id: profile_a.id,
+            },
+        )
+        .unwrap();
+        run_sync(&state, REALTIME_SYNC_SOURCE, false).await.unwrap();
+        assert!(!db::has_pending_profile_work(&state.db_path, "supabase-1").unwrap());
+        for (rpc, body) in server_a.state.rpc_requests.lock().unwrap().iter() {
+            if rpc == "message_apply" {
+                assert_eq!(body["p_operation_id"], "operation-message-a");
+                assert_eq!(body["p_space_id"], "00000000-0000-4000-8000-000000000001");
+            }
+        }
+        assert_eq!(server_a.state.rpc_count("space_upsert"), 0);
+        assert_eq!(server_b.state.rpc_count("space_upsert"), 0);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn storage_profile_switch_keeps_messages_marks_tags_and_uploads_on_two_services() {
+        let server_a = spawn_test_supabase().await;
+        let server_b = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-switch-business-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let mut settings = test_supabase_settings_with_url(server_a.base_url.clone());
+        let mut b = settings.storage_profiles[0].clone();
+        b.id = "supabase-2".into();
+        b.supabase.as_mut().unwrap().api_url = server_b.base_url.clone();
+        b.supabase.as_mut().unwrap().space_id = "00000000-0000-4000-8000-000000000002".into();
+        seed_test_supabase_space(&server_b.state, &b.supabase.as_ref().unwrap().space_id);
+        settings.storage_profiles.push(b);
+        let state = test_app_state(&temp_dir, settings);
+        db::init_db(&state.db_path, None).unwrap();
+        install_test_supabase_session(&state);
+        let mut session_b = state.supabase_sessions.lock().unwrap()["supabase-1"].clone();
+        session_b.user_id = "user-b".into();
+        state
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .insert("supabase-2".into(), session_b);
+        let mut sent = Vec::new();
+        for (id, label) in [("supabase-1", "A"), ("supabase-2", "B")] {
+            activate_storage_profile_impl(
+                &state,
+                ActivateStorageProfileInput {
+                    profile_id: id.into(),
+                },
+            )
+            .unwrap();
+            let tag = create_marked_tag_impl(&state, "Shared name, separate scopes".into())
+                .await
+                .unwrap();
+            let options = Some(SendMarkedOptionsInput {
+                marked: true,
+                selected_tag_ids: vec![tag.id],
+                due_date: Some("2026-12-31".into()),
+                ..Default::default()
+            });
+            let text = send_text_impl(
+                &state,
+                format!("# Only {label}"),
+                Some("markdown".into()),
+                options.clone(),
+            )
+            .await
+            .unwrap();
+            let file = send_file_data_impl(
+                &state,
+                None,
+                format!("private file {label}").into_bytes(),
+                "same-name.bin".into(),
+                Some(format!("file-{label}")),
+                options,
+            )
+            .await
+            .unwrap();
+            sent.push((text.filename, file.filename));
+        }
+        // Pending A is retained while only active B gets a new sync round.
+        run_sync(&state, REALTIME_SYNC_SOURCE, false).await.unwrap();
+        assert_eq!(server_a.state.rpc_requests.lock().unwrap().len(), 0);
+        assert!(db::has_pending_profile_work(&state.db_path, "supabase-1").unwrap());
+        assert!(!db::has_pending_profile_work(&state.db_path, "supabase-2").unwrap());
+        assert_eq!(server_b.state.objects.lock().unwrap().len(), 1);
+        activate_storage_profile_impl(
+            &state,
+            ActivateStorageProfileInput {
+                profile_id: "supabase-1".into(),
+            },
+        )
+        .unwrap();
+        run_sync(&state, REALTIME_SYNC_SOURCE, false).await.unwrap();
+        assert!(!db::has_pending_profile_work(&state.db_path, "supabase-1").unwrap());
+        for (index, (server, owner, space_id, label)) in [
+            (
+                &server_a,
+                "user-a",
+                "00000000-0000-4000-8000-000000000001",
+                "A",
+            ),
+            (
+                &server_b,
+                "user-b",
+                "00000000-0000-4000-8000-000000000002",
+                "B",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let requests = server.state.rpc_requests.lock().unwrap();
+            let mut operation_ids = HashSet::new();
+            for (rpc, body) in requests.iter() {
+                if ["message_apply", "tag_apply", "attachment_apply"].contains(&rpc.as_str()) {
+                    assert_eq!(body["p_space_id"], space_id);
+                    assert!(
+                        operation_ids.insert(body["p_operation_id"].as_str().unwrap().to_string()),
+                        "no double write"
+                    );
+                }
+                if rpc == "message_apply" {
+                    assert_eq!(body["p_payload"]["marked"], true);
+                }
+            }
+            assert_eq!(server.state.rpc_count("message_apply"), 2);
+            assert_eq!(server.state.rpc_count("tag_apply"), 1);
+            assert_eq!(server.state.rpc_count("attachment_apply"), 1);
+            assert_eq!(server.state.rpc_count("space_upsert"), 0);
+            let objects = server.state.objects.lock().unwrap();
+            assert_eq!(objects.len(), 1);
+            for (path, bytes) in objects.iter() {
+                assert!(path.starts_with(&format!("{owner}/{space_id}/")));
+                assert_eq!(bytes, format!("private file {label}").as_bytes());
+            }
+            let profile_id = if index == 0 {
+                "supabase-1"
+            } else {
+                "supabase-2"
+            };
+            assert_eq!(
+                db::get_message(&state.db_path, profile_id, &sent[index].0)
+                    .unwrap()
+                    .unwrap()
+                    .content
+                    .as_deref(),
+                Some(format!("# Only {label}").as_str())
+            );
+            assert!(
+                db::get_message(&state.db_path, profile_id, &sent[1 - index].0)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                db::get_message(&state.db_path, profile_id, &sent[1 - index].1)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn storage_profile_activation_rejects_missing_disabled_and_invalid_bindings_without_switching()
+    {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-profile-activate-reject-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let mut settings = test_supabase_settings();
+        for (id, enabled, binding_state) in [
+            ("disabled", false, SupabaseBindingState::Bound),
+            ("unbound", true, SupabaseBindingState::Unbound),
+            (
+                "needs-attention",
+                true,
+                SupabaseBindingState::NeedsAttention,
+            ),
+        ] {
+            let mut profile = settings.storage_profiles[0].clone();
+            profile.id = id.into();
+            profile.enabled = enabled;
+            profile.supabase.as_mut().unwrap().binding_state = binding_state;
+            settings.storage_profiles.push(profile);
+        }
+        let state = test_app_state(&temp_dir, settings);
+        db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+
+        for profile_id in ["missing", "disabled", "unbound", "needs-attention"] {
+            assert!(activate_storage_profile_impl(
+                &state,
+                ActivateStorageProfileInput {
+                    profile_id: profile_id.into(),
+                },
+            )
+            .is_err());
+            assert_eq!(
+                current_settings(&state)
+                    .unwrap()
+                    .active_storage_profile_id
+                    .as_deref(),
+                Some("supabase-1")
+            );
+        }
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn storage_profile_enablement_is_narrow_and_disabling_active_preserves_data_and_session() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-profile-enable-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let settings = test_supabase_settings();
+        let state = test_app_state(&temp_dir, settings);
+        db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+        db::upsert_message(
+            &state.db_path,
+            &test_db_message("supabase-1", "cached.bin", "cached.bin", 1, 10),
+        )
+        .unwrap();
+        install_test_supabase_session(&state);
+
+        let disabled = set_storage_profile_enabled_impl(
+            &state,
+            SetStorageProfileEnabledInput {
+                profile_id: "supabase-1".into(),
+                enabled: false,
+            },
+        )
+        .unwrap();
+        assert!(!disabled.storage_profiles[0].enabled);
+        assert!(disabled.active_storage_profile_id.is_none());
+        assert!(db::has_profile_business_data(&state.db_path, "supabase-1").unwrap());
+        assert!(state
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .contains_key("supabase-1"));
+
+        let enabled = set_storage_profile_enabled_impl(
+            &state,
+            SetStorageProfileEnabledInput {
+                profile_id: "supabase-1".into(),
+                enabled: true,
+            },
+        )
+        .unwrap();
+        assert!(enabled.storage_profiles[0].enabled);
+        assert!(enabled.active_storage_profile_id.is_none());
         let _ = fs::remove_dir_all(temp_dir);
     }
 
@@ -23772,8 +25670,8 @@ mod tests {
         let profile = StorageProfile::from_webdav(&settings.webdav_endpoints[0]);
         let profile_id = profile.id.clone();
         settings.storage_profiles = vec![profile];
-        settings.active_storage_profile_id = None;
-        settings.active_webdav_id = None;
+        settings.active_storage_profile_id = Some(profile_id.clone());
+        settings.active_webdav_id = Some(profile_id.clone());
         let state = test_app_state(&temp_dir, settings);
         db::init_db(&state.db_path, Some(&profile_id)).unwrap();
         db::upsert_message(
@@ -23791,13 +25689,18 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let blocked = match remove_storage_profile_impl(&state, &profile_id, false) {
+        let blocked = match remove_storage_profile_impl(&state, &profile_id, false, false) {
             Ok(_) => panic!("removing a profile with pending work should be blocked"),
             Err(error) => error,
         };
-        assert!(blocked.contains("未完成"));
+        assert!(blocked.contains("正在使用"));
+        let pending_blocked = match remove_storage_profile_impl(&state, &profile_id, true, false) {
+            Ok(_) => panic!("confirming active removal must not also abandon pending work"),
+            Err(error) => error,
+        };
+        assert!(pending_blocked.contains("未完成"));
 
-        let updated = remove_storage_profile_impl(&state, &profile_id, true).unwrap();
+        let updated = remove_storage_profile_impl(&state, &profile_id, true, true).unwrap();
         assert!(updated.storage_profiles.is_empty());
         assert!(!db::has_pending_profile_work(&state.db_path, &profile_id).unwrap());
         assert!(db::has_profile_business_data(&state.db_path, &profile_id).unwrap());
@@ -23821,16 +25724,74 @@ mod tests {
         let state = test_app_state(&temp_dir, settings);
         db::init_db(&state.db_path, Some(&profile_id)).unwrap();
 
-        let blocked = match remove_storage_profile_impl(&state, &profile_id, false) {
+        let blocked = match remove_storage_profile_impl(&state, &profile_id, false, false) {
             Ok(_) => panic!("removing the active profile should be blocked"),
             Err(error) => error,
         };
         assert!(blocked.contains("正在使用"));
 
-        let updated = remove_storage_profile_impl(&state, &profile_id, true).unwrap();
+        let updated = remove_storage_profile_impl(&state, &profile_id, true, true).unwrap();
         assert!(updated.storage_profiles.is_empty());
         assert!(updated.active_storage_profile_id.is_none());
         assert!(updated.active_webdav_id.is_none());
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn removing_supabase_profile_deletes_only_its_session_and_keeps_history_scoped() {
+        let _credential_guard = credential_store::credential_test_guard();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-remove-supabase-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let mut settings = test_supabase_settings();
+        let profile_a = format!("remove-a-{}", uuid::Uuid::new_v4());
+        let profile_b = format!("remove-b-{}", uuid::Uuid::new_v4());
+        settings.storage_profiles[0].id = profile_a.clone();
+        let mut secondary = settings.storage_profiles[0].clone();
+        secondary.id = profile_b.clone();
+        secondary.supabase.as_mut().unwrap().space_id =
+            "00000000-0000-4000-8000-000000000002".into();
+        settings.storage_profiles.push(secondary);
+        settings.active_storage_profile_id = Some(profile_b.clone());
+        let state = test_app_state(&temp_dir, settings);
+        db::init_db(&state.db_path, Some(&profile_b)).unwrap();
+        let session = supabase_auth::SupabaseSession {
+            access_token: "remove-access".into(),
+            refresh_token: "remove-refresh".into(),
+            user_id: "remove-user".into(),
+            email: "remove@example.invalid".into(),
+            expires_at: i64::MAX,
+        };
+        credential_store::save_session(&profile_a, &session).unwrap();
+        state
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .insert(profile_a.clone(), session);
+        db::upsert_message(
+            &state.db_path,
+            &test_db_message(&profile_a, "history-a.bin", "history-a.bin", 1, 10),
+        )
+        .unwrap();
+
+        let updated = remove_storage_profile_impl(&state, &profile_a, false, false).unwrap();
+        assert_eq!(
+            updated.active_storage_profile_id.as_deref(),
+            Some(profile_b.as_str())
+        );
+        assert!(credential_store::load_session(&profile_a)
+            .unwrap()
+            .is_none());
+        assert!(!state
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .contains_key(&profile_a));
+        assert!(db::has_profile_business_data(&state.db_path, &profile_a).unwrap());
+        assert!(!db::has_profile_business_data(&state.db_path, &profile_b).unwrap());
 
         let _ = fs::remove_dir_all(temp_dir);
     }
@@ -23985,7 +25946,8 @@ mod tests {
 
     #[test]
     fn mobile_composer_draft_restores_files_and_preserves_account_isolation() {
-        let temp_dir = std::env::temp_dir().join(format!("tg-mobile-draft-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("tg-mobile-draft-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&temp_dir).unwrap();
         let state = test_app_state(&temp_dir, test_supabase_settings());
         install_test_supabase_session(&state);
@@ -23993,11 +25955,18 @@ mod tests {
         let file = temp_dir.join("fixture.pdf");
         fs::write(&file, b"fixture").unwrap();
         let payload = MobileComposerDraftPayload {
-            text_client_id: "stable-text".into(), text: "# fixture".into(), format: "markdown".into(),
-            marked: true, tag_ids: vec!["work".into()], due_date: Some("2026-11-01".into()),
+            text_client_id: "stable-text".into(),
+            text: "# fixture".into(),
+            format: "markdown".into(),
+            marked: true,
+            tag_ids: vec!["work".into()],
+            due_date: Some("2026-11-01".into()),
             attachments: vec![MobileComposerDraftAttachment {
-                client_id: "stable-file".into(), path: file.to_string_lossy().into_owned(),
-                original_name: "fixture.pdf".into(), media_type: "file".into(), size_bytes: 7,
+                client_id: "stable-file".into(),
+                path: file.to_string_lossy().into_owned(),
+                original_name: "fixture.pdf".into(),
+                media_type: "file".into(),
+                size_bytes: 7,
                 ..Default::default()
             }],
         };
@@ -24007,59 +25976,163 @@ mod tests {
         assert_eq!(draft.payload.text, "# fixture");
         assert!(draft.payload.attachments[0].available);
         fs::remove_file(file).unwrap();
-        assert!(!get_mobile_composer_draft_impl(&state).unwrap().payload.attachments[0].available);
-        state.supabase_sessions.lock().unwrap().get_mut("supabase-1").unwrap().user_id = "user-b".into();
-        assert!(get_mobile_composer_draft_impl(&state).unwrap().updated_at_ms.is_none());
-        state.supabase_sessions.lock().unwrap().get_mut("supabase-1").unwrap().user_id = "user-a".into();
-        state.settings.lock().unwrap().storage_profiles[0].supabase.as_mut().unwrap().space_id = "space-b".into();
-        assert!(get_mobile_composer_draft_impl(&state).unwrap().updated_at_ms.is_none());
-        state.settings.lock().unwrap().storage_profiles[0].supabase.as_mut().unwrap().space_id = "00000000-0000-4000-8000-000000000001".into();
+        assert!(
+            !get_mobile_composer_draft_impl(&state)
+                .unwrap()
+                .payload
+                .attachments[0]
+                .available
+        );
+        state
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .get_mut("supabase-1")
+            .unwrap()
+            .user_id = "user-b".into();
+        assert!(get_mobile_composer_draft_impl(&state)
+            .unwrap()
+            .updated_at_ms
+            .is_none());
+        state
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .get_mut("supabase-1")
+            .unwrap()
+            .user_id = "user-a".into();
+        state.settings.lock().unwrap().storage_profiles[0]
+            .supabase
+            .as_mut()
+            .unwrap()
+            .space_id = "space-b".into();
+        assert!(get_mobile_composer_draft_impl(&state)
+            .unwrap()
+            .updated_at_ms
+            .is_none());
+        state.settings.lock().unwrap().storage_profiles[0]
+            .supabase
+            .as_mut()
+            .unwrap()
+            .space_id = "00000000-0000-4000-8000-000000000001".into();
         save_mobile_composer_draft_impl(&state, MobileComposerDraftPayload::default()).unwrap();
-        assert!(get_mobile_composer_draft_impl(&state).unwrap().updated_at_ms.is_none());
+        assert!(get_mobile_composer_draft_impl(&state)
+            .unwrap()
+            .updated_at_ms
+            .is_none());
     }
 
     #[test]
     fn mobile_composer_draft_paths_reject_escape_and_support_container_relocation() {
         let root = std::env::temp_dir().join(format!("tg-mobile-imports-{}", uuid::Uuid::new_v4()));
         let relative = format!("{}/fixture.pdf", uuid::Uuid::new_v4());
-        assert_eq!(mobile_draft_import_path(&root, &relative).unwrap(), root.join(&relative));
-        assert_eq!(mobile_draft_import_path(&root, &root.join(&relative).to_string_lossy()).unwrap(), root.join(&relative));
-        for invalid in ["../fixture.pdf", "../../secret", "/etc/passwd", "bad/fixture.pdf"] {
+        assert_eq!(
+            mobile_draft_import_path(&root, &relative).unwrap(),
+            root.join(&relative)
+        );
+        assert_eq!(
+            mobile_draft_import_path(&root, &root.join(&relative).to_string_lossy()).unwrap(),
+            root.join(&relative)
+        );
+        for invalid in [
+            "../fixture.pdf",
+            "../../secret",
+            "/etc/passwd",
+            "bad/fixture.pdf",
+        ] {
             assert!(mobile_draft_import_path(&root, invalid).is_err());
         }
     }
 
     #[test]
     fn mobile_composer_draft_write_retains_the_verified_scope_after_switch() {
-        let temp_dir = std::env::temp_dir().join(format!("tg-mobile-draft-switch-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("tg-mobile-draft-switch-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&temp_dir).unwrap();
         let state = test_app_state(&temp_dir, test_supabase_settings());
         install_test_supabase_session(&state);
         db::init_db(&state.db_path, None).unwrap();
         let (profile, session, space_id) = mobile_composer_scope(&state).unwrap();
-        let scope = MobileComposerDraftScope { profile_id: profile.id.clone(), user_id: session.user_id.clone(), space_id: space_id.clone() };
-        state.supabase_sessions.lock().unwrap().get_mut(&profile.id).unwrap().user_id = "user-b".into();
-        state.settings.lock().unwrap().storage_profiles[0].supabase.as_mut().unwrap().space_id = "space-b".into();
-        save_mobile_composer_draft_for_scope(&state, MobileComposerDraftPayload { text: "scope-a-only".into(), ..Default::default() }, scope).unwrap();
-        assert!(get_mobile_composer_draft_impl(&state).unwrap().updated_at_ms.is_none());
-        let original = db::get_mobile_composer_draft(&state.db_path, &profile.id, &session.user_id, &space_id).unwrap().unwrap();
-        let payload: MobileComposerDraftPayload = serde_json::from_str(&original.payload_json).unwrap();
+        let scope = MobileComposerDraftScope {
+            profile_id: profile.id.clone(),
+            user_id: session.user_id.clone(),
+            space_id: space_id.clone(),
+        };
+        state
+            .supabase_sessions
+            .lock()
+            .unwrap()
+            .get_mut(&profile.id)
+            .unwrap()
+            .user_id = "user-b".into();
+        state.settings.lock().unwrap().storage_profiles[0]
+            .supabase
+            .as_mut()
+            .unwrap()
+            .space_id = "space-b".into();
+        save_mobile_composer_draft_for_scope(
+            &state,
+            MobileComposerDraftPayload {
+                text: "scope-a-only".into(),
+                ..Default::default()
+            },
+            scope,
+        )
+        .unwrap();
+        assert!(get_mobile_composer_draft_impl(&state)
+            .unwrap()
+            .updated_at_ms
+            .is_none());
+        let original =
+            db::get_mobile_composer_draft(&state.db_path, &profile.id, &session.user_id, &space_id)
+                .unwrap()
+                .unwrap();
+        let payload: MobileComposerDraftPayload =
+            serde_json::from_str(&original.payload_json).unwrap();
         assert_eq!(payload.text, "scope-a-only");
         let _ = fs::remove_dir_all(temp_dir);
     }
 
     #[tokio::test]
     async fn mobile_composer_text_retry_returns_same_local_message() {
-        let temp_dir = std::env::temp_dir().join(format!("tg-mobile-text-id-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("tg-mobile-text-id-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&temp_dir).unwrap();
         let state = test_app_state(&temp_dir, test_supabase_settings());
         install_test_supabase_session(&state);
         db::init_db(&state.db_path, None).unwrap();
-        let first = send_text_with_client_id_impl(&state, "fixture".into(), Some("markdown".into()), None, Some("stable-text".into())).await.unwrap();
-        let retried = send_text_with_client_id_impl(&state, "fixture".into(), Some("markdown".into()), None, Some("stable-text".into())).await.unwrap();
+        let first = send_text_with_client_id_impl(
+            &state,
+            "fixture".into(),
+            Some("markdown".into()),
+            None,
+            Some("stable-text".into()),
+        )
+        .await
+        .unwrap();
+        let retried = send_text_with_client_id_impl(
+            &state,
+            "fixture".into(),
+            Some("markdown".into()),
+            None,
+            Some("stable-text".into()),
+        )
+        .await
+        .unwrap();
         assert_eq!(first.filename, retried.filename);
-        assert_eq!(db::count_pending_outbox(&state.db_path, "supabase-1", "user-a").unwrap(), 1);
-        assert!(send_text_with_client_id_impl(&state, "different".into(), Some("markdown".into()), None, Some("stable-text".into())).await.is_err());
+        assert_eq!(
+            db::count_pending_outbox(&state.db_path, "supabase-1", "user-a").unwrap(),
+            1
+        );
+        assert!(send_text_with_client_id_impl(
+            &state,
+            "different".into(),
+            Some("markdown".into()),
+            None,
+            Some("stable-text".into())
+        )
+        .await
+        .is_err());
     }
 
     fn seed_mobile_cache_attachment(
@@ -26257,6 +28330,7 @@ mod tests {
                 api_url: "https://supabase.example.com/".to_string(),
                 anon_key: "public-key".to_string(),
                 space_id: "space-a".to_string(),
+                binding_state: Default::default(),
             }),
         }];
         settings.active_storage_profile_id = Some("supabase-1".to_string());
@@ -26297,6 +28371,7 @@ mod tests {
                     api_url: "https://supabase.example.com".into(),
                     anon_key: "public-key".into(),
                     space_id: "00000000-0000-4000-8000-000000000001".into(),
+                    binding_state: Default::default(),
                 }),
             },
         ];
@@ -26312,6 +28387,7 @@ mod tests {
         previous.ai.provider.base_url = "https://ai.example.com/v1".into();
         previous.ai.provider.api_key = "desktop-ai-key".into();
         previous.ai.provider.model = "desktop-model".into();
+        previous.speech_to_text.api_key = "desktop-speech-key".into();
 
         let mut mobile = ios_settings_view(&previous);
         assert_eq!(mobile.storage_profiles.len(), 1);
@@ -26321,6 +28397,15 @@ mod tests {
             .all(|profile| profile.provider_kind == StorageProviderKind::Supabase));
         assert!(mobile.webdav_endpoints.is_empty());
         assert!(mobile.active_webdav_id.is_none());
+        let mobile_json = serde_json::to_string(&mobile).unwrap();
+        assert!(!mobile_json.contains("pass"));
+        assert!(!mobile_json.contains("desktop-bot-token"));
+        assert!(!mobile_json.contains("desktop-ai-key"));
+        assert!(!mobile_json.contains("desktop-speech-key"));
+        assert!(!mobile.local_http_api.enabled);
+        assert!(mobile.telegram.bot_token.is_empty());
+        assert!(mobile.ai.provider.api_key.is_empty());
+        assert!(mobile.speech_to_text.api_key.is_empty());
         mobile.sender_name = "iPhone".into();
         mobile.refresh_interval_secs = 12;
         mobile.active_storage_profile_id = Some("supabase-1".into());
@@ -26403,6 +28488,7 @@ mod tests {
                     api_url: "https://primary.example.com/".to_string(),
                     anon_key: "primary-key".to_string(),
                     space_id: "11111111-1111-4111-8111-111111111111".to_string(),
+                    binding_state: Default::default(),
                 }),
             },
             StorageProfile {
@@ -26415,6 +28501,7 @@ mod tests {
                     api_url: "https://secondary.example.com/".to_string(),
                     anon_key: "secondary-key".to_string(),
                     space_id: "22222222-2222-4222-8222-222222222222".to_string(),
+                    binding_state: Default::default(),
                 }),
             },
         ];
@@ -26612,6 +28699,7 @@ mod tests {
                 api_url: "https://example.com".into(),
                 anon_key: "anon".into(),
                 space_id: "11111111-1111-4111-8111-111111111111".into(),
+                binding_state: Default::default(),
             }),
         });
         let (webdav_messages, webdav_tags) =
@@ -26924,6 +29012,7 @@ mod tests {
                 api_url: server.base_url.clone(),
                 anon_key: "anon".into(),
                 space_id: "11111111-1111-4111-8111-111111111111".into(),
+                binding_state: Default::default(),
             }),
         };
         let session = supabase_auth::SupabaseSession {
@@ -27395,6 +29484,7 @@ mod tests {
                 api_url: server.base_url.clone(),
                 anon_key: "anon".into(),
                 space_id: "11111111-1111-4111-8111-111111111111".into(),
+                binding_state: Default::default(),
             }),
         };
         let session = supabase_auth::SupabaseSession {
@@ -27513,6 +29603,7 @@ mod tests {
                         api_url: source_supabase.base_url.clone(),
                         anon_key: "anon".into(),
                         space_id: "source-space".into(),
+                        binding_state: Default::default(),
                     }),
                 })
             };
@@ -27536,6 +29627,7 @@ mod tests {
                         api_url: target_supabase.base_url.clone(),
                         anon_key: "anon".into(),
                         space_id: "target-space".into(),
+                        binding_state: Default::default(),
                     }),
                 })
             };
@@ -27854,6 +29946,7 @@ mod tests {
                 api_url: target_server.base_url.clone(),
                 anon_key: "anon".into(),
                 space_id: "target-space".into(),
+                binding_state: Default::default(),
             }),
         };
         let session = supabase_auth::SupabaseSession {
@@ -28011,6 +30104,7 @@ mod tests {
                 api_url: source_server.base_url.clone(),
                 anon_key: "anon".into(),
                 space_id: "source-space".into(),
+                binding_state: Default::default(),
             }),
         };
         let target_profile = StorageProfile {
@@ -28023,6 +30117,7 @@ mod tests {
                 api_url: target_server.base_url.clone(),
                 anon_key: "anon".into(),
                 space_id: "target-space".into(),
+                binding_state: Default::default(),
             }),
         };
         let context = StorageTransferContext {
@@ -28153,6 +30248,7 @@ mod tests {
                 api_url: "https://example.invalid".into(),
                 anon_key: "anon".into(),
                 space_id: "space".into(),
+                binding_state: Default::default(),
             }),
         };
         let session = supabase_auth::SupabaseSession {
@@ -28659,6 +30755,7 @@ mod tests {
                     api_url: auth_url,
                     anon_key: "anon".into(),
                     space_id: "11111111-1111-4111-8111-111111111111".into(),
+                    binding_state: Default::default(),
                 }),
             },
             StorageProfile {
@@ -28699,7 +30796,7 @@ mod tests {
             Ok(_) => panic!("revoked Supabase session should block transfer"),
             Err(error) => error,
         };
-        assert!(revoked.to_ascii_lowercase().contains("refresh token"));
+        assert_eq!(revoked, "Supabase 会话已失效");
         assert!(!state
             .supabase_sessions
             .lock()
@@ -28861,6 +30958,7 @@ mod tests {
                 api_url: "https://supabase.example.com".to_string(),
                 anon_key: "public-key".to_string(),
                 space_id: String::new(),
+                binding_state: Default::default(),
             }),
         }];
         let download_dir = std::env::temp_dir().join("transfer-genie-empty-space-id");
@@ -29145,6 +31243,7 @@ mod tests {
                 api_url: original_config.api_url.clone(),
                 anon_key: original_config.anon_key.clone(),
                 space_id: space_a.clone(),
+                binding_state: Default::default(),
             }),
         };
         let supabase_b = StorageProfile {
@@ -29157,6 +31256,7 @@ mod tests {
                 api_url: original_config.api_url.clone(),
                 anon_key: original_config.anon_key.clone(),
                 space_id: space_b.clone(),
+                binding_state: Default::default(),
             }),
         };
         let mut acceptance_settings = real_settings.clone();
@@ -31627,6 +33727,7 @@ mod tests {
             api_url: server.base_url.clone(),
             anon_key: "anon".into(),
             space_id: "space-a".into(),
+            binding_state: Default::default(),
         };
         let session = supabase_auth::SupabaseSession {
             access_token: "access-token".into(),
@@ -33216,6 +35317,7 @@ mod tests {
                 api_url: "https://supabase.example.com".into(),
                 anon_key: "public-anon-key".into(),
                 space_id: "space-a".into(),
+                binding_state: Default::default(),
             }),
         });
         let secrets = extract_export_secrets(&settings);

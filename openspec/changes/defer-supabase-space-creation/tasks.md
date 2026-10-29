@@ -10,14 +10,14 @@
 
 - [ ] 2.1 Add a Rust-managed short-lived binding-flow context for unsaved Supabase drafts, including expiration, cancellation and project-fingerprint invalidation; verify tokens never appear in Settings, frontend payloads, logs or configuration exports.
 - [ ] 2.2 Add draft connection-test and ordinary-user sign-in commands that operate through the binding-flow context, and verify successful login, invalid credentials, project changes and explicit cancellation clean up state correctly.
-- [ ] 2.3 Add read-only account Space listing for binding flows with message/storage statistics where available, and verify listing zero, one and multiple Spaces does not change the remote Space count.
+- [x] 2.3 Add read-only account Space listing for binding flows with message/storage statistics where available, and verify listing zero, one and multiple Spaces does not change the remote Space count.
 - [ ] 2.4 Split Space accessibility validation from provisioning, add a dedicated idempotent user-confirmed create-Space operation, and verify connection tests, login, listing and failed validation never invoke creation while duplicate create retries return the same result.
-- [ ] 2.5 Add an atomic complete-binding command that creates the formal profile and moves the secure Session into its profile credential scope only after final confirmation; verify cancellation before completion leaves no profile or persisted Session.
+- [x] 2.5 Add an atomic complete-binding command that creates the formal profile and moves the secure Session into its profile credential scope only after final confirmation; verify cancellation before completion leaves no profile or persisted Session.
 
 ## 3. Sync and remote-safety boundaries
 
-- [ ] 3.1 Replace sync-time `space_upsert`/`ensure_space` creation semantics with side-effect-free accessibility validation, and verify a missing or unauthorized Space stops sync without increasing the remote Space count.
-- [ ] 3.2 Enforce the bound-profile guard for outbox push, message send, attachment upload/download, history paging and Realtime startup; verify each unbound entry point returns a clear recoverable error and performs no remote business write.
+- [x] 3.1 Replace sync-time `space_upsert`/`ensure_space` creation semantics with side-effect-free accessibility validation, and verify a missing or unauthorized Space stops sync without increasing the remote Space count.
+- [x] 3.2 Enforce the bound-profile guard for outbox push, message send, attachment upload/download, history paging and Realtime startup; verify each unbound entry point returns a clear recoverable error and performs no remote business write.
 - [ ] 3.3 Handle a bound Space becoming missing or inaccessible by stopping writes and Realtime while retaining local caches, outbox and conflicts; verify reauthentication or explicit repair can resume without losing local work.
 
 ## 4. Supabase binding wizard UI
@@ -31,7 +31,7 @@
 ## 5. Editing, switching and repair flows
 
 - [x] 5.1 Initialize the wizard from a bound profile without changing it until final confirmation, and verify editing the display name or reconfirming the same Space updates the original profile ID rather than creating another profile.
-- [ ] 5.2 Reuse the existing in-place account-Space switch checks, preserve the profile connection and Session, and verify pending outbox, conflicts or transfer tasks block switching while a successful switch creates no extra local profile.
+- [x] 5.2 Reuse the existing in-place account-Space switch checks, preserve the profile connection and Session, and verify pending outbox, conflicts or transfer tasks block switching while a successful switch creates no extra local profile.
 - [ ] 5.3 Add repair UI for unbound and needs-attention legacy profiles with explicit choices to select an existing Space, deliberately restore/create the retained Space ID, or leave unresolved; verify none of these screens silently deletes local or remote data.
 
 ## 6. Integration verification and operator guidance

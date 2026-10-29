@@ -588,6 +588,15 @@ pub struct WebDavStorageConfig {
     pub password: String,
 }
 
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum SupabaseBindingState {
+    Unbound,
+    #[default]
+    Bound,
+    NeedsAttention,
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Default, Debug)]
 pub struct SupabaseStorageConfig {
     #[serde(default)]
@@ -596,6 +605,21 @@ pub struct SupabaseStorageConfig {
     pub anon_key: String,
     #[serde(default)]
     pub space_id: String,
+    // Legacy non-empty bindings remain readable; access is verified before remote work.
+    #[serde(default)]
+    pub binding_state: SupabaseBindingState,
+}
+
+impl SupabaseStorageConfig {
+    pub fn require_bound(&self) -> Result<(), String> {
+        if self.space_id.trim().is_empty() || self.binding_state == SupabaseBindingState::Unbound {
+            return Err("Supabase 空间尚未完成绑定，请先选择空间并确认绑定".into());
+        }
+        if self.binding_state == SupabaseBindingState::NeedsAttention {
+            return Err("Supabase 空间绑定需要处理，请先在存储空间设置中修复".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]

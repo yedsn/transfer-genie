@@ -484,20 +484,30 @@ async fn run_contract(
     )?;
 
     let space_id = random_uuid();
+    let user_a_create_operation = random_uuid();
     rpc(
         client,
         config,
         user_a,
         "space_upsert",
-        json!({"p_space_id":space_id,"p_name":"Probe A"}),
+        json!({
+            "p_operation_id": user_a_create_operation,
+            "p_space_id": space_id,
+            "p_name": "Probe A"
+        }),
     )
     .await?;
+    let user_b_create_operation = random_uuid();
     rpc(
         client,
         config,
         user_b,
         "space_upsert",
-        json!({"p_space_id":space_id,"p_name":"Probe B"}),
+        json!({
+            "p_operation_id": user_b_create_operation,
+            "p_space_id": space_id,
+            "p_name": "Probe B"
+        }),
     )
     .await?;
     verify_direct_write_denied(client, config, user_a, &space_id).await?;

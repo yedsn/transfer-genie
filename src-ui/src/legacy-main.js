@@ -14221,6 +14221,8 @@ async function createSupabaseSpaceFromWizard() {
   if (!confirmed) return null;
   setSupabaseAuthFeedback({ storageProfileWizardBusy: true, storageProfileWizardError: '' });
   try {
+    const operationId = crypto.randomUUID();
+    const spaceId = crypto.randomUUID();
     const space = await invoke('create_supabase_space', {
       input: {
         flowId: currentSettingsFormState.storageProfileEditorMode === 'create'
@@ -14229,6 +14231,8 @@ async function createSupabaseSpaceFromWizard() {
         profileId: currentSettingsFormState.storageProfileEditorMode === 'edit'
           ? currentSettingsFormState.supabaseProfileId || null
           : null,
+        operationId,
+        spaceId,
         name,
       },
     });

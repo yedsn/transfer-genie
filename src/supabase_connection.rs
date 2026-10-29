@@ -1,3 +1,5 @@
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use serde::Serialize;
@@ -8,6 +10,38 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 const APP_SCHEMA: &str = "transfer_genie";
 const FILE_BUCKET: &str = "transfer-genie-files";
+
+pub fn validate_public_config(api_url: &str, anon_key: &str) -> Result<(), String> {
+    let api_url = api_url.trim();
+    let anon_key = anon_key.trim();
+    if api_url.is_empty() || anon_key.is_empty() {
+        return Err("请填写 Supabase API URL 和公开 Key".into());
+    }
+    let url = url::Url::parse(api_url).map_err(|_| "Supabase API URL 格式无效".to_string())?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(String::from(
+            "Supabase API URL 必须是有效的 HTTP(S) 服务地址，且不能包含账号密码",
+        ));
+    }
+    if anon_key.starts_with("sb_secret_") || jwt_role(anon_key).as_deref() == Some("service_role") {
+        return Err("不能使用 service-role 或 secret Key，请填写 Supabase 公开 Key".into());
+    }
+    Ok(())
+}
+
+fn jwt_role(value: &str) -> Option<String> {
+    let payload = value.split('.').nth(1)?;
+    let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    serde_json::from_slice::<Value>(&decoded).ok()?["role"]
+        .as_str()
+        .map(str::to_string)
+}
 
 #[derive(Clone, Debug, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -211,7 +245,7 @@ async fn check_realtime(api_url: &str, anon_key: &str, access_token: &str) -> Re
     let (mut socket, _) = timeout(Duration::from_secs(10), connect_async(url))
         .await
         .map_err(|_| "连接 Supabase Realtime 超时".to_string())?
-        .map_err(|error| format!("连接 Supabase Realtime 失败: {error}"))?;
+        .map_err(|_| "连接 Supabase Realtime 失败".to_string())?;
     socket
         .send(Message::Text(
             json!({
@@ -224,13 +258,13 @@ async fn check_realtime(api_url: &str, anon_key: &str, access_token: &str) -> Re
             .to_string(),
         ))
         .await
-        .map_err(|error| format!("发送 Realtime 检查失败: {error}"))?;
+        .map_err(|_| "发送 Realtime 检查失败".to_string())?;
     loop {
         let message = timeout(Duration::from_secs(10), socket.next())
             .await
             .map_err(|_| "等待 Realtime 响应超时".to_string())?
             .ok_or_else(|| "Realtime 连接提前关闭".to_string())?
-            .map_err(|error| format!("读取 Realtime 响应失败: {error}"))?;
+            .map_err(|_| "读取 Realtime 响应失败".to_string())?;
         if let Message::Text(text) = message {
             let value: Value = serde_json::from_str(&text)
                 .map_err(|error| format!("解析 Realtime 响应失败: {error}"))?;
@@ -311,5 +345,26 @@ mod tests {
             missing_schema.error_code.as_deref(),
             Some("CLOUD_SCHEMA_MISSING")
         );
+    }
+
+    #[test]
+    fn public_config_rejects_embedded_credentials_and_privileged_keys() {
+        assert!(validate_public_config("https://example.com", "sb_publishable_public").is_ok());
+        assert!(validate_public_config("http://127.0.0.1:54321", "anon-test").is_ok());
+        let url_with_credentials = ["https://", "user", ":", "pass", "@example.com"].concat();
+        let embedded_error = validate_public_config(&url_with_credentials, "anon").unwrap_err();
+        assert!(!embedded_error.contains("user"));
+        assert!(!embedded_error.contains("pass"));
+        let secret_key = "sb_secret_server";
+        let secret_error = validate_public_config("https://example.com", secret_key).unwrap_err();
+        assert!(!secret_error.contains(secret_key));
+        assert!(validate_public_config("https://example.com?token=private", "anon").is_err());
+        let header = URL_SAFE_NO_PAD.encode(serde_json::json!({ "alg": "HS256" }).to_string());
+        let payload =
+            URL_SAFE_NO_PAD.encode(serde_json::json!({ "role": "service_role" }).to_string());
+        let privileged_key = format!("{header}.{payload}.fixture-signature");
+        let privileged_error =
+            validate_public_config("https://example.com", &privileged_key).unwrap_err();
+        assert!(!privileged_error.contains(&privileged_key));
     }
 }

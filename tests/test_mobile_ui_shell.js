@@ -147,6 +147,7 @@ const runtimeApi = {
     getSettings: async () => ({ active_storage_profile_id: 'supabase-1', storage_profiles: [{ id: 'supabase-1', provider_kind: 'supabase', supabase: { space_id: 'space-a' } }] }),
     supabaseCurrentUser: async () => ({ signedIn: true, userId: 'user-a' }),
     listSupabaseSpaces: async () => [{ id: 'space-a', name: 'A' }],
+    activateStorageProfile: async () => ({}),
   },
   sync: {
     getSyncStatus: async () => ({ pending_count: 1 }),
@@ -223,16 +224,16 @@ runtimeApi.settings.completeSupabaseBinding = async (input) => {
   bindingInput = input;
   return { active_storage_profile_id: null, storage_profiles: [existingProfile] };
 };
-runtimeApi.settings.saveSettings = async (settings) => { savedActiveProfileId = settings.active_storage_profile_id; return settings; };
+runtimeApi.settings.activateStorageProfile = async (profileId) => { savedActiveProfileId = profileId; return { active_storage_profile_id: profileId, storage_profiles: [existingProfile] }; };
 runtimeApi.settings.getSettings = async () => ({ active_storage_profile_id: 'supabase-existing', storage_profiles: [existingProfile] });
 runtimeApi.settings.supabaseCurrentUser = async () => ({ signedIn: true, userId: 'user-a' });
 runtimeApi.settings.listSupabaseSpaces = async () => [{ id: 'space-existing', name: 'Existing', current: true }];
 runtimeApi.sync.getSyncStatus = async () => ({ pending_count: 0 });
 runtimeApi.transfer.listDownloadHistory = async () => ({ records: [] });
-runtime.state.setup.flowId = 'binding-flow';
-runtime.state.setup.apiUrl = 'https://supabase.example';
-runtime.state.setup.anonKey = 'public-key';
-runtime.state.setup.profileName = 'Retry';
+runtime.state.connectionWizard.flowId = 'binding-flow';
+runtime.state.connectionWizard.apiUrl = 'https://supabase.example';
+runtime.state.connectionWizard.anonKey = 'public-key';
+runtime.state.connectionWizard.profileName = 'Retry';
 await runtime.completeSetup({ id: 'space-existing', name: 'Existing' });
 assert.equal(bindingInput.originalProfileId, null);
 assert.notEqual(bindingInput.profile.id, existingProfile.id, 'the draft may use a temporary ID');

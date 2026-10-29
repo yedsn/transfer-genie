@@ -141,6 +141,7 @@ export function useMobileController() {
   let feedRead: Promise<void> = Promise.resolve();
   let searchGeneration = 0;
   let markedGeneration = 0;
+  const connectionRequestGeneration = new Map<string, number>();
   const state = reactive({
     previewMode,
     boot: "loading" as "loading" | "no-profile" | "choose-profile" | "signed-out" | "needs-space" | "ready" | "error",
@@ -149,6 +150,8 @@ export function useMobileController() {
     notice: "",
     settings: null as any,
     profiles: [] as any[],
+    connectionStates: {} as Record<string, "unknown" | "checking" | "ready" | "signed-out" | "network-error" | "needs-attention" | "disabled">,
+    connectionEditor: { profileId: "", name: "", email: "", password: "", sending: false, error: "" },
     activeProfile: null as any,
     account: null as any,
     spaces: [] as any[],
@@ -169,7 +172,12 @@ export function useMobileController() {
     sender: { saving: false, error: "" },
     cache: { reclaimableBytes: 0, fileCount: 0, protectedTasks: 0, clearing: false },
     login: { email: "", password: "", sending: false },
-    setup: { apiUrl: "", anonKey: "", profileName: "我的 Supabase", email: "", password: "", flowId: "", tested: false, sending: false },
+    connectionWizard: {
+      open: false, step: 1 as 1 | 2 | 3 | 4, mode: "create" as "create" | "repair", originalProfileId: "",
+      apiUrl: "", anonKey: "", profileName: "我的 Supabase", email: "", password: "",
+      flowId: "", tested: false, sending: false, generation: 0, account: null as any, spaces: [] as any[], selectedSpaceId: "",
+      createOpen: false, createName: "", createOperationId: "", createSpaceId: "",
+    },
     composer: {
       text: "",
       textClientId: `mobile-text-${crypto.randomUUID()}`,
@@ -192,6 +200,10 @@ export function useMobileController() {
     const spaceId = state.activeProfile?.supabase?.space_id;
     return state.spaces.find((space) => space.id === spaceId || space.current) || null;
   });
+  const selectableProfiles = computed(() => state.profiles.filter((profile: any) => {
+    const bindingState = profile?.supabase?.binding_state || "bound";
+    return profile.enabled !== false && bindingState === "bound" && !!profile?.supabase?.space_id;
+  }));
   const pendingCount = computed(() => Number(state.syncStatus?.pending_count || state.syncStatus?.pendingCount || 0));
   const activeTransfers = computed(() => state.transfers.filter((item) => !["done", "complete", "completed", "saved", "sent", "success", "failed", "error", "cancelled"].includes(item.state)));
   const signedIn = computed(() => !!state.account?.signedIn);
@@ -355,7 +367,9 @@ export function useMobileController() {
     state.composer.persistenceReady = false;
     composerMutationVersion += 1;
     viewGeneration += 1;
+    const generation = viewGeneration;
     state.busy = false;
+    state.login.sending = false;
     searchGeneration += 1;
     markedGeneration += 1;
     Object.assign(state.search, { query: "", messages: [], offset: 0, hasMore: false, loading: false, error: "" });
@@ -374,6 +388,7 @@ export function useMobileController() {
     state.syncStatus = null;
     state.account = null;
     state.activeProfile = null;
+    state.connectionStates = {};
     state.composer.attachments = [];
     state.composer.text = "";
     state.composer.textClientId = `mobile-text-${crypto.randomUUID()}`;
@@ -390,8 +405,10 @@ export function useMobileController() {
     clearFeedback();
     state.boot = "loading";
     if (previewMode) {
-      state.settings = { sender_name: "Jam" };
-      state.activeProfile = { id: "preview-profile", name: "Personal", provider_kind: "supabase", supabase: { space_id: "preview-space" } };
+      state.settings = { sender_name: "Jam", active_storage_profile_id: "preview-profile" };
+      state.activeProfile = { id: "preview-profile", name: "Personal", provider_kind: "supabase", enabled: true, supabase: { api_url: "https://preview.supabase.invalid", space_id: "preview-space", binding_state: "bound" } };
+      state.profiles = [state.activeProfile];
+      state.connectionStates = { "preview-profile": "ready" };
       state.account = { signedIn: true, email: "preview@example.com", userId: "preview-user" };
       state.spaces = [{ id: "preview-space", name: "Personal Space", current: true, messageCount: 3 }];
       state.messages = previewFixtures();
@@ -410,9 +427,21 @@ export function useMobileController() {
     }
 
     try {
-      state.settings = await api().settings.getSettings();
-      state.profiles = (state.settings?.storage_profiles || []).filter((profile: any) => profile.provider_kind === "supabase" && profile.enabled !== false);
+      const settings = await api().settings.getSettings();
+      if (generation !== viewGeneration) return;
+      state.settings = settings;
+      state.profiles = (state.settings?.storage_profiles || []).filter((profile: any) => profile.provider_kind === "supabase");
+      state.connectionStates = Object.fromEntries(state.profiles.map((profile: any) => {
+        const bindingState = profile?.supabase?.binding_state || "bound";
+        const status = profile.enabled === false
+          ? "disabled"
+          : bindingState !== "bound" || !profile?.supabase?.space_id
+            ? "needs-attention"
+            : "unknown";
+        return [profile.id, status];
+      }));
       if (!state.profiles.length) {
+        state.connectionWizard.open = true;
         state.boot = "no-profile";
         return;
       }
@@ -421,29 +450,39 @@ export function useMobileController() {
         state.boot = "choose-profile";
         return;
       }
-      state.account = await api().settings.supabaseCurrentUser(state.activeProfile.id);
+      const bindingState = state.activeProfile?.supabase?.binding_state || "bound";
+      if (bindingState !== "bound" || !state.activeProfile?.supabase?.space_id) {
+        state.connectionStates[state.activeProfile.id] = "needs-attention";
+        state.boot = "needs-space";
+        return;
+      }
+      state.connectionStates[state.activeProfile.id] = "checking";
+      try {
+        const account = await api().settings.supabaseCurrentUser(state.activeProfile.id);
+        if (generation !== viewGeneration) return;
+        state.account = account;
+      } catch (error) {
+        if (generation !== viewGeneration) return;
+        state.connectionStates[state.activeProfile.id] = "network-error";
+        throw error;
+      }
       if (!state.account?.signedIn) {
+        state.connectionStates[state.activeProfile.id] = "signed-out";
         state.boot = "signed-out";
         return;
       }
       const boundSpaceId = state.activeProfile?.supabase?.space_id;
-      try {
-        await loadSpaces();
-      } catch (error) {
-        if (!boundSpaceId) throw error;
-        state.spaces = [{ id: boundSpaceId, name: state.activeProfile.name, current: true, messageCount: 0 }];
-        state.notice = "当前离线或无法读取空间列表，继续显示本机数据";
-      }
-      if (!boundSpaceId) {
-        state.boot = "needs-space";
-        return;
-      }
+      state.spaces = [{ id: boundSpaceId, name: state.activeProfile.name, current: true, messageCount: 0 }];
+      state.connectionStates[state.activeProfile.id] = "ready";
       await restoreComposerDraft();
+      if (generation !== viewGeneration) return;
       state.boot = "ready";
       const results = await Promise.allSettled([refreshMessages(), refreshMarked(), refreshStatus(), refreshTransfers(), refreshCache(), loadAppVersion()]);
+      if (generation !== viewGeneration) return;
       const failure = results.find((result) => result.status === "rejected") as PromiseRejectedResult | undefined;
       if (failure) state.notice = state.notice || `部分本机状态暂时无法读取：${errorText(failure.reason)}`;
     } catch (error) {
+      if (generation !== viewGeneration) return;
       setError(error);
       state.boot = "error";
     }
@@ -546,6 +585,7 @@ export function useMobileController() {
     };
     feedRead = feedRead.then(read, read);
     await feedRead;
+    if (generation !== viewGeneration) return;
     if (state.search.query) await searchMessages(state.search.query);
   }
 
@@ -789,8 +829,9 @@ export function useMobileController() {
 
   async function refreshAfterForeground() {
     if (previewMode || state.boot !== "ready") return;
+    const generation = viewGeneration;
     try { await Promise.all([refreshMessages(), refreshMarked(), refreshStatus(), refreshTransfers()]); }
-    catch (error) { setError(error); }
+    catch (error) { if (generation === viewGeneration) setError(error); }
   }
 
   async function refreshAll() {
@@ -1242,25 +1283,150 @@ export function useMobileController() {
   }
 
   async function signIn() {
-    if (!state.activeProfile) return;
+    if (!state.activeProfile || state.login.sending) return;
+    const generation = viewGeneration;
+    const profileId = state.activeProfile.id;
     state.login.sending = true;
     clearFeedback();
     try {
-      state.account = await api().settings.supabaseSignIn({ profileId: state.activeProfile.id, email: state.login.email.trim(), password: state.login.password });
+      const account = await api().settings.supabaseSignIn({ profileId, email: state.login.email.trim(), password: state.login.password });
+      if (generation !== viewGeneration || state.activeProfile?.id !== profileId) return;
+      state.account = account;
       state.login.password = "";
       await initialize();
-    } catch (error) { setError(error); } finally { state.login.sending = false; }
+    } catch (error) { if (generation === viewGeneration) setError(error); }
+    finally { if (generation === viewGeneration) state.login.sending = false; }
   }
 
   async function chooseProfile(profile: any) {
-    if (state.busy || state.composer.sending || state.composer.selecting || state.sender.saving) return;
+    if (profile?.enabled === false || profile?.supabase?.binding_state === "needs_attention" || profile?.supabase?.binding_state === "unbound" || !profile?.supabase?.space_id) return;
+    if (state.composer.sending || state.composer.selecting || state.sender.saving) {
+      state.notice = "请等待发送、文件选择或名称保存结束后再切换连接";
+      return;
+    }
+    if (state.busy) return;
     state.busy = true;
     clearFeedback();
     try {
       if (state.boot === "ready" && !await persistComposerDraft(true)) return;
-      state.settings = await api().settings.saveSettings({ ...state.settings, active_storage_profile_id: profile.id });
+      state.settings = await api().settings.activateStorageProfile(profile.id);
       await initialize();
     } catch (error) { setError(error); } finally { state.busy = false; }
+  }
+
+  function connectionFingerprint(profile: any) {
+    return [
+      profile?.supabase?.api_url?.trim().replace(/\/+$/, "") || "",
+      profile?.supabase?.anon_key?.trim() || "",
+      profile?.supabase?.space_id?.trim() || "",
+      profile?.enabled === false ? "disabled" : "enabled",
+    ].join("\u0000");
+  }
+
+  async function diagnoseProfile(profile: any) {
+    if (!profile?.id || profile.provider_kind !== "supabase") return false;
+    const request = (connectionRequestGeneration.get(profile.id) || 0) + 1;
+    const fingerprint = connectionFingerprint(profile);
+    connectionRequestGeneration.set(profile.id, request);
+    state.connectionStates[profile.id] = "checking";
+    try {
+      const result = await api().settings.testSupabaseConnection(profile.id);
+      const current = state.profiles.find((candidate: any) => candidate.id === profile.id);
+      if (connectionRequestGeneration.get(profile.id) !== request
+        || !current || connectionFingerprint(current) !== fingerprint) return false;
+      if (result?.network === false) state.connectionStates[profile.id] = "network-error";
+      else if (result?.auth === false) state.connectionStates[profile.id] = "signed-out";
+      else if (result?.errorCode || result?.error_code || result?.schema === false || result?.rpc === false || result?.rls === false)
+        state.connectionStates[profile.id] = "needs-attention";
+      else state.connectionStates[profile.id] = "ready";
+      return state.connectionStates[profile.id] === "ready";
+    } catch (error) {
+      const current = state.profiles.find((candidate: any) => candidate.id === profile.id);
+      if (connectionRequestGeneration.get(profile.id) === request
+        && current && connectionFingerprint(current) === fingerprint) {
+        const message = errorText(error);
+        state.connectionStates[profile.id] = /session.?revoked|invalid.?credentials|会话.*失效|请.*登录/i.test(message)
+          ? "signed-out"
+          : /网络|network|offline|连接/i.test(message)
+            ? "network-error"
+            : "needs-attention";
+      }
+      return false;
+    }
+  }
+
+  async function setProfileEnabled(profile: any, enabled: boolean) {
+    if (!profile?.id || state.busy || state.composer.sending || state.composer.selecting || state.sender.saving) return false;
+    state.busy = true;
+    clearFeedback();
+    try {
+      if (!enabled && state.activeProfile?.id === profile.id && state.boot === "ready" && !await persistComposerDraft(true)) return false;
+      state.settings = await api().settings.setStorageProfileEnabled(profile.id, enabled);
+      connectionRequestGeneration.set(profile.id, (connectionRequestGeneration.get(profile.id) || 0) + 1);
+      await initialize();
+      return true;
+    } catch (error) { setError(error); return false; }
+    finally { state.busy = false; }
+  }
+
+  function beginConnectionEdit(profile: any) {
+    Object.assign(state.connectionEditor, { profileId: profile?.id || "", name: profile?.name || "", email: "", password: "", sending: false, error: "" });
+  }
+
+  async function renameProfile(name: string) {
+    const profileId = state.connectionEditor.profileId;
+    const nextName = name.trim();
+    if (!profileId || !nextName || state.connectionEditor.sending) return false;
+    state.connectionEditor.sending = true; state.connectionEditor.error = "";
+    try {
+      const latest = await api().settings.getSettings();
+      const profile = (latest?.storage_profiles || []).find((candidate: any) => candidate.id === profileId && candidate.provider_kind === "supabase");
+      if (!profile) throw new Error("连接已不存在，请关闭后重新打开");
+      state.settings = await api().settings.saveStorageProfile({ originalProfileId: profileId, profile: { ...profile, name: nextName } });
+      await initialize();
+      return true;
+    } catch (error) { state.connectionEditor.error = errorText(error); return false; }
+    finally { state.connectionEditor.sending = false; }
+  }
+
+  async function signInProfile(profile: any, email: string, password: string) {
+    if (!profile?.id || !email.trim() || !password || state.connectionEditor.sending) return false;
+    const generation = viewGeneration;
+    state.connectionEditor.sending = true; state.connectionEditor.error = "";
+    try {
+      await api().settings.supabaseSignIn({ profileId: profile.id, email: email.trim(), password });
+      if (generation !== viewGeneration || !state.profiles.some((candidate: any) => candidate.id === profile.id)) return false;
+      state.connectionStates[profile.id] = "ready"; state.connectionEditor.password = "";
+      if (state.activeProfile?.id === profile.id) await initialize();
+      return true;
+    } catch (error) { if (generation === viewGeneration) state.connectionEditor.error = errorText(error); return false; }
+    finally { if (generation === viewGeneration) state.connectionEditor.sending = false; }
+  }
+
+  async function logoutProfile(profile: any) {
+    if (!profile?.id || state.connectionEditor.sending) return false;
+    state.connectionEditor.sending = true; state.connectionEditor.error = "";
+    try {
+      if (state.activeProfile?.id === profile.id && state.boot === "ready" && !await persistComposerDraft(true)) return false;
+      await api().settings.supabaseLogout(profile.id);
+      state.connectionStates[profile.id] = "signed-out";
+      if (state.activeProfile?.id === profile.id) await initialize();
+      return true;
+    } catch (error) { state.connectionEditor.error = errorText(error); return false; }
+    finally { state.connectionEditor.sending = false; }
+  }
+
+  async function removeProfile(profile: any, options: { confirmActiveRemoval?: boolean; abandonWork?: boolean } = {}) {
+    if (!profile?.id || state.connectionEditor.sending) return false;
+    state.connectionEditor.sending = true; state.connectionEditor.error = "";
+    try {
+      if (state.activeProfile?.id === profile.id && state.boot === "ready" && !await persistComposerDraft(true)) return false;
+      state.settings = await api().settings.removeStorageProfile(profile.id, options);
+      connectionRequestGeneration.set(profile.id, (connectionRequestGeneration.get(profile.id) || 0) + 1);
+      await initialize();
+      return true;
+    } catch (error) { state.connectionEditor.error = errorText(error); return false; }
+    finally { state.connectionEditor.sending = false; }
   }
 
   async function logout() {
@@ -1280,42 +1446,142 @@ export function useMobileController() {
   }
 
   async function testSetupConnection() {
-    state.setup.sending = true;
+    const wizard = state.connectionWizard;
+    const generation = ++wizard.generation;
+    const fingerprint = `${wizard.apiUrl.trim().replace(/\/+$/, "")}\u0000${wizard.anonKey.trim()}`;
+    wizard.sending = true;
     clearFeedback();
-    try { await api().settings.testSupabaseDraftConnection({ profileId: null, apiUrl: state.setup.apiUrl, anonKey: state.setup.anonKey }); state.setup.tested = true; state.notice = "连接可用，请继续登录账号"; }
-    catch (error) { setError(error); } finally { state.setup.sending = false; }
+    try {
+      await api().settings.testSupabaseDraftConnection({ profileId: null, apiUrl: wizard.apiUrl, anonKey: wizard.anonKey });
+      if (generation !== wizard.generation || fingerprint !== `${wizard.apiUrl.trim().replace(/\/+$/, "")}\u0000${wizard.anonKey.trim()}`) return false;
+      wizard.tested = true; wizard.step = 2; state.notice = "连接可用，请继续登录账号"; return true;
+    } catch (error) { if (generation === wizard.generation) setError(error); return false; }
+    finally { if (generation === wizard.generation) wizard.sending = false; }
   }
 
   async function setupSignIn() {
-    state.setup.sending = true;
+    const wizard = state.connectionWizard;
+    const generation = ++wizard.generation;
+    wizard.sending = true;
     clearFeedback();
     try {
-      const result = await api().settings.supabaseDraftSignIn({ flowId: state.setup.flowId || null, apiUrl: state.setup.apiUrl, anonKey: state.setup.anonKey, email: state.setup.email, password: state.setup.password });
-      state.setup.flowId = result.profileId;
-      state.account = result;
-      state.spaces = await api().settings.listSupabaseDraftSpaces(state.setup.flowId);
-      state.setup.password = "";
-      state.boot = "needs-space";
-    } catch (error) { setError(error); } finally { state.setup.sending = false; }
+      const result = await api().settings.supabaseDraftSignIn({ flowId: wizard.flowId || null, apiUrl: wizard.apiUrl, anonKey: wizard.anonKey, email: wizard.email, password: wizard.password });
+      const flowId = result.profileId;
+      if (generation !== wizard.generation) {
+        await api().settings.cancelSupabaseBindingFlow(flowId).catch(() => {});
+        return false;
+      }
+      wizard.flowId = flowId;
+      const spaces = await api().settings.listSupabaseDraftSpaces(flowId);
+      if (generation !== wizard.generation) return false;
+      wizard.flowId = flowId; wizard.account = result; wizard.spaces = spaces; wizard.password = ""; wizard.step = 3; return true;
+    } catch (error) { if (generation === wizard.generation) setError(error); return false; }
+    finally { if (generation === wizard.generation) wizard.sending = false; }
   }
 
-  async function completeSetup(space: any) {
+  async function completeSetup(space: any, activate = true) {
+    const wizard = state.connectionWizard;
+    const generation = ++wizard.generation;
     state.busy = true;
     clearFeedback();
     try {
       const profileId = `supabase-${crypto.randomUUID()}`;
       const updated = await api().settings.completeSupabaseBinding({
-        flowId: state.setup.flowId,
-        originalProfileId: null,
+        flowId: wizard.flowId,
+        originalProfileId: wizard.originalProfileId || null,
         spaceId: space.id,
-        profile: { id: profileId, name: state.setup.profileName.trim() || space.name, provider_kind: "supabase", enabled: true, supabase: { api_url: state.setup.apiUrl.trim(), anon_key: state.setup.anonKey.trim(), space_id: space.id } },
+        profile: { id: profileId, name: wizard.profileName.trim() || space.name, provider_kind: "supabase", enabled: true, supabase: { api_url: wizard.apiUrl.trim(), anon_key: wizard.anonKey.trim(), space_id: space.id, binding_state: "bound" } },
       });
-      const savedProfile = (updated.storage_profiles || []).find((item: any) => item.provider_kind === "supabase" && item.supabase?.space_id === space.id && item.supabase?.api_url?.replace(/\/+$/, "") === state.setup.apiUrl.trim().replace(/\/+$/, ""));
+      if (generation !== wizard.generation) return false;
+      const savedProfile = (updated.storage_profiles || []).find((item: any) => item.provider_kind === "supabase" && item.supabase?.space_id === space.id && item.supabase?.api_url?.replace(/\/+$/, "") === wizard.apiUrl.trim().replace(/\/+$/, ""));
       if (!savedProfile) throw new Error("绑定未返回存储空间配置，请重试");
-      await api().settings.saveSettings({ ...updated, active_storage_profile_id: savedProfile.id });
-      state.setup.flowId = "";
+
+      // Completing the binding consumes the temporary flow. From this point on the
+      // saved profile is authoritative, even when the optional activation fails.
+      Object.assign(wizard, { open: false, flowId: "", password: "", account: null, spaces: [], selectedSpaceId: "", sending: false });
+      state.settings = updated;
+
+      if (activate) {
+        try {
+          await api().settings.activateStorageProfile(savedProfile.id);
+        } catch (error) {
+          await initialize();
+          state.error = "";
+          state.notice = `连接“${savedProfile.name}”已保存，但未切换。可稍后从连接卡片重试。${errorText(error) ? ` 原因：${errorText(error)}` : ""}`;
+          return true;
+        }
+      }
+
       await initialize();
-    } catch (error) { setError(error); } finally { state.busy = false; }
+      state.notice = activate
+        ? `已保存并切换到连接“${savedProfile.name}”`
+        : `已保存连接“${savedProfile.name}”，当前连接未切换`;
+      return true;
+    } catch (error) { if (generation === wizard.generation) setError(error); return false; } finally { state.busy = false; }
+  }
+
+  function resetWizardDownstream() {
+    const wizard = state.connectionWizard;
+    const staleFlowId = wizard.flowId;
+    wizard.generation += 1; wizard.tested = false; wizard.step = 1; wizard.flowId = ""; wizard.account = null; wizard.spaces = []; wizard.selectedSpaceId = ""; wizard.password = ""; wizard.sending = false; wizard.createOpen = false; wizard.createName = ""; wizard.createOperationId = ""; wizard.createSpaceId = "";
+    if (!previewMode && staleFlowId) void api().settings.cancelSupabaseBindingFlow(staleFlowId).catch(() => undefined);
+  }
+
+  function openConnectionWizard() {
+    resetWizardDownstream();
+    Object.assign(state.connectionWizard, { open: true, mode: "create", originalProfileId: "", apiUrl: "", anonKey: "", profileName: "我的 Supabase", email: "" });
+    clearFeedback();
+  }
+
+  function openConnectionRepair(profile: any) {
+    resetWizardDownstream();
+    Object.assign(state.connectionWizard, {
+      open: true, mode: "repair", originalProfileId: profile?.id || "",
+      apiUrl: profile?.supabase?.api_url || "", anonKey: profile?.supabase?.anon_key || "",
+      profileName: profile?.name || "Supabase", email: "",
+    });
+    clearFeedback();
+  }
+
+  async function cancelConnectionWizard() {
+    const wizard = state.connectionWizard;
+    const flowId = wizard.flowId;
+    wizard.generation += 1; wizard.open = false; wizard.flowId = ""; wizard.password = ""; wizard.account = null; wizard.spaces = []; wizard.selectedSpaceId = ""; wizard.sending = false;
+    if (!previewMode && flowId) { try { await api().settings.cancelSupabaseBindingFlow(flowId); } catch { /* Expiry is the backend fallback. */ } }
+  }
+
+  function selectWizardSpace(space: any) {
+    const wizard = state.connectionWizard;
+    if (!space?.id || wizard.sending) return;
+    wizard.selectedSpaceId = space.id; wizard.step = 4;
+  }
+
+  function backConnectionWizard() {
+    const wizard = state.connectionWizard;
+    if (wizard.sending) return;
+    if (wizard.step === 4) { wizard.step = 3; wizard.selectedSpaceId = ""; return; }
+    if (wizard.step === 3) { wizard.step = 2; wizard.spaces = []; wizard.selectedSpaceId = ""; return; }
+    if (wizard.step === 2) resetWizardDownstream();
+  }
+
+  async function createWizardSpace() {
+    const wizard = state.connectionWizard;
+    const name = wizard.createName.trim();
+    if (!wizard.flowId || !name || wizard.sending) return false;
+    if (!wizard.createOperationId) wizard.createOperationId = crypto.randomUUID();
+    if (!wizard.createSpaceId) wizard.createSpaceId = crypto.randomUUID();
+    const generation = wizard.generation;
+    wizard.sending = true; clearFeedback();
+    try {
+      const space = await api().settings.createSupabaseSpace({ flowId: wizard.flowId, profileId: null, operationId: wizard.createOperationId, spaceId: wizard.createSpaceId, name });
+      if (generation !== wizard.generation) return false;
+      wizard.spaces = [...wizard.spaces.filter((item: any) => item.id !== space.id), space];
+      wizard.createOpen = false; wizard.createName = ""; wizard.createOperationId = ""; wizard.createSpaceId = "";
+      wizard.selectedSpaceId = space.id; wizard.step = 4;
+      state.notice = "Space 已在服务端创建；取消向导不会自动删除它";
+      return true;
+    } catch (error) { if (generation === wizard.generation) setError(error); return false; }
+    finally { if (generation === wizard.generation) wizard.sending = false; }
   }
 
   async function installTransferListeners() {
@@ -1350,8 +1616,8 @@ export function useMobileController() {
   }
 
   return {
-    state, currentSpace, pendingCount, activeTransfers, signedIn, initialize, refreshAll, refreshRuntimeState, refreshAfterForeground, refreshMessages, loadOlderMessages, searchMessages, loadMoreSearch, setMarkedFilter, loadMoreMarked, loadConflicts, resolveConflict, retryTransfer,
+    state, currentSpace, selectableProfiles, pendingCount, activeTransfers, signedIn, initialize, refreshAll, refreshRuntimeState, refreshAfterForeground, refreshMessages, loadOlderMessages, searchMessages, loadMoreSearch, setMarkedFilter, loadMoreMarked, loadConflicts, resolveConflict, retryTransfer,
     selectMedia, selectDocuments, removeAttachment, sendDraft, persistComposerDraft, deactivateComposerPersistence, toggleMark, copyMessage, updateMarkedMetadata, createMarkedTag, deleteMessage, applyMessageSelection, previewMessage, prepareVideo, shareMessage, retryPreview, previewImageFailed, previewDraftAttachment,
-    signIn, logout, chooseProfile, loadSpaces, switchSpace, testSetupConnection, setupSignIn, completeSetup, installTransferListeners, refreshCache, clearCache, clearFeedback, saveSenderName,
+    signIn, logout, chooseProfile, diagnoseProfile, setProfileEnabled, beginConnectionEdit, renameProfile, signInProfile, logoutProfile, removeProfile, loadSpaces, switchSpace, testSetupConnection, setupSignIn, completeSetup, resetWizardDownstream, openConnectionWizard, openConnectionRepair, cancelConnectionWizard, selectWizardSpace, backConnectionWizard, createWizardSpace, installTransferListeners, refreshCache, clearCache, clearFeedback, saveSenderName,
   };
 }

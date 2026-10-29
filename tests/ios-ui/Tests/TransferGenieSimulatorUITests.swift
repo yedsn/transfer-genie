@@ -46,6 +46,86 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         app = nil
     }
 
+    func testConnectionManagerCancelledOperationsPreserveCurrentConnection() throws {
+        app.buttons["我的"].tap()
+        button(containing: "存储空间").tap()
+        XCTAssertTrue(app.buttons["关闭连接管理"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["WebDAV"].exists)
+        app.buttons["＋ 新增连接"].tap()
+        XCTAssertTrue(app.staticTexts["连接服务"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.secureTextFields["Supabase 公开 Key（已遮蔽）"].exists)
+        app.buttons["取消新增"].tap()
+        XCTAssertTrue(app.buttons["关闭连接管理"].waitForExistence(timeout: 5))
+        let manage = app.buttons["管理"].firstMatch
+        XCTAssertTrue(manage.exists)
+        if !manage.isHittable { app.swipeUp() }
+        manage.tap()
+        XCTAssertTrue(app.buttons["关闭连接设置"].waitForExistence(timeout: 5))
+        app.buttons["移除连接…"].tap()
+        XCTAssertTrue(app.buttons["取消移除连接"].waitForExistence(timeout: 5))
+        app.buttons["取消"].tap()
+        XCTAssertTrue(app.buttons["关闭连接设置"].waitForExistence(timeout: 5))
+        app.buttons["关闭连接设置"].tap()
+        XCTAssertTrue(app.buttons["关闭连接管理"].waitForExistence(timeout: 5))
+        app.buttons["关闭连接管理"].tap()
+        app.buttons["消息"].tap()
+        button(containing: "切换 Supabase 连接").tap()
+        XCTAssertTrue(app.buttons["关闭连接选择"].waitForExistence(timeout: 5))
+        app.buttons["关闭连接选择"].tap()
+        XCTAssertTrue(app.buttons["新消息"].waitForExistence(timeout: 5))
+    }
+
+    func testConnectionWizardControlsReachableWithSoftwareKeyboard() throws {
+        app.buttons["我的"].tap()
+        button(containing: "存储空间").tap()
+        XCTAssertTrue(app.buttons["关闭连接管理"].waitForExistence(timeout: 5))
+        app.buttons["＋ 新增连接"].tap()
+        let key = app.secureTextFields["Supabase 公开 Key（已遮蔽）"]
+        XCTAssertTrue(key.waitForExistence(timeout: 5))
+        defer {
+            if app.buttons["取消新增"].exists {
+                if !app.buttons["取消新增"].isHittable { app.swipeUp() }
+                app.buttons["取消新增"].tap()
+            }
+            if app.buttons["关闭连接管理"].exists { app.buttons["关闭连接管理"].tap() }
+        }
+        if !key.isHittable { app.swipeUp() }
+        key.tap()
+        key.typeText("sb_publishable_layout_fixture_only")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "Requires an actual software keyboard")
+        // XCTest's Keyboard frame excludes the floating Previous/Next/Done
+        // toolbar. AX may call offscreen WebKit buttons hittable beneath it.
+        func contentBoundary() -> CGFloat {
+            let keyboardTop = app.keyboards.firstMatch.frame.minY
+            let toolbar = app.toolbars.firstMatch
+            return min(keyboardTop, toolbar.exists ? toolbar.frame.minY : keyboardTop) - 48
+        }
+        func scrollWritingArea() {
+            let boundary = contentBoundary()
+            let start = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: app.frame.midX, dy: boundary - 25))
+            let end = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: app.frame.midX, dy: 120))
+            start.press(forDuration: 0.05, thenDragTo: end)
+        }
+        let action = app.buttons["测试连接并继续"]
+        for _ in 0..<5 {
+            if action.isHittable && action.frame.maxY <= contentBoundary() { break }
+            scrollWritingArea()
+        }
+        XCTAssertTrue(action.isHittable)
+        XCTAssertGreaterThanOrEqual(action.frame.height, 44)
+        XCTAssertLessThanOrEqual(action.frame.maxY, contentBoundary() + 1)
+        attachScreenshot(named: "connection-wizard-large-text-software-keyboard")
+        let cancel = app.buttons["取消新增"]
+        for _ in 0..<5 {
+            if cancel.isHittable && cancel.frame.maxY <= contentBoundary() { break }
+            scrollWritingArea()
+        }
+        XCTAssertTrue(cancel.isHittable)
+        XCTAssertLessThanOrEqual(cancel.frame.maxY, contentBoundary() + 1)
+        cancel.tap()
+        XCTAssertTrue(app.buttons["关闭连接管理"].waitForExistence(timeout: 5))
+    }
+
     func testComposerDraftIsEmptyBeforeUpgrade() throws {
         guard app.buttons["新消息"].isHittable else {
             throw XCTSkip("An editor is already open; preserve the current process")

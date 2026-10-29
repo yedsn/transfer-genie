@@ -125,6 +125,9 @@
     async listSupabaseDraftSpaces(flowId) {
       return invoke('list_supabase_draft_spaces', { input: { flowId } });
     },
+    async createSupabaseSpace(input) {
+      return invoke('create_supabase_space', { input });
+    },
     async completeSupabaseBinding(input) {
       return invoke('complete_supabase_binding', { input });
     },
@@ -148,6 +151,18 @@
     },
     async switchSupabaseSpace(input) {
       return invoke('switch_supabase_space', { input });
+    },
+    async saveStorageProfile(input) {
+      return invoke('save_storage_profile', { input });
+    },
+    async removeStorageProfile(profileId, options = {}) {
+      return invoke('remove_storage_profile', { input: { profileId, ...options } });
+    },
+    async activateStorageProfile(profileId) {
+      return invoke('activate_storage_profile', { input: { profileId } });
+    },
+    async setStorageProfileEnabled(profileId, enabled) {
+      return invoke('set_storage_profile_enabled', { input: { profileId, enabled } });
     },
   };
 

@@ -4091,6 +4091,14 @@ pub fn has_pending_profile_work(path: &Path, profile_id: &str) -> rusqlite::Resu
     )
 }
 
+pub fn has_mobile_composer_drafts(path: &Path, profile_id: &str) -> rusqlite::Result<bool> {
+    Connection::open(path)?.query_row(
+        "SELECT EXISTS(SELECT 1 FROM mobile_composer_drafts WHERE endpoint_id=?1)",
+        params![profile_id],
+        |row| row.get(0),
+    )
+}
+
 pub fn abandon_profile_work(path: &Path, profile_id: &str, now_ms: i64) -> rusqlite::Result<()> {
     let mut conn = Connection::open(path)?;
     let tx = conn.transaction()?;
@@ -11010,7 +11018,10 @@ mod tests {
             Some(draft)
         );
         assert_eq!(
-            get_message(&path, "endpoint-1", "existing.txt").unwrap().unwrap().content,
+            get_message(&path, "endpoint-1", "existing.txt")
+                .unwrap()
+                .unwrap()
+                .content,
             message.content
         );
         let _ = std::fs::remove_file(path);
@@ -11029,8 +11040,7 @@ mod tests {
         };
         upsert_mobile_composer_draft(&path, &draft).expect("save draft");
         assert_eq!(
-            get_mobile_composer_draft(&path, "profile-a", "user-a", "space-a")
-                .expect("read draft"),
+            get_mobile_composer_draft(&path, "profile-a", "user-a", "space-a").expect("read draft"),
             Some(draft.clone())
         );
         for (profile, user, space) in [
@@ -11058,9 +11068,11 @@ mod tests {
                 .expect("delete draft"),
             1
         );
-        assert!(get_mobile_composer_draft(&path, "profile-a", "user-a", "space-a")
-            .expect("read deleted draft")
-            .is_none());
+        assert!(
+            get_mobile_composer_draft(&path, "profile-a", "user-a", "space-a")
+                .expect("read deleted draft")
+                .is_none()
+        );
         let _ = std::fs::remove_file(path);
     }
 }

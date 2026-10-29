@@ -96,7 +96,12 @@ pub async fn current_user(
             } else {
                 SupabaseAuthErrorKind::Service
             },
-            message: public_error_message(&body, "无法验证当前 Supabase 用户"),
+            message: if status == StatusCode::UNAUTHORIZED {
+                "Supabase 会话已失效"
+            } else {
+                "无法验证当前 Supabase 用户"
+            }
+            .to_string(),
         });
     }
     let id = body["id"]
@@ -139,11 +144,16 @@ async fn parse_session_response(
     if !status.is_success() {
         return Err(SupabaseAuthError {
             kind: if status == StatusCode::BAD_REQUEST || status == StatusCode::UNAUTHORIZED {
-                auth_failure_kind
+                auth_failure_kind.clone()
             } else {
                 SupabaseAuthErrorKind::Service
             },
-            message: public_error_message(&body, "Supabase Auth 请求失败"),
+            message: match auth_failure_kind {
+                SupabaseAuthErrorKind::InvalidCredentials => "Supabase 登录凭据无效",
+                SupabaseAuthErrorKind::SessionRevoked => "Supabase 会话已失效",
+                _ => "Supabase Auth 请求失败",
+            }
+            .to_string(),
         });
     }
     let now_seconds = std::time::SystemTime::now()
@@ -178,10 +188,10 @@ async fn parse_session_response(
     })
 }
 
-fn network_error(error: reqwest::Error) -> SupabaseAuthError {
+fn network_error(_error: reqwest::Error) -> SupabaseAuthError {
     SupabaseAuthError {
         kind: SupabaseAuthErrorKind::Network,
-        message: format!("Supabase Auth 网络请求失败: {error}"),
+        message: "Supabase Auth 网络请求失败".to_string(),
     }
 }
 
@@ -190,14 +200,6 @@ fn invalid_response() -> SupabaseAuthError {
         kind: SupabaseAuthErrorKind::InvalidResponse,
         message: "Supabase Auth 返回内容无效".to_string(),
     }
-}
-
-fn public_error_message(body: &Value, fallback: &str) -> String {
-    body["msg"]
-        .as_str()
-        .or_else(|| body["message"].as_str())
-        .unwrap_or(fallback)
-        .to_string()
 }
 
 #[cfg(test)]
@@ -223,7 +225,12 @@ mod tests {
             ),
             Some("password") => (
                 AxumStatusCode::BAD_REQUEST,
-                Json(json!({"message":"Invalid login credentials"})),
+                Json(json!({
+                    "message": format!(
+                        "invalid password={} key=sb_secret_fixture token=access-secret",
+                        body["password"].as_str().unwrap_or_default()
+                    )
+                })),
             ),
             Some("refresh_token") if body["refresh_token"] == "refresh-a" => (
                 AxumStatusCode::OK,
@@ -293,6 +300,10 @@ mod tests {
             .await
             .expect_err("invalid credentials should fail");
         assert_eq!(invalid.kind, SupabaseAuthErrorKind::InvalidCredentials);
+        assert_eq!(invalid.message, "Supabase 登录凭据无效");
+        assert!(!invalid.message.contains("wrong"));
+        assert!(!invalid.message.contains("sb_secret_fixture"));
+        assert!(!invalid.message.contains("access-secret"));
 
         let session = sign_in(&client, &base_url, "public", "a@example.com", "correct")
             .await
@@ -303,6 +314,8 @@ mod tests {
             .await
             .expect_err("revoked refresh should fail");
         assert_eq!(revoked.kind, SupabaseAuthErrorKind::SessionRevoked);
+        assert_eq!(revoked.message, "Supabase 会话已失效");
+        assert!(!revoked.message.contains("revoked"));
 
         let refreshed = refresh(&client, &base_url, "public", &session.refresh_token)
             .await
