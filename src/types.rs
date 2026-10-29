@@ -110,6 +110,10 @@ fn default_ai_default_action_id() -> String {
     "polish".to_string()
 }
 
+pub fn default_ai_tab_name_prompt() -> String {
+    "阅读以下草稿，生成一个不超过 16 个汉字的标签名称。只输出名称，不要引号、解释、标点结尾或换行。\n\n<draft>\n{{text}}\n</draft>".to_string()
+}
+
 pub fn default_speech_to_text_provider_kind() -> String {
     "volcengine_agent_plan".to_string()
 }
@@ -771,6 +775,8 @@ pub struct AiSettings {
     pub provider: AiProviderSettings,
     #[serde(default = "default_ai_default_action_id")]
     pub default_action_id: String,
+    #[serde(default = "default_ai_tab_name_prompt")]
+    pub tab_name_prompt: String,
     #[serde(default = "default_ai_actions")]
     pub actions: Vec<AiTextAction>,
 }
@@ -781,6 +787,7 @@ impl Default for AiSettings {
             enabled: false,
             provider: AiProviderSettings::default(),
             default_action_id: default_ai_default_action_id(),
+            tab_name_prompt: default_ai_tab_name_prompt(),
             actions: default_ai_actions(),
         }
     }

@@ -98,6 +98,10 @@ export const composerStore = {
   },
   switchDraft(paneId: string, tabId: string) { commit(core.setActiveTabById(state, paneId, tabId)); },
   setActivePane(paneId: string) { commit(core.setActivePane(state, paneId)); },
+  getDraft(tabId: string): DraftTab | null {
+    return state.panes.flatMap((p) => p.tabs).find((t) => t.id === tabId) || null;
+  },
+  renameDraft(tabId: string, title: string) { commit(core.renameTab(state, tabId, title)); },
   setDraftText(tabId: string, text: string) { commit(ccore.setDraftText(state, tabId, text)); },
   setDraftFormat(tabId: string, format: DraftFormat) { commit(ccore.setDraftFormat(state, tabId, format)); },
   clearWorkspaceConfirmed() {

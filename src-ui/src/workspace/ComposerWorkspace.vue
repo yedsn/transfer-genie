@@ -1,12 +1,17 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { composerStore } from "./composer-store";
 import DraftEditor from "./DraftEditor.vue";
+import "./tab-name-ai.js";
 
 const state = composerStore.state;
 const mainEl = ref<HTMLElement | null>(null);
 const hoverZone = ref<Record<string, string>>({});
 const destructivePrompt = ref<{ title: string; body: string; action: () => void } | null>(null);
+const renameInputEl = ref<HTMLInputElement | null>(null);
+const renameDialog = ref<{ tabId: string; title: string; aiBusy: boolean } | null>(null);
+const tabNameAi = (globalThis as any).transferGenieTabNameAi;
+const tabNameAiSession = tabNameAi.createRequestSession();
 
 const orderedPanes = computed(() =>
   state.paneOrder.map((id) => state.panes.find((p) => p.id === id)).filter(Boolean)
@@ -75,12 +80,65 @@ function onTabContextMenu(event: MouseEvent, tab: any, paneId: string) {
   ctxMenu.value = { x: event.clientX, y: event.clientY, tabId: tab.id, paneId };
 }
 function closeCtxMenu() { ctxMenu.value = null; }
+function aiSettings() {
+  return (window as any).transferGenieVue?.store?.settingsForm || {};
+}
+function closeRenameDialog() {
+  tabNameAiSession.cancel();
+  renameDialog.value = null;
+}
+function saveRename(title?: string) {
+  const dialog = renameDialog.value;
+  const normalized = String(title ?? dialog?.title ?? "").trim();
+  if (!dialog || !normalized) return;
+  composerStore.renameDraft(dialog.tabId, normalized);
+  closeRenameDialog();
+}
+async function openRenameDialog(tabId: string) {
+  const draft = composerStore.getDraft(tabId);
+  if (!draft) return;
+  tabNameAiSession.cancel();
+  renameDialog.value = {
+    tabId,
+    title: draftTitle(draft),
+    aiBusy: false,
+  };
+  await nextTick();
+  renameInputEl.value?.focus();
+  renameInputEl.value?.select();
+}
+async function generateRenameSuggestion() {
+  const dialog = renameDialog.value;
+  if (!dialog || dialog.aiBusy) return;
+  const draft = composerStore.getDraft(dialog.tabId);
+  if (!draft) return;
+  const availability = tabNameAi.availability(draft, aiSettings());
+  if (!availability.available) return;
+
+  dialog.aiBusy = true;
+  tabNameAiSession.cancel();
+  const requestId = tabNameAiSession.begin();
+  const tabId = dialog.tabId;
+  const api = (window as any).transferGenieApi;
+  const tauriInvoke = (window as any).__TAURI__?.core?.invoke || (window as any).__TAURI__?.invoke;
+  const result = await tabNameAi.generate(draft, aiSettings(), api?.ai?.processText
+    ? (request: any) => api.ai.processText(request)
+    : tauriInvoke
+      ? (request: any) => tauriInvoke("process_text_with_ai", { request })
+      : null);
+  if (!tabNameAiSession.isCurrent(requestId) || renameDialog.value?.tabId !== tabId) return;
+  renameDialog.value.aiBusy = false;
+  if (result.status === "ready" && result.suggestion) renameDialog.value.title = result.suggestion;
+}
 function ctxAction(action: string) {
   const m = ctxMenu.value;
   if (!m) return;
   const { tabId, paneId } = m;
   ctxMenu.value = null;
   switch (action) {
+    case "rename":
+      openRenameDialog(tabId);
+      break;
     case "splitRight":
       composerStore.splitTab(tabId, "right");
       break;
@@ -264,6 +322,7 @@ onMounted(() => {
   (window as any).transferGenieComposer = bridge;
 });
 onUnmounted(() => {
+  tabNameAiSession.cancel();
   if (dragEndHandler) window.removeEventListener("dragend", dragEndHandler as any, true);
   window.removeEventListener("transfer-genie:composer-fullscreen-change", syncFullscreenState as EventListener);
   window.removeEventListener("resize", closeDestructivePromptOnLayoutChange);
@@ -319,6 +378,39 @@ onUnmounted(() => {
           <button class="cw-btn cw-btn-danger" type="button" @click="confirmDestructiveAction">确认</button>
         </div>
       </div>
+    </div>
+
+    <div v-if="renameDialog" class="cw-modal-backdrop cw-rename-backdrop" @click.self="closeRenameDialog">
+      <form class="cw-modal cw-rename-dialog" role="dialog" aria-modal="true" aria-labelledby="cw-rename-title" @submit.prevent="saveRename()" @keydown.esc.prevent="closeRenameDialog">
+        <div id="cw-rename-title" class="cw-modal-title">重命名标签</div>
+        <label class="cw-rename-label" for="cw-rename-input">名称</label>
+        <div class="cw-rename-input-row">
+          <input
+            id="cw-rename-input"
+            ref="renameInputEl"
+            v-model="renameDialog.title"
+            class="cw-rename-input"
+            type="text"
+            maxlength="80"
+            autocomplete="off"
+          />
+          <button
+            class="cw-rename-ai-button"
+            type="button"
+            :disabled="renameDialog.aiBusy"
+            title="使用 AI 根据草稿生成名称"
+            aria-label="使用 AI 根据草稿生成名称"
+            @click="generateRenameSuggestion"
+          >
+            <span v-if="renameDialog.aiBusy" class="cw-rename-spinner" aria-hidden="true"></span>
+            <img v-else src="/icons/ai.svg" alt="" />
+          </button>
+        </div>
+        <div class="cw-modal-actions">
+          <button class="cw-btn" type="button" @click="closeRenameDialog">取消</button>
+          <button class="cw-btn cw-btn-primary" type="submit" :disabled="!renameDialog.title.trim()">保存</button>
+        </div>
+      </form>
     </div>
 
     <div class="composer-ws-main" :class="layoutClasses">
@@ -377,6 +469,11 @@ onUnmounted(() => {
       :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }"
       @contextmenu.prevent
     >
+      <button class="cw-ctx-item cw-ctx-rename" type="button" @click="ctxAction('rename')">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg>
+        <span>重命名</span>
+      </button>
+      <div class="cw-ctx-sep"></div>
       <div class="cw-ctx-submenu">
         <button class="cw-ctx-item cw-ctx-sub-trigger" type="button">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>

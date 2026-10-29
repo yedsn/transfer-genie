@@ -399,6 +399,96 @@
   background: var(--accent-strong);
 }
 
+.cw-ctx-rename {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.cw-ctx-rename svg { opacity: 0.7; }
+
+.cw-rename-backdrop {
+  z-index: 10030;
+  backdrop-filter: blur(2px);
+}
+
+.cw-rename-dialog {
+  width: min(390px, calc(100vw - 32px));
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.cw-rename-label {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.cw-rename-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 36px;
+  gap: 7px;
+}
+
+.cw-rename-input {
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 8px 10px;
+  background: #fff;
+  color: var(--ink);
+  font: 13px/20px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  outline: none;
+}
+
+.cw-rename-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(107, 140, 255, 0.15);
+}
+
+.cw-rename-ai-button {
+  width: 36px;
+  height: 36px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel);
+  cursor: pointer;
+}
+
+.cw-rename-ai-button:hover:not(:disabled),
+.cw-rename-ai-button:focus-visible {
+  border-color: rgba(107, 140, 255, 0.62);
+  background: rgba(107, 140, 255, 0.08);
+  outline: 2px solid rgba(107, 140, 255, 0.32);
+  outline-offset: 1px;
+}
+
+.cw-rename-ai-button:disabled { opacity: 0.45; cursor: wait; }
+
+.cw-rename-ai-button img {
+  width: 18px;
+  height: 18px;
+  display: block;
+  filter: invert(54%) sepia(95%) saturate(1391%) hue-rotate(350deg) brightness(96%) contrast(94%);
+}
+
+.cw-rename-spinner {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  border: 2px solid rgba(107, 140, 255, 0.2);
+  border-top-color: var(--accent);
+  border-radius: 999px;
+  animation: cw-ai-spin 820ms linear infinite;
+}
+
 .cw-ai-bar {
   flex: 0 0 auto;
   display: flex;
@@ -1067,7 +1157,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .cw-ai-loading-spinner {
+  .cw-ai-loading-spinner,
+  .cw-rename-spinner {
     animation: none;
   }
 }

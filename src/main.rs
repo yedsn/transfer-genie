@@ -14909,6 +14909,11 @@ fn normalize_ai_settings(ai: &mut AiSettings) -> Result<(), String> {
         ai.provider.timeout_secs = AiProviderSettings::default().timeout_secs;
     }
     ai.provider.timeout_secs = ai.provider.timeout_secs.clamp(5, 300);
+    ai.tab_name_prompt = if ai.tab_name_prompt.trim().is_empty() {
+        types::default_ai_tab_name_prompt()
+    } else {
+        ai.tab_name_prompt.trim().to_string()
+    };
 
     let builtin_actions = AiSettings::default().actions;
     let builtin_ids: HashSet<String> = builtin_actions
@@ -28654,6 +28659,10 @@ mod tests {
         assert!(!loaded.ai.enabled);
         assert_eq!(loaded.ai.provider.kind, "openai_compatible");
         assert_eq!(loaded.ai.default_action_id, "polish");
+        assert_eq!(
+            loaded.ai.tab_name_prompt,
+            types::default_ai_tab_name_prompt()
+        );
         assert!(loaded.ai.actions.iter().any(|action| action.id == "polish"));
         assert!(loaded
             .ai
@@ -28826,6 +28835,7 @@ mod tests {
         settings.ai.provider.model = " model-a ".to_string();
         settings.ai.provider.temperature = 3.0;
         settings.ai.provider.timeout_secs = 0;
+        settings.ai.tab_name_prompt = "  为 {{text}} 生成短标题  ".to_string();
         settings.ai.actions.push(AiTextAction {
             id: "custom-dev".to_string(),
             name: " 自定义开发提示词 ".to_string(),
@@ -28849,6 +28859,7 @@ mod tests {
         assert_eq!(normalized.ai.provider.model, "model-a");
         assert_eq!(normalized.ai.provider.temperature, 2.0);
         assert_eq!(normalized.ai.provider.timeout_secs, 60);
+        assert_eq!(normalized.ai.tab_name_prompt, "为 {{text}} 生成短标题");
         let custom = normalized
             .ai
             .actions
@@ -28858,6 +28869,19 @@ mod tests {
         assert_eq!(custom.name, "自定义开发提示词");
         assert_eq!(custom.category, "通用");
         assert_eq!(custom.output_mode, "preview_replace");
+    }
+
+    #[test]
+    fn normalize_settings_defaults_blank_ai_tab_name_prompt() {
+        let mut settings = test_settings();
+        settings.ai.tab_name_prompt = "   ".to_string();
+
+        let normalized = normalize_settings(settings, Path::new("downloads")).expect("normalize");
+
+        assert_eq!(
+            normalized.ai.tab_name_prompt,
+            types::default_ai_tab_name_prompt()
+        );
     }
 
     #[test]

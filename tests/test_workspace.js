@@ -118,6 +118,28 @@ function testPerPaneTabsAndActive() {
   assert.equal(core.getActiveTab(switched.panes[0]).title, '文档A');
 }
 
+function testRenameTab() {
+  const s = stateWithTabs();
+  const tabId = s.panes[0].tabs[0].id;
+  const before = structuredClone(s.panes[0].tabs[0]);
+  const renamed = core.renameTab(s, tabId, '  项目方案  ');
+  assert.equal(renamed.panes[0].tabs[0].title, '项目方案');
+  assert.deepEqual({ ...renamed.panes[0].tabs[0], title: before.title }, before, '仅修改标题字段');
+  assert.equal(s.panes[0].tabs[0].title, '文档A', '不修改原状态');
+  assert.deepEqual(core.renameTab(s, tabId, '   '), s, '空白名称保持状态');
+  assert.deepEqual(core.renameTab(s, 'missing-tab', '名称'), s, '不存在的标签保持状态');
+}
+
+function testRenamedTabPersistsAndMoves() {
+  const s = stateWithTabs();
+  const tabId = s.panes[0].tabs[0].id;
+  const renamed = core.renameTab(s, tabId, '持久名称');
+  const restored = core.deserialize(core.serialize(renamed));
+  const split = core.splitHorizontal(restored);
+  const moved = core.moveTab(split, tabId, split.panes[1].id);
+  assert.equal(core.findTab(moved, tabId).tab.title, '持久名称');
+}
+
 function testCloseTabRemovesFromGroupNotSource() {
   const s = stateWithTabs();
   const firstTabId = s.panes[0].tabs[0].id;
@@ -284,6 +306,8 @@ function run() {
   testVerticalSplit();
   testCollapseToSingle();
   testPerPaneTabsAndActive();
+  testRenameTab();
+  testRenamedTabPersistsAndMoves();
   testCloseTabRemovesFromGroupNotSource();
   testMoveTabBetweenPanesPreservesState();
   testDockTabCenter();
