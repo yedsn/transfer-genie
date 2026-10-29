@@ -236,6 +236,16 @@
     return next;
   }
 
+  /** 修改标签显示名称；空白名称或不存在的标签保持原状态。 */
+  function renameTab(state, tabId, title) {
+    var next = clone(state);
+    var normalized = typeof title === "string" ? title.trim() : "";
+    if (!normalized) return next;
+    var found = findTab(next, tabId);
+    if (found) found.tab.title = normalized;
+    return next;
+  }
+
   /** 在分栏之间移动标签，保留标签状态（含消息快照）。 */
   function moveTab(state, tabId, targetPaneId, options) {
     options = options || {};
@@ -513,6 +523,7 @@
     closeTab: closeTab,
     setActiveTabById: setActiveTabById,
     setActivePane: setActivePane,
+    renameTab: renameTab,
     moveTab: moveTab,
     createDragPayload: createDragPayload,
     dockToPane: dockToPane,

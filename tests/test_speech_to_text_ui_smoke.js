@@ -597,6 +597,7 @@ function preloadScript() {
           if (command === 'send_text') {
             const delayMs = Number(window.__speechSmoke.sendTextDelayMs || 0);
             if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+            if (window.__speechSmoke.failSendText) throw new Error('mock text failure');
             const message = {
               filename: 'text-message.txt',
               original_name: 'message.txt',
@@ -615,6 +616,9 @@ function preloadScript() {
             return { filename: message.filename, markedTagIds: [] };
           }
           if (command === 'send_file') {
+            const delayMs = Number(window.__speechSmoke.sendFileDelayMs || 0);
+            if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+            if (window.__speechSmoke.failSendFile) throw new Error('mock file failure');
             return { filename: 'file-message.bin', markedTagIds: [] };
           }
           if (command === 'send_file_data') {
@@ -2169,33 +2173,211 @@ async function run() {
       window.__speechSmoke.sentMessages = [];
       window.__speechSmoke.sendTextDelayMs = 120;
       const bridge = window.transferGenieComposer || {};
+      const store = window.transferGenieComposerStore;
+      store.clearWorkspaceConfirmed();
+      const draftId = store.getActiveDraft().id;
+      store.renameDraft(draftId, '待保留标签');
       bridge.setActiveDraftText?.('普通发送按钮测试');
       const draftBeforeSend = window.transferGenieComposerStore?.getActiveDraft?.()?.text || '';
       document.querySelector('#send-text')?.click();
-      const clearedImmediately = window.transferGenieComposerStore?.getActiveDraft?.()?.text === '';
+      const retainedImmediately = store.getDraft(draftId)?.text === '普通发送按钮测试';
       bridge.setActiveDraftText?.('继续输入');
       await new Promise((resolve, reject) => {
         const start = Date.now();
         const tick = () => {
-          const sent = window.__speechSmoke.sentMessages.some((message) => message.content === '普通发送按钮测试');
-          if (sent) resolve();
+          if (document.querySelector('#cw-sent-title')) resolve();
           else if (Date.now() - start > 2500) reject(new Error('send button did not finish in background'));
           else setTimeout(tick, 20);
         };
         tick();
       });
+      const promptText = document.querySelector('#cw-sent-title').closest('.cw-modal').textContent;
+      const promptTitleColor = getComputedStyle(document.querySelector('#cw-sent-title')).color;
+      document.querySelector('#cw-sent-title').closest('.cw-modal').querySelector('.cw-modal-actions button').click();
+      await new Promise((r) => setTimeout(r, 400));
+      const persisted = JSON.parse(localStorage.getItem('transfer-genie:workspace-state'));
+      await store.restore();
       return {
-        clearedImmediately,
+        retainedImmediately,
         draftBeforeSend,
-        draftValue: window.transferGenieComposerStore?.getActiveDraft?.()?.text || '',
+        draftValue: store.getDraft(draftId)?.text || '',
+        title: store.getDraft(draftId)?.title,
+        persisted: persisted.panes.flatMap((pane) => pane.tabs).find((tab) => tab.id === draftId),
+        promptText,
+        promptTitleColor,
         sentText: window.__speechSmoke.sentMessages.at(-1)?.content || '',
         calls: window.__speechSmoke.calls.map((call) => call.command),
       };
     })()`);
-    assert.equal(sendButtonResult.clearedImmediately, true, 'send button clears the editor immediately');
-    assert.equal(sendButtonResult.draftBeforeSend, '普通发送按钮测试', 'send button reads the current draft before clearing');
+    assert.equal(sendButtonResult.retainedImmediately, true, 'send button preserves the draft while sending');
+    assert.equal(sendButtonResult.draftBeforeSend, '普通发送按钮测试', 'send button reads the current draft');
     assert.equal(sendButtonResult.draftValue, '继续输入', 'background send does not overwrite new editor input');
+    assert.equal(sendButtonResult.title, '待保留标签', 'keeping the tab preserves its title');
+    assert.equal(sendButtonResult.persisted.text, '继续输入', 'kept content is persisted');
+    assert.equal(sendButtonResult.persisted.title, '待保留标签', 'kept title is persisted');
+    assert.match(sendButtonResult.promptText, /自动执行倒计时：5 秒.*发送完毕，即将关闭标签“待保留标签”.*已修改.*丢失.*取消.*确认/, 'confirmation shows the requested title, message, and actions');
+    assert.equal(sendButtonResult.promptTitleColor, 'rgb(233, 100, 27)', 'countdown title uses the stronger theme color');
     assert.equal(sendButtonResult.sentText, '普通发送按钮测试', 'send button still sends the original text in the background');
+
+    const closeSentTabResult = await evaluate(client, `(async () => {
+      const store = window.transferGenieComposerStore;
+      const bridge = window.transferGenieComposer;
+      const paneId = store.state.activePaneId;
+      const sourceId = store.getActiveDraft().id;
+      bridge.setActiveDraftText('发送来源');
+      document.querySelector('#send-text').click();
+      const otherId = store.addDraft(paneId);
+      store.setDraftText(otherId, '其他草稿');
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#cw-sent-title')) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('missing close confirmation'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      document.querySelector('#cw-sent-title').closest('.cw-modal').querySelector('.cw-btn-danger').click();
+      await new Promise((r) => setTimeout(r, 30));
+      return { sourceExists: !!store.getDraft(sourceId), otherExists: !!store.getDraft(otherId), otherText: store.getDraft(otherId)?.text, otherId, active: store.getActiveDraft()?.id };
+    })()`);
+    assert.equal(closeSentTabResult.sourceExists, false, 'confirmation closes the original sending tab');
+    assert.equal(closeSentTabResult.otherText, '其他草稿', 'switching tabs does not close or clear the active tab: ' + JSON.stringify(closeSentTabResult));
+    assert.equal(closeSentTabResult.active, closeSentTabResult.otherId);
+
+    const keepSentTabResult = await evaluate(client, `(async () => {
+      const store = window.transferGenieComposerStore;
+      const id = store.getActiveDraft().id;
+      document.querySelector('#send-text').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#cw-sent-title')) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('missing cancel confirmation'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      document.querySelector('#cw-sent-title').closest('.cw-modal').querySelector('.cw-modal-actions button').click();
+      await new Promise((r) => setTimeout(r, 30));
+      return { text: store.getDraft(id)?.text, prompt: !!document.querySelector('#cw-sent-title') };
+    })()`);
+    assert.deepEqual(keepSentTabResult, { text: '其他草稿', prompt: false }, 'keep action preserves the tab and its content');
+
+    const autoCloseSentTabResult = await evaluate(client, `(async () => {
+      const store = window.transferGenieComposerStore;
+      const sourceId = store.getActiveDraft().id;
+      const paneId = store.state.activePaneId;
+      document.querySelector('#send-text').click();
+      const otherId = store.addDraft(paneId);
+      store.setDraftText(otherId, '其他草稿');
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          const text = document.querySelector('#cw-sent-title')?.closest('.cw-modal').textContent || '';
+          if (/自动执行倒计时：1 秒/.test(text)) resolve();
+          else if (Date.now() - start > 5500) reject(new Error('countdown did not advance'));
+          else setTimeout(tick, 30);
+        };
+        tick();
+      });
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (!store.getDraft(sourceId) && !document.querySelector('#cw-sent-title')) resolve();
+          else if (Date.now() - start > 1500) reject(new Error('source tab did not close after countdown'));
+          else setTimeout(tick, 30);
+        };
+        tick();
+      });
+      return { sourceExists: !!store.getDraft(sourceId), otherText: store.getDraft(otherId)?.text, activeId: store.getActiveDraft()?.id, otherId };
+    })()`);
+    assert.equal(autoCloseSentTabResult.sourceExists, false, 'countdown closes the sending tab by default');
+    assert.equal(autoCloseSentTabResult.otherText, '其他草稿', 'countdown does not affect another tab');
+    assert.equal(autoCloseSentTabResult.activeId, autoCloseSentTabResult.otherId);
+
+    const failedSendResult = await evaluate(client, `(async () => {
+      const store = window.transferGenieComposerStore;
+      const id = store.getActiveDraft().id;
+      window.__speechSmoke.failSendText = true;
+      document.querySelector('#send-text').click();
+      await new Promise((r) => setTimeout(r, 350));
+      window.__speechSmoke.failSendText = false;
+      const result = { text: store.getDraft(id)?.text, prompt: !!document.querySelector('#cw-sent-title') };
+      const failedCard = document.querySelector('.message-card[data-send-status="failed"]');
+      [...(failedCard?.querySelectorAll('button') || [])].find((button) => button.textContent.trim() === '取消')?.click();
+      return result;
+    })()`);
+    assert.deepEqual(failedSendResult, { text: '其他草稿', prompt: false }, 'failed send preserves the tab without confirmation');
+
+    const partialSendResult = await evaluate(client, `(async () => {
+      const store = window.transferGenieComposerStore;
+      const id = store.getActiveDraft().id;
+      window.__speechSmoke.selectedDialogPaths = ['C:/Smoke/partial.txt'];
+      window.__speechSmoke.failSendFile = true;
+      document.querySelector('#send-file').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#selected-files-container .selected-file-item')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('file was not selected'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      document.querySelector('#send-text').click();
+      await new Promise((r) => setTimeout(r, 500));
+      window.__speechSmoke.failSendFile = false;
+      window.__speechSmoke.selectedDialogPaths = null;
+      return { text: store.getDraft(id)?.text, prompt: !!document.querySelector('#cw-sent-title') };
+    })()`);
+    assert.deepEqual(partialSendResult, { text: '其他草稿', prompt: false }, 'partial failure preserves the tab without confirmation');
+
+    const mixedSendResult = await evaluate(client, `(async () => {
+      const store = window.transferGenieComposerStore;
+      const id = store.getActiveDraft().id;
+      window.__speechSmoke.selectedDialogPaths = ['C:/Smoke/success.txt'];
+      window.__speechSmoke.sendFileDelayMs = 400;
+      document.querySelector('#send-file').click();
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#selected-files-container .selected-file-item')) resolve();
+          else if (Date.now() - start > 2000) reject(new Error('file was not selected'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      document.querySelector('#send-text').click();
+      await new Promise((r) => setTimeout(r, 240));
+      const promptedBeforeFileFinished = !!document.querySelector('#cw-sent-title');
+      await new Promise((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (document.querySelector('#cw-sent-title')) resolve();
+          else if (Date.now() - start > 2500) reject(new Error('mixed send did not prompt'));
+          else setTimeout(tick, 20);
+        };
+        tick();
+      });
+      document.querySelector('#cw-sent-title').closest('.cw-modal').querySelector('.cw-modal-actions button').click();
+      window.__speechSmoke.sendFileDelayMs = 0;
+      window.__speechSmoke.selectedDialogPaths = null;
+      return { promptedBeforeFileFinished, text: store.getDraft(id)?.text };
+    })()`);
+    assert.deepEqual(mixedSendResult, { promptedBeforeFileFinished: false, text: '其他草稿' }, 'mixed send waits for every file and keeps the draft');
+
+    const alreadyClosedResult = await evaluate(client, `(async () => {
+      const store = window.transferGenieComposerStore;
+      const id = store.getActiveDraft().id;
+      document.querySelector('#send-text').click();
+      store.removeDraftConfirmed(id);
+      const nextId = store.addDraft(store.state.activePaneId);
+      store.setDraftText(nextId, '新草稿');
+      await new Promise((r) => setTimeout(r, 350));
+      return { prompt: !!document.querySelector('#cw-sent-title'), text: store.getDraft(nextId)?.text };
+    })()`);
+    assert.deepEqual(alreadyClosedResult, { prompt: false, text: '新草稿' }, 'already closed source does not prompt or affect another tab');
     await evaluate(client, `(async () => {
       window.__speechSmoke.sentMessages = [];
       window.__speechSmoke.calls = [];

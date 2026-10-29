@@ -1196,6 +1196,11 @@
                       <option v-for="action in ui.settingsForm.aiActions" :key="action.id" :value="action.id">{{ action.name || action.id }}</option>
                     </select>
                   </label>
+                  <label>
+                    标签命名提示词
+                    <textarea id="ai-tab-name-prompt" rows="4" :value="ui.settingsForm.aiTabNamePrompt" @input="updateSettingsFormField('aiTabNamePrompt', $event.target.value)"></textarea>
+                    <span class="field-hint" v-pre>点击标签命名窗口中的 AI 按钮时使用；可使用 `{{text}}` 和 `{{format}}`，留空则恢复默认提示词。</span>
+                  </label>
                   <div class="ai-action-toolbar">
                     <div>
                       <div class="settings-choice-title">提示词动作</div>

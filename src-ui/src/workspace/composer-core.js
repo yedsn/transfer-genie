@@ -119,6 +119,19 @@
     return setDraftText(state, d.id, "");
   }
 
+  /** 关闭草稿；若工作区已无标签，则在活动分栏创建一条空白草稿。 */
+  function closeDraftWithBlankFallback(state, tabId, spec) {
+    var next = core.closeTab(state, tabId);
+    if (next.panes.some(function (pane) { return pane.tabs.length > 0; })) return next;
+    var pane = core.findPane(next, next.activePaneId) || next.panes[0];
+    if (!pane) return createInitialComposer(spec || {});
+    var draft = createDraft(spec || {});
+    pane.tabs.push(draft);
+    pane.activeTabId = draft.id;
+    next.activePaneId = pane.id;
+    return next;
+  }
+
   function collectTabIds(state) {
     var ids = {};
     for (var i = 0; i < state.panes.length; i++) {
@@ -235,6 +248,7 @@
     activePane: activePane,
     dockMessageAsDraft: dockMessageAsDraft,
     clearActiveDraftAfterSend: clearActiveDraftAfterSend,
+    closeDraftWithBlankFallback: closeDraftWithBlankFallback,
     createInitialComposer: createInitialComposer,
     tabsInPane: tabsInPane,
     closeOtherTabsInPane: closeOtherTabsInPane,

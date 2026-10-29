@@ -128,6 +128,19 @@ function testClearActiveDraftAfterSend() {
   assert.equal(s.panes[0].tabs.length, 1);
 }
 
+function testCloseLastDraftCreatesBlankFallback() {
+  let s = fresh();
+  const lastId = ccore.getActiveDraft(s).id;
+  s = ccore.setDraftText(s, lastId, '最后一条草稿');
+  s = ccore.closeDraftWithBlankFallback(s, lastId, { format: 'markdown' });
+  const fallback = ccore.getActiveDraft(s);
+  assert.ok(fallback, '关闭最后一个标签后创建空白标签');
+  assert.notEqual(fallback.id, lastId);
+  assert.equal(fallback.text, '');
+  assert.equal(fallback.format, 'markdown');
+  assert.equal(s.panes.flatMap(p => p.tabs).length, 1);
+}
+
 // ============ 持久化与恢复 ============
 function testPersistAndRestoreDrafts() {
   globalThis.localStorage = makeStorage();
@@ -285,6 +298,7 @@ function run() {
   testDockMessageRightCreatesPane();
   testDockMessageBottomCreatesVertical();
   testClearActiveDraftAfterSend();
+  testCloseLastDraftCreatesBlankFallback();
   testPersistAndRestoreDrafts();
   testFullDraftSession();
   testNonEmptyDetection();

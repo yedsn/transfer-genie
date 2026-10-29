@@ -1194,6 +1194,7 @@ let currentSettingsFormState = {
   aiTemperature: 0.3,
   aiTimeoutSecs: 60,
   aiDefaultActionId: 'polish',
+  aiTabNamePrompt: '阅读以下草稿，生成一个不超过 16 个汉字的标签名称。只输出名称，不要引号、解释、标点结尾或换行。\n\n<draft>\n{{text}}\n</draft>',
   aiActions: [],
   speechToTextEnabled: false,
   speechToTextApiKey: '',
@@ -11888,6 +11889,7 @@ function applySettings(settings) {
     aiTemperature: Number(aiProvider.temperature ?? 0.3),
     aiTimeoutSecs: Number(aiProvider.timeout_secs || 60),
     aiDefaultActionId: ai.default_action_id || aiActions[0]?.id || 'polish',
+    aiTabNamePrompt: ai.tab_name_prompt || '',
     aiActions,
     activeAiActionCategory: currentSettingsFormState.activeAiActionCategory || aiActions[0]?.category || '通用',
     speechToTextEnabled: !!speechToText.enabled,
@@ -12396,6 +12398,7 @@ async function saveSettings(options = {}) {
         timeout_secs: Number(currentSettingsFormState.aiTimeoutSecs || 60),
       },
       default_action_id: aiDefaultActionId,
+      tab_name_prompt: (currentSettingsFormState.aiTabNamePrompt || '').trim(),
       actions: aiActions,
     },
     speech_to_text: {
@@ -12858,8 +12861,10 @@ async function sendText() {
   let text = '';
   const cw = window.transferGenieComposer;
   const usesWorkspaceComposer = !!(cw && cw.isActive && cw.isActive() && cw.getActiveDraft);
+  let sendingDraft = null;
   if (usesWorkspaceComposer) {
     const draft = cw.getActiveDraft();
+    sendingDraft = draft ? { ...draft } : null;
     if (draft && draft.format) currentFormat = draft.format;
     text = draft ? (draft.text || '') : '';
   } else if (currentFormat === 'markdown' && mdEditor) {
@@ -12912,11 +12917,9 @@ async function sendText() {
       marked_due_date: activeMarkedOptions.dueDate || null,
     });
 
-    if (usesWorkspaceComposer) {
-      if (cw && cw.clearActiveDraftAfterSend) cw.clearActiveDraftAfterSend();
-    } else if (formatToSend === 'markdown' && mdEditor) {
+    if (!usesWorkspaceComposer && formatToSend === 'markdown' && mdEditor) {
       mdEditor.setMarkdown('');
-    } else {
+    } else if (!usesWorkspaceComposer) {
       textInput.value = '';
     }
   }
@@ -13018,6 +13021,7 @@ async function sendText() {
 
     if (!hadSendFailure) {
       setSuccessStatus('发送成功');
+      if (sendingDraft) cw.promptCloseSentDraft?.(sendingDraft);
     }
   })();
 }

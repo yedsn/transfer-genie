@@ -98,6 +98,10 @@ export const composerStore = {
   },
   switchDraft(paneId: string, tabId: string) { commit(core.setActiveTabById(state, paneId, tabId)); },
   setActivePane(paneId: string) { commit(core.setActivePane(state, paneId)); },
+  getDraft(tabId: string): DraftTab | null {
+    return state.panes.flatMap((p) => p.tabs).find((t) => t.id === tabId) || null;
+  },
+  renameDraft(tabId: string, title: string) { commit(core.renameTab(state, tabId, title)); },
   setDraftText(tabId: string, text: string) { commit(ccore.setDraftText(state, tabId, text)); },
   setDraftFormat(tabId: string, format: DraftFormat) { commit(ccore.setDraftFormat(state, tabId, format)); },
   clearWorkspaceConfirmed() {
@@ -124,7 +128,9 @@ export const composerStore = {
     const idx = tabs.findIndex((t: any) => t.id === tabId);
     return ccore.countNonEmpty(idx >= 0 ? tabs.slice(0, idx) : []);
   },
-  removeDraftConfirmed(tabId: string) { commit(core.closeTab(state, tabId)); },
+  removeDraftConfirmed(tabId: string) {
+    commit(ccore.closeDraftWithBlankFallback(state, tabId, { format: getDefaultDraftFormat() }));
+  },
   closeOthersInPaneConfirmed(paneId: string, keepTabId: string) { commit(ccore.closeOtherTabsInPane(state, paneId, keepTabId)); },
   closeAllInPaneConfirmed(paneId: string) {
     commit(ccore.closeAllTabsInPane(state, paneId, { format: getDefaultDraftFormat() }));

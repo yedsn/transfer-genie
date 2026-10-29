@@ -96,6 +96,7 @@ export const transferGenieState = reactive<TransferGenieState>({
     aiTemperature: 0.3,
     aiTimeoutSecs: 60,
     aiDefaultActionId: "polish",
+    aiTabNamePrompt: "阅读以下草稿，生成一个不超过 16 个汉字的标签名称。只输出名称，不要引号、解释、标点结尾或换行。\n\n<draft>\n{{text}}\n</draft>",
     aiActions: [],
     activeAiActionCategory: "",
     speechToTextEnabled: false,

@@ -1,12 +1,31 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { composerStore } from "./composer-store";
 import DraftEditor from "./DraftEditor.vue";
+import "./tab-name-ai.js";
 
 const state = composerStore.state;
 const mainEl = ref<HTMLElement | null>(null);
 const hoverZone = ref<Record<string, string>>({});
 const destructivePrompt = ref<{ title: string; body: string; action: () => void } | null>(null);
+const sentDraftPrompts = ref<{ id: string; text: string; format: string }[]>([]);
+const sentDraftPromptEl = ref<HTMLElement | null>(null);
+const sentDraftPrompt = computed(() => sentDraftPrompts.value[0] || null);
+const sentDraftCountdown = ref(5);
+let sentDraftCountdownTimer: number | null = null;
+const sentDraftTitle = computed(() => {
+  const draft = sentDraftPrompt.value && composerStore.getDraft(sentDraftPrompt.value.id);
+  return draft ? draftTitle(draft) : "";
+});
+const sentDraftChanged = computed(() => {
+  const prompt = sentDraftPrompt.value;
+  const draft = prompt && composerStore.getDraft(prompt.id);
+  return !!(prompt && draft && (draft.text !== prompt.text || draft.format !== prompt.format));
+});
+const renameInputEl = ref<HTMLInputElement | null>(null);
+const renameDialog = ref<{ tabId: string; title: string; aiBusy: boolean } | null>(null);
+const tabNameAi = (globalThis as any).transferGenieTabNameAi;
+const tabNameAiSession = tabNameAi.createRequestSession();
 
 const orderedPanes = computed(() =>
   state.paneOrder.map((id) => state.panes.find((p) => p.id === id)).filter(Boolean)
@@ -36,6 +55,39 @@ function editorKey(pane: any) {
 
 function addDraft(paneId: string) { composerStore.addDraft(paneId); }
 function switchDraft(paneId: string, tabId: string) { composerStore.switchDraft(paneId, tabId); }
+function promptCloseSentDraft(draft: { id: string; text: string; format: string }) {
+  if (composerStore.getDraft(draft.id)) sentDraftPrompts.value.push(draft);
+}
+function stopSentDraftCountdown() {
+  if (sentDraftCountdownTimer !== null) {
+    window.clearInterval(sentDraftCountdownTimer);
+    sentDraftCountdownTimer = null;
+  }
+}
+function keepSentDraft() {
+  stopSentDraftCountdown();
+  sentDraftPrompts.value.shift();
+}
+function closeSentDraft() {
+  stopSentDraftCountdown();
+  const prompt = sentDraftPrompt.value;
+  if (prompt && composerStore.getDraft(prompt.id)) composerStore.removeDraftConfirmed(prompt.id);
+  else keepSentDraft();
+}
+watch(() => state.panes.flatMap((pane) => pane.tabs.map((tab) => tab.id)).join("|"), () => {
+  sentDraftPrompts.value = sentDraftPrompts.value.filter((prompt) => !!composerStore.getDraft(prompt.id));
+});
+watch(sentDraftPrompt, async (prompt) => {
+  stopSentDraftCountdown();
+  if (!prompt) return;
+  sentDraftCountdown.value = 5;
+  sentDraftCountdownTimer = window.setInterval(() => {
+    sentDraftCountdown.value -= 1;
+    if (sentDraftCountdown.value <= 0) closeSentDraft();
+  }, 1000);
+  await nextTick();
+  sentDraftPromptEl.value?.focus();
+});
 function requestDestructiveAction(title: string, body: string, action: () => void) {
   destructivePrompt.value = { title, body, action };
 }
@@ -75,12 +127,65 @@ function onTabContextMenu(event: MouseEvent, tab: any, paneId: string) {
   ctxMenu.value = { x: event.clientX, y: event.clientY, tabId: tab.id, paneId };
 }
 function closeCtxMenu() { ctxMenu.value = null; }
+function aiSettings() {
+  return (window as any).transferGenieVue?.store?.settingsForm || {};
+}
+function closeRenameDialog() {
+  tabNameAiSession.cancel();
+  renameDialog.value = null;
+}
+function saveRename(title?: string) {
+  const dialog = renameDialog.value;
+  const normalized = String(title ?? dialog?.title ?? "").trim();
+  if (!dialog || !normalized) return;
+  composerStore.renameDraft(dialog.tabId, normalized);
+  closeRenameDialog();
+}
+async function openRenameDialog(tabId: string) {
+  const draft = composerStore.getDraft(tabId);
+  if (!draft) return;
+  tabNameAiSession.cancel();
+  renameDialog.value = {
+    tabId,
+    title: draftTitle(draft),
+    aiBusy: false,
+  };
+  await nextTick();
+  renameInputEl.value?.focus();
+  renameInputEl.value?.select();
+}
+async function generateRenameSuggestion() {
+  const dialog = renameDialog.value;
+  if (!dialog || dialog.aiBusy) return;
+  const draft = composerStore.getDraft(dialog.tabId);
+  if (!draft) return;
+  const availability = tabNameAi.availability(draft, aiSettings());
+  if (!availability.available) return;
+
+  dialog.aiBusy = true;
+  tabNameAiSession.cancel();
+  const requestId = tabNameAiSession.begin();
+  const tabId = dialog.tabId;
+  const api = (window as any).transferGenieApi;
+  const tauriInvoke = (window as any).__TAURI__?.core?.invoke || (window as any).__TAURI__?.invoke;
+  const result = await tabNameAi.generate(draft, aiSettings(), api?.ai?.processText
+    ? (request: any) => api.ai.processText(request)
+    : tauriInvoke
+      ? (request: any) => tauriInvoke("process_text_with_ai", { request })
+      : null);
+  if (!tabNameAiSession.isCurrent(requestId) || renameDialog.value?.tabId !== tabId) return;
+  renameDialog.value.aiBusy = false;
+  if (result.status === "ready" && result.suggestion) renameDialog.value.title = result.suggestion;
+}
 function ctxAction(action: string) {
   const m = ctxMenu.value;
   if (!m) return;
   const { tabId, paneId } = m;
   ctxMenu.value = null;
   switch (action) {
+    case "rename":
+      openRenameDialog(tabId);
+      break;
     case "splitRight":
       composerStore.splitTab(tabId, "right");
       break;
@@ -234,6 +339,7 @@ onMounted(() => {
   bridge.isActive = () => true;
   bridge.hasEditorFocus = () => !!bridge._editorFocused;
   bridge.getActiveDraft = () => composerStore.getActiveDraft();
+  bridge.promptCloseSentDraft = promptCloseSentDraft;
   bridge.setActiveDraftFormat = (f: string) => {
     const d = composerStore.activeDraft;
     if (d) composerStore.setDraftFormat(d.id, f as any);
@@ -264,6 +370,11 @@ onMounted(() => {
   (window as any).transferGenieComposer = bridge;
 });
 onUnmounted(() => {
+  tabNameAiSession.cancel();
+  stopSentDraftCountdown();
+  if ((window as any).transferGenieComposer?.promptCloseSentDraft === promptCloseSentDraft) {
+    delete (window as any).transferGenieComposer.promptCloseSentDraft;
+  }
   if (dragEndHandler) window.removeEventListener("dragend", dragEndHandler as any, true);
   window.removeEventListener("transfer-genie:composer-fullscreen-change", syncFullscreenState as EventListener);
   window.removeEventListener("resize", closeDestructivePromptOnLayoutChange);
@@ -310,6 +421,31 @@ onUnmounted(() => {
       <span class="cw-info">{{ state.panes.length }} 栏 · {{ state.panes.reduce((n:number,p:any)=>n+p.tabs.length,0) }} 草稿</span>
     </div>
 
+    <div v-if="sentDraftPrompt" ref="sentDraftPromptEl" class="cw-modal-backdrop cw-sent-backdrop" tabindex="-1">
+      <div class="cw-modal cw-sent-dialog" role="dialog" aria-modal="true" aria-labelledby="cw-sent-title">
+        <div class="cw-sent-header">
+          <span class="cw-sent-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="8.25" />
+              <path d="M12 7.5v5l3.25 1.75" />
+            </svg>
+          </span>
+          <div id="cw-sent-title" class="cw-modal-title cw-sent-title">自动执行倒计时：{{ sentDraftCountdown }} 秒</div>
+        </div>
+        <div class="cw-modal-body cw-sent-body">
+          发送完毕，即将关闭标签“{{ sentDraftTitle }}”。
+          <span v-if="sentDraftChanged" class="cw-sent-warning">发送后标签内容已修改，关闭会丢失这些修改。</span>
+        </div>
+        <div class="cw-sent-progress" aria-hidden="true">
+          <span :style="{ width: `${(sentDraftCountdown / 5) * 100}%` }"></span>
+        </div>
+        <div class="cw-modal-actions cw-sent-actions">
+          <button class="cw-btn cw-sent-cancel" type="button" @click="keepSentDraft">取消</button>
+          <button class="cw-btn cw-btn-danger cw-sent-confirm" type="button" @click="closeSentDraft">确认</button>
+        </div>
+      </div>
+    </div>
+
     <div v-if="destructivePrompt" class="cw-modal-backdrop" @click.self="cancelDestructiveAction">
       <div class="cw-modal">
         <div class="cw-modal-title">{{ destructivePrompt.title }}</div>
@@ -319,6 +455,39 @@ onUnmounted(() => {
           <button class="cw-btn cw-btn-danger" type="button" @click="confirmDestructiveAction">确认</button>
         </div>
       </div>
+    </div>
+
+    <div v-if="renameDialog" class="cw-modal-backdrop cw-rename-backdrop" @click.self="closeRenameDialog">
+      <form class="cw-modal cw-rename-dialog" role="dialog" aria-modal="true" aria-labelledby="cw-rename-title" @submit.prevent="saveRename()" @keydown.esc.prevent="closeRenameDialog">
+        <div id="cw-rename-title" class="cw-modal-title">重命名标签</div>
+        <label class="cw-rename-label" for="cw-rename-input">名称</label>
+        <div class="cw-rename-input-row">
+          <input
+            id="cw-rename-input"
+            ref="renameInputEl"
+            v-model="renameDialog.title"
+            class="cw-rename-input"
+            type="text"
+            maxlength="80"
+            autocomplete="off"
+          />
+          <button
+            class="cw-rename-ai-button"
+            type="button"
+            :disabled="renameDialog.aiBusy"
+            title="使用 AI 根据草稿生成名称"
+            aria-label="使用 AI 根据草稿生成名称"
+            @click="generateRenameSuggestion"
+          >
+            <span v-if="renameDialog.aiBusy" class="cw-rename-spinner" aria-hidden="true"></span>
+            <img v-else src="/icons/ai.svg" alt="" />
+          </button>
+        </div>
+        <div class="cw-modal-actions">
+          <button class="cw-btn" type="button" @click="closeRenameDialog">取消</button>
+          <button class="cw-btn cw-btn-primary" type="submit" :disabled="!renameDialog.title.trim()">保存</button>
+        </div>
+      </form>
     </div>
 
     <div class="composer-ws-main" :class="layoutClasses">
@@ -377,6 +546,11 @@ onUnmounted(() => {
       :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }"
       @contextmenu.prevent
     >
+      <button class="cw-ctx-item cw-ctx-rename" type="button" @click="ctxAction('rename')">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg>
+        <span>重命名</span>
+      </button>
+      <div class="cw-ctx-sep"></div>
       <div class="cw-ctx-submenu">
         <button class="cw-ctx-item cw-ctx-sub-trigger" type="button">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
