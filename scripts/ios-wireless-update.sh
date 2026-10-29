@@ -12,7 +12,21 @@ build_mode="release"
 skip_build=false
 check_only=false
 launch_after_install=false
+confirm_before_update=false
 temp_root=""
+
+# Keep redirected logs and terminals without color support clean.
+color_reset="" color_bold="" color_muted="" color_cyan=""
+color_yellow="" color_green="" color_red=""
+if [[ -t 1 && "${TERM:-dumb}" != "dumb" && -z "${NO_COLOR+x}" ]]; then
+  color_reset=$'\033[0m'
+  color_bold=$'\033[1m'
+  color_muted=$'\033[2m'
+  color_cyan=$'\033[1;36m'
+  color_yellow=$'\033[33m'
+  color_green=$'\033[32m'
+  color_red=$'\033[31m'
+fi
 
 usage() {
   cat <<'EOF'
@@ -28,6 +42,7 @@ Options:
   --skip-build           Reuse gen/apple/build/transfer-genie_iOS.xcarchive
   --check-only           Run all safety checks but do not install or launch
   --launch               Open Transfer Genie after the update
+  --confirm              Show effective iOS settings and ask before connecting
   -h, --help             Show this help
 
 Environment equivalents:
@@ -41,11 +56,11 @@ EOF
 }
 
 log() {
-  printf '[ios-wifi] %s\n' "$*"
+  printf '%s[ios-wifi]%s %s\n' "$color_cyan" "$color_reset" "$*"
 }
 
 fail() {
-  printf '[ios-wifi] Error: %s\n' "$*" >&2
+  printf '%s[ios-wifi] Error:%s %s\n' "$color_red" "$color_reset" "$*" >&2
   exit 1
 }
 
@@ -80,6 +95,49 @@ read_config_value() {
   esac
 
   printf '%s' "$value"
+}
+
+confirmation_field() {
+  printf '  %s%s%s\n    %s%s%s\n' "$color_muted" "$1" "$color_reset" "$color_bold" "$2" "$color_reset"
+}
+
+confirm_update() {
+  local answer
+  local action="原位更新，不主动打开 App"
+  local archive_action="从当前源码重新构建"
+  if [[ "$launch_after_install" == "true" ]]; then
+    action="原位更新后打开 App"
+  fi
+  if [[ "$check_only" == "true" ]]; then
+    action="仅执行检查，不安装或打开 App"
+  fi
+  if [[ "$skip_build" == "true" ]]; then
+    archive_action="复用已有 archive（不重新构建）"
+  fi
+
+  printf '\n%s  Transfer Genie · iOS 无线更新%s\n' "$color_cyan" "$color_reset"
+  printf '%s  ────────────────────────────────────────%s\n\n' "$color_muted" "$color_reset"
+  printf '%s  网络提醒%s\n' "$color_yellow" "$color_reset"
+  printf '  请确保 Mac 和 iPhone 连接%s同一个 Wi-Fi%s。\n' "$color_yellow" "$color_reset"
+  printf '  手机需已配对、解锁，并开启开发者模式。\n\n'
+  printf '%s  生效配置%s\n' "$color_cyan" "$color_reset"
+  confirmation_field "配置文件" "$config_file"
+  confirmation_field "TRANSFER_GENIE_IOS_DEVICE" "${device_name:-<未配置>}"
+  confirmation_field "APPLE_DEVELOPMENT_TEAM" "${development_team:-<未配置>}"
+  confirmation_field "TRANSFER_GENIE_IOS_CARGO_HOME" "$ios_cargo_home"
+  printf '\n%s  本次操作%s\n' "$color_cyan" "$color_reset"
+  confirmation_field "构建模式" "$build_mode · $archive_action"
+  confirmation_field "执行方式" "$action"
+  printf '\n%s  命令行 / 进程环境变量优先于 .env，以上为最终生效值。\n' "$color_muted"
+  printf '  仅展示相关配置，不打印 Token、密码或其他 .env 内容。%s\n\n' "$color_reset"
+  printf '  %s确认网络和配置无误，继续？%s %s[y/N]%s ' "$color_bold" "$color_reset" "$color_yellow" "$color_reset"
+  if ! IFS= read -r answer; then
+    answer=""
+  fi
+  case "$answer" in
+    y|Y|yes|YES|Yes) printf '\n%s  已确认，开始连接检查。%s\n\n' "$color_green" "$color_reset" ;;
+    *) printf '\n%s  已取消；未连接手机、构建或安装。%s\n\n' "$color_yellow" "$color_reset"; exit 0 ;;
+  esac
 }
 
 copy_container_file() {
@@ -175,6 +233,10 @@ while [[ $# -gt 0 ]]; do
       launch_after_install=true
       shift
       ;;
+    --confirm)
+      confirm_before_update=true
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -184,6 +246,10 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "$confirm_before_update" == "true" ]]; then
+  confirm_update
+fi
 
 [[ -n "$device_name" ]] \
   || fail "Missing TRANSFER_GENIE_IOS_DEVICE. Configure it in $config_file (see .env.example)"

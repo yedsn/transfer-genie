@@ -407,17 +407,19 @@ APPLE_DEVELOPMENT_TEAM=9RV293JR6V CARGO_HOME="$PWD/.cargo-ios" \
 cp .env.example .env
 ```
 
-日常可以在 VS Code 的“运行和调试”中选择 `iOS: 无线静默更新`，或在终端执行：
+日常可以在 VS Code 的“运行和调试”中选择 `ios:wireless-update`，或在终端执行：
 
 ```bash
 npm run ios:update
 ```
 
-默认流程不会打开系统“设置”，也不会在安装完成后主动启动 App 或抢占手机前台。如果希望更新后立即打开 Transfer Genie，可以选择 `iOS: 无线更新并打开`，或执行：
+默认流程不会打开系统“设置”，也不会在安装完成后主动启动 App 或抢占手机前台。如果希望更新后立即打开 Transfer Genie，可以选择 `ios:wireless-update:launch`，或执行：
 
 ```bash
 npm run ios:update:launch
 ```
+
+两个 VS Code 入口都附带 `--confirm`：连接设备和构建前，终端提示 Mac 与 iPhone 连接同一个 Wi-Fi，显示配置文件路径、生效的设备名称/UDID、Apple Team ID、Cargo 缓存目录，以及本次构建和打开 App 的方式。只打印这些 iOS 相关项，不输出 `.env` 中的 Token 或其他无关内容。输入 `y`/`yes` 并回车才继续；直接回车、其他输入或输入流关闭都会取消，不连接手机或安装。命令行/进程环境变量覆盖 `.env` 时，显示的是最终生效值。终端执行需要相同确认时使用 `npm run ios:update -- --confirm` 或 `npm run ios:update:launch -- --confirm`；未带该参数的命令保持原有行为。
 
 脚本要求 Mac 与 `.env` 中配置的 iPhone 位于同一可用 Bonjour/IPv6 的局域网，手机已配对、解锁并开启 Developer Mode。它会从当前源码重新构建签名真机 archive，先等待现有的 350ms 草稿自动保存稳定，再连续两次通过 CoreDevice 无线复制 SQLite/WAL 并执行只读完整性与空草稿检查；随后核对 `iphoneos` 平台、strict codesign、Team、profile 有效期和设备 UDID。只有门禁通过才会原位覆盖安装，最后再次确认数据库完整。脚本不卸载 App、不清空容器，发现任何草稿或无法验证时都会停止。命令行 `--device`、`--team` 以及同名进程环境变量仍可临时覆盖 `.env`。
 
