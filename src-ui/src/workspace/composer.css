@@ -64,14 +64,22 @@
 .composer-ws-main {
   display: flex;
   flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
   min-height: 120px;
-  gap: 4px;
+  overflow: hidden;
   padding-top: 2px;
 }
-.composer-ws-main.is-horizontal,
-.composer-ws-main.is-three-column,
-.composer-ws-main.is-single { flex-direction: row; }
-.composer-ws-main.is-vertical { flex-direction: column; }
+.cw-layout-node {
+  display: flex;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+}
+.composer-ws-main > .cw-layout-node { width: 100%; height: 100%; }
+.cw-layout-split { gap: 4px; }
+.cw-layout-split.is-horizontal { flex-direction: row; }
+.cw-layout-split.is-vertical { flex-direction: column; }
 
 .cw-pane {
   flex: 1 1 0;

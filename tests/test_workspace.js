@@ -65,6 +65,7 @@ function testSerializationRoundTrip() {
   assert.equal(back.panes.length, 1);
   assert.equal(back.panes[0].tabs.length, 2);
   assert.equal(back.panes[0].tabs[0].title, '文档A');
+  assert.deepEqual(back.layoutTree, s.layoutTree);
 }
 
 function testDeserializeInvalid() {
@@ -93,12 +94,15 @@ function testHorizontalSplitTwoToThree() {
   assert.equal(h3.panes.length, 3);
 }
 
-function testHorizontalSplitThreeNoExpand() {
+function testHorizontalSplitCanContinuePastThreePanes() {
   const s = stateWithTabs();
   const h3 = core.splitHorizontal(core.splitHorizontal(s));
   const h4 = core.splitHorizontal(h3);
   assert.equal(h4.layout, 'three-column');
-  assert.equal(h4.panes.length, 3, '三列不再扩展');
+  assert.equal(h4.panes.length, 4, 'VS Code 风格布局允许继续拆分');
+  assert.equal(h4.layoutTree.type, 'split');
+  assert.equal(h4.layoutTree.direction, 'horizontal');
+  assert.equal(h4.layoutTree.children.length, 4);
 }
 
 function testVerticalSplit() {
@@ -106,10 +110,43 @@ function testVerticalSplit() {
   const v = core.splitVertical(s);
   assert.equal(v.layout, 'vertical');
   assert.equal(v.panes.length, 2);
-  // 已有分栏时纵向不改布局
+  // 已有分栏时继续拆分活动栏
   const v2 = core.splitVertical(v);
   assert.equal(v2.layout, 'vertical');
-  assert.equal(v2.panes.length, 2);
+  assert.equal(v2.panes.length, 3);
+  assert.equal(v2.layoutTree.children.length, 3);
+}
+
+function testNestedLeftVerticalRightWholeLayout() {
+  let state = stateWithOrderedTabs();
+  const leftPaneId = state.panes[0].id;
+  state = core.splitHorizontal(state);
+  const rightPaneId = state.activePaneId;
+  state = core.addTabToPane(state, rightPaneId, { title: '拖动标签', kind: 'document' });
+  state = core.addTabToPane(state, rightPaneId, { title: '右侧保留', kind: 'document' });
+  const movedTab = core.findPane(state, rightPaneId).tabs[0];
+  const payload = drag.createTabDragPayload(movedTab, rightPaneId);
+  state = core.dockToPane(state, payload, leftPaneId, 'bottom');
+
+  assert.equal(state.layout, 'nested');
+  assert.equal(state.layoutTree.type, 'split');
+  assert.equal(state.layoutTree.direction, 'horizontal');
+  assert.equal(state.layoutTree.children.length, 2);
+  assert.equal(state.layoutTree.children[0].type, 'split');
+  assert.equal(state.layoutTree.children[0].direction, 'vertical');
+  assert.equal(state.layoutTree.children[0].children[0].paneId, leftPaneId);
+  assert.equal(state.layoutTree.children[1].paneId, rightPaneId);
+  assert.equal(core.findPane(state, rightPaneId).tabs.length, 1, '右栏保留且不参与纵向拆分');
+  assert.equal(state.layoutTree.children[0].children[1].paneId, state.activePaneId, '新栏位于左栏下方');
+  const restored = core.deserialize(core.serialize(state));
+  assert.deepEqual(restored.layoutTree, state.layoutTree, '嵌套布局可持久化恢复');
+}
+
+function testLegacyLayoutMigratesToTree() {
+  const legacy = stateWithTabs();
+  delete legacy.layoutTree;
+  const restored = core.deserialize(JSON.stringify(legacy));
+  assert.deepEqual(restored.layoutTree, { type: 'pane', paneId: restored.panes[0].id });
 }
 
 function testCollapseToSingle() {
@@ -312,6 +349,33 @@ function testDetectDropZoneOutsidePaneDefaultsCenter() {
   assert.equal(drag.detectDropZoneFromRects({ x: 200, y: 200 }, pane, win), 'center');
 }
 
+function testMissingDraggedTabNeverCreatesCopy() {
+  const s = stateWithTabs();
+  const beforeIds = s.panes.flatMap((pane) => pane.tabs.map((tab) => tab.id));
+  const stalePayload = core.createDragPayload({
+    kind: 'tab',
+    sourceId: 'missing-tab',
+    contentKind: 'document',
+    title: '不应复制',
+  });
+  const next = core.dockToPane(s, stalePayload, s.panes[0].id, 'right');
+  assert.deepEqual(next.panes.flatMap((pane) => pane.tabs.map((tab) => tab.id)), beforeIds);
+  assert.equal(next.panes.length, 1, '源标签失效时不创建新标签或新分栏');
+}
+
+function testRepeatedTabDropNeverDuplicatesTab() {
+  const s = stateWithTabs();
+  const tabId = s.panes[0].tabs[0].id;
+  const payload = drag.createTabDragPayload(s.panes[0].tabs[0], s.panes[0].id);
+  const first = core.dockToPane(s, payload, s.panes[0].id, 'right');
+  const targetPaneId = first.activePaneId;
+  const second = core.dockToPane(first, payload, targetPaneId, 'center');
+  const ids = second.panes.flatMap((pane) => pane.tabs.map((tab) => tab.id));
+  assert.equal(ids.filter((id) => id === tabId).length, 1);
+  assert.equal(ids.length, new Set(ids).size, '重复结束事件后所有标签 ID 仍唯一');
+  assert.equal(ids.length, s.panes.flatMap((pane) => pane.tabs).length, '标签总数不增加');
+}
+
 function testDetectDropZoneLeft() {
   const pane = { left: 0, top: 0, right: 100, bottom: 100 };
   const win = { left: 0, top: 0, right: 200, bottom: 200 };
@@ -411,8 +475,10 @@ function run() {
   testDeserializeInvalid();
   testHorizontalSplitSingleToTwo();
   testHorizontalSplitTwoToThree();
-  testHorizontalSplitThreeNoExpand();
+  testHorizontalSplitCanContinuePastThreePanes();
   testVerticalSplit();
+  testNestedLeftVerticalRightWholeLayout();
+  testLegacyLayoutMigratesToTree();
   testCollapseToSingle();
   testPerPaneTabsAndActive();
   testRenameTab();
@@ -428,6 +494,8 @@ function run() {
   testDockTabCenter();
   testDockTabRightCreatesHorizontal();
   testDockTabBottomCreatesVertical();
+  testMissingDraggedTabNeverCreatesCopy();
+  testRepeatedTabDropNeverDuplicatesTab();
   testDockMessageCenter();
   testDetectDropZoneCenter();
   testDetectDropZoneRight();

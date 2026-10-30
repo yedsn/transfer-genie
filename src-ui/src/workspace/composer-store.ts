@@ -40,10 +40,15 @@ export interface DraftPane {
   activeTabId: string | null;
 }
 
+export type ComposerLayoutNode =
+  | { type: "pane"; paneId: string }
+  | { type: "split"; direction: "horizontal" | "vertical"; children: ComposerLayoutNode[] };
+
 export interface ComposerState {
   panes: DraftPane[];
   layout: string;
   paneOrder: string[];
+  layoutTree: ComposerLayoutNode;
   activePaneId: string | null;
 }
 
@@ -53,6 +58,7 @@ function commit(next: ComposerState) {
   state.panes = next.panes;
   state.layout = next.layout;
   state.paneOrder = next.paneOrder;
+  state.layoutTree = next.layoutTree;
   state.activePaneId = next.activePaneId;
   persistence.save(state);
 }
@@ -196,11 +202,7 @@ export const composerStore = {
   splitTab(tabId: string, zone: string) {
     const targetPaneId = state.activePaneId || state.panes[0]?.id || "";
     if (!targetPaneId) return;
-    const next = core.copyTabToZone(state, tabId, targetPaneId, zone) as ComposerState;
-    if ((zone === "right" || zone === "left") && next.layout === "horizontal" && next.panes.length >= 3) {
-      next.layout = "three-column";
-    }
-    commit(next);
+    commit(core.copyTabToZone(state, tabId, targetPaneId, zone) as ComposerState);
   },
   splitHorizontal() {
     const active = this.activeDraft;
@@ -266,10 +268,11 @@ export const composerStore = {
     const raw = persistence.load();
     if (!raw) return;
     try {
-      const next = JSON.parse(raw);
+      const next = core.normalizeRestoredState(JSON.parse(raw));
       state.panes = next.panes;
       state.layout = next.layout;
       state.paneOrder = next.paneOrder;
+      state.layoutTree = next.layoutTree;
       state.activePaneId = next.activePaneId;
     } catch (e) { /* 损坏的存储，忽略 */ }
   },

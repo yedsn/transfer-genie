@@ -148,17 +148,17 @@ function testMessageDockingRules() {
 }
 
 /**
- * 集成场景：三列布局扩展上限与折叠规则。
+ * 集成场景：多列布局继续扩展与折叠规则。
  */
 function testThreeColumnBoundsAndCollapse() {
   let s = core.createInitialState({ tabs: [{ title: 'A', kind: 'document', sourceRef: 'a' }] });
   s = core.splitHorizontal(s);
   s = core.splitHorizontal(s);
   assert.equal(s.layout, 'three-column');
-  // 第四次横向不再扩展
+  // VS Code 风格允许继续拆分
   s = core.splitHorizontal(s);
   assert.equal(s.layout, 'three-column');
-  assert.equal(s.panes.length, 3);
+  assert.equal(s.panes.length, 4);
   // 关闭两个标签 -> 自动折叠回单栏
   for (const p of s.panes.slice()) {
     if (p.tabs[0]) s = core.closeTab(s, p.tabs[0].id);

@@ -4,8 +4,8 @@
  * 设计要点：
  * - 工作区状态显式、可序列化，不由 DOM 反推。
  * - 每个分栏拥有独立标签组与活动标签。
- * - 布局受限为 single / horizontal / vertical / three-column。
- * - 标签与消息共享同一套停靠规则（右半区、下半区、中间）。
+ * - 分栏布局使用可嵌套的 split tree，旧 layout / paneOrder 字段保留为兼容元数据。
+ * - 标签与消息共享上、下、左、右及中间停靠规则。
  *
  * 该模块为纯逻辑（无 DOM、无 Vue、无 Tauri 依赖），
  * 便于在 Node 中通过 tests/test_workspace.js 直接测试。
@@ -70,6 +70,108 @@
     };
   }
 
+  function createPaneNode(paneId) {
+    return { type: "pane", paneId: paneId };
+  }
+
+  function createSplitNode(direction, children) {
+    return {
+      type: "split",
+      direction: direction === "vertical" ? "vertical" : "horizontal",
+      children: children || [],
+    };
+  }
+
+  function collectLayoutPaneIds(node, result) {
+    result = result || [];
+    if (!node) return result;
+    if (node.type === "pane") {
+      if (node.paneId && result.indexOf(node.paneId) === -1) result.push(node.paneId);
+      return result;
+    }
+    var children = Array.isArray(node.children) ? node.children : [];
+    for (var i = 0; i < children.length; i++) collectLayoutPaneIds(children[i], result);
+    return result;
+  }
+
+  function legacyLayoutTree(layout, paneOrder) {
+    var ids = Array.isArray(paneOrder) ? paneOrder.filter(Boolean) : [];
+    if (ids.length === 0) return null;
+    if (ids.length === 1) return createPaneNode(ids[0]);
+    return createSplitNode(layout === LAYOUT_VERTICAL ? "vertical" : "horizontal", ids.map(createPaneNode));
+  }
+
+  function normalizeLayoutNode(node, validPaneIds) {
+    if (!node) return null;
+    if (node.type === "pane") return validPaneIds.indexOf(node.paneId) >= 0 ? createPaneNode(node.paneId) : null;
+    if (node.type !== "split") return null;
+    var children = (Array.isArray(node.children) ? node.children : [])
+      .map(function(child) { return normalizeLayoutNode(child, validPaneIds); })
+      .filter(Boolean);
+    if (children.length === 0) return null;
+    if (children.length === 1) return children[0];
+    return createSplitNode(node.direction, children);
+  }
+
+  function deriveLegacyLayout(tree) {
+    if (!tree || tree.type === "pane") return LAYOUT_SINGLE;
+    var directPanes = tree.children.every(function(child) { return child.type === "pane"; });
+    if (directPanes && tree.direction === "vertical") return LAYOUT_VERTICAL;
+    if (directPanes && tree.direction === "horizontal") return tree.children.length >= 3 ? LAYOUT_THREE_COLUMN : LAYOUT_HORIZONTAL;
+    return "nested";
+  }
+
+  function syncLayoutMetadata(state) {
+    var validIds = state.panes.map(function(pane) { return pane.id; });
+    var tree = normalizeLayoutNode(state.layoutTree || legacyLayoutTree(state.layout, state.paneOrder || validIds), validIds);
+    var included = collectLayoutPaneIds(tree);
+    var missing = validIds.filter(function(id) { return included.indexOf(id) === -1; });
+    if (missing.length > 0) {
+      var extras = missing.map(createPaneNode);
+      tree = tree ? createSplitNode("horizontal", [tree].concat(extras)) : (extras.length === 1 ? extras[0] : createSplitNode("horizontal", extras));
+    }
+    state.layoutTree = tree;
+    state.paneOrder = collectLayoutPaneIds(tree);
+    state.layout = deriveLegacyLayout(tree);
+    if (!state.activePaneId || state.paneOrder.indexOf(state.activePaneId) === -1) state.activePaneId = state.paneOrder[0] || null;
+    return state;
+  }
+
+  function insertPaneNode(node, targetPaneId, newPaneId, direction, before) {
+    if (!node || node.type === "pane") {
+      if (!node || node.paneId !== targetPaneId) return node;
+      var leafChildren = before
+        ? [createPaneNode(newPaneId), createPaneNode(targetPaneId)]
+        : [createPaneNode(targetPaneId), createPaneNode(newPaneId)];
+      return createSplitNode(direction, leafChildren);
+    }
+    var directIndex = node.direction === direction
+      ? node.children.findIndex(function(child) { return child.type === "pane" && child.paneId === targetPaneId; })
+      : -1;
+    if (directIndex >= 0) {
+      node.children.splice(before ? directIndex : directIndex + 1, 0, createPaneNode(newPaneId));
+      return node;
+    }
+    node.children = node.children.map(function(child) {
+      return insertPaneNode(child, targetPaneId, newPaneId, direction, before);
+    });
+    return node;
+  }
+
+  function splitPaneInLayout(state, targetPaneId, newPaneId, dropZone) {
+    var existingIds = state.panes
+      .map(function(pane) { return pane.id; })
+      .filter(function(id) { return id !== newPaneId; });
+    state.layoutTree = normalizeLayoutNode(
+      state.layoutTree || legacyLayoutTree(state.layout, (state.paneOrder || existingIds).filter(function(id) { return id !== newPaneId; })),
+      existingIds
+    ) || createPaneNode(targetPaneId);
+    var vertical = dropZone === DROP_TOP || dropZone === DROP_BOTTOM;
+    var before = dropZone === DROP_LEFT || dropZone === DROP_TOP;
+    state.layoutTree = insertPaneNode(state.layoutTree, targetPaneId, newPaneId, vertical ? "vertical" : "horizontal", before);
+    syncLayoutMetadata(state);
+  }
+
   /** 创建默认单栏工作区状态。可传入初始标签，用于把现有编辑器/消息引导进首个分栏。 */
   function createInitialState(spec) {
     spec = spec || {};
@@ -78,6 +180,7 @@
       panes: [pane],
       layout: LAYOUT_SINGLE,
       paneOrder: [pane.id],
+      layoutTree: createPaneNode(pane.id),
       activePaneId: pane.id,
     };
   }
@@ -114,74 +217,42 @@
   }
 
   function normalizeAfterPaneChange(state) {
-    // 空分栏在多栏布局下自动折叠
-    if (state.layout !== LAYOUT_SINGLE) {
-      var nonEmpty = state.panes.filter(function (p) { return p.tabs.length > 0; });
-      if (nonEmpty.length === 0) {
-        var placeholder = createPane({ tabs: [] });
-        state.panes = [placeholder];
-        state.paneOrder = [placeholder.id];
-        state.layout = LAYOUT_SINGLE;
-        state.activePaneId = placeholder.id;
-        return;
-      }
-      if (nonEmpty.length === 1 && state.layout !== LAYOUT_THREE_COLUMN) {
-        state.panes = [nonEmpty[0]];
-        state.paneOrder = [nonEmpty[0].id];
-        state.layout = LAYOUT_SINGLE;
-        state.activePaneId = nonEmpty[0].id;
-        return;
-      }
-      if (state.layout === LAYOUT_THREE_COLUMN && nonEmpty.length <= 2) {
-        state.panes = nonEmpty;
-        state.paneOrder = nonEmpty.map(function (p) { return p.id; });
-        state.layout = LAYOUT_HORIZONTAL;
-        state.activePaneId = nonEmpty[0].id;
-        return;
-      }
-      state.panes = nonEmpty;
-      state.paneOrder = nonEmpty.map(function (p) { return p.id; });
-      if (state.paneOrder.indexOf(state.activePaneId) === -1) {
-        state.activePaneId = state.paneOrder[0] || null;
-      }
+    var nonEmpty = state.panes.filter(function (p) { return p.tabs.length > 0; });
+    if (nonEmpty.length === 0) {
+      var placeholder = createPane({ tabs: [] });
+      state.panes = [placeholder];
+      state.layoutTree = createPaneNode(placeholder.id);
+      state.activePaneId = placeholder.id;
+      syncLayoutMetadata(state);
+      return;
     }
+    state.panes = nonEmpty;
+    syncLayoutMetadata(state);
   }
 
-  /** 横向分栏：单栏 -> 双列；双列 -> 三列；纵向或已达三列时不扩展。返回新状态。 */
+  /** 在活动分栏右侧创建一个局部横向分栏。 */
   function splitHorizontal(state, options) {
     options = options || {};
     var next = clone(state);
-    if (next.layout === LAYOUT_SINGLE) {
-      var newPane = createPane({ tabs: options.tabs || [] });
-      next.panes.push(newPane);
-      next.paneOrder.push(newPane.id);
-      next.layout = LAYOUT_HORIZONTAL;
-      next.activePaneId = newPane.id;
-      return next;
-    }
-    if (next.layout === LAYOUT_HORIZONTAL && next.panes.length === 2) {
-      var thirdPane = createPane({ tabs: options.tabs || [] });
-      next.panes.push(thirdPane);
-      next.paneOrder.push(thirdPane.id);
-      next.layout = LAYOUT_THREE_COLUMN;
-      next.activePaneId = thirdPane.id;
-      return next;
-    }
+    var targetId = options.targetPaneId || next.activePaneId || (next.panes[0] && next.panes[0].id);
+    if (!targetId || !findPane(next, targetId)) return next;
+    var newPane = createPane({ tabs: options.tabs || [] });
+    next.panes.push(newPane);
+    splitPaneInLayout(next, targetId, newPane.id, DROP_RIGHT);
+    next.activePaneId = newPane.id;
     return next;
   }
 
-  /** 纵向分栏：单栏 -> 上下双栏。已有分栏时不改布局。 */
+  /** 在活动分栏下方创建一个局部纵向分栏。 */
   function splitVertical(state, options) {
     options = options || {};
     var next = clone(state);
-    if (next.layout === LAYOUT_SINGLE) {
-      var newPane = createPane({ tabs: options.tabs || [] });
-      next.panes.push(newPane);
-      next.paneOrder.push(newPane.id);
-      next.layout = LAYOUT_VERTICAL;
-      next.activePaneId = newPane.id;
-      return next;
-    }
+    var targetId = options.targetPaneId || next.activePaneId || (next.panes[0] && next.panes[0].id);
+    if (!targetId || !findPane(next, targetId)) return next;
+    var newPane = createPane({ tabs: options.tabs || [] });
+    next.panes.push(newPane);
+    splitPaneInLayout(next, targetId, newPane.id, DROP_BOTTOM);
+    next.activePaneId = newPane.id;
     return next;
   }
 
@@ -193,9 +264,9 @@
       : (findPane(next, next.activePaneId) || next.panes[0]);
     if (!target) return createInitialState({});
     next.panes = [target];
-    next.paneOrder = [target.id];
-    next.layout = LAYOUT_SINGLE;
+    next.layoutTree = createPaneNode(target.id);
     next.activePaneId = target.id;
+    syncLayoutMetadata(next);
     return next;
   }
 
@@ -312,62 +383,35 @@
     var target = findPane(next, targetPaneId);
     if (!target) return next;
 
-    var movedTab = null;
-    if (payload.kind === "tab" && payload.sourceId) {
+    var tab = null;
+    if (payload.kind === "tab") {
+      if (!payload.sourceId) return next;
       var found = findTab(next, payload.sourceId);
-      if (found) {
-        movedTab = found.tab;
-        found.pane.tabs.splice(found.tabIndex, 1);
-        if (found.pane.activeTabId === movedTab.id) {
-          setActiveTab(found.pane, found.pane.tabs.length > 0 ? found.pane.tabs[Math.max(0, found.tabIndex - 1)].id : null);
-        }
+      // 标签拖动只能移动现有标签。源标签已失效时取消投放，绝不退化为复制。
+      if (!found) return next;
+      tab = found.tab;
+      found.pane.tabs.splice(found.tabIndex, 1);
+      if (found.pane.activeTabId === tab.id) {
+        setActiveTab(found.pane, found.pane.tabs.length > 0 ? found.pane.tabs[Math.max(0, found.tabIndex - 1)].id : null);
       }
+    } else {
+      tab = createTab({
+        kind: payload.contentKind,
+        title: payload.title || "消息",
+        sourceRef: payload.sourceRef,
+        message: payload.message,
+      });
     }
-
-    var tab = movedTab || createTab({
-      kind: payload.contentKind,
-      title: payload.title || (payload.kind === "message" ? "消息" : ""),
-      sourceRef: payload.sourceRef,
-      message: payload.message,
-    });
 
     if (dropZone === DROP_CENTER) {
       target.tabs.push(tab);
       setActiveTab(target, tab.id);
       next.activePaneId = targetPaneId;
-    } else if (dropZone === DROP_RIGHT) {
-      var rightPane = createPane({ tabs: [tab] });
-      var rightPaneIndex = next.panes.findIndex(function(p) { return p.id === targetPaneId; });
-      next.panes.splice(rightPaneIndex + 1, 0, rightPane);
-      var orderIndex = next.paneOrder.indexOf(targetPaneId);
-      next.paneOrder.splice(orderIndex + 1, 0, rightPane.id);
-      if (next.layout === LAYOUT_SINGLE) next.layout = LAYOUT_HORIZONTAL;
-      else if (next.layout === LAYOUT_VERTICAL) next.layout = LAYOUT_HORIZONTAL;
-      next.activePaneId = rightPane.id;
-    } else if (dropZone === DROP_LEFT) {
-      var leftPane = createPane({ tabs: [tab] });
-      var leftPaneIndex = next.panes.findIndex(function(p) { return p.id === targetPaneId; });
-      next.panes.splice(leftPaneIndex, 0, leftPane);
-      var leftOrderIndex = next.paneOrder.indexOf(targetPaneId);
-      next.paneOrder.splice(leftOrderIndex, 0, leftPane.id);
-      if (next.layout === LAYOUT_SINGLE) next.layout = LAYOUT_HORIZONTAL;
-      else if (next.layout === LAYOUT_VERTICAL) next.layout = LAYOUT_HORIZONTAL;
-      next.activePaneId = leftPane.id;
-    } else if (dropZone === DROP_BOTTOM) {
-      var bottomPane = createPane({ tabs: [tab] });
-      var bottomPaneIndex = next.panes.findIndex(function(p) { return p.id === targetPaneId; });
-      next.panes.splice(bottomPaneIndex + 1, 0, bottomPane);
-      next.paneOrder.push(bottomPane.id);
-      if (next.layout === LAYOUT_SINGLE) next.layout = LAYOUT_VERTICAL;
-      next.activePaneId = bottomPane.id;
-    } else if (dropZone === DROP_TOP) {
-      var topPane = createPane({ tabs: [tab] });
-      var topPaneIndex = next.panes.findIndex(function(p) { return p.id === targetPaneId; });
-      next.panes.splice(topPaneIndex, 0, topPane);
-      var topOrderIndex = next.paneOrder.indexOf(targetPaneId);
-      next.paneOrder.splice(topOrderIndex, 0, topPane.id);
-      if (next.layout === LAYOUT_SINGLE) next.layout = LAYOUT_VERTICAL;
-      next.activePaneId = topPane.id;
+    } else {
+      var dockedPane = createPane({ tabs: [tab] });
+      next.panes.push(dockedPane);
+      splitPaneInLayout(next, targetPaneId, dockedPane.id, dropZone);
+      next.activePaneId = dockedPane.id;
     }
 
     normalizeAfterPaneChange(next);
@@ -399,39 +443,11 @@
       target.tabs.push(tabCopy);
       setActiveTab(target, tabCopy.id);
       next.activePaneId = targetPaneId;
-    } else if (dropZone === DROP_RIGHT) {
-      var rightPane = createPane({ tabs: [tabCopy] });
-      var rightIdx = next.panes.findIndex(function(p) { return p.id === targetPaneId; });
-      next.panes.splice(rightIdx + 1, 0, rightPane);
-      var ri = next.paneOrder.indexOf(targetPaneId);
-      next.paneOrder.splice(ri + 1, 0, rightPane.id);
-      if (next.layout === LAYOUT_SINGLE) next.layout = LAYOUT_HORIZONTAL;
-      else if (next.layout === LAYOUT_VERTICAL) next.layout = LAYOUT_HORIZONTAL;
-      next.activePaneId = rightPane.id;
-    } else if (dropZone === DROP_LEFT) {
-      var leftPane = createPane({ tabs: [tabCopy] });
-      var leftIdx = next.panes.findIndex(function(p) { return p.id === targetPaneId; });
-      next.panes.splice(leftIdx, 0, leftPane);
-      var li = next.paneOrder.indexOf(targetPaneId);
-      next.paneOrder.splice(li, 0, leftPane.id);
-      if (next.layout === LAYOUT_SINGLE) next.layout = LAYOUT_HORIZONTAL;
-      else if (next.layout === LAYOUT_VERTICAL) next.layout = LAYOUT_HORIZONTAL;
-      next.activePaneId = leftPane.id;
-    } else if (dropZone === DROP_BOTTOM) {
-      var bottomPane = createPane({ tabs: [tabCopy] });
-      var bottomIdx = next.panes.findIndex(function(p) { return p.id === targetPaneId; });
-      next.panes.splice(bottomIdx + 1, 0, bottomPane);
-      next.paneOrder.push(bottomPane.id);
-      if (next.layout === LAYOUT_SINGLE) next.layout = LAYOUT_VERTICAL;
-      next.activePaneId = bottomPane.id;
-    } else if (dropZone === DROP_TOP) {
-      var topPane = createPane({ tabs: [tabCopy] });
-      var topIdx = next.panes.findIndex(function(p) { return p.id === targetPaneId; });
-      next.panes.splice(topIdx, 0, topPane);
-      var ti = next.paneOrder.indexOf(targetPaneId);
-      next.paneOrder.splice(ti, 0, topPane.id);
-      if (next.layout === LAYOUT_SINGLE) next.layout = LAYOUT_VERTICAL;
-      next.activePaneId = topPane.id;
+    } else {
+      var copyPane = createPane({ tabs: [tabCopy] });
+      next.panes.push(copyPane);
+      splitPaneInLayout(next, targetPaneId, copyPane.id, dropZone);
+      next.activePaneId = copyPane.id;
     }
 
     normalizeAfterPaneChange(next);
@@ -455,15 +471,10 @@
 
   function normalizeRestoredState(state) {
     if (!state || !Array.isArray(state.panes)) return createInitialState({});
-    var validLayouts = [LAYOUT_SINGLE, LAYOUT_HORIZONTAL, LAYOUT_VERTICAL, LAYOUT_THREE_COLUMN];
-    state.layout = validLayouts.indexOf(state.layout) >= 0 ? state.layout : LAYOUT_SINGLE;
     if (!Array.isArray(state.paneOrder)) {
       state.paneOrder = state.panes.map(function (p) { return p.id; });
     }
-    if (!state.activePaneId || state.paneOrder.indexOf(state.activePaneId) === -1) {
-      state.activePaneId = state.paneOrder[0] || null;
-    }
-    return state;
+    return syncLayoutMetadata(state);
   }
 
   /**
@@ -519,6 +530,10 @@
     resetIdCounter: resetIdCounter,
     createTab: createTab,
     createPane: createPane,
+    createPaneNode: createPaneNode,
+    createSplitNode: createSplitNode,
+    collectLayoutPaneIds: collectLayoutPaneIds,
+    syncLayoutMetadata: syncLayoutMetadata,
     createInitialState: createInitialState,
     findPane: findPane,
     findTab: findTab,

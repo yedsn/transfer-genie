@@ -158,6 +158,7 @@
       panes: [pane],
       layout: core.LAYOUT_SINGLE,
       paneOrder: [pane.id],
+      layoutTree: core.createPaneNode(pane.id),
       activePaneId: pane.id,
     };
   }

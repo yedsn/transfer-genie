@@ -39,6 +39,13 @@
 - **THEN** 应用 SHALL 以半栏矩形预览最终拆分位置
 - **AND** 放下后 SHALL 按预览的左右或上下方向拆分
 
+#### Scenario: Split one side without changing its sibling group
+- **GIVEN** 工作区包含左右两个分栏
+- **WHEN** 用户把标签拖到左侧分栏的下半部分
+- **THEN** 左侧分栏 SHALL 拆分为上下两个分栏
+- **AND** 右侧分栏 SHALL 保持一个覆盖完整高度的独立分栏
+- **AND** 嵌套布局 SHALL 随工作区状态持久化并恢复
+
 #### Scenario: Move into an editor group body
 - **WHEN** 用户把标签拖到另一个分栏编辑区的中央区域
 - **THEN** 应用 SHALL 以中央矩形预览加入该分栏
@@ -51,3 +58,23 @@
 #### Scenario: Restore reordered tabs
 - **WHEN** 用户调整标签顺序后关闭并重新打开应用
 - **THEN** 工作区 SHALL 按调整后的顺序恢复标签
+
+### Requirement: Move tabs without duplication
+
+应用 SHALL 将标签拖动统一解释为移动操作，一个标签 ID 在工作区状态与界面中 SHALL 始终最多出现一次。标签拖动源失效或同一次拖动产生重复结束事件时，应用 SHALL 忽略多余操作而不是创建标签副本。
+
+#### Scenario: Move a tab exactly once
+- **WHEN** 用户把标签拖到其他标签栏或分栏边缘
+- **THEN** 源分栏 SHALL 移除该标签
+- **AND** 目标位置 SHALL 只出现一个相同标签
+
+#### Scenario: Ignore a stale tab drag payload
+- **WHEN** 标签拖动结束时源标签已不存在
+- **THEN** 应用 SHALL 取消该次投放
+- **AND** 应用 SHALL NOT 根据拖动负载新建标签副本
+
+#### Scenario: Expand the remaining pane after merging in fullscreen
+- **GIVEN** 编辑器处于全屏状态且包含左右两个分栏
+- **WHEN** 用户把右栏最后一个标签移动到左栏合并
+- **THEN** 工作区 SHALL 收起为单栏
+- **AND** 唯一分栏 SHALL 铺满工作区的可用宽度和高度

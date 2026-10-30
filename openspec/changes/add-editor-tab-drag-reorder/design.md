@@ -41,6 +41,14 @@ Sortable instances are rebuilt after Vue renders a pane-list topology change. Re
 
 SortableJS owns the live placeholder and sibling displacement while the pointer remains in a tab strip. The application does not independently recalculate cross-pane tab indices. When the pointer leaves the strip for an editor body, a rectangular drop preview shows the exact center, left, right, top, or bottom result. The outer quarter of each editor group is reserved for splitting and the central rectangle moves the tab into that group.
 
+### Store editor groups as a nested split tree
+
+The workspace persists a split tree whose leaves reference pane IDs and whose branch direction is horizontal or vertical. Splitting a pane replaces only that leaf, or inserts a sibling into an existing branch with the same direction. Legacy `layout` and `paneOrder` values remain derived compatibility metadata, and saved states without a tree are migrated on restore. This allows a vertical group on the left and an unsplit editor group on the right, matching VS Code's editor group model.
+
+### Enforce move-only tab drag semantics
+
+Tab drag payloads are valid only while their source tab still exists in workspace state. A missing source cancels the drop instead of falling back to tab creation. During SortableJS fallback dragging, native pane `drop` handlers do not commit tab changes; `onEnd` closes the drag session before applying the single state transition and removes any detached fallback clone after Vue reconciliation.
+
 ## Risks / Trade-offs
 
 - [Sortable mutates DOM before Vue state commits] → Commit synchronously in `onEnd`; Vue immediately reconciles the list from workspace state.

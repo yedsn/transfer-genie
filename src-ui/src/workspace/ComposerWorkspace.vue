@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import Sortable, { type MoveEvent, type SortableEvent } from "sortablejs";
 import { composerStore } from "./composer-store";
 import DraftEditor from "./DraftEditor.vue";
+import WorkspaceLayoutNode from "./WorkspaceLayoutNode.vue";
 import "./tab-name-ai.js";
 
 const state = composerStore.state;
@@ -34,18 +35,12 @@ const renameDialog = ref<{ tabId: string; title: string; aiBusy: boolean } | nul
 const tabNameAi = (globalThis as any).transferGenieTabNameAi;
 const tabNameAiSession = tabNameAi.createRequestSession();
 
-const orderedPanes = computed(() =>
-  state.paneOrder.map((id) => state.panes.find((p) => p.id === id)).filter(Boolean)
-);
-const layoutClasses = computed(() => ({
-  "is-single": state.layout === "single",
-  "is-horizontal": state.layout === "horizontal",
-  "is-vertical": state.layout === "vertical",
-  "is-three-column": state.layout === "three-column",
-}));
-const canSplitH = computed(() => state.layout === "single" || (state.layout === "horizontal" && state.panes.length === 2));
-const canSplitV = computed(() => state.layout === "single");
-const canCollapse = computed(() => state.layout !== "single");
+const canSplitH = computed(() => !!state.activePaneId);
+const canSplitV = computed(() => !!state.activePaneId);
+const canCollapse = computed(() => state.panes.length > 1);
+function paneById(paneId: string) {
+  return state.panes.find((pane) => pane.id === paneId) || null;
+}
 function draftTitle(tab: any) {
   if (tab.title) return tab.title;
   const preview = (tab.text || "").replace(/\n/g, " ").trim();
@@ -261,6 +256,11 @@ function onPaneDragLeave(paneId: string, event: DragEvent) {
 function onPaneDrop(event: DragEvent, paneId: string) {
   const ctx = (window as any).transferGenieComposerDragCtx;
   if (!ctx || !ctx.payload) return;
+  // SortableJS fallback 拖动统一在 onSortableEnd 提交，避免原生 drop 路径重复处理。
+  if (sortableDrag && ctx.payload.kind === "tab") {
+    event.preventDefault();
+    return;
+  }
   if (ctx.payload.kind === "tab" && (event.target as HTMLElement | null)?.closest(".cw-tabs-list")) return;
   event.preventDefault();
   const drag = (window as any).transferGenieWorkspaceDrag;
@@ -304,6 +304,10 @@ function onSortableMove(event: MoveEvent) {
 function onSortableEnd(event: SortableEvent) {
   const ctx = (window as any).transferGenieComposerDragCtx;
   const dragSession = sortableDrag;
+  // 先关闭会话再提交状态，防止布局重渲染期间其他 drop/end 入口重复处理同一标签。
+  sortableDrag = null;
+  ctx.payload = null;
+  hoverZone.value = {};
   if (dragSession?.target?.kind === "pane") {
     const { paneId, zone } = dragSession.target;
     if (zone === "center") composerStore.moveDraft(dragSession.tabId, paneId);
@@ -315,9 +319,9 @@ function onSortableEnd(event: SortableEvent) {
     const insertIndex = drag.getSortableInsertIndex(event.oldIndex, event.newIndex, sourcePaneId === targetPaneId);
     if (targetPaneId && insertIndex != null) composerStore.moveDraft(dragSession.tabId, targetPaneId, insertIndex);
   }
-  sortableDrag = null;
-  ctx.payload = null;
-  hoverZone.value = {};
+  nextTick(() => {
+    document.querySelectorAll("body > .cw-tab-sortable-fallback").forEach((element) => element.remove());
+  });
 }
 function trackSortablePaneTarget(event: MouseEvent) {
   if (!sortableDrag) return;
@@ -618,28 +622,30 @@ onUnmounted(() => {
       </form>
     </div>
 
-    <div class="composer-ws-main" :class="layoutClasses">
+    <div class="composer-ws-main">
+      <WorkspaceLayoutNode :node="state.layoutTree">
+        <template #pane="{ paneId }">
       <section
-        v-for="pane in orderedPanes"
-        :key="pane.id"
+        v-if="paneById(paneId)"
+        :key="paneId"
         class="cw-pane"
-        :data-pane-id="pane.id"
-        :class="{ 'is-active': pane.id === state.activePaneId, 'is-drop-target': !!hoverZone[pane.id] }"
-        @dragover="onPaneDragOver($event, pane.id)"
-        @dragleave="onPaneDragLeave(pane.id, $event)"
-        @drop="onPaneDrop($event, pane.id)"
+        :data-pane-id="paneId"
+        :class="{ 'is-active': paneId === state.activePaneId, 'is-drop-target': !!hoverZone[paneId] }"
+        @dragover="onPaneDragOver($event, paneId)"
+        @dragleave="onPaneDragLeave(paneId, $event)"
+        @drop="onPaneDrop($event, paneId)"
       >
         <header class="cw-tabs">
-          <div class="cw-tabs-list" :data-pane-id="pane.id">
+          <div class="cw-tabs-list" :data-pane-id="paneId">
           <button
-            v-for="tab in pane.tabs"
+            v-for="tab in paneById(paneId)?.tabs || []"
             :key="tab.id"
             class="cw-tab"
-            :class="{ 'is-active': tab.id === pane.activeTabId }"
+            :class="{ 'is-active': tab.id === paneById(paneId)?.activeTabId }"
             :data-tab-id="tab.id"
             type="button"
-            @click="switchDraft(pane.id, tab.id)"
-            @contextmenu="onTabContextMenu($event, tab, pane.id)"
+            @click="switchDraft(paneId, tab.id)"
+            @contextmenu="onTabContextMenu($event, tab, paneId)"
             :title="draftTitle(tab)"
           >
             <span class="cw-tab-fmt" :data-fmt="tab.format">{{ tab.format === 'markdown' ? 'M' : 'T' }}</span>
@@ -647,22 +653,24 @@ onUnmounted(() => {
             <span class="cw-tab-close" @click.stop="removeDraft(tab.id)" title="删除草稿">×</span>
           </button>
           </div>
-          <button class="cw-tab-add" type="button" @click="addDraft(pane.id)" title="新建草稿">+</button>
+          <button class="cw-tab-add" type="button" @click="addDraft(paneId)" title="新建草稿">+</button>
         </header>
 
        <DraftEditor
-         v-if="activeTabOf(pane)"
-         :key="editorKey(pane)"
-         :draft="activeTabOf(pane)"
-         :pane-id="pane.id"
-          :is-active="pane.id === state.activePaneId"
+         v-if="activeTabOf(paneById(paneId))"
+         :key="editorKey(paneById(paneId))"
+         :draft="activeTabOf(paneById(paneId))"
+         :pane-id="paneId"
+          :is-active="paneId === state.activePaneId"
        />
         <div v-else class="cw-pane-empty">空分栏</div>
 
-        <div v-if="hoverZone[pane.id]" class="cw-drop-overlay">
-          <div class="cw-drop-preview" :class="'is-' + hoverZone[pane.id]"></div>
+        <div v-if="hoverZone[paneId]" class="cw-drop-overlay">
+          <div class="cw-drop-preview" :class="'is-' + hoverZone[paneId]"></div>
         </div>
       </section>
+        </template>
+      </WorkspaceLayoutNode>
     </div>
     <div v-if="ctxMenu" class="cw-ctx-backdrop" @click="closeCtxMenu" @contextmenu.prevent="closeCtxMenu" @wheel="closeCtxMenu"></div>
     <div
