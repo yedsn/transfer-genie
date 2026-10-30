@@ -53,11 +53,15 @@ let visibilityListener: ((event: Event) => void) | null = null;
 let sendHotkeyListener: ((event: Event) => void) | null = null;
 let shortcutsEnabledListener: ((event: Event) => void) | null = null;
 let resizeListener: (() => void) | null = null;
+let markdownBindTimer: number | null = null;
+let markdownBindGeneration = 0;
+let markdownChangeHandler: (() => void) | null = null;
+let componentDisposed = false;
 let syncingMarkdownFromDraft = false;
 
 const MARKDOWN_NORMAL_HEIGHT = "180px";
 
-const mdId = "cw-md-" + props.paneId + "-" + props.draft.id;
+const mdId = computed(() => "cw-md-" + props.paneId + "-" + props.draft.id);
 
 function createAiRequestId() {
   return "ai-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
@@ -170,20 +174,16 @@ function unregisterFocusIfOutsideEditor() {
 }
 
 function syncMarkdownTextFromDraft(text: string) {
-  if (!isMarkdown.value || !editor) return;
+  if (!isMarkdown.value || !editor?.cm) return;
   try {
-    const current = editor.cm && typeof editor.cm.getValue === "function"
-      ? editor.cm.getValue()
-      : typeof editor.getMarkdown === "function"
-        ? editor.getMarkdown()
-        : "";
-    if (current !== text && typeof editor.setMarkdown === "function") {
+    const current = typeof editor.cm.getValue === "function" ? editor.cm.getValue() : "";
+    if (current !== text && typeof editor.cm.setValue === "function") {
       syncingMarkdownFromDraft = true;
-      editor.setMarkdown(text);
-      window.setTimeout(() => { syncingMarkdownFromDraft = false; }, 0);
+      editor.cm.setValue(text);
+      syncingMarkdownFromDraft = false;
     }
     window.requestAnimationFrame(() => refreshMarkdownLayout());
-  } catch (e) { /* ignore */ }
+  } catch (e) { syncingMarkdownFromDraft = false; }
 }
 
 function onActivated() {
@@ -778,7 +778,44 @@ function handleEditorKeydown(event: KeyboardEvent) {
   if (bridge && typeof bridge.sendActiveDraft === "function") bridge.sendActiveDraft();
 }
 
+function bindMarkdownInstance(instance: any, draftId: string, editorId: string) {
+  const generation = ++markdownBindGeneration;
+  if (markdownBindTimer !== null) window.clearTimeout(markdownBindTimer);
+  const bind = () => {
+    if (componentDisposed || generation !== markdownBindGeneration || editor !== instance) return;
+    if (props.draft.id !== draftId || mdWrap.value?.id !== editorId) return;
+    const cm = instance?.cm;
+    if (!cm) {
+      markdownBindTimer = window.setTimeout(bind, 25);
+      return;
+    }
+
+    markdownBindTimer = null;
+    syncingMarkdownFromDraft = true;
+    if (cm.getValue() !== (props.draft.text || "")) cm.setValue(props.draft.text || "");
+    syncingMarkdownFromDraft = false;
+
+    if (!markdownChangeHandler) {
+      markdownChangeHandler = () => {
+        if (componentDisposed || editor !== instance || props.draft.id !== draftId || syncingMarkdownFromDraft) return;
+        composerStore.setDraftText(draftId, cm.getValue());
+      };
+      cm.on("change", markdownChangeHandler);
+      cm.on("focus", () => {
+        if (!componentDisposed && editor === instance && props.draft.id === draftId) onActivated();
+      });
+      cm.on("keydown", (_cm: any, event: KeyboardEvent) => {
+        if (!componentDisposed && editor === instance && props.draft.id === draftId) handleEditorKeydown(event);
+      });
+    }
+    mdWrap.value?.setAttribute("data-markdown-ready", "true");
+    window.requestAnimationFrame(() => refreshMarkdownLayout());
+  };
+  bind();
+}
+
 function initMarkdown() {
+  if (componentDisposed) return;
   if (editor) return;
   if (!(window as any).editormd) {
     initRetry += 1;
@@ -787,13 +824,17 @@ function initMarkdown() {
     return;
   }
   if (!mdWrap.value) return;
-  mdWrap.value.id = mdId;
+  const editorId = mdId.value;
+  const draftId = props.draft.id;
+  mdWrap.value.id = editorId;
+  mdWrap.value.removeAttribute("data-markdown-ready");
   try {
-    editor = (window as any).editormd(mdId, {
+    const instance = (window as any).editormd(editorId, {
       width: "100%",
       height: isComposerFullscreen() ? "100%" : MARKDOWN_NORMAL_HEIGHT,
       path: "lib/editor.md/lib/",
       pluginPath: "lib/editor.md/plugins/",
+      markdown: props.draft.text || "",
       placeholder: "使用 Markdown 输入草稿…",
       watch: true,
       toolbar: true,
@@ -805,23 +846,11 @@ function initMarkdown() {
         return ["bold", "italic", "quote", "|", "h1", "h2", "h3", "|", "list-ul", "list-ol", "|", "link", "code", "code-block", "table", "datetime", "|", "watch", "preview", "clear", "help"];
       },
       onload: function () {
-        try {
-          syncingMarkdownFromDraft = true;
-          this.setMarkdown(props.draft.text || "");
-          window.setTimeout(() => { syncingMarkdownFromDraft = false; }, 0);
-        } catch (e) { syncingMarkdownFromDraft = false; }
-        window.requestAnimationFrame(() => refreshMarkdownLayout());
-        const cm = this.cm;
-        if (cm) {
-          cm.on("change", () => {
-            if (syncingMarkdownFromDraft) return;
-            try { composerStore.setDraftText(props.draft.id, cm.getValue()); } catch (e) { /* ignore */ }
-          });
-          cm.on("focus", () => { onActivated(); });
-          cm.on("keydown", (_cm: any, event: KeyboardEvent) => { handleEditorKeydown(event); });
-        }
+        bindMarkdownInstance(this, draftId, editorId);
       },
     });
+    editor = instance;
+    bindMarkdownInstance(instance, draftId, editorId);
   } catch (e) {
     console.error("editormd init failed", e);
   }
@@ -840,12 +869,20 @@ function refreshMarkdownLayout(fullscreen = isComposerFullscreen()) {
 }
 
 function destroyMarkdown() {
+  markdownBindGeneration += 1;
+  if (markdownBindTimer !== null) window.clearTimeout(markdownBindTimer);
+  markdownBindTimer = null;
   try {
     if (editor) {
+      if (markdownChangeHandler && editor.cm && typeof editor.cm.off === "function") {
+        editor.cm.off("change", markdownChangeHandler);
+      }
       if (typeof editor.destroy === "function") editor.destroy();
       else if (editor.cm && typeof editor.cm.toTextArea === "function") editor.cm.toTextArea();
     }
   } catch (e) { /* ignore */ }
+  markdownChangeHandler = null;
+  mdWrap.value?.removeAttribute("data-markdown-ready");
   editor = null;
 }
 
@@ -902,6 +939,7 @@ watch(() => props.draft.text, (text) => {
   syncMarkdownTextFromDraft(text || "");
 });
 onBeforeUnmount(() => {
+  componentDisposed = true;
   destroyMarkdown();
   if (sendHotkeyListener) window.removeEventListener("transfer-genie:send-hotkey-change", sendHotkeyListener as EventListener);
   if (shortcutsEnabledListener) window.removeEventListener("transfer-genie:shortcuts-enabled-change", shortcutsEnabledListener as EventListener);
@@ -918,7 +956,7 @@ function setFormat(format: string) {
 </script>
 
 <template>
-  <div class="cw-editor">
+  <div class="cw-editor" :data-draft-id="draft.id" :data-pane-id="paneId">
     <div class="cw-ai-bar">
       <button class="cw-ai-prompt-button" type="button" :disabled="aiBusy || !canRunAi" @click="openAiPromptDialog" title="输入提示词" aria-label="输入提示词">
         <img src="/icons/ai.svg" alt="" aria-hidden="true" />

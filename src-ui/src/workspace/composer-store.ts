@@ -200,7 +200,8 @@ export const composerStore = {
     commit(core.dockToPane(state, payload, targetPaneId, zone));
   },
   splitTab(tabId: string, zone: string) {
-    const targetPaneId = state.activePaneId || state.panes[0]?.id || "";
+    const sourcePane = state.panes.find((pane) => pane.tabs.some((tab) => tab.id === tabId));
+    const targetPaneId = sourcePane?.id || state.activePaneId || state.panes[0]?.id || "";
     if (!targetPaneId) return;
     commit(core.copyTabToZone(state, tabId, targetPaneId, zone) as ComposerState);
   },

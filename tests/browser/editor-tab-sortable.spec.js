@@ -205,3 +205,204 @@ test('fullscreen merge from two columns expands the remaining pane', async ({ pa
   expect(Math.abs(geometry.pane.y - geometry.workspace.y - 2)).toBeLessThan(1);
   expect(Math.abs((geometry.pane.y + geometry.pane.height) - (geometry.workspace.y + geometry.workspace.height))).toBeLessThan(1);
 });
+
+test('split buttons create independent copies of the active tab', async ({ page }) => {
+  await page.goto('/', { waitUntil: 'networkidle' });
+  await page.evaluate(() => localStorage.removeItem('transfer-genie:workspace-state'));
+  await page.reload({ waitUntil: 'networkidle' });
+
+  const originalText = '分栏前的完整内容';
+  await page.locator('.cw-pane .cw-textarea').fill(originalText);
+  await page.getByTitle('横向分栏').click();
+  await expect(page.locator('.cw-pane')).toHaveCount(2);
+
+  const panes = page.locator('.cw-pane');
+  const originalId = await panes.first().locator('.cw-tab').getAttribute('data-tab-id');
+  const copyId = await panes.nth(1).locator('.cw-tab').getAttribute('data-tab-id');
+  expect(copyId).not.toBe(originalId);
+  await expect(panes.first().locator('.cw-textarea')).toHaveValue(originalText);
+  await expect(panes.nth(1).locator('.cw-textarea')).toHaveValue(originalText);
+
+  await panes.nth(1).locator('.cw-textarea').fill('只修改右侧副本');
+  await expect(panes.first().locator('.cw-textarea')).toHaveValue(originalText);
+  await expect(panes.nth(1).locator('.cw-textarea')).toHaveValue('只修改右侧副本');
+
+  await panes.first().locator('.cw-textarea').fill('只修改左侧原标签');
+  await expect(panes.first().locator('.cw-textarea')).toHaveValue('只修改左侧原标签');
+  await expect(panes.nth(1).locator('.cw-textarea')).toHaveValue('只修改右侧副本');
+
+  await panes.nth(1).locator('.cw-textarea').click();
+  const verticalSource = page.locator('.cw-pane.is-active');
+  const verticalSourcePaneId = await verticalSource.getAttribute('data-pane-id');
+  const verticalSourceId = await verticalSource.locator('.cw-tab.is-active').getAttribute('data-tab-id');
+  await page.getByTitle('纵向分栏').click();
+  await expect(page.locator('.cw-pane')).toHaveCount(3);
+  const verticalCopy = page.locator('.cw-pane.is-active');
+  const verticalCopyId = await verticalCopy.locator('.cw-tab.is-active').getAttribute('data-tab-id');
+  expect(verticalCopyId).not.toBe(verticalSourceId);
+  await expect(verticalCopy.locator('.cw-textarea')).toHaveValue('只修改右侧副本');
+  await verticalCopy.locator('.cw-textarea').fill('只修改纵向副本');
+  await expect(page.locator(`.cw-pane[data-pane-id="${verticalSourcePaneId}"] .cw-textarea`)).toHaveValue('只修改右侧副本');
+  await expect(verticalCopy.locator('.cw-textarea')).toHaveValue('只修改纵向副本');
+  await expectUniqueTabIds(page);
+});
+
+test('dragging one of two same-name tabs moves the matching content', async ({ page }) => {
+  await page.goto('/', { waitUntil: 'networkidle' });
+  await page.evaluate(() => {
+    localStorage.setItem('transfer-genie:workspace-state', JSON.stringify({
+      panes: [{
+        id: 'same-name-pane',
+        activeTabId: 'same-name-a',
+        tabs: [
+          { id: 'same-name-a', kind: 'draft', title: '同名标签', sourceRef: null, text: '内容 A', format: 'text', message: null, missing: false },
+          { id: 'same-name-b', kind: 'draft', title: '同名标签', sourceRef: null, text: '内容 B', format: 'text', message: null, missing: false },
+        ],
+      }],
+      layout: 'single',
+      paneOrder: ['same-name-pane'],
+      layoutTree: { type: 'pane', paneId: 'same-name-pane' },
+      activePaneId: 'same-name-pane',
+    }));
+  });
+  await page.reload({ waitUntil: 'networkidle' });
+
+  const sourcePane = page.locator('.cw-pane[data-pane-id="same-name-pane"]');
+  await expect(sourcePane.locator('.cw-tab-title')).toHaveText(['同名标签', '同名标签']);
+  await expect(sourcePane.locator('.cw-tabs-list')).toHaveAttribute('data-sortable-ready', 'true');
+  await expect(sourcePane.locator('.cw-textarea')).toHaveValue('内容 A');
+
+  await beginDrag(page, sourcePane.locator('.cw-tab[data-tab-id="same-name-b"]'), sourcePane.locator('.cw-editor'), 0.96, 0.5);
+  await expect(sourcePane.locator('.cw-drop-preview.is-right')).toBeVisible();
+  await page.mouse.up();
+
+  await expect(page.locator('.cw-pane')).toHaveCount(2);
+  const movedTab = page.locator('.cw-tab[data-tab-id="same-name-b"]');
+  const movedPane = movedTab.locator('xpath=ancestor::section[contains(@class, "cw-pane")]');
+  await expect(movedPane.locator('.cw-textarea')).toHaveValue('内容 B');
+  await expect(sourcePane.locator('.cw-tab[data-tab-id="same-name-a"]')).toHaveCount(1);
+  await expect(sourcePane.locator('.cw-textarea')).toHaveValue('内容 A');
+  await expectUniqueTabIds(page);
+});
+
+test('moving a same-name Markdown tab rebuilds the editor in its new pane', async ({ page }) => {
+  await page.goto('/', { waitUntil: 'networkidle' });
+  await page.evaluate(() => {
+    localStorage.setItem('transfer-genie:workspace-state', JSON.stringify({
+      panes: [{
+        id: 'markdown-source-pane',
+        activeTabId: 'same-markdown-b',
+        tabs: [
+          { id: 'same-markdown-a', kind: 'draft', title: '草稿 2', sourceRef: null, text: '111', format: 'markdown', message: null, missing: false },
+          { id: 'same-markdown-b', kind: 'draft', title: '草稿 2', sourceRef: null, text: '222', format: 'markdown', message: null, missing: false },
+        ],
+      }],
+      layout: 'single',
+      paneOrder: ['markdown-source-pane'],
+      layoutTree: { type: 'pane', paneId: 'markdown-source-pane' },
+      activePaneId: 'markdown-source-pane',
+    }));
+  });
+  await page.reload({ waitUntil: 'networkidle' });
+
+  const sourcePane = page.locator('.cw-pane[data-pane-id="markdown-source-pane"]');
+  await expect(sourcePane.locator('.cw-md-wrap.editormd')).toBeVisible();
+  await expect(sourcePane.locator('.cw-md-wrap')).toHaveAttribute('data-markdown-ready', 'true');
+  await expect(sourcePane.locator('.cw-tab-title')).toHaveText(['草稿 2', '草稿 2']);
+  await expect.poll(() => sourcePane.locator('.cw-md-wrap').evaluate((wrap) => wrap.querySelector('.CodeMirror')?.CodeMirror?.getValue())).toBe('222');
+
+  await beginDrag(page, sourcePane.locator('.cw-tab[data-tab-id="same-markdown-b"]'), sourcePane.locator('.cw-editor'), 0.96, 0.5);
+  await expect(sourcePane.locator('.cw-drop-preview.is-right')).toBeVisible();
+  await page.mouse.up();
+
+  await expect(page.locator('.cw-pane')).toHaveCount(2);
+  const movedPane = page.locator('.cw-tab[data-tab-id="same-markdown-b"]')
+    .locator('xpath=ancestor::section[contains(@class, "cw-pane")]');
+  const movedPaneId = await movedPane.getAttribute('data-pane-id');
+  await expect.poll(() => page.evaluate(() => {
+    const raw = localStorage.getItem('transfer-genie:workspace-state');
+    const state = raw ? JSON.parse(raw) : null;
+    return state?.panes?.flatMap((pane) => pane.tabs).reduce((result, tab) => {
+      result[tab.id] = tab.text;
+      return result;
+    }, {});
+  })).toEqual({ 'same-markdown-a': '111', 'same-markdown-b': '222' });
+  await expect(movedPane.locator('.cw-md-wrap.editormd')).toBeVisible();
+  await expect(movedPane.locator('.cw-md-wrap')).toHaveAttribute('data-markdown-ready', 'true');
+  await expect(sourcePane.locator('.cw-editor')).toHaveAttribute('data-draft-id', 'same-markdown-a');
+  await expect(movedPane.locator('.cw-editor')).toHaveAttribute('data-draft-id', 'same-markdown-b');
+  await expect(movedPane.locator('.cw-md-wrap')).toHaveAttribute('id', `cw-md-${movedPaneId}-same-markdown-b`);
+  await expect.poll(() => movedPane.locator('.cw-md-wrap').evaluate((wrap) => wrap.querySelector('.CodeMirror')?.CodeMirror?.getValue())).toBe('222');
+  await expect.poll(() => sourcePane.locator('.cw-md-wrap').evaluate((wrap) => wrap.querySelector('.CodeMirror')?.CodeMirror?.getValue())).toBe('111');
+});
+
+test('same-name Markdown copies keep 111 and 222 after merge and split again', async ({ page }) => {
+  await page.goto('/', { waitUntil: 'networkidle' });
+  await page.evaluate(() => {
+    localStorage.setItem('transfer-genie:workspace-state', JSON.stringify({
+      panes: [{
+        id: 'lifecycle-pane',
+        activeTabId: 'lifecycle-a',
+        tabs: [
+          { id: 'lifecycle-a', kind: 'draft', title: '草稿 2', sourceRef: null, text: '111', format: 'markdown', message: null, missing: false },
+        ],
+      }],
+      layout: 'single',
+      paneOrder: ['lifecycle-pane'],
+      layoutTree: { type: 'pane', paneId: 'lifecycle-pane' },
+      activePaneId: 'lifecycle-pane',
+    }));
+  });
+  await page.reload({ waitUntil: 'networkidle' });
+
+  await page.getByTitle('横向分栏').click();
+  await expect(page.locator('.cw-pane')).toHaveCount(2);
+  const panes = page.locator('.cw-pane');
+  const copiedId = await panes.nth(1).locator('.cw-tab').getAttribute('data-tab-id');
+  await expect(panes.nth(1).locator('.cw-md-wrap')).toHaveAttribute('data-markdown-ready', 'true');
+  await expect.poll(() => panes.nth(1).locator('.cw-md-wrap').evaluate((wrap) => wrap.querySelector('.CodeMirror')?.CodeMirror?.getValue())).toBe('111');
+  await panes.nth(1).locator('.cw-md-wrap').evaluate((wrap) => wrap.querySelector('.CodeMirror')?.CodeMirror?.setValue('222'));
+  await expect.poll(async () => {
+    const raw = await page.evaluate(() => localStorage.getItem('transfer-genie:workspace-state'));
+    const state = raw ? JSON.parse(raw) : null;
+    return state?.panes?.flatMap((pane) => pane.tabs).find((tab) => tab.id === copiedId)?.text;
+  }).toBe('222');
+
+  await dragBetween(page, panes.nth(1).locator(`.cw-tab[data-tab-id="${copiedId}"]`), panes.first().locator('.cw-tabs-list'), 0.8);
+  await expect(page.locator('.cw-pane')).toHaveCount(1);
+  const mergedPane = page.locator('.cw-pane').first();
+  await expect(mergedPane.locator('.cw-tab-title')).toHaveText(['草稿 2', '草稿 2']);
+  await expect(mergedPane.locator('.cw-md-wrap')).toHaveAttribute('data-markdown-ready', 'true');
+  await expect.poll(() => mergedPane.locator('.cw-md-wrap').evaluate((wrap) => wrap.querySelector('.CodeMirror')?.CodeMirror?.getValue())).toBe('222');
+  await expect.poll(async () => {
+    const raw = await page.evaluate(() => localStorage.getItem('transfer-genie:workspace-state'));
+    const state = raw ? JSON.parse(raw) : null;
+    return Object.fromEntries(state.panes.flatMap((pane) => pane.tabs).map((tab) => [tab.id, tab.text]));
+  }).toEqual({ 'lifecycle-a': '111', [copiedId]: '222' });
+
+  await beginDrag(page, mergedPane.locator(`.cw-tab[data-tab-id="${copiedId}"]`), mergedPane.locator('.cw-editor'), 0.96, 0.5);
+  await expect(mergedPane.locator('.cw-drop-preview.is-right')).toBeVisible();
+  await page.mouse.up();
+  await expect(page.locator('.cw-pane')).toHaveCount(2);
+
+  const leftPane = page.locator('.cw-tab[data-tab-id="lifecycle-a"]')
+    .locator('xpath=ancestor::section[contains(@class, "cw-pane")]');
+  const rightPane = page.locator(`.cw-tab[data-tab-id="${copiedId}"]`)
+    .locator('xpath=ancestor::section[contains(@class, "cw-pane")]');
+  await expect(leftPane.locator('.cw-md-wrap')).toHaveAttribute('data-markdown-ready', 'true');
+  await expect(rightPane.locator('.cw-md-wrap')).toHaveAttribute('data-markdown-ready', 'true');
+  await expect(leftPane.locator('.cw-editor')).toHaveAttribute('data-draft-id', 'lifecycle-a');
+  await expect(rightPane.locator('.cw-editor')).toHaveAttribute('data-draft-id', copiedId);
+  await expect.poll(async () => {
+    const raw = await page.evaluate(() => localStorage.getItem('transfer-genie:workspace-state'));
+    const state = raw ? JSON.parse(raw) : null;
+    return Object.fromEntries(state.panes.flatMap((pane) => pane.tabs).map((tab) => [tab.id, tab.text]));
+  }).toEqual({ 'lifecycle-a': '111', [copiedId]: '222' });
+  await expect.poll(() => leftPane.locator('.cw-md-wrap').evaluate((wrap) => wrap.querySelector('.CodeMirror')?.CodeMirror?.getValue())).toBe('111');
+  await expect.poll(() => rightPane.locator('.cw-md-wrap').evaluate((wrap) => wrap.querySelector('.CodeMirror')?.CodeMirror?.getValue())).toBe('222');
+  await expect.poll(async () => {
+    const raw = await page.evaluate(() => localStorage.getItem('transfer-genie:workspace-state'));
+    const state = raw ? JSON.parse(raw) : null;
+    return Object.fromEntries(state.panes.flatMap((pane) => pane.tabs).map((tab) => [tab.id, tab.text]));
+  }).toEqual({ 'lifecycle-a': '111', [copiedId]: '222' });
+});

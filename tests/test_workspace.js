@@ -158,6 +158,43 @@ function testCollapseToSingle() {
   assert.equal(collapsed.panes[0].id, h.panes[0].id);
 }
 
+function testSplitCopiesCompleteTabAsIndependentSnapshot() {
+  const originalTab = {
+    title: '完整草稿',
+    kind: 'draft',
+    sourceRef: 'message.md',
+    text: '# 原始内容',
+    format: 'markdown',
+    dirty: true,
+    missing: true,
+    message: { filename: 'message.md', meta: { sender: 'Alice' } },
+    editorState: { selection: { start: 2, end: 5 } },
+  };
+  const state = core.createInitialState({ tabs: [originalTab] });
+  const sourcePaneId = state.panes[0].id;
+  const sourceTabId = state.panes[0].tabs[0].id;
+  state.panes[0].tabs[0].missing = true;
+  const split = core.copyTabToZone(state, sourceTabId, sourcePaneId, 'right');
+  const source = core.findTab(split, sourceTabId).tab;
+  const copy = core.findPane(split, split.activePaneId).tabs[0];
+
+  assert.notEqual(copy.id, source.id, '副本使用新的标签 ID');
+  assert.deepEqual({ ...copy, id: source.id }, source, '除 ID 外完整复制所有标签字段');
+  assert.notEqual(copy.message, source.message, '消息快照不共享对象');
+  assert.notEqual(copy.editorState, source.editorState, '扩展状态不共享对象');
+
+  copy.text = '副本修改';
+  copy.format = 'text';
+  copy.title = '副本标题';
+  copy.message.meta.sender = 'Bob';
+  copy.editorState.selection.start = 9;
+  assert.equal(source.text, '# 原始内容');
+  assert.equal(source.format, 'markdown');
+  assert.equal(source.title, '完整草稿');
+  assert.equal(source.message.meta.sender, 'Alice');
+  assert.equal(source.editorState.selection.start, 2);
+}
+
 // ============ 3.1/3.2 标签组与移动 ============
 function testPerPaneTabsAndActive() {
   const s = stateWithTabs();
@@ -480,6 +517,7 @@ function run() {
   testNestedLeftVerticalRightWholeLayout();
   testLegacyLayoutMigratesToTree();
   testCollapseToSingle();
+  testSplitCopiesCompleteTabAsIndependentSnapshot();
   testPerPaneTabsAndActive();
   testRenameTab();
   testRenamedTabPersistsAndMoves();

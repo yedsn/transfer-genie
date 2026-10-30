@@ -49,6 +49,22 @@ The workspace persists a split tree whose leaves reference pane IDs and whose br
 
 Tab drag payloads are valid only while their source tab still exists in workspace state. A missing source cancels the drop instead of falling back to tab creation. During SortableJS fallback dragging, native pane `drop` handlers do not commit tab changes; `onEnd` closes the drag session before applying the single state transition and removes any detached fallback clone after Vue reconciliation.
 
+### Create independent snapshots for explicit split commands
+
+Toolbar and tab-menu split commands deep-copy the selected tab's complete current state and replace only its ID. The new pane owns that copy as a separate tab, so later edits to text, format, title, message metadata, or extension fields do not update the source tab.
+
+### Bind sortable identity to the tab ID
+
+SortableJS uses `data-tab-id` as its `dataIdAttr`. A drag session captures the tab ID, source pane ID, and source index at start, and the final commit uses that captured identity instead of re-reading source identity from Sortable's temporary DOM. Equal display names therefore cannot alias one another.
+
+### Recreate Markdown editors after cross-pane moves
+
+Each editor component is keyed by both pane ID and tab ID. Moving a tab to another pane therefore unmounts the old Editor.md/CodeMirror instance and mounts a new instance with an ID derived from the destination pane and tab. This prevents a cached Markdown editor from retaining the previous pane binding or displaying another same-name tab's content.
+
+The drag start does not switch the source pane's active editor. The moved tab becomes active only when the state transition commits at drop time, preventing a cached CodeMirror instance from being mounted just before removal and writing its value back into the remaining source tab during teardown.
+
+Editor.md receives the draft text through its initial `markdown` option, avoiding an empty asynchronous instance followed by a competing `onload` write. After a drag commit, all visible Markdown editors receive a refresh event and resynchronize from their own tab state after layout reconciliation.
+
 ## Risks / Trade-offs
 
 - [Sortable mutates DOM before Vue state commits] → Commit synchronously in `onEnd`; Vue immediately reconciles the list from workspace state.

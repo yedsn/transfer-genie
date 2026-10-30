@@ -13,6 +13,7 @@ const tabSortables = new Map<string, Sortable>();
 let sortableDrag: {
   tabId: string;
   sourcePaneId: string;
+  sourceIndex: number;
   target: { kind: "tabs"; paneId: string } | { kind: "pane"; paneId: string; zone: string } | null;
 } | null = null;
 const destructivePrompt = ref<{ title: string; body: string; action: () => void } | null>(null);
@@ -52,7 +53,7 @@ function activeTabOf(pane: any) {
 }
 function editorKey(pane: any) {
   const t = activeTabOf(pane);
-  return t ? t.id : "empty";
+  return t ? pane.id + "::" + t.id : pane.id + "::empty";
 }
 
 function addDraft(paneId: string) { composerStore.addDraft(paneId); }
@@ -279,12 +280,13 @@ function onPaneDrop(event: DragEvent, paneId: string) {
   ctx.payload = null;
 }
 function onSortableStart(event: SortableEvent) {
+  sortableDrag = null;
   const tabId = (event.item as HTMLElement).dataset.tabId || "";
   const paneId = (event.from as HTMLElement).dataset.paneId || "";
+  const sourceIndex = event.oldIndex;
   const tab = composerStore.getDraft(tabId);
-  if (!tab) return;
-  sortableDrag = { tabId, sourcePaneId: paneId, target: null };
-  switchDraft(paneId, tabId);
+  if (!tab || !paneId || sourceIndex == null) return;
+  sortableDrag = { tabId, sourcePaneId: paneId, sourceIndex, target: null };
   const ctx = (window as any).transferGenieComposerDragCtx;
   const drag = (window as any).transferGenieWorkspaceDrag;
   ctx.payload = drag.createTabDragPayload(tab, paneId);
@@ -313,10 +315,10 @@ function onSortableEnd(event: SortableEvent) {
     if (zone === "center") composerStore.moveDraft(dragSession.tabId, paneId);
     else composerStore.dockTab(dragSession.tabId, paneId, zone);
   } else if (dragSession?.target?.kind === "tabs" && event.oldIndex != null && event.newIndex != null) {
-    const sourcePaneId = (event.from as HTMLElement).dataset.paneId || "";
-    const targetPaneId = (event.to as HTMLElement).dataset.paneId || "";
+    const sourcePaneId = dragSession.sourcePaneId;
+    const targetPaneId = dragSession.target.paneId;
     const drag = (window as any).transferGenieWorkspaceDrag;
-    const insertIndex = drag.getSortableInsertIndex(event.oldIndex, event.newIndex, sourcePaneId === targetPaneId);
+    const insertIndex = drag.getSortableInsertIndex(dragSession.sourceIndex, event.newIndex, sourcePaneId === targetPaneId);
     if (targetPaneId && insertIndex != null) composerStore.moveDraft(dragSession.tabId, targetPaneId, insertIndex);
   }
   nextTick(() => {
@@ -363,6 +365,7 @@ function syncTabSortables() {
     existing?.destroy();
     tabSortables.set(paneId, Sortable.create(element, {
       group: "transfer-genie-editor-tabs",
+      dataIdAttr: "data-tab-id",
       direction: "horizontal",
       draggable: ".cw-tab",
       filter: ".cw-tab-close",

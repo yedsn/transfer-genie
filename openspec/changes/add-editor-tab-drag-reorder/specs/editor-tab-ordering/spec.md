@@ -78,3 +78,31 @@
 - **WHEN** 用户把右栏最后一个标签移动到左栏合并
 - **THEN** 工作区 SHALL 收起为单栏
 - **AND** 唯一分栏 SHALL 铺满工作区的可用宽度和高度
+
+### Requirement: Create independent tab copies when splitting
+
+应用通过横向分栏、纵向分栏或标签菜单分栏时 SHALL 完整复制被操作标签的当前状态，SHALL 为副本生成新的标签 ID，并 SHALL 保证源标签与副本后续修改完全独立。
+
+#### Scenario: Copy all current tab content into a split
+- **WHEN** 用户对包含正文、格式、标题、来源和消息快照的标签执行分栏
+- **THEN** 新分栏的标签 SHALL 包含这些字段在分栏时的完整快照
+- **AND** 新标签 ID SHALL 与源标签不同
+
+#### Scenario: Edit split tabs independently
+- **GIVEN** 用户通过分栏创建了标签副本
+- **WHEN** 用户修改源标签或副本的正文、格式、标题或嵌套状态
+- **THEN** 另一个标签 SHALL 保持不变
+
+#### Scenario: Move the correct tab when names are equal
+- **GIVEN** 同一栏包含两个名称相同但正文和标签 ID 不同的标签
+- **WHEN** 用户将其中一个标签拖到其他栏或分栏边缘
+- **THEN** 应用 SHALL 按被拖动标签的唯一 ID 移动对应正文
+- **AND** 另一个同名标签 SHALL 保留在原位置且正文不变
+
+#### Scenario: Rebuild a Markdown editor after moving panes
+- **GIVEN** 两个同名 Markdown 标签具有不同正文
+- **WHEN** 用户把其中一个标签移动到其他分栏
+- **THEN** 应用 SHALL 在目标分栏重新创建该标签的 Markdown 编辑器实例
+- **AND** 目标编辑器 SHALL 显示被移动标签的正文
+- **AND** 原分栏编辑器 SHALL 继续显示原标签正文
+- **AND** 拖动开始阶段 SHALL NOT 临时切换原分栏编辑器并把缓存内容回写到其他标签

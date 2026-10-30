@@ -434,17 +434,18 @@
     var found = findTab(next, tabId);
     if (!found) return next;
 
-    // 创建标签副本（新 ID，其余字段保留）
-    var spec = clone(found.tab);
-    delete spec.id;
-    var tabCopy = createTab(spec);
+    // 深复制当前标签的完整快照，只替换 ID，确保两个标签后续完全独立。
+    var tabCopy = clone(found.tab);
+    tabCopy.id = nextId("tab");
 
     if (dropZone === DROP_CENTER) {
       target.tabs.push(tabCopy);
       setActiveTab(target, tabCopy.id);
       next.activePaneId = targetPaneId;
     } else {
-      var copyPane = createPane({ tabs: [tabCopy] });
+      var copyPane = createPane({ tabs: [] });
+      copyPane.tabs = [tabCopy];
+      copyPane.activeTabId = tabCopy.id;
       next.panes.push(copyPane);
       splitPaneInLayout(next, targetPaneId, copyPane.id, dropZone);
       next.activePaneId = copyPane.id;
