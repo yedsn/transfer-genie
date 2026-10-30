@@ -57,7 +57,7 @@
     },
     { "name":"----------ios-build---------", "command":"---------------------","request":"launch","type":"node-terminal"},
     {
-      "command": "npm run ios:build-lates",
+      "command": "npm run ios:build-latest",
       "cwd": "${workspaceFolder}",
       "name": "ios:build-latest",
       "request": "launch",
