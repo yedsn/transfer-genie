@@ -63,7 +63,7 @@ Each editor component is keyed by both pane ID and tab ID. Moving a tab to anoth
 
 The drag start does not switch the source pane's active editor. The moved tab becomes active only when the state transition commits at drop time, preventing a cached CodeMirror instance from being mounted just before removal and writing its value back into the remaining source tab during teardown.
 
-Editor.md receives the draft text through its initial `markdown` option, avoiding an empty asynchronous instance followed by a competing `onload` write. After a drag commit, all visible Markdown editors receive a refresh event and resynchronize from their own tab state after layout reconciliation.
+Editor.md receives the draft text through its initial `markdown` option. Each component also owns a generation token and waits until its own CodeMirror instance exists before binding change handlers. The handler captures the tab ID that created the instance instead of reading a later reactive active tab. Unmounting invalidates the generation and detaches the handler, so delayed Editor.md callbacks cannot write into a replacement component. A `data-markdown-ready` marker is set only after the instance has been synchronized and its listener is active.
 
 ## Risks / Trade-offs
 

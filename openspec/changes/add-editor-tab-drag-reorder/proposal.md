@@ -17,7 +17,7 @@
 - 所有标签拖动 SHALL 采用移动语义；源标签失效或拖动事件重复到达时 SHALL 取消多余提交，绝不新建副本。
 - 横向、纵向及标签菜单分栏 SHALL 完整复制当前标签，并生成后续修改互不影响的独立标签。
 - SortableJS SHALL 以标签唯一 ID 而不是名称或显示内容识别拖动对象，确保同名标签移动正确。
-- Markdown 标签跨栏后 SHALL 销毁旧栏编辑器实例并在新栏按正确内容重新初始化，避免复用旧 CodeMirror 缓存。
+- Markdown 标签跨栏后 SHALL 销毁旧栏编辑器实例并在新栏按正确内容重新初始化；每个 CodeMirror 实例 SHALL 在真正就绪后绑定到固定标签 ID，旧实例的迟到回调 SHALL NOT 修改当前标签。
 
 ## Capabilities
 

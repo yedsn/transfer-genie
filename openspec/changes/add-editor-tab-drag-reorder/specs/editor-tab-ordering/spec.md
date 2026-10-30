@@ -106,3 +106,11 @@
 - **AND** 目标编辑器 SHALL 显示被移动标签的正文
 - **AND** 原分栏编辑器 SHALL 继续显示原标签正文
 - **AND** 拖动开始阶段 SHALL NOT 临时切换原分栏编辑器并把缓存内容回写到其他标签
+- **AND** 已卸载 Markdown 实例的异步回调 SHALL NOT 修改新实例或其他标签正文
+
+#### Scenario: Preserve independently edited copies through merge and split
+- **GIVEN** 两个同名 Markdown 标签由分栏复制产生，正文分别为 `111` 和 `222`
+- **WHEN** 用户先把它们合并回同一栏，再把正文为 `222` 的标签拖到右侧分栏
+- **THEN** 左栏 Markdown 编辑器 SHALL 显示 `111`
+- **AND** 右栏 Markdown 编辑器 SHALL 显示 `222`
+- **AND** 两个标签的持久化正文 SHALL 保持不变
