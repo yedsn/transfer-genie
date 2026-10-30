@@ -888,7 +888,7 @@ async function confirmDeletion() {
 async function copySelectedText() {
   const message = selectedMessage.value;
   if (!message) return;
-  if (await controller.copyMessage(message) && selectedMessage.value === message && activeSheet.value === "actions") closeSheet();
+  await controller.copyMessage(message);
 }
 async function sendDraft() {
   const complete = await controller.sendDraft();
@@ -1053,6 +1053,7 @@ onBeforeUnmount(() => {
   window.clearTimeout(longPressTimer);
   window.clearTimeout(composerCloseTimer);
   window.clearInterval(statusTimer);
+  controller.dismissToast();
   removeTransferListeners?.();
 });
 </script>
@@ -1269,13 +1270,6 @@ onBeforeUnmount(() => {
               清除
             </button>
           </div>
-          <p
-            v-if="state.notice || state.error"
-            class="mobile-feedback"
-            :class="{ 'is-error': state.error }"
-          >
-            {{ state.error || state.notice }}
-          </p>
           <div class="mobile-section-heading">
             <span>{{ selectionMode ? `已选择 ${selectedMessages.length} 条` : searchQuery ? "搜索结果" : "消息" }}</span
             ><small
@@ -1313,7 +1307,7 @@ onBeforeUnmount(() => {
                 <button v-if="selectionMode" class="mobile-message-select" type="button" :aria-label="`选择消息 ${message.title}`" :aria-pressed="selectedFilenames.includes(message.filename)" :disabled="state.busy" @pointerdown.stop @click.stop="toggleMessageSelection(message)">{{ selectedFilenames.includes(message.filename) ? "✓" : "" }}</button>
                 <span>{{ message.source }}</span>
                 <time>{{ message.time }}</time>
-                <span v-if="message.marked" class="mobile-message-mark" aria-label="已标记">★</span>
+                <span v-if="message.marked" class="mobile-message-mark" aria-label="已标记"><svg class="mobile-star-icon is-marked" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.2 2.72 5.5 6.08.89-4.4 4.28 1.04 6.05L12 17.06 6.56 19.92l1.04-6.05-4.4-4.28 6.08-.89L12 3.2Z" /></svg></span>
                 <button v-if="!selectionMode" class="mobile-card-more" type="button" aria-label="更多操作" @pointerdown.stop @click.stop="openActions(message)">•••</button>
               </header>
               <div class="mobile-message-bubble">
@@ -1455,7 +1449,7 @@ onBeforeUnmount(() => {
                 <small><span v-for="tag in state.tags.filter((tag) => item.tagIds.includes(tag.id))" :key="tag.id">{{ tag.name }}</span><span v-if="!item.tagIds.length">未分类</span><i></i>{{ item.dueDate || "无截止日期" }}</small>
               </button>
               <div class="mobile-task-controls">
-                <button class="mobile-task-pin" type="button" :aria-label="`取消标记 ${item.title}`" :disabled="state.busy" @click="openUnmarkConfirmation(item)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10l-1 6 3 3v2h-6v7l-1 1-1-1v-7H5v-2l3-3-1-6Z" /></svg></button>
+                <button class="mobile-task-pin" type="button" :aria-label="`取消标记 ${item.title}`" :disabled="state.busy" @click="openUnmarkConfirmation(item)"><svg class="mobile-star-icon is-marked" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.2 2.72 5.5 6.08.89-4.4 4.28 1.04 6.05L12 17.06 6.56 19.92l1.04-6.05-4.4-4.28 6.08-.89L12 3.2Z" /></svg></button>
                 <button class="mobile-task-edit" type="button" :aria-label="`编辑标记 ${item.title}`" @click="openMarkedEditor(item)">编辑</button>
               </div>
             </article>
@@ -1753,7 +1747,7 @@ onBeforeUnmount(() => {
           <div class="mobile-compose-tools">
             <button type="button" aria-label="照片" :disabled="state.busy || state.composer.sending || state.composer.selecting" @click="controller.selectMedia"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="8.5" cy="9" r="1.5"/><path d="m4 18 5-5 3 3 3-4 5 6"/></svg><span class="mobile-visually-hidden">照片</span></button>
             <button type="button" aria-label="文件" :disabled="state.busy || state.composer.sending || state.composer.selecting" @click="controller.selectDocuments"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h9l5 5v13H5zM14 3v5h5M8 13h8M8 17h8"/></svg><span class="mobile-visually-hidden">文件</span></button>
-            <button type="button" aria-label="标记" :title="state.composer.marked ? '已标记，编辑标记设置' : '设置标记'" :class="{ 'is-selected': state.composer.marked }" :disabled="state.composer.sending" @click="openMarkSettings('composer')"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10v18l-5-3-5 3z"/></svg><span class="mobile-visually-hidden">标记</span></button>
+            <button type="button" aria-label="标记" :title="state.composer.marked ? '已标记，编辑标记设置' : '设置标记'" :class="{ 'is-selected': state.composer.marked }" :aria-pressed="state.composer.marked" :disabled="state.composer.sending" @click="openMarkSettings('composer')"><svg class="mobile-star-icon" :class="{ 'is-marked': state.composer.marked }" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.2 2.72 5.5 6.08.89-4.4 4.28 1.04 6.05L12 17.06 6.56 19.92l1.04-6.05-4.4-4.28 6.08-.89L12 3.2Z" /></svg><span class="mobile-visually-hidden">标记</span></button>
           </div>
           <button
             class="mobile-primary-button"
@@ -1806,8 +1800,8 @@ onBeforeUnmount(() => {
           <div class="mobile-action-grid">
             <button type="button" :disabled="state.busy || state.composer.sending" @click="copySelectedText">
               <span>⧉</span>复制</button
-            ><button type="button" :disabled="state.busy || state.composer.sending" @click="toggleSelectedMark">
-              <span>☆</span
+            ><button type="button" aria-label="切换标记" :class="{ 'is-marked': selectedMessage?.marked }" :aria-pressed="selectedMessage?.marked" :disabled="state.busy || state.composer.sending" @click="toggleSelectedMark">
+              <span><svg class="mobile-star-icon" :class="{ 'is-marked': selectedMessage?.marked }" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.2 2.72 5.5 6.08.89-4.4 4.28 1.04 6.05L12 17.06 6.56 19.92l1.04-6.05-4.4-4.28 6.08-.89L12 3.2Z" /></svg></span
               >{{ selectedMessage?.marked ? "取消标记" : "标记" }}</button
             ><button
               type="button"
@@ -2121,7 +2115,7 @@ onBeforeUnmount(() => {
           </div>
           <p v-if="state.error" class="mobile-feedback is-error" role="alert">{{ state.error }}</p>
           <div class="mobile-mark-footer">
-            <button class="mobile-primary-button" type="button" :disabled="state.busy || savingMark" @click="saveMarkedMetadata"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10v18l-5-3-5 3z" /></svg>{{ state.busy || savingMark ? "正在保存…" : "保存标记" }}</button>
+            <button class="mobile-primary-button" type="button" :disabled="state.busy || savingMark" @click="saveMarkedMetadata"><svg class="mobile-star-icon is-marked" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.2 2.72 5.5 6.08.89-4.4 4.28 1.04 6.05L12 17.06 6.56 19.92l1.04-6.05-4.4-4.28 6.08-.89L12 3.2Z" /></svg>{{ state.busy || savingMark ? "正在保存…" : "保存标记" }}</button>
             <button v-if="canRemoveSavedMark" class="mobile-mark-remove" type="button" :disabled="state.busy || savingMark" @click="removeSavedMark">取消标记</button>
           </div>
         </section>
@@ -2322,5 +2316,22 @@ onBeforeUnmount(() => {
           </div>
         </section>
     </div>
+    <Transition name="mobile-toast">
+      <div
+        v-if="state.toast.visible"
+        :key="state.toast.id"
+        class="mobile-toast"
+        :class="`is-${state.toast.tone}`"
+        :role="state.toast.tone === 'error' ? 'alert' : 'status'"
+        :aria-live="state.toast.tone === 'error' ? 'assertive' : 'polite'"
+      >
+        <span class="mobile-toast-icon" aria-hidden="true">
+          <svg v-if="state.toast.tone === 'success'" viewBox="0 0 20 20"><path d="m5.1 10.2 3.1 3.1 6.8-7" /></svg>
+          <svg v-else-if="state.toast.tone === 'error'" viewBox="0 0 20 20"><path d="M10 5.3v5.3M10 14.2h.01" /></svg>
+          <svg v-else viewBox="0 0 20 20"><path d="M10 9v5M10 5.8h.01" /></svg>
+        </span>
+        <span>{{ state.toast.message }}</span>
+      </div>
+    </Transition>
   </div>
 </template>

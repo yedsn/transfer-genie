@@ -145,13 +145,14 @@ export function useMobileController() {
   let feedRead: Promise<void> = Promise.resolve();
   let searchGeneration = 0;
   let markedGeneration = 0;
+  let toastTimer: number | undefined;
   const connectionRequestGeneration = new Map<string, number>();
   const state = reactive({
     previewMode,
     boot: "loading" as "loading" | "no-profile" | "choose-profile" | "signed-out" | "needs-space" | "ready" | "error",
     busy: false,
     error: "",
-    notice: "",
+    toast: { id: 0, visible: false, message: "", tone: "success" as "success" | "info" | "error" },
     settings: null as any,
     profiles: [] as any[],
     connectionStates: {} as Record<string, "unknown" | "checking" | "ready" | "signed-out" | "network-error" | "needs-attention" | "disabled">,
@@ -213,14 +214,34 @@ export function useMobileController() {
   const activeTransfers = computed(() => state.transfers.filter((item) => !["done", "complete", "completed", "saved", "sent", "success", "failed", "error", "cancelled"].includes(item.state)));
   const signedIn = computed(() => !!state.account?.signedIn);
 
+  function dismissToast() {
+    window.clearTimeout(toastTimer);
+    toastTimer = undefined;
+    state.toast.visible = false;
+  }
+
+  function showToast(message: string, tone: "success" | "info" | "error" = "success") {
+    const normalized = message.trim();
+    if (!normalized) return;
+    window.clearTimeout(toastTimer);
+    state.toast.id += 1;
+    state.toast.message = normalized;
+    state.toast.tone = tone;
+    state.toast.visible = true;
+    toastTimer = window.setTimeout(() => {
+      state.toast.visible = false;
+      toastTimer = undefined;
+    }, tone === "error" ? 3200 : 2300);
+  }
+
   function clearFeedback() {
     state.error = "";
-    state.notice = "";
+    dismissToast();
   }
 
   function setError(error: unknown) {
     state.error = errorText(error);
-    state.notice = "";
+    showToast(state.error, "error");
   }
 
   let draftWrite: Promise<boolean> = Promise.resolve(true);
@@ -524,7 +545,7 @@ export function useMobileController() {
       const results = await Promise.allSettled([refreshMessages(), refreshMarked(), refreshStatus(), refreshTransfers(), refreshCache(), loadAppVersion()]);
       if (generation !== viewGeneration) return;
       const failure = results.find((result) => result.status === "rejected") as PromiseRejectedResult | undefined;
-      if (failure) state.notice = state.notice || `部分本机状态暂时无法读取：${errorText(failure.reason)}`;
+      if (failure) showToast(`部分本机状态暂时无法读取：${errorText(failure.reason)}`, "info");
     } catch (error) {
       if (generation !== viewGeneration) return;
       setError(error);
@@ -544,7 +565,7 @@ export function useMobileController() {
     if (name === state.settings?.sender_name) return true;
     if (previewMode) {
       state.settings = { ...state.settings, sender_name: name };
-      state.notice = "浏览器预览已更新名称，不会保存到本机";
+      showToast("浏览器预览已更新名称，不会保存到本机", "info");
       return true;
     }
     const generation = viewGeneration;
@@ -556,7 +577,7 @@ export function useMobileController() {
       const saved = await api().settings.saveSettings({ ...latest, sender_name: name });
       if (generation !== viewGeneration) return false;
       state.settings = saved;
-      state.notice = "发送者名称已保存，之后发送的消息使用新名称";
+      showToast("发送者名称已保存");
       return true;
     } catch (error) {
       if (generation === viewGeneration) state.sender.error = errorText(error);
@@ -582,7 +603,7 @@ export function useMobileController() {
       const summary = await api().mobileCache.clear();
       if (generation !== viewGeneration) return false;
       Object.assign(state.cache, summary, { clearing: false });
-      state.notice = before > 0 ? `已释放 ${formatBytes(Number(summary.removedBytes || before))}，待上传文件均已保留` : "当前没有可清理的附件缓存";
+      showToast(before > 0 ? `已释放 ${formatBytes(Number(summary.removedBytes || before))}，待上传文件均已保留` : "当前没有可清理的附件缓存", before > 0 ? "success" : "info");
       await refreshMessages();
       return true;
     } catch (error) { if (generation === viewGeneration) setError(error); return false; }
@@ -813,7 +834,7 @@ export function useMobileController() {
       if (generation !== viewGeneration) return false;
       await Promise.all([loadConflicts(), refreshMessages(), refreshMarked(), refreshStatus(), refreshTransfers()]);
       if (generation !== viewGeneration) return false;
-      state.notice = resolution === "local" ? "已保留本机版本并重新同步" : "已采用云端版本";
+      showToast(resolution === "local" ? "已保留本机版本并重新同步" : "已采用云端版本");
       return true;
     } catch (error) {
       if (generation === viewGeneration) setError(error);
@@ -858,7 +879,7 @@ export function useMobileController() {
       if (generation !== viewGeneration) return false;
       await Promise.all([refreshStatus(), refreshTransfers(), refreshMessages()]);
       if (generation !== viewGeneration) return false;
-      state.notice = "已重新提交同步任务";
+      showToast("已重新提交同步任务");
       return true;
     } catch (error) {
       if (generation === viewGeneration) setError(error);
@@ -956,7 +977,7 @@ export function useMobileController() {
       attachment.error = "原文件已不可用，请移除后重新选择";
       return;
     }
-    if (previewMode) { state.notice = "浏览器预览不调用 iOS 系统文件操作"; return; }
+    if (previewMode) { showToast("浏览器预览不调用 iOS 系统文件操作", "info"); return; }
     const generation = viewGeneration;
     state.busy = true;
     attachment.error = undefined;
@@ -1066,10 +1087,10 @@ export function useMobileController() {
       }
       state.composer.savedLocally = localSaveCount > 0;
       if (!await persistComposerDraft(true)) {
-        state.notice = "内容已保存到本机，但草稿状态更新失败；请勿重启，稍后重试保存";
+        showToast("内容已保存到本机，但草稿状态更新失败；请勿重启，稍后重试保存", "error");
         return false;
       }
-      state.notice = failed ? "部分内容未保存，请重试失败附件" : "已保存到本机，正在等待云端确认";
+      showToast(failed ? "部分内容未保存，请重试失败附件" : "已保存到本机，正在等待云端确认", failed ? "error" : "success");
       // The durable local commit and draft clear above are the send boundary.
       // Feed/status reads may wait on sync or transfer work, especially on a
       // physical iPhone, and must not keep a successfully committed composer
@@ -1078,7 +1099,7 @@ export function useMobileController() {
         .then((results) => {
           if (generation !== viewGeneration || failed) return;
           if (results.some((result) => result.status === "rejected")) {
-            state.notice = "内容已保存到本机，部分状态将在稍后刷新";
+            showToast("内容已保存到本机，部分状态将在稍后刷新", "info");
           }
         });
       return !failed;
@@ -1101,7 +1122,7 @@ export function useMobileController() {
       if (generation !== viewGeneration) return false;
       await Promise.all([refreshMessages(), refreshMarked(), refreshStatus()]);
       if (generation !== viewGeneration) return false;
-      state.notice = "标记变更已保存到本机，云端变更等待同步";
+      showToast(message.marked ? "已取消标记" : "已标记");
       return true;
     } catch (error) {
       if (generation === viewGeneration) setError(error);
@@ -1119,7 +1140,7 @@ export function useMobileController() {
     try {
       await navigator.clipboard.writeText(value);
       if (generation !== viewGeneration) return false;
-      state.notice = "已复制";
+      showToast("已复制到剪贴板");
       return true;
     } catch (error) {
       if (generation === viewGeneration) setError(error);
@@ -1137,7 +1158,7 @@ export function useMobileController() {
       if (generation !== viewGeneration) return false;
       await Promise.all([refreshMessages(), refreshMarked(), refreshStatus()]);
       if (generation !== viewGeneration) return false;
-      state.notice = "标记信息已保存，等待云端确认";
+      showToast(message.marked ? "标记设置已保存" : "已标记");
       return true;
     } catch (error) {
       if (generation === viewGeneration) setError(error);
@@ -1162,7 +1183,7 @@ export function useMobileController() {
         state.tags = tags;
       } catch {
         if (generation !== viewGeneration) return null;
-        state.notice = "标签已保存，列表暂未刷新；稍后刷新即可";
+        showToast("标签已保存，列表暂未刷新；稍后刷新即可", "info");
       }
       return tag;
     } catch (error) {
@@ -1183,7 +1204,7 @@ export function useMobileController() {
       if (result?.deleted !== 1) throw new Error("删除结果尚未确认，请刷新后重试");
       await Promise.all([refreshMessages(), refreshMarked(), refreshStatus()]);
       if (generation !== viewGeneration) return false;
-      state.notice = deleteRemote ? "删除已保存到本机，云端删除等待同步" : "已移除本地附件缓存";
+      showToast(deleteRemote ? "消息已删除，云端变更等待同步" : "已移除本地附件缓存");
       return true;
     } catch (error) {
       if (generation === viewGeneration) setError(error);
@@ -1220,8 +1241,11 @@ export function useMobileController() {
           }
         }
       }
-      state.notice = `${succeeded.length} 条消息已${action === "delete" ? "删除" : action === "mark" ? "标记" : "取消标记"}，云端变更等待同步`;
-      if (failed.length) state.error = `${failed.length} 条消息未完成，已保留选择，请重试`;
+      if (succeeded.length) showToast(`${succeeded.length} 条消息已${action === "delete" ? "删除" : action === "mark" ? "标记" : "取消标记"}`);
+      if (failed.length) {
+        state.error = `${failed.length} 条消息未完成，已保留选择，请重试`;
+        showToast(state.error, "error");
+      }
       try {
         await Promise.all([refreshMessages(), refreshMarked(), refreshStatus()]);
       } catch (error) {
@@ -1249,7 +1273,7 @@ export function useMobileController() {
   async function previewMessage(message: MobileMessage) {
     if (state.busy || message.kind === "text") return;
     clearFeedback();
-    if (previewMode) { state.notice = "浏览器预览不调用 iOS 系统文件操作"; return; }
+    if (previewMode) { showToast("浏览器预览不调用 iOS 系统文件操作", "info"); return; }
     const generation = viewGeneration;
     message.attachmentError = undefined;
     state.busy = true;
@@ -1281,7 +1305,7 @@ export function useMobileController() {
 
   async function prepareVideo(message: MobileMessage): Promise<string | null> {
     if (state.busy || message.kind !== "video") return null;
-    if (previewMode) { state.notice = "浏览器预览不下载视频原件"; return null; }
+    if (previewMode) { showToast("浏览器预览不下载视频原件", "info"); return null; }
     const generation = viewGeneration;
     state.busy = true;
     clearFeedback();
@@ -1305,7 +1329,7 @@ export function useMobileController() {
   async function shareMessage(message: MobileMessage) {
     if (state.busy || message.kind === "text") return;
     clearFeedback();
-    if (previewMode) { state.notice = "浏览器预览不调用 iOS 系统文件操作"; return; }
+    if (previewMode) { showToast("浏览器预览不调用 iOS 系统文件操作", "info"); return; }
     const generation = viewGeneration;
     message.attachmentError = undefined;
     state.busy = true;
@@ -1345,7 +1369,7 @@ export function useMobileController() {
   async function chooseProfile(profile: any) {
     if (profile?.enabled === false || profile?.supabase?.binding_state === "needs_attention" || profile?.supabase?.binding_state === "unbound" || !profile?.supabase?.space_id) return;
     if (state.composer.sending || state.composer.selecting || state.sender.saving) {
-      state.notice = "请等待发送、文件选择或名称保存结束后再切换连接";
+      showToast("请等待发送、文件选择或名称保存结束后再切换连接", "info");
       return;
     }
     if (state.busy) return;
@@ -1498,7 +1522,7 @@ export function useMobileController() {
     try {
       await api().settings.testSupabaseDraftConnection({ profileId: null, apiUrl: wizard.apiUrl, anonKey: wizard.anonKey });
       if (generation !== wizard.generation || fingerprint !== `${wizard.apiUrl.trim().replace(/\/+$/, "")}\u0000${wizard.anonKey.trim()}`) return false;
-      wizard.tested = true; wizard.step = 2; state.notice = "连接可用，请继续登录账号"; return true;
+      wizard.tested = true; wizard.step = 2; showToast("连接可用，请继续登录账号"); return true;
     } catch (error) { if (generation === wizard.generation) setError(error); return false; }
     finally { if (generation === wizard.generation) wizard.sending = false; }
   }
@@ -1551,15 +1575,15 @@ export function useMobileController() {
         } catch (error) {
           await initialize();
           state.error = "";
-          state.notice = `连接“${savedProfile.name}”已保存，但未切换。可稍后从连接卡片重试。${errorText(error) ? ` 原因：${errorText(error)}` : ""}`;
+          showToast(`连接“${savedProfile.name}”已保存，但未切换。可稍后从连接卡片重试。${errorText(error) ? ` 原因：${errorText(error)}` : ""}`, "info");
           return true;
         }
       }
 
       await initialize();
-      state.notice = activate
+      showToast(activate
         ? `已保存并切换到连接“${savedProfile.name}”`
-        : `已保存连接“${savedProfile.name}”，当前连接未切换`;
+        : `已保存连接“${savedProfile.name}”，当前连接未切换`);
       return true;
     } catch (error) { if (generation === wizard.generation) setError(error); return false; } finally { state.busy = false; }
   }
@@ -1622,7 +1646,7 @@ export function useMobileController() {
       wizard.spaces = [...wizard.spaces.filter((item: any) => item.id !== space.id), space];
       wizard.createOpen = false; wizard.createName = ""; wizard.createOperationId = ""; wizard.createSpaceId = "";
       wizard.selectedSpaceId = space.id; wizard.step = 4;
-      state.notice = "Space 已在服务端创建；取消向导不会自动删除它";
+      showToast("Space 已在服务端创建；取消向导不会自动删除它", "info");
       return true;
     } catch (error) { if (generation === wizard.generation) setError(error); return false; }
     finally { if (generation === wizard.generation) wizard.sending = false; }
@@ -1662,6 +1686,6 @@ export function useMobileController() {
   return {
     state, currentSpace, selectableProfiles, pendingCount, activeTransfers, signedIn, initialize, refreshAll, refreshRuntimeState, refreshAfterForeground, refreshMessages, loadOlderMessages, searchMessages, loadMoreSearch, setMarkedFilter, loadMoreMarked, loadConflicts, resolveConflict, retryTransfer,
     selectMedia, selectDocuments, removeAttachment, sendDraft, persistComposerDraft, persistComposerDraftForNavigation, deactivateComposerPersistence, toggleMark, copyMessage, updateMarkedMetadata, createMarkedTag, deleteMessage, applyMessageSelection, previewMessage, prepareVideo, shareMessage, retryPreview, previewImageFailed, previewDraftAttachment,
-    signIn, logout, chooseProfile, diagnoseProfile, setProfileEnabled, beginConnectionEdit, renameProfile, signInProfile, logoutProfile, removeProfile, loadSpaces, switchSpace, testSetupConnection, setupSignIn, completeSetup, resetWizardDownstream, openConnectionWizard, openConnectionRepair, cancelConnectionWizard, selectWizardSpace, backConnectionWizard, createWizardSpace, installTransferListeners, refreshCache, clearCache, clearFeedback, saveSenderName,
+    signIn, logout, chooseProfile, diagnoseProfile, setProfileEnabled, beginConnectionEdit, renameProfile, signInProfile, logoutProfile, removeProfile, loadSpaces, switchSpace, testSetupConnection, setupSignIn, completeSetup, resetWizardDownstream, openConnectionWizard, openConnectionRepair, cancelConnectionWizard, selectWizardSpace, backConnectionWizard, createWizardSpace, installTransferListeners, refreshCache, clearCache, clearFeedback, showToast, dismissToast, saveSenderName,
   };
 }

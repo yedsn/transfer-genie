@@ -1644,12 +1644,62 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         search.tap()
         search.typeText("TG-IOS-PROBE-20261027-document")
         XCTAssertTrue(app.staticTexts["TG-IOS-PROBE-20261027-document.txt"].waitForExistence(timeout: 15))
+        dismissSearchKeyboard()
         app.buttons["更多操作"].firstMatch.tap()
         let copy = button(containing: "复制")
         XCTAssertTrue(copy.waitForExistence(timeout: 5))
         copy.tap()
-        XCTAssertTrue(waitForNonExistence(copy, timeout: 5), "Successful copy must close the action sheet")
-        XCTAssertTrue(app.buttons["新消息"].exists)
+        XCTAssertTrue(app.staticTexts["已复制到剪贴板"].waitForExistence(timeout: 3), "Copy result must appear above the open action sheet")
+        XCTAssertTrue(copy.exists, "Toast feedback must not close the action sheet")
+        attachScreenshot(named: "copy-toast-above-action-sheet")
+        app.buttons["取消"].tap()
+        app.buttons["清除"].tap()
+    }
+
+    func testActionToastAndMarkStateRestoreOriginalFixture() {
+        app.buttons["搜索消息"].tap()
+        let search = app.searchFields["搜索文本、文件名"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap()
+        search.typeText("TG-IOS-PROBE-20261027-document")
+        XCTAssertTrue(app.staticTexts["TG-IOS-PROBE-20261027-document.txt"].waitForExistence(timeout: 15))
+        dismissSearchKeyboard()
+        app.buttons["更多操作"].firstMatch.tap()
+        XCTAssertTrue(button(containing: "复制").waitForExistence(timeout: 5))
+
+        let markToggle = app.switches["切换标记"]
+        XCTAssertTrue(markToggle.waitForExistence(timeout: 5))
+        let initiallyMarked = (markToggle.value as? String) == "1"
+        if initiallyMarked {
+            markToggle.tap()
+            XCTAssertTrue(app.buttons["确认取消标记"].waitForExistence(timeout: 5))
+            app.buttons["确认取消标记"].tap()
+            XCTAssertTrue(app.staticTexts["已取消标记"].waitForExistence(timeout: 3))
+            XCTAssertEqual(markToggle.value as? String, "0")
+            attachScreenshot(named: "unmarked-hollow-star-toast")
+
+            markToggle.tap()
+            XCTAssertTrue(app.buttons["保存标记"].waitForExistence(timeout: 5))
+            app.buttons["保存标记"].tap()
+            XCTAssertTrue(app.staticTexts["已标记"].waitForExistence(timeout: 3))
+            XCTAssertEqual(markToggle.value as? String, "1")
+        } else {
+            markToggle.tap()
+            XCTAssertTrue(app.buttons["保存标记"].waitForExistence(timeout: 5))
+            app.buttons["保存标记"].tap()
+            XCTAssertTrue(app.staticTexts["已标记"].waitForExistence(timeout: 3))
+            XCTAssertEqual(markToggle.value as? String, "1")
+            attachScreenshot(named: "marked-yellow-star-toast")
+
+            markToggle.tap()
+            XCTAssertTrue(app.buttons["确认取消标记"].waitForExistence(timeout: 5))
+            app.buttons["确认取消标记"].tap()
+            XCTAssertTrue(app.staticTexts["已取消标记"].waitForExistence(timeout: 3))
+            XCTAssertEqual(markToggle.value as? String, "0")
+        }
+
+        app.buttons["取消"].tap()
+        app.buttons["清除"].tap()
     }
 
     func testDedicatedDocumentMarkAndDeleteCancellation() {
@@ -1664,7 +1714,7 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         app.buttons["更多操作"].firstMatch.tap()
         XCTAssertTrue(button(containing: "复制").waitForExistence(timeout: 5))
         let wasMarked = button(containing: "取消标记").exists
-        let markAction = button(containing: wasMarked ? "编辑标签与截止日期" : "☆ 标记")
+        let markAction = button(containing: wasMarked ? "编辑标签与截止日期" : "标记")
         XCTAssertTrue(markAction.waitForExistence(timeout: 5))
         markAction.tap()
         XCTAssertTrue(app.staticTexts["标记设置"].waitForExistence(timeout: 5))
