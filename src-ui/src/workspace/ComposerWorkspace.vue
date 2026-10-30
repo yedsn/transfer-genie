@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
-import Sortable, { type SortableEvent } from "sortablejs";
+import Sortable, { type MoveEvent, type SortableEvent } from "sortablejs";
 import { composerStore } from "./composer-store";
 import DraftEditor from "./DraftEditor.vue";
 import "./tab-name-ai.js";
@@ -12,7 +12,7 @@ const tabSortables = new Map<string, Sortable>();
 let sortableDrag: {
   tabId: string;
   sourcePaneId: string;
-  target: { kind: "tabs"; paneId: string; insertIndex: number } | { kind: "pane"; paneId: string; zone: string } | null;
+  target: { kind: "tabs"; paneId: string } | { kind: "pane"; paneId: string; zone: string } | null;
 } | null = null;
 const destructivePrompt = ref<{ title: string; body: string; action: () => void } | null>(null);
 const sentDraftPrompts = ref<{ id: string; text: string; format: string }[]>([]);
@@ -284,6 +284,7 @@ function onSortableStart(event: SortableEvent) {
   const tab = composerStore.getDraft(tabId);
   if (!tab) return;
   sortableDrag = { tabId, sourcePaneId: paneId, target: null };
+  switchDraft(paneId, tabId);
   const ctx = (window as any).transferGenieComposerDragCtx;
   const drag = (window as any).transferGenieWorkspaceDrag;
   ctx.payload = drag.createTabDragPayload(tab, paneId);
@@ -293,16 +294,21 @@ function onSortableStart(event: SortableEvent) {
     originalEvent.dataTransfer.effectAllowed = "move";
   }
 }
+function onSortableMove(event: MoveEvent) {
+  if (!sortableDrag) return true;
+  const paneId = (event.to as HTMLElement).dataset.paneId || "";
+  sortableDrag.target = paneId ? { kind: "tabs", paneId } : null;
+  hoverZone.value = {};
+  return true;
+}
 function onSortableEnd(event: SortableEvent) {
   const ctx = (window as any).transferGenieComposerDragCtx;
   const dragSession = sortableDrag;
-  if (dragSession?.target?.kind === "tabs" && dragSession.target.paneId !== dragSession.sourcePaneId) {
-    composerStore.moveDraft(dragSession.tabId, dragSession.target.paneId, dragSession.target.insertIndex);
-  } else if (dragSession?.target?.kind === "pane") {
+  if (dragSession?.target?.kind === "pane") {
     const { paneId, zone } = dragSession.target;
     if (zone === "center") composerStore.moveDraft(dragSession.tabId, paneId);
     else composerStore.dockTab(dragSession.tabId, paneId, zone);
-  } else if (dragSession && event.oldIndex != null && event.newIndex != null) {
+  } else if (dragSession?.target?.kind === "tabs" && event.oldIndex != null && event.newIndex != null) {
     const sourcePaneId = (event.from as HTMLElement).dataset.paneId || "";
     const targetPaneId = (event.to as HTMLElement).dataset.paneId || "";
     const drag = (window as any).transferGenieWorkspaceDrag;
@@ -319,16 +325,7 @@ function trackSortablePaneTarget(event: MouseEvent) {
   const tabsList = target?.closest<HTMLElement>(".cw-tabs-list[data-pane-id]");
   if (tabsList) {
     const paneId = tabsList.dataset.paneId || "";
-    const targetTab = target?.closest<HTMLElement>(".cw-tab[data-tab-id]");
-    const tabs = Array.from(tabsList.querySelectorAll<HTMLElement>(".cw-tab[data-tab-id]"))
-      .filter((tab) => !tab.classList.contains("cw-tab-sortable-fallback"));
-    var insertIndex = tabs.length;
-    if (targetTab) {
-      const targetIndex = tabs.indexOf(targetTab);
-      const rect = targetTab.getBoundingClientRect();
-      if (targetIndex >= 0) insertIndex = event.clientX < (rect.left + rect.right) / 2 ? targetIndex : targetIndex + 1;
-    }
-    sortableDrag.target = paneId ? { kind: "tabs", paneId, insertIndex } : null;
+    sortableDrag.target = paneId ? { kind: "tabs", paneId } : null;
     hoverZone.value = {};
     return;
   }
@@ -366,16 +363,23 @@ function syncTabSortables() {
       draggable: ".cw-tab",
       filter: ".cw-tab-close",
       preventOnFilter: false,
-      animation: 140,
+      animation: 120,
+      easing: "cubic-bezier(0.2, 0, 0, 1)",
+      swapThreshold: 0.55,
+      invertSwap: false,
       forceFallback: true,
       fallbackOnBody: true,
-      fallbackTolerance: 3,
+      fallbackTolerance: 4,
       fallbackClass: "cw-tab-sortable-fallback",
       ghostClass: "cw-tab-sortable-ghost",
       chosenClass: "cw-tab-sortable-chosen",
       dragClass: "cw-tab-sortable-drag",
       emptyInsertThreshold: 24,
+      scroll: true,
+      scrollSensitivity: 48,
+      scrollSpeed: 14,
       onStart: onSortableStart,
+      onMove: onSortableMove,
       onEnd: onSortableEnd,
     }));
     element.dataset.sortableReady = "true";
@@ -620,7 +624,7 @@ onUnmounted(() => {
         :key="pane.id"
         class="cw-pane"
         :data-pane-id="pane.id"
-        :class="{ 'is-active': pane.id === state.activePaneId }"
+        :class="{ 'is-active': pane.id === state.activePaneId, 'is-drop-target': !!hoverZone[pane.id] }"
         @dragover="onPaneDragOver($event, pane.id)"
         @dragleave="onPaneDragLeave(pane.id, $event)"
         @drop="onPaneDrop($event, pane.id)"
@@ -656,11 +660,7 @@ onUnmounted(() => {
         <div v-else class="cw-pane-empty">空分栏</div>
 
         <div v-if="hoverZone[pane.id]" class="cw-drop-overlay">
-          <div class="cw-drop-zone cw-drop-top" :class="{ 'is-hot': hoverZone[pane.id] === 'top' }"></div>
-          <div class="cw-drop-zone cw-drop-left" :class="{ 'is-hot': hoverZone[pane.id] === 'left' }"></div>
-          <div class="cw-drop-zone cw-drop-center" :class="{ 'is-hot': hoverZone[pane.id] === 'center' }"></div>
-          <div class="cw-drop-zone cw-drop-right" :class="{ 'is-hot': hoverZone[pane.id] === 'right' }"></div>
-          <div class="cw-drop-zone cw-drop-bottom" :class="{ 'is-hot': hoverZone[pane.id] === 'bottom' }"></div>
+          <div class="cw-drop-preview" :class="'is-' + hoverZone[pane.id]"></div>
         </div>
       </section>
     </div>

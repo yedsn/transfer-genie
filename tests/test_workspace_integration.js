@@ -19,12 +19,16 @@ function testTabDragStartUsesExportedPayloadFactory() {
   assert.match(workspaceComponent, /group: "transfer-genie-editor-tabs"/);
   assert.match(workspaceComponent, /forceFallback: true/);
   assert.match(workspaceComponent, /fallbackOnBody: true/);
+  assert.match(workspaceComponent, /swapThreshold: 0\.55/);
+  assert.match(workspaceComponent, /onMove: onSortableMove/);
   assert.match(workspaceComponent, /trackSortablePaneTarget/);
-  assert.match(workspaceComponent, /kind: "tabs", paneId, insertIndex/);
+  assert.match(workspaceComponent, /kind: "tabs", paneId/);
+  assert.match(workspaceComponent, /switchDraft\(paneId, tabId\)/);
   assert.match(workspaceComponent, /composerStore\.dockTab\(dragSession\.tabId, paneId, zone\)/);
   assert.match(workspaceComponent, /drag\.createTabDragPayload\(tab, paneId\)/);
   assert.match(workspaceComponent, /composerStore\.moveDraft\(dragSession\.tabId, targetPaneId, insertIndex\)/);
   assert.match(workspaceComponent, /closest\("\.cw-tabs-list"\)/);
+  assert.doesNotMatch(workspaceComponent, /targetTab\.getBoundingClientRect/);
   assert.doesNotMatch(workspaceComponent, /drag\.createDragPayload\(/);
   assert.doesNotMatch(workspaceComponent, /@dragover="onTabDragOver/);
 }

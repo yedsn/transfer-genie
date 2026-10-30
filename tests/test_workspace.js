@@ -312,6 +312,26 @@ function testDetectDropZoneOutsidePaneDefaultsCenter() {
   assert.equal(drag.detectDropZoneFromRects({ x: 200, y: 200 }, pane, win), 'center');
 }
 
+function testDetectDropZoneLeft() {
+  const pane = { left: 0, top: 0, right: 100, bottom: 100 };
+  const win = { left: 0, top: 0, right: 200, bottom: 200 };
+  assert.equal(drag.detectDropZoneFromRects({ x: 10, y: 50 }, pane, win), 'left');
+}
+
+function testDetectDropZoneTop() {
+  const pane = { left: 0, top: 0, right: 100, bottom: 100 };
+  const win = { left: 0, top: 0, right: 200, bottom: 200 };
+  assert.equal(drag.detectDropZoneFromRects({ x: 50, y: 10 }, pane, win), 'top');
+}
+
+function testDetectDropZoneUsesRectangularCenter() {
+  const pane = { left: 0, top: 0, right: 100, bottom: 100 };
+  const win = { left: 0, top: 0, right: 200, bottom: 200 };
+  assert.equal(drag.EDGE_RATIO, 0.25);
+  assert.equal(drag.detectDropZoneFromRects({ x: 26, y: 74 }, pane, win), 'center');
+  assert.equal(drag.detectDropZoneFromRects({ x: 24, y: 50 }, pane, win), 'left');
+}
+
 function testSortableInsertIndexConversion() {
   assert.equal(drag.getSortableInsertIndex(0, 2, true), 3, '同栏向后移动转换为移动前插入索引');
   assert.equal(drag.getSortableInsertIndex(2, 0, true), 0, '同栏向前移动保持最终索引');
@@ -412,6 +432,9 @@ function run() {
   testDetectDropZoneCenter();
   testDetectDropZoneRight();
   testDetectDropZoneBottom();
+  testDetectDropZoneLeft();
+  testDetectDropZoneTop();
+  testDetectDropZoneUsesRectangularCenter();
   testDetectDropZoneOutsidePaneDefaultsCenter();
   testSortableInsertIndexConversion();
   testPersistenceRoundTrip();

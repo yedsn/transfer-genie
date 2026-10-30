@@ -20,8 +20,8 @@
   var DROP_LEFT = "left";
   var DROP_TOP = "top";
 
-  // 中心区半径占比：距中心小于该比例时视为 center
-  var CENTER_RATIO = 0.25;
+  // VS Code 风格落区：四周 25% 为拆分区域，中间矩形加入当前分栏。
+  var EDGE_RATIO = 0.25;
 
   /** 标签拖拽负载。 */
   function createTabDragPayload(tab, sourcePaneId) {
@@ -64,23 +64,23 @@
       return DROP_CENTER;
     }
 
-    var cx = (paneRect.left + paneRect.right) / 2;
-    var cy = (paneRect.top + paneRect.bottom) / 2;
-    var halfW = (paneRect.right - paneRect.left) / 2;
-    var halfH = (paneRect.bottom - paneRect.top) / 2;
-    if (halfW <= 0 || halfH <= 0) return DROP_CENTER;
+    var width = paneRect.right - paneRect.left;
+    var height = paneRect.bottom - paneRect.top;
+    if (width <= 0 || height <= 0) return DROP_CENTER;
 
-    var dx = (px - cx) / halfW; // -1..1
-    var dy = (py - cy) / halfH; // -1..1
+    var edgeX = width * EDGE_RATIO;
+    var edgeY = height * EDGE_RATIO;
+    var inCenterX = px >= paneRect.left + edgeX && px <= paneRect.right - edgeX;
+    var inCenterY = py >= paneRect.top + edgeY && py <= paneRect.bottom - edgeY;
+    if (inCenterX && inCenterY) return DROP_CENTER;
 
-    // 中心圆区
-    if (Math.sqrt(dx * dx + dy * dy) <= CENTER_RATIO) return DROP_CENTER;
-
-    // 横向偏好大于纵向时取右半区，否则下半区
-    if (Math.abs(dx) >= Math.abs(dy)) {
-      return dx > 0 ? DROP_RIGHT : DROP_LEFT;
-    }
-    return dy > 0 ? DROP_BOTTOM : DROP_TOP;
+    var candidates = [];
+    if (px < paneRect.left + edgeX) candidates.push({ zone: DROP_LEFT, score: (px - paneRect.left) / edgeX });
+    if (px > paneRect.right - edgeX) candidates.push({ zone: DROP_RIGHT, score: (paneRect.right - px) / edgeX });
+    if (py < paneRect.top + edgeY) candidates.push({ zone: DROP_TOP, score: (py - paneRect.top) / edgeY });
+    if (py > paneRect.bottom - edgeY) candidates.push({ zone: DROP_BOTTOM, score: (paneRect.bottom - py) / edgeY });
+    candidates.sort(function(a, b) { return a.score - b.score; });
+    return candidates.length > 0 ? candidates[0].zone : DROP_CENTER;
   }
 
   /** DOM 适配：从事件与元素矩形判定投放区域。 */
@@ -104,7 +104,7 @@
     DROP_BOTTOM: DROP_BOTTOM,
     DROP_LEFT: DROP_LEFT,
     DROP_TOP: DROP_TOP,
-    CENTER_RATIO: CENTER_RATIO,
+    EDGE_RATIO: EDGE_RATIO,
     createTabDragPayload: createTabDragPayload,
     createMessageDragPayload: createMessageDragPayload,
     detectDropZoneFromRects: detectDropZoneFromRects,

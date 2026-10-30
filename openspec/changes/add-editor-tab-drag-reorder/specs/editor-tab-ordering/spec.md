@@ -16,7 +16,7 @@
 
 #### Scenario: Show the insertion position
 - **WHEN** 标签拖动经过另一个标签的左半区或右半区
-- **THEN** 应用 SHALL 在对应标签边缘显示插入位置提示
+- **THEN** 应用 SHALL 像 VS Code 一样让相邻标签实时让位并显示最终插入位置
 - **AND** 标签移动、取消或离开标签栏后 SHALL 清除该提示
 
 #### Scenario: Preserve tab content after reordering
@@ -36,7 +36,13 @@
 
 #### Scenario: Keep edge docking behavior
 - **WHEN** 用户把标签拖到分栏边缘区域而不是标签栏
-- **THEN** 应用 SHALL 继续按现有左右或上下停靠规则拆分
+- **THEN** 应用 SHALL 以半栏矩形预览最终拆分位置
+- **AND** 放下后 SHALL 按预览的左右或上下方向拆分
+
+#### Scenario: Move into an editor group body
+- **WHEN** 用户把标签拖到另一个分栏编辑区的中央区域
+- **THEN** 应用 SHALL 以中央矩形预览加入该分栏
+- **AND** 放下后该标签 SHALL 成为目标分栏的活动标签
 
 ### Requirement: Persist editor tab order
 

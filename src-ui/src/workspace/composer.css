@@ -83,6 +83,7 @@
   border-radius: 6px;
   overflow: hidden;
   position: relative;
+  isolation: isolate;
   background: var(--panel);
 }
 .cw-pane.is-active { border-color: rgba(107,140,255,0.7); }
@@ -94,8 +95,9 @@
   border-bottom: 1px solid var(--border);
   background: var(--panel-soft);
   overflow-x: auto;
+  scrollbar-width: thin;
 }
-.cw-tabs-list { display: flex; align-items: stretch; min-width: 0; }
+.cw-tabs-list { display: flex; flex: 1 0 auto; align-items: stretch; min-width: 24px; }
 .cw-tab {
   display: inline-flex;
   align-items: center;
@@ -113,17 +115,17 @@
   user-select: none;
 }
 .cw-tab:active { cursor: grabbing; }
-.cw-tab-sortable-ghost { opacity: 0.35; background: rgba(107,140,255,0.18); }
+.cw-tab-sortable-ghost { opacity: 0.38; background: rgba(107,140,255,0.16); }
 .cw-tab-sortable-chosen { color: var(--ink); }
-.cw-tab-sortable-drag { cursor: grabbing; box-shadow: 0 6px 18px rgba(24,34,58,0.2); }
+.cw-tab-sortable-drag { cursor: grabbing; }
 .cw-tab-sortable-fallback {
-  opacity: 0.92 !important;
+  opacity: 0.96 !important;
   cursor: grabbing !important;
   pointer-events: none !important;
   background: var(--panel) !important;
-  border: 1px solid var(--accent-strong) !important;
-  border-radius: 6px;
-  box-shadow: 0 10px 28px rgba(24,34,58,0.24);
+  border: 1px solid rgba(107,140,255,0.72) !important;
+  border-radius: 3px;
+  box-shadow: 0 8px 20px rgba(24,34,58,0.22);
 }
 .cw-tab.is-active { background: var(--panel); color: var(--ink); }
 .cw-tab-fmt {
@@ -273,18 +275,28 @@
 
 /* 投放区域 */
 .cw-drop-overlay {
-  position: absolute; inset: 0; pointer-events: none;
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  grid-template-rows: 1fr 1fr 1fr;
+  position: absolute;
+  inset: 0;
+  z-index: 100000;
+  pointer-events: none;
+  background: rgba(107,140,255,0.04);
 }
-.cw-drop-zone { border: 2px dashed transparent; border-radius: 4px; }
-.cw-drop-center { grid-column: 2; grid-row: 2; }
-.cw-drop-left { grid-column: 1; grid-row: 1/4; }
-.cw-drop-right { grid-column: 3; grid-row: 1/4; }
-.cw-drop-top { grid-column: 2; grid-row: 1; }
-.cw-drop-bottom { grid-column: 2; grid-row: 3; }
-.cw-drop-zone.is-hot { background: rgba(107,140,255,0.18); border-color: rgba(107,140,255,0.7); }
+.cw-drop-preview {
+  position: absolute;
+  border: 1px solid rgba(107,140,255,0.9);
+  border-radius: 3px;
+  background: rgba(107,140,255,0.2);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.16);
+}
+.cw-drop-preview.is-center { inset: 4px; top: 30px; }
+.cw-drop-preview.is-left { inset: 4px 50% 4px 4px; }
+.cw-drop-preview.is-right { inset: 4px 4px 4px 50%; }
+.cw-drop-preview.is-top { inset: 4px 4px 50% 4px; }
+.cw-drop-preview.is-bottom { inset: 50% 4px 4px 4px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .cw-tab { transition: none !important; }
+}
 
 /* 可拖拽消息卡视觉提示 */
 .message-card[draggable="true"] { cursor: grab; }

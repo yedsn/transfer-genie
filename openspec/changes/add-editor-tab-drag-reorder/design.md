@@ -37,6 +37,10 @@ The label row owns SortableJS sorting. During fallback dragging, a window-level 
 
 Sortable instances are rebuilt after Vue renders a pane-list topology change. Rebinding is limited to pane IDs, not every text edit, and all instances are destroyed on unmount.
 
+### Match VS Code's direct-manipulation model
+
+SortableJS owns the live placeholder and sibling displacement while the pointer remains in a tab strip. The application does not independently recalculate cross-pane tab indices. When the pointer leaves the strip for an editor body, a rectangular drop preview shows the exact center, left, right, top, or bottom result. The outer quarter of each editor group is reserved for splitting and the central rectangle moves the tab into that group.
+
 ## Risks / Trade-offs
 
 - [Sortable mutates DOM before Vue state commits] → Commit synchronously in `onEnd`; Vue immediately reconciles the list from workspace state.
