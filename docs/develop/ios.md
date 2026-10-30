@@ -413,13 +413,29 @@ cp .env.example .env
 npm run ios:update
 ```
 
+如果希望避免每次更新都等待完整编译，可以让 TaskTick 每天预先生成一份独立的签名真机包：
+
+```bash
+npm run ios:build-latest
+```
+
+这个命令只构建、校验并原子更新 `gen/apple/build/ios-wireless-latest` 缓存，不连接、安装或启动 iPhone；缓存不会被后续 Simulator 或 VPhone 共用 archive 覆盖。TaskTick 任务 `Transfer Genie · iOS 每日预构建` 每天 00:00 执行项目内的 `scripts/tasktick-ios-build-latest.sh`，成功与失败记录在 TaskTick 运行日志中。Mac 在该时刻需要处于开机可运行状态，并能访问签名证书与 Xcode。
+
+需要更新手机时，在 VS Code 选择 `ios:wireless-install-latest`，或在终端执行：
+
+```bash
+npm run ios:wireless-install-latest -- --confirm
+```
+
+该入口读取最近一次成功缓存，不重新编译；它仍会确认同一 Wi-Fi 和 `.env` 生效配置，检查缓存平台、bundle ID、strict codesign、Team、描述文件有效期与目标设备 UDID，并在安装前后执行草稿和 SQLite 完整性门禁。缓存构建失败时保留上一份成功产物；若从未成功构建，会明确提示先运行 `ios:build-latest`。缓存对应每日 00:00 时的源码快照，因此当天 00:00 之后的新代码不会自动进入该包，可手动执行一次 `npm run ios:build-latest` 刷新。
+
 默认流程不会打开系统“设置”，也不会在安装完成后主动启动 App 或抢占手机前台。如果希望更新后立即打开 Transfer Genie，可以选择 `ios:wireless-update:launch`，或执行：
 
 ```bash
 npm run ios:update:launch
 ```
 
-两个 VS Code 入口都附带 `--confirm`：连接设备和构建前，终端提示 Mac 与 iPhone 连接同一个 Wi-Fi，显示配置文件路径、生效的设备名称/UDID、Apple Team ID、Cargo 缓存目录，以及本次构建和打开 App 的方式。只打印这些 iOS 相关项，不输出 `.env` 中的 Token 或其他无关内容。输入 `y`/`yes` 并回车才继续；直接回车、其他输入或输入流关闭都会取消，不连接手机或安装。命令行/进程环境变量覆盖 `.env` 时，显示的是最终生效值。终端执行需要相同确认时使用 `npm run ios:update -- --confirm` 或 `npm run ios:update:launch -- --confirm`；未带该参数的命令保持原有行为。
+三个 VS Code 无线安装入口都附带 `--confirm`：连接设备和安装前，终端提示 Mac 与 iPhone 连接同一个 Wi-Fi，显示配置文件路径、生效的设备名称/UDID、Apple Team ID、Cargo 缓存目录，以及本次使用的构建和打开 App 方式。只打印这些 iOS 相关项，不输出 `.env` 中的 Token 或其他无关内容。输入 `y`/`yes` 并回车才继续；直接回车、其他输入或输入流关闭都会取消，不连接手机、构建或安装。命令行/进程环境变量覆盖 `.env` 时，显示的是最终生效值。终端执行需要相同确认时使用 `npm run ios:update -- --confirm`、`npm run ios:update:launch -- --confirm` 或 `npm run ios:wireless-install-latest -- --confirm`；未带该参数的命令保持原有行为。
 
 脚本要求 Mac 与 `.env` 中配置的 iPhone 位于同一可用 Bonjour/IPv6 的局域网，手机已配对、解锁并开启 Developer Mode。它会从当前源码重新构建签名真机 archive，先等待现有的 350ms 草稿自动保存稳定，再连续两次通过 CoreDevice 无线复制 SQLite/WAL 并执行只读完整性与空草稿检查；随后核对 `iphoneos` 平台、strict codesign、Team、profile 有效期和设备 UDID。只有门禁通过才会原位覆盖安装，最后再次确认数据库完整。脚本不卸载 App、不清空容器，发现任何草稿或无法验证时都会停止。命令行 `--device`、`--team` 以及同名进程环境变量仍可临时覆盖 `.env`。
 

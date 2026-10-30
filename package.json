@@ -29,6 +29,8 @@
         "tauri": "tauri",
         "tauri:dev": "tauri dev",
         "tauri:build": "tauri build",
+        "ios:build-latest": "bash scripts/ios-wireless-update.sh --build-latest",
+        "ios:wireless-install-latest": "bash scripts/ios-wireless-update.sh --install-latest",
         "ios:update": "bash scripts/ios-wireless-update.sh",
         "ios:update:launch": "bash scripts/ios-wireless-update.sh --launch",
         "ios:simulator:deploy": "node scripts/ios-virtual-deploy.mjs simulator deploy",

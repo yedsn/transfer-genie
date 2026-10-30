@@ -26,6 +26,7 @@
       "request": "launch",
       "type": "node-terminal"
     },
+    { "name":"--------ios-simulator------", "command":"---------------------","request":"launch","type":"node-terminal"},
     {
       "command": "npm run ios:simulator:dev",
       "cwd": "${workspaceFolder}",
@@ -54,6 +55,21 @@
       "request": "launch",
       "type": "node-terminal"
     },
+    { "name":"----------ios-build---------", "command":"---------------------","request":"launch","type":"node-terminal"},
+    {
+      "command": "npm run ios:build-lates",
+      "cwd": "${workspaceFolder}",
+      "name": "ios:build-latest",
+      "request": "launch",
+      "type": "node-terminal"
+    },
+    {
+      "command": "npm run ios:wireless-install-latest -- --confirm",
+      "cwd": "${workspaceFolder}",
+      "name": "ios:wireless-install-latest",
+      "request": "launch",
+      "type": "node-terminal"
+    },
     {
       "command": "npm run ios:update -- --confirm",
       "cwd": "${workspaceFolder}",
@@ -68,5 +84,6 @@
       "request": "launch",
       "type": "node-terminal"
     }
+    { "name":"----------------------------", "command":"---------------------","request":"launch","type":"node-terminal"}
   ]
 }

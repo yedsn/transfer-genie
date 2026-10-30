@@ -46,6 +46,15 @@ try {
   assertPreview(launch);
   assert.match(launch.stdout, /原位更新后打开 App/);
   assert.match(launch.stdout, /构建模式\s+debug/);
+  const installLatest = run(['--install-latest', '--confirm'], 'n\n');
+  assertPreview(installLatest);
+  assert.match(installLatest.stdout, /安装每日预构建缓存（不重新构建）/);
+  assert.match(installLatest.stdout, /预构建产物/);
+  assert.ok(!installLatest.stdout.includes('STUB_'));
+  const buildLatestConflict = run(['--build-latest', '--confirm'], '');
+  assert.equal(buildLatestConflict.status, 1);
+  assert.match(buildLatestConflict.stderr, /--build-latest cannot be combined/);
+  assert.ok(!buildLatestConflict.stdout.includes('STUB_'));
   const overrides = run(['--confirm', '--device', 'CLI iPhone', '--team', 'CLITEAM'], 'n\n', { TRANSFER_GENIE_IOS_DEVICE: 'Env iPhone', APPLE_DEVELOPMENT_TEAM: 'ENVTEAM' });
   assert.match(overrides.stdout, /TRANSFER_GENIE_IOS_DEVICE\s+CLI iPhone/);
   assert.match(overrides.stdout, /APPLE_DEVELOPMENT_TEAM\s+CLITEAM/);
@@ -98,9 +107,13 @@ try {
   assert.equal(help.status, 0);
   assert.ok(!help.stdout.includes('[y/N]'));
   const launchConfig = JSON.parse(readFileSync(new URL('../.vscode/launch.json', import.meta.url)));
-  for (const name of ['ios:wireless-update', 'ios:wireless-update:launch']) {
+  for (const name of ['ios:wireless-update', 'ios:wireless-update:launch', 'ios:wireless-install-latest']) {
     assert.match(launchConfig.configurations.find(item => item.name === name).command, / -- --confirm$/);
   }
+  assert.match(launchConfig.configurations.find(item => item.name === 'ios:wireless-install-latest').command, /ios:wireless-install-latest/);
+  const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url)));
+  assert.match(packageJson.scripts['ios:build-latest'], /--build-latest$/);
+  assert.match(packageJson.scripts['ios:wireless-install-latest'], /--install-latest$/);
   console.log('iOS wireless confirmation passed: safe preview, cancellation/EOF, explicit consent, overrides and launch wiring; hardware/build tools stubbed');
 } finally {
   rmSync(fixture, { recursive: true, force: true });

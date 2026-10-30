@@ -10,10 +10,16 @@ ios_cargo_home="${TRANSFER_GENIE_IOS_CARGO_HOME:-}"
 bundle_id="com.transfergenie"
 build_mode="release"
 skip_build=false
+build_latest=false
+install_latest=false
 check_only=false
 launch_after_install=false
 confirm_before_update=false
 temp_root=""
+cache_staging=""
+owns_build_lock=false
+build_lock="$project_root/gen/apple/build/.virtual-deploy.lock"
+latest_build_dir="${TRANSFER_GENIE_IOS_LATEST_BUILD_DIR:-}"
 
 # Keep redirected logs and terminals without color support clean.
 color_reset="" color_bold="" color_muted="" color_cyan=""
@@ -40,6 +46,9 @@ Options:
   --team <team-id>       Override APPLE_DEVELOPMENT_TEAM from .env
   --debug                Build a Debug archive instead of Release
   --skip-build           Reuse gen/apple/build/transfer-genie_iOS.xcarchive
+  --build-latest         Build and cache a signed device app; do not connect
+                        to, install on, or launch an iPhone
+  --install-latest       Install the latest cached device app without building
   --check-only           Run all safety checks but do not install or launch
   --launch               Open Transfer Genie after the update
   --confirm              Show effective iOS settings and ask before connecting
@@ -47,7 +56,8 @@ Options:
 
 Environment equivalents:
   TRANSFER_GENIE_IOS_DEVICE, APPLE_DEVELOPMENT_TEAM,
-  TRANSFER_GENIE_IOS_CARGO_HOME, TRANSFER_GENIE_IOS_CONFIG
+  TRANSFER_GENIE_IOS_CARGO_HOME, TRANSFER_GENIE_IOS_CONFIG,
+  TRANSFER_GENIE_IOS_LATEST_BUILD_DIR
 
 Setup:
   Copy .env.example to .env and configure the iOS device and Apple team.
@@ -68,6 +78,22 @@ cleanup() {
   if [[ -n "$temp_root" && -d "$temp_root" ]]; then
     rm -rf -- "$temp_root"
   fi
+  if [[ -n "$cache_staging" && -d "$cache_staging" ]]; then
+    rm -rf -- "$cache_staging"
+  fi
+  if [[ "$owns_build_lock" == "true" ]]; then
+    rm -f -- "$build_lock/pid"
+    rmdir "$build_lock" 2>/dev/null || true
+  fi
+}
+
+acquire_build_lock() {
+  mkdir -p "$(dirname "$build_lock")"
+  if ! mkdir "$build_lock" 2>/dev/null; then
+    fail "Another iOS build/deployment is active. If it ended abnormally, verify no build is running before removing $build_lock"
+  fi
+  printf '%s\n' "$$" >"$build_lock/pid"
+  owns_build_lock=true
 }
 
 require_command() {
@@ -114,6 +140,9 @@ confirm_update() {
   if [[ "$skip_build" == "true" ]]; then
     archive_action="复用已有 archive（不重新构建）"
   fi
+  if [[ "$install_latest" == "true" ]]; then
+    archive_action="安装每日预构建缓存（不重新构建）"
+  fi
 
   printf '\n%s  Transfer Genie · iOS 无线更新%s\n' "$color_cyan" "$color_reset"
   printf '%s  ────────────────────────────────────────%s\n\n' "$color_muted" "$color_reset"
@@ -125,6 +154,9 @@ confirm_update() {
   confirmation_field "TRANSFER_GENIE_IOS_DEVICE" "${device_name:-<未配置>}"
   confirmation_field "APPLE_DEVELOPMENT_TEAM" "${development_team:-<未配置>}"
   confirmation_field "TRANSFER_GENIE_IOS_CARGO_HOME" "$ios_cargo_home"
+  if [[ "$install_latest" == "true" ]]; then
+    confirmation_field "预构建产物" "$latest_build_dir"
+  fi
   printf '\n%s  本次操作%s\n' "$color_cyan" "$color_reset"
   confirmation_field "构建模式" "$build_mode · $archive_action"
   confirmation_field "执行方式" "$action"
@@ -204,6 +236,14 @@ if [[ -z "$ios_cargo_home" ]]; then
 elif [[ "$ios_cargo_home" != /* ]]; then
   ios_cargo_home="$project_root/$ios_cargo_home"
 fi
+if [[ -z "$latest_build_dir" ]]; then
+  latest_build_dir="$(read_config_value TRANSFER_GENIE_IOS_LATEST_BUILD_DIR)"
+fi
+if [[ -z "$latest_build_dir" ]]; then
+  latest_build_dir="$project_root/gen/apple/build/ios-wireless-latest"
+elif [[ "$latest_build_dir" != /* ]]; then
+  latest_build_dir="$project_root/$latest_build_dir"
+fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -223,6 +263,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-build)
       skip_build=true
+      shift
+      ;;
+    --build-latest)
+      build_latest=true
+      shift
+      ;;
+    --install-latest)
+      install_latest=true
       shift
       ;;
     --check-only)
@@ -247,78 +295,110 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "$confirm_before_update" == "true" ]]; then
+if [[ "$build_latest" == "true" && ( "$install_latest" == "true" || "$skip_build" == "true" || "$check_only" == "true" || "$launch_after_install" == "true" || "$confirm_before_update" == "true" ) ]]; then
+  fail "--build-latest cannot be combined with install, check, launch, confirmation, or archive-reuse options"
+fi
+if [[ "$install_latest" == "true" && "$skip_build" == "true" ]]; then
+  fail "--install-latest and --skip-build select different archive sources"
+fi
+
+if [[ "$confirm_before_update" == "true" && "$build_latest" != "true" ]]; then
   confirm_update
 fi
 
-[[ -n "$device_name" ]] \
-  || fail "Missing TRANSFER_GENIE_IOS_DEVICE. Configure it in $config_file (see .env.example)"
 [[ -n "$development_team" ]] \
   || fail "Missing APPLE_DEVELOPMENT_TEAM. Configure it in $config_file (see .env.example)"
-[[ "$device_name" != YOUR_* ]] \
-  || fail "Replace the placeholder TRANSFER_GENIE_IOS_DEVICE in $config_file"
 [[ "$development_team" != YOUR_* ]] \
   || fail "Replace the placeholder APPLE_DEVELOPMENT_TEAM in $config_file"
+if [[ "$build_latest" != "true" ]]; then
+  [[ -n "$device_name" ]] \
+    || fail "Missing TRANSFER_GENIE_IOS_DEVICE. Configure it in $config_file (see .env.example)"
+  [[ "$device_name" != YOUR_* ]] \
+    || fail "Replace the placeholder TRANSFER_GENIE_IOS_DEVICE in $config_file"
+fi
 
-for command_name in jq sqlite3 security plutil codesign npm xcrun; do
+for command_name in jq security plutil codesign npm; do
   require_command "$command_name"
 done
+if [[ "$build_latest" != "true" ]]; then
+  for command_name in sqlite3 xcrun; do
+    require_command "$command_name"
+  done
+fi
 
 temp_root="$(mktemp -d /tmp/transfer-genie-ios-wifi.XXXXXX)"
 trap cleanup EXIT INT TERM
 
 cd "$project_root"
 
-details_json="$temp_root/device-details.json"
-xcrun devicectl device info details \
-  --device "$device_name" \
-  --timeout 60 \
-  --json-output "$details_json" >/dev/null
+if [[ "$install_latest" == "true" ]]; then
+  # Keep the cached app stable while it is verified and installed. This also
+  # prevents Simulator/VPhone builds from replacing the shared Tauri archive
+  # during the same deployment window.
+  acquire_build_lock
+fi
 
-device_udid="$(jq -r '.result.hardwareProperties.udid // empty' "$details_json")"
-pairing_state="$(jq -r '.result.connectionProperties.pairingState // empty' "$details_json")"
-transport_type="$(jq -r '.result.connectionProperties.transportType // empty' "$details_json")"
-tunnel_state="$(jq -r '.result.connectionProperties.tunnelState // empty' "$details_json")"
-developer_mode="$(jq -r '.result.deviceProperties.developerModeStatus // empty' "$details_json")"
-ddi_available="$(jq -r '.result.deviceProperties.ddiServicesAvailable // false' "$details_json")"
+device_udid=""
+installed_before=0
+if [[ "$build_latest" != "true" ]]; then
+  details_json="$temp_root/device-details.json"
+  xcrun devicectl device info details \
+    --device "$device_name" \
+    --timeout 60 \
+    --json-output "$details_json" >/dev/null
 
-[[ -n "$device_udid" ]] || fail "Could not read the UDID for $device_name"
-[[ "$pairing_state" == "paired" ]] || fail "$device_name is not paired with this Mac"
-[[ "$transport_type" == "localNetwork" ]] \
-  || fail "$device_name is using '$transport_type', not the local-network transport"
-[[ "$tunnel_state" == "connected" ]] || fail "The Wi-Fi developer tunnel is not connected"
-[[ "$developer_mode" == "enabled" ]] || fail "Developer Mode is not enabled on $device_name"
-[[ "$ddi_available" == "true" ]] || fail "Developer disk image services are unavailable"
-log "Connected to $device_name over Wi-Fi ($device_udid)"
+  device_udid="$(jq -r '.result.hardwareProperties.udid // empty' "$details_json")"
+  pairing_state="$(jq -r '.result.connectionProperties.pairingState // empty' "$details_json")"
+  transport_type="$(jq -r '.result.connectionProperties.transportType // empty' "$details_json")"
+  tunnel_state="$(jq -r '.result.connectionProperties.tunnelState // empty' "$details_json")"
+  developer_mode="$(jq -r '.result.deviceProperties.developerModeStatus // empty' "$details_json")"
+  ddi_available="$(jq -r '.result.deviceProperties.ddiServicesAvailable // false' "$details_json")"
 
-apps_before_json="$temp_root/apps-before.json"
-xcrun devicectl device info apps \
-  --device "$device_name" \
-  --bundle-id "$bundle_id" \
-  --timeout 60 \
-  --json-output "$apps_before_json" >/dev/null
-installed_before="$(jq -r '[.result.apps[]? | select(.bundleIdentifier == "com.transfergenie")] | length' "$apps_before_json")"
+  [[ -n "$device_udid" ]] || fail "Could not read the UDID for $device_name"
+  [[ "$pairing_state" == "paired" ]] || fail "$device_name is not paired with this Mac"
+  [[ "$transport_type" == "localNetwork" ]] \
+    || fail "$device_name is using '$transport_type', not the local-network transport"
+  [[ "$tunnel_state" == "connected" ]] || fail "The Wi-Fi developer tunnel is not connected"
+  [[ "$developer_mode" == "enabled" ]] || fail "Developer Mode is not enabled on $device_name"
+  [[ "$ddi_available" == "true" ]] || fail "Developer disk image services are unavailable"
+  log "Connected to $device_name over Wi-Fi ($device_udid)"
 
-if [[ "$installed_before" == "1" ]]; then
-  # Do not foreground Settings or another app. The composer saves 350 ms after
-  # each mutation, so wait for the debounce and verify twice before replacing
-  # the installed bundle. Any saved draft blocks the update.
-  sleep 2
-  inspect_drafts "preinstall-1"
-  sleep 1
-  inspect_drafts "preinstall-2"
-else
-  log "$bundle_id is not installed yet; the draft guard is not applicable"
+  apps_before_json="$temp_root/apps-before.json"
+  xcrun devicectl device info apps \
+    --device "$device_name" \
+    --bundle-id "$bundle_id" \
+    --timeout 60 \
+    --json-output "$apps_before_json" >/dev/null
+  installed_before="$(jq -r '[.result.apps[]? | select(.bundleIdentifier == "com.transfergenie")] | length' "$apps_before_json")"
+
+  if [[ "$installed_before" == "1" ]]; then
+    # Do not foreground Settings or another app. The composer saves 350 ms after
+    # each mutation, so wait for the debounce and verify twice before replacing
+    # the installed bundle. Any saved draft blocks the update.
+    sleep 2
+    inspect_drafts "preinstall-1"
+    sleep 1
+    inspect_drafts "preinstall-2"
+  else
+    log "$bundle_id is not installed yet; the draft guard is not applicable"
+  fi
 fi
 
 archive_path="$project_root/gen/apple/build/transfer-genie_iOS.xcarchive"
-if [[ "$skip_build" != "true" ]]; then
+if [[ "$install_latest" == "true" ]]; then
+  manifest_path="$latest_build_dir/manifest.json"
+  app_path="$latest_build_dir/Transfer Genie.app"
+  [[ -f "$manifest_path" ]] || fail "Latest build manifest not found: $manifest_path. Run npm run ios:build-latest first"
+  [[ -d "$app_path" ]] || fail "Latest cached app not found: $app_path. Run npm run ios:build-latest first"
+  log "Using cached build from $(jq -r '.builtAt // "unknown time"' "$manifest_path")"
+elif [[ "$skip_build" != "true" ]]; then
   build_args=(ios build --target aarch64 --archive-only --ci --export-method debugging)
   if [[ "$build_mode" == "debug" ]]; then
     build_args+=(--debug)
   fi
 
   log "Building a signed $build_mode iPhone archive"
+  acquire_build_lock
   APPLE_DEVELOPMENT_TEAM="$development_team" \
   CARGO_HOME="$ios_cargo_home" \
     npx tauri "${build_args[@]}"
@@ -326,9 +406,11 @@ else
   log "Reusing the existing archive (--skip-build)"
 fi
 
-[[ -d "$archive_path" ]] || fail "Archive not found: $archive_path"
-application_path="$(/usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:ApplicationPath' "$archive_path/Info.plist")"
-app_path="$archive_path/Products/$application_path"
+if [[ "$install_latest" != "true" ]]; then
+  [[ -d "$archive_path" ]] || fail "Archive not found: $archive_path"
+  application_path="$(/usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:ApplicationPath' "$archive_path/Info.plist")"
+  app_path="$archive_path/Products/$application_path"
+fi
 [[ -d "$app_path" ]] || fail "App bundle not found in the archive: $app_path"
 
 platform_name="$(/usr/libexec/PlistBuddy -c 'Print :DTPlatformName' "$app_path/Info.plist")"
@@ -345,14 +427,16 @@ profile_plist="$temp_root/profile.plist"
 security cms -D -i "$profile_path" >"$profile_plist"
 profile_team="$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' "$profile_plist" 2>/dev/null || true)"
 profile_expiration="$(plutil -extract ExpirationDate raw -o - "$profile_plist")"
-if /usr/libexec/PlistBuddy -c 'Print :ProvisionedDevices' "$profile_plist" 2>/dev/null \
-  | grep -Fqx "    $device_udid"; then
-  profile_has_device=true
-else
-  profile_has_device=false
-fi
 [[ "$profile_team" == "$development_team" ]] || fail "Profile team '$profile_team' does not match '$development_team'"
-[[ "$profile_has_device" == "true" ]] || fail "The provisioning profile does not include $device_udid"
+if [[ "$build_latest" != "true" ]]; then
+  if /usr/libexec/PlistBuddy -c 'Print :ProvisionedDevices' "$profile_plist" 2>/dev/null \
+    | grep -Fqx "    $device_udid"; then
+    profile_has_device=true
+  else
+    profile_has_device=false
+  fi
+  [[ "$profile_has_device" == "true" ]] || fail "The provisioning profile does not include $device_udid"
+fi
 
 expiration_epoch="$(date -j -f '%Y-%m-%dT%H:%M:%SZ' "$profile_expiration" '+%s' 2>/dev/null || true)"
 [[ -n "$expiration_epoch" ]] || fail "Could not parse profile expiration: $profile_expiration"
@@ -367,6 +451,51 @@ executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_
 candidate_uuid="$(dwarfdump --uuid "$app_path/$executable_name" | awk '{print $2}')"
 log "Candidate $candidate_version ($candidate_build), UUID $candidate_uuid"
 log "Development profile expires at $profile_expiration"
+
+if [[ "$build_latest" == "true" ]]; then
+  latest_parent="$(dirname "$latest_build_dir")"
+  mkdir -p "$latest_parent"
+  cache_staging="$(mktemp -d "$latest_parent/.ios-wireless-latest.XXXXXX")"
+  ditto "$app_path" "$cache_staging/Transfer Genie.app"
+  codesign --verify --deep --strict --verbose=2 "$cache_staging/Transfer Genie.app"
+  source_revision="$(git rev-parse --short=12 HEAD 2>/dev/null || printf unknown)"
+  if [[ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+    source_dirty=true
+  else
+    source_dirty=false
+  fi
+  jq -n \
+    --arg builtAt "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    --arg version "$candidate_version" \
+    --arg build "$candidate_build" \
+    --arg bundleId "$candidate_bundle_id" \
+    --arg platform "$platform_name" \
+    --arg team "$profile_team" \
+    --arg profileExpiration "$profile_expiration" \
+    --arg executableUuid "$candidate_uuid" \
+    --arg sourceRevision "$source_revision" \
+    --argjson sourceDirty "$source_dirty" \
+    '{builtAt: $builtAt, version: $version, build: $build, bundleId: $bundleId, platform: $platform, team: $team, profileExpiration: $profileExpiration, executableUuid: $executableUuid, sourceRevision: $sourceRevision, sourceDirty: $sourceDirty, app: "Transfer Genie.app"}' \
+    >"$cache_staging/manifest.json"
+  previous_build="$latest_build_dir.previous.$$"
+  if [[ -e "$latest_build_dir" ]]; then
+    mv "$latest_build_dir" "$previous_build"
+  fi
+  if mv "$cache_staging" "$latest_build_dir"; then
+    cache_staging=""
+    if [[ -e "$previous_build" ]]; then
+      rm -rf -- "$previous_build"
+    fi
+  else
+    if [[ -e "$previous_build" && ! -e "$latest_build_dir" ]]; then
+      mv "$previous_build" "$latest_build_dir"
+    fi
+    fail "Unable to publish the latest iOS build cache"
+  fi
+  log "Latest signed device build cached at $latest_build_dir"
+  log "Build-only completed; no iPhone was connected, installed, or launched"
+  exit 0
+fi
 
 if [[ "$check_only" == "true" ]]; then
   log "Check-only completed; no app was installed"
