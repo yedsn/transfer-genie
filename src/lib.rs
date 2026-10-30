@@ -7855,6 +7855,7 @@ struct SystemDictationPasteResult {
 #[derive(Debug, PartialEq, Eq)]
 enum SystemPasteDispatchOutcome {
     Pasted,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     NoFocusedInput,
 }
 
