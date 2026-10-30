@@ -98,6 +98,10 @@ html.is-ios-platform #mobile-app-shell { display: block; }
 .mobile-icon-button, .mobile-avatar-button { display: grid; place-items: center; width: 44px; height: 44px; padding: 0; border-radius: 14px; }
 .mobile-icon-button { border: 1px solid var(--mobile-line); background: rgba(255, 253, 249, 0.68); }
 .mobile-icon-button svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; }
+.mobile-refresh-button svg.is-spinning { animation: mobile-refresh-spin 0.9s linear infinite; transform-origin: 50% 50%; }
+.mobile-refresh-button:disabled { opacity: 0.55; }
+@keyframes mobile-refresh-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .mobile-refresh-button svg.is-spinning { animation: none; } }
 .mobile-avatar-button { border: 0; color: #fff !important; background: var(--mobile-ink); font-size: calc(15px * var(--mobile-text-scale, 1)); font-weight: 700; }
 
 .mobile-search-wrap {

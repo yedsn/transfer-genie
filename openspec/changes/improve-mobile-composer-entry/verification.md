@@ -33,6 +33,27 @@
 
 ## 自动化检查
 
+### 消息列表刷新
+
+需求：消息列表缺少手动刷新入口，且启动时只读取本机窗口，云端新增消息可能看不到。
+
+实现：
+
+- 顶部栏新增“刷新列表”按钮（`aria-label="刷新列表"`，避免与“新消息”按钮的可访问名称冲突），刷新中禁用并旋转图标。
+- 新增 `controller.pullLatest()`：先执行 `sync.refresh()` 拉取云端增量，再用 `allSettled` 重读消息、标记、同步状态和传输；手动刷新成功后用 toast 显示同步结果，失败走错误提示。
+- `initialize()` 完成后若进入 ready 且非预览模式，静默执行一次 `pullLatest({ silent: true })`；失败不打扰用户，只刷新状态胶囊。
+
+验证：
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm run typecheck` | 通过 |
+| `node tests/test_mobile_refresh_browser.js`（新增） | 通过；点击后只拉取一次、重读消息、显示 toast、按钮恢复可用 |
+| `node tests/test_mobile_feed_browser.js` / `test_mobile_keyboard_browser.js` / `test_mobile_native_navigation_browser.js` / `test_mobile_ui_shell.js` / `test_mobile_wysiwyg_browser.js` | 全部通过 |
+| Simulator `testComposerExistingDraftOpensWithKeyboardAndStableActions` | 1/1 通过（`/tmp/tg-ios-refresh-20261030-1450.xcresult`） |
+
+注意：`aria-label` 使用“刷新列表”而不是“刷新消息”，因为后者包含“新消息”子串，会让既有 UI 测试的 `getByRole('button', { name: '新消息' })` 命中两个按钮。
+
 | 检查 | 结果 |
 | --- | --- |
 | `npm run typecheck` | 通过 |

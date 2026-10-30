@@ -176,6 +176,7 @@ export function useMobileController() {
     tags: [] as any[],
     hasMoreBefore: false,
     loadingOlder: false,
+    refreshing: false,
     syncStatus: null as any,
     transfers: [] as any[],
     conflicts: [] as any[],
@@ -955,6 +956,34 @@ export function useMobileController() {
     finally { if (generation === viewGeneration) state.busy = false; }
   }
 
+  async function pullLatest(options: { silent?: boolean } = {}) {
+    if (state.boot !== "ready" || state.busy || state.refreshing) return false;
+    const generation = viewGeneration;
+    state.refreshing = true;
+    if (!options.silent) clearFeedback();
+    try {
+      const status = await api().sync.refresh();
+      if (generation !== viewGeneration) return false;
+      // The remote pull already succeeded; a failing local re-read must not turn
+      // the whole refresh into an error banner.
+      await Promise.allSettled([refreshMessages(), refreshMarked(), refreshStatus(), refreshTransfers()]);
+      if (generation !== viewGeneration) return false;
+      if (!options.silent) {
+        showToast(String(status?.last_result || status?.lastResult || "已刷新消息"), "success");
+      }
+      return true;
+    } catch (error) {
+      if (generation === viewGeneration) {
+        // Keep the sync chip honest even when the pull fails silently.
+        void refreshStatus().catch(() => undefined);
+        if (!options.silent) setError(error);
+      }
+      return false;
+    } finally {
+      if (generation === viewGeneration) state.refreshing = false;
+    }
+  }
+
   async function selectMedia() {
     if (state.boot !== "ready" || state.busy || state.composer.sending || state.composer.selecting) return;
     const generation = viewGeneration;
@@ -1727,7 +1756,7 @@ export function useMobileController() {
   }
 
   return {
-    state, currentSpace, selectableProfiles, pendingCount, activeTransfers, signedIn, initialize, refreshAll, refreshRuntimeState, refreshAfterForeground, refreshMessages, loadOlderMessages, searchMessages, loadMoreSearch, setMarkedFilter, loadMoreMarked, loadConflicts, resolveConflict, retryTransfer,
+    state, currentSpace, selectableProfiles, pendingCount, activeTransfers, signedIn, initialize, refreshAll, pullLatest, refreshRuntimeState, refreshAfterForeground, refreshMessages, loadOlderMessages, searchMessages, loadMoreSearch, setMarkedFilter, loadMoreMarked, loadConflicts, resolveConflict, retryTransfer,
     selectMedia, selectDocuments, removeAttachment, sendDraft, prepareNewComposer, persistComposerDraft, persistComposerDraftForNavigation, deactivateComposerPersistence, toggleMark, copyMessage, updateMarkedMetadata, createMarkedTag, deleteMessage, applyMessageSelection, previewMessage, prepareVideo, shareMessage, retryPreview, previewImageFailed, previewDraftAttachment,
     signIn, logout, chooseProfile, diagnoseProfile, setProfileEnabled, beginConnectionEdit, renameProfile, signInProfile, logoutProfile, removeProfile, loadSpaces, switchSpace, testSetupConnection, setupSignIn, completeSetup, resetWizardDownstream, openConnectionWizard, openConnectionRepair, cancelConnectionWizard, selectWizardSpace, backConnectionWizard, createWizardSpace, installTransferListeners, refreshCache, clearCache, clearFeedback, showToast, dismissToast, saveSenderName, saveDefaultEditorFormat,
   };

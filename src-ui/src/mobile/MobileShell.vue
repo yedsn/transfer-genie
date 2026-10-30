@@ -1065,6 +1065,10 @@ async function clearCache() {
 async function confirmCacheClear() {
   if (await controller.clearCache()) cacheConfirmation.value = false;
 }
+async function refreshFeed() {
+  if (state.boot !== "ready" || state.busy || state.refreshing) return;
+  await controller.pullLatest();
+}
 
 onMounted(async () => {
   // Warm the editor chunk while the user is reading the feed. Its code remains
@@ -1095,6 +1099,11 @@ onMounted(async () => {
   window.addEventListener("transfer-genie-navigation-shown", handleNativePageShown);
   window.addEventListener("transfer-genie-mobile-backgrounding", persistDraftBeforeBackground);
   await controller.initialize();
+  // initialize() only reads the local window; pull the remote delta once on
+  // launch so a cold start never shows yesterday's list until the next tick.
+  if (!state.previewMode && state.boot === "ready") {
+    void controller.pullLatest({ silent: true });
+  }
   if (initialNativeSheet && state.boot !== "ready") {
     navigationError.value = state.error || "当前连接暂不可用，请返回消息列表重试";
   }
@@ -1324,6 +1333,18 @@ onBeforeUnmount(() => {
             </button>
             <div class="mobile-topbar-actions">
               <button
+                class="mobile-icon-button mobile-refresh-button"
+                type="button"
+                aria-label="刷新列表"
+                :aria-busy="state.refreshing"
+                :disabled="state.refreshing || state.busy || state.boot !== 'ready'"
+                @click="refreshFeed"
+              >
+                <svg :class="{ 'is-spinning': state.refreshing }" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M20.5 12a8.5 8.5 0 1 1-2.6-6.1" />
+                  <path d="M20.5 4v5.5H15" />
+                </svg></button
+              ><button
                 class="mobile-icon-button"
                 type="button"
                 aria-label="搜索消息"
