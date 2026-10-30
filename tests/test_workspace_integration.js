@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import '../src-ui/src/workspace/workspace-core.js';
 import '../src-ui/src/workspace/workspace-persistence.js';
 import '../src-ui/src/workspace/workspace-restore.js';
@@ -8,6 +9,25 @@ const core = globalThis.transferGenieWorkspaceCore;
 const persistence = globalThis.transferGenieWorkspacePersistence;
 const restore = globalThis.transferGenieWorkspaceRestore;
 const drag = globalThis.transferGenieWorkspaceDrag;
+const workspaceComponent = readFileSync(
+  new URL('../src-ui/src/workspace/ComposerWorkspace.vue', import.meta.url),
+  'utf8'
+);
+
+function testTabDragStartUsesExportedPayloadFactory() {
+  assert.match(workspaceComponent, /Sortable\.create\(element/);
+  assert.match(workspaceComponent, /group: "transfer-genie-editor-tabs"/);
+  assert.match(workspaceComponent, /forceFallback: true/);
+  assert.match(workspaceComponent, /fallbackOnBody: true/);
+  assert.match(workspaceComponent, /trackSortablePaneTarget/);
+  assert.match(workspaceComponent, /kind: "tabs", paneId, insertIndex/);
+  assert.match(workspaceComponent, /composerStore\.dockTab\(dragSession\.tabId, paneId, zone\)/);
+  assert.match(workspaceComponent, /drag\.createTabDragPayload\(tab, paneId\)/);
+  assert.match(workspaceComponent, /composerStore\.moveDraft\(dragSession\.tabId, targetPaneId, insertIndex\)/);
+  assert.match(workspaceComponent, /closest\("\.cw-tabs-list"\)/);
+  assert.doesNotMatch(workspaceComponent, /drag\.createDragPayload\(/);
+  assert.doesNotMatch(workspaceComponent, /@dragover="onTabDragOver/);
+}
 
 function makeStorage() {
   const m = new Map();
@@ -143,6 +163,7 @@ function testThreeColumnBoundsAndCollapse() {
 }
 
 function run() {
+  testTabDragStartUsesExportedPayloadFactory();
   testFullSessionLifecycle();
   testMessageDockingRules();
   testThreeColumnBoundsAndCollapse();

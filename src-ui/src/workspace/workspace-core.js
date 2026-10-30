@@ -246,7 +246,10 @@
     return next;
   }
 
-  /** 在分栏之间移动标签，保留标签状态（含消息快照）。 */
+  /**
+   * 移动标签到指定分栏，并可插入到指定索引。
+   * insertIndex 以移动操作开始前的目标标签数组为基准，因此同栏向后移动会先扣除源标签占位。
+   */
   function moveTab(state, tabId, targetPaneId, options) {
     options = options || {};
     var next = clone(state);
@@ -254,24 +257,29 @@
     if (!found) return next;
     var target = findPane(next, targetPaneId);
     if (!target) return next;
-    if (found.pane.id === targetPaneId) {
-      setActiveTab(found.pane, tabId);
-      next.activePaneId = targetPaneId;
-      return next;
-    }
+
     var tab = found.tab;
+    var samePane = found.pane.id === targetPaneId;
+    var sourceIndex = found.tabIndex;
+    var targetLengthBeforeMove = target.tabs.length;
     found.pane.tabs.splice(found.tabIndex, 1);
     if (found.pane.activeTabId === tabId) {
       setActiveTab(found.pane, found.pane.tabs.length > 0 ? found.pane.tabs[Math.max(0, found.tabIndex - 1)].id : null);
     }
-    if (options.insertIndex != null && options.insertIndex >= 0 && options.insertIndex <= target.tabs.length) {
-      target.tabs.splice(options.insertIndex, 0, tab);
-    } else {
+
+    var insertIndex = target.tabs.length;
+    if (options.insertIndex != null && isFinite(options.insertIndex)) {
+      insertIndex = Math.max(0, Math.min(targetLengthBeforeMove, Math.floor(Number(options.insertIndex))));
+      if (samePane && insertIndex > sourceIndex) insertIndex -= 1;
+    }
+    if (insertIndex >= target.tabs.length) {
       target.tabs.push(tab);
+    } else {
+      target.tabs.splice(insertIndex, 0, tab);
     }
     setActiveTab(target, tab.id);
     next.activePaneId = targetPaneId;
-    normalizeAfterPaneChange(next);
+    if (!samePane) normalizeAfterPaneChange(next);
     return next;
   }
 

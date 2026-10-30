@@ -29,6 +29,21 @@ function stateWithTabs() {
   });
 }
 
+function stateWithOrderedTabs() {
+  return core.createInitialState({
+    tabs: [
+      { title: 'A', kind: 'document', sourceRef: 'doc-a' },
+      { title: 'B', kind: 'document', sourceRef: 'doc-b' },
+      { title: 'C', kind: 'document', sourceRef: 'doc-c' },
+      { title: 'D', kind: 'document', sourceRef: 'doc-d' },
+    ],
+  });
+}
+
+function titlesInPane(state, paneId) {
+  return core.findPane(state, paneId).tabs.map((tab) => tab.title);
+}
+
 // ============ 1.1 状态模型 ============
 function testInitialState() {
   core.resetIdCounter();
@@ -164,6 +179,73 @@ function testMoveTabBetweenPanesPreservesState() {
   assert.equal(moved.activePaneId, dstPane.id);
 }
 
+function testMoveTabForwardWithinPane() {
+  const s = stateWithOrderedTabs();
+  const paneId = s.panes[0].id;
+  const tabA = s.panes[0].tabs[0];
+  // 拖到 C 的右半区：原数组插入索引为 3
+  const moved = core.moveTab(s, tabA.id, paneId, { insertIndex: 3 });
+  assert.deepEqual(titlesInPane(moved, paneId), ['B', 'C', 'A', 'D']);
+  assert.equal(core.getActiveTab(moved.panes[0]).title, 'A');
+  assert.equal(moved.activePaneId, paneId);
+}
+
+function testMoveTabBackwardWithinPane() {
+  const s = stateWithOrderedTabs();
+  const paneId = s.panes[0].id;
+  const tabD = s.panes[0].tabs[3];
+  // 拖到 B 的左半区：原数组插入索引为 1
+  const moved = core.moveTab(s, tabD.id, paneId, { insertIndex: 1 });
+  assert.deepEqual(titlesInPane(moved, paneId), ['A', 'D', 'B', 'C']);
+  assert.equal(core.getActiveTab(moved.panes[0]).title, 'D');
+}
+
+function testMoveTabSamePositionIsNoOp() {
+  const s = stateWithOrderedTabs();
+  const paneId = s.panes[0].id;
+  const tabB = s.panes[0].tabs[1];
+  const before = core.moveTab(s, tabB.id, paneId, { insertIndex: 1 });
+  const after = core.moveTab(s, tabB.id, paneId, { insertIndex: 2 });
+  assert.deepEqual(titlesInPane(before, paneId), ['A', 'B', 'C', 'D']);
+  assert.deepEqual(titlesInPane(after, paneId), ['A', 'B', 'C', 'D']);
+}
+
+function testMoveTabAcrossPanesAtInsertIndex() {
+  const s = stateWithOrderedTabs();
+  const h = core.splitHorizontal(s);
+  const sourcePaneId = h.panes[0].id;
+  const targetPaneId = h.panes[1].id;
+  const withTargetTabs = core.addTabToPane(
+    core.addTabToPane(h, targetPaneId, { title: 'X', kind: 'document' }),
+    targetPaneId,
+    { title: 'Y', kind: 'document' }
+  );
+  const moved = core.moveTab(withTargetTabs, withTargetTabs.panes[0].tabs[1].id, targetPaneId, { insertIndex: 1 });
+  assert.deepEqual(titlesInPane(moved, sourcePaneId), ['A', 'C', 'D']);
+  assert.deepEqual(titlesInPane(moved, targetPaneId), ['X', 'B', 'Y']);
+  assert.equal(core.getActiveTab(core.findPane(moved, targetPaneId)).title, 'B');
+  assert.equal(moved.activePaneId, targetPaneId);
+}
+
+function testMoveTabClampsInsertIndex() {
+  const s = stateWithOrderedTabs();
+  const paneId = s.panes[0].id;
+  const tabA = s.panes[0].tabs[0];
+  const last = core.moveTab(s, tabA.id, paneId, { insertIndex: 99 });
+  const first = core.moveTab(s, s.panes[0].tabs[3].id, paneId, { insertIndex: -10 });
+  assert.deepEqual(titlesInPane(last, paneId), ['B', 'C', 'D', 'A']);
+  assert.deepEqual(titlesInPane(first, paneId), ['D', 'A', 'B', 'C']);
+}
+
+function testReorderedTabsPersist() {
+  const s = stateWithOrderedTabs();
+  const paneId = s.panes[0].id;
+  const moved = core.moveTab(s, s.panes[0].tabs[0].id, paneId, { insertIndex: 4 });
+  const restored = core.deserialize(core.serialize(moved));
+  assert.deepEqual(titlesInPane(restored, paneId), ['B', 'C', 'D', 'A']);
+  assert.equal(core.getActiveTab(restored.panes[0]).title, 'A');
+}
+
 // ============ 3.3/4.2 拖拽停靠 ============
 function testDockTabCenter() {
   const s = stateWithTabs();
@@ -228,6 +310,13 @@ function testDetectDropZoneOutsidePaneDefaultsCenter() {
   const pane = { left: 10, top: 10, right: 110, bottom: 110 };
   const win = { left: 0, top: 0, right: 100, bottom: 100 };
   assert.equal(drag.detectDropZoneFromRects({ x: 200, y: 200 }, pane, win), 'center');
+}
+
+function testSortableInsertIndexConversion() {
+  assert.equal(drag.getSortableInsertIndex(0, 2, true), 3, '同栏向后移动转换为移动前插入索引');
+  assert.equal(drag.getSortableInsertIndex(2, 0, true), 0, '同栏向前移动保持最终索引');
+  assert.equal(drag.getSortableInsertIndex(0, 1, false), 1, '跨栏移动直接使用目标索引');
+  assert.equal(drag.getSortableInsertIndex(undefined, 1, false), null, '缺少索引时拒绝提交');
 }
 
 // ============ 1.2 持久化 ============
@@ -310,6 +399,12 @@ function run() {
   testRenamedTabPersistsAndMoves();
   testCloseTabRemovesFromGroupNotSource();
   testMoveTabBetweenPanesPreservesState();
+  testMoveTabForwardWithinPane();
+  testMoveTabBackwardWithinPane();
+  testMoveTabSamePositionIsNoOp();
+  testMoveTabAcrossPanesAtInsertIndex();
+  testMoveTabClampsInsertIndex();
+  testReorderedTabsPersist();
   testDockTabCenter();
   testDockTabRightCreatesHorizontal();
   testDockTabBottomCreatesVertical();
@@ -318,6 +413,7 @@ function run() {
   testDetectDropZoneRight();
   testDetectDropZoneBottom();
   testDetectDropZoneOutsidePaneDefaultsCenter();
+  testSortableInsertIndexConversion();
   testPersistenceRoundTrip();
   testPersistenceNoWebdav();
   testRestoreSyncWithSavedState();

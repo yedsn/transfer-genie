@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import Sortable, { type SortableEvent } from "sortablejs";
 import { composerStore } from "./composer-store";
 import DraftEditor from "./DraftEditor.vue";
 import "./tab-name-ai.js";
@@ -7,6 +8,12 @@ import "./tab-name-ai.js";
 const state = composerStore.state;
 const mainEl = ref<HTMLElement | null>(null);
 const hoverZone = ref<Record<string, string>>({});
+const tabSortables = new Map<string, Sortable>();
+let sortableDrag: {
+  tabId: string;
+  sourcePaneId: string;
+  target: { kind: "tabs"; paneId: string; insertIndex: number } | { kind: "pane"; paneId: string; zone: string } | null;
+} | null = null;
 const destructivePrompt = ref<{ title: string; body: string; action: () => void } | null>(null);
 const sentDraftPrompts = ref<{ id: string; text: string; format: string }[]>([]);
 const sentDraftPromptEl = ref<HTMLElement | null>(null);
@@ -235,6 +242,10 @@ function onPaneDragOver(event: DragEvent, paneId: string) {
   const drag = (window as any).transferGenieWorkspaceDrag;
   const ctx = (window as any).transferGenieComposerDragCtx;
   if (!ctx || !ctx.payload) return;
+  if (ctx.payload.kind === "tab" && (event.target as HTMLElement | null)?.closest(".cw-tabs-list")) {
+    hoverZone.value[paneId] = "";
+    return;
+  }
   event.preventDefault();
   if (event.dataTransfer) event.dataTransfer.dropEffect = ctx.payload.kind === "message" ? "copy" : "move";
   const paneEl = (event.currentTarget as HTMLElement);
@@ -243,11 +254,14 @@ function onPaneDragOver(event: DragEvent, paneId: string) {
 }
 function onPaneDragLeave(paneId: string, event: DragEvent) {
   const paneEl = (event.currentTarget as HTMLElement);
-  if (!paneEl.contains(event.relatedTarget as Node)) hoverZone.value[paneId] = "";
+  if (!paneEl.contains(event.relatedTarget as Node)) {
+    hoverZone.value[paneId] = "";
+  }
 }
 function onPaneDrop(event: DragEvent, paneId: string) {
   const ctx = (window as any).transferGenieComposerDragCtx;
   if (!ctx || !ctx.payload) return;
+  if (ctx.payload.kind === "tab" && (event.target as HTMLElement | null)?.closest(".cw-tabs-list")) return;
   event.preventDefault();
   const drag = (window as any).transferGenieWorkspaceDrag;
   const paneEl = (event.currentTarget as HTMLElement);
@@ -264,15 +278,115 @@ function onPaneDrop(event: DragEvent, paneId: string) {
   hoverZone.value[paneId] = "";
   ctx.payload = null;
 }
-function onTabDragStart(event: DragEvent, tab: any, paneId: string) {
+function onSortableStart(event: SortableEvent) {
+  const tabId = (event.item as HTMLElement).dataset.tabId || "";
+  const paneId = (event.from as HTMLElement).dataset.paneId || "";
+  const tab = composerStore.getDraft(tabId);
+  if (!tab) return;
+  sortableDrag = { tabId, sourcePaneId: paneId, target: null };
   const ctx = (window as any).transferGenieComposerDragCtx;
   const drag = (window as any).transferGenieWorkspaceDrag;
-  ctx.payload = drag.createDragPayload({ kind: "tab", sourceId: tab.id, sourcePaneId: paneId, contentKind: tab.kind, sourceRef: tab.sourceRef, title: tab.title });
-  if (event.dataTransfer) { event.dataTransfer.setData("text/plain", tab.id); event.dataTransfer.effectAllowed = "move"; }
+  ctx.payload = drag.createTabDragPayload(tab, paneId);
+  const originalEvent = (event as SortableEvent & { originalEvent?: DragEvent }).originalEvent;
+  if (originalEvent?.dataTransfer) {
+    originalEvent.dataTransfer.setData("text/plain", tab.id);
+    originalEvent.dataTransfer.effectAllowed = "move";
+  }
 }
-function onDragEnd() {
+function onSortableEnd(event: SortableEvent) {
   const ctx = (window as any).transferGenieComposerDragCtx;
+  const dragSession = sortableDrag;
+  if (dragSession?.target?.kind === "tabs" && dragSession.target.paneId !== dragSession.sourcePaneId) {
+    composerStore.moveDraft(dragSession.tabId, dragSession.target.paneId, dragSession.target.insertIndex);
+  } else if (dragSession?.target?.kind === "pane") {
+    const { paneId, zone } = dragSession.target;
+    if (zone === "center") composerStore.moveDraft(dragSession.tabId, paneId);
+    else composerStore.dockTab(dragSession.tabId, paneId, zone);
+  } else if (dragSession && event.oldIndex != null && event.newIndex != null) {
+    const sourcePaneId = (event.from as HTMLElement).dataset.paneId || "";
+    const targetPaneId = (event.to as HTMLElement).dataset.paneId || "";
+    const drag = (window as any).transferGenieWorkspaceDrag;
+    const insertIndex = drag.getSortableInsertIndex(event.oldIndex, event.newIndex, sourcePaneId === targetPaneId);
+    if (targetPaneId && insertIndex != null) composerStore.moveDraft(dragSession.tabId, targetPaneId, insertIndex);
+  }
+  sortableDrag = null;
   ctx.payload = null;
+  hoverZone.value = {};
+}
+function trackSortablePaneTarget(event: MouseEvent) {
+  if (!sortableDrag) return;
+  const target = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
+  const tabsList = target?.closest<HTMLElement>(".cw-tabs-list[data-pane-id]");
+  if (tabsList) {
+    const paneId = tabsList.dataset.paneId || "";
+    const targetTab = target?.closest<HTMLElement>(".cw-tab[data-tab-id]");
+    const tabs = Array.from(tabsList.querySelectorAll<HTMLElement>(".cw-tab[data-tab-id]"))
+      .filter((tab) => !tab.classList.contains("cw-tab-sortable-fallback"));
+    var insertIndex = tabs.length;
+    if (targetTab) {
+      const targetIndex = tabs.indexOf(targetTab);
+      const rect = targetTab.getBoundingClientRect();
+      if (targetIndex >= 0) insertIndex = event.clientX < (rect.left + rect.right) / 2 ? targetIndex : targetIndex + 1;
+    }
+    sortableDrag.target = paneId ? { kind: "tabs", paneId, insertIndex } : null;
+    hoverZone.value = {};
+    return;
+  }
+  if (!target) {
+    sortableDrag.target = null;
+    hoverZone.value = {};
+    return;
+  }
+  const paneElement = target.closest<HTMLElement>(".cw-pane[data-pane-id]");
+  const paneId = paneElement?.dataset.paneId || "";
+  if (!paneElement || !paneId) {
+    sortableDrag.target = null;
+    hoverZone.value = {};
+    return;
+  }
+  const drag = (window as any).transferGenieWorkspaceDrag;
+  const zone = drag.detectDropZone(event, paneElement, mainEl.value);
+  sortableDrag.target = { kind: "pane", paneId, zone };
+  hoverZone.value = { [paneId]: zone };
+}
+function syncTabSortables() {
+  const root = mainEl.value;
+  if (!root) return;
+  const activePaneIds = new Set<string>();
+  root.querySelectorAll<HTMLElement>(".cw-tabs-list[data-pane-id]").forEach((element) => {
+    const paneId = element.dataset.paneId || "";
+    if (!paneId) return;
+    activePaneIds.add(paneId);
+    const existing = tabSortables.get(paneId);
+    if (existing?.el === element) return;
+    existing?.destroy();
+    tabSortables.set(paneId, Sortable.create(element, {
+      group: "transfer-genie-editor-tabs",
+      direction: "horizontal",
+      draggable: ".cw-tab",
+      filter: ".cw-tab-close",
+      preventOnFilter: false,
+      animation: 140,
+      forceFallback: true,
+      fallbackOnBody: true,
+      fallbackTolerance: 3,
+      fallbackClass: "cw-tab-sortable-fallback",
+      ghostClass: "cw-tab-sortable-ghost",
+      chosenClass: "cw-tab-sortable-chosen",
+      dragClass: "cw-tab-sortable-drag",
+      emptyInsertThreshold: 24,
+      onStart: onSortableStart,
+      onEnd: onSortableEnd,
+    }));
+    element.dataset.sortableReady = "true";
+  });
+  tabSortables.forEach((sortable, paneId) => {
+    if (!activePaneIds.has(paneId)) {
+      delete sortable.el.dataset.sortableReady;
+      sortable.destroy();
+      tabSortables.delete(paneId);
+    }
+  });
 }
 
 function requestCollapseToSingle() {
@@ -323,6 +437,7 @@ function syncFullscreenState(event?: Event) {
 function globalDragEnd() {
   const ctx = (window as any).transferGenieComposerDragCtx;
   if (ctx) ctx.payload = null;
+  hoverZone.value = {};
 }
 
 let dragEndHandler: ((e: DragEvent) => void) | null = null;
@@ -330,10 +445,12 @@ onMounted(() => {
   (window as any).transferGenieComposerDragCtx = { payload: null };
   dragEndHandler = globalDragEnd;
   window.addEventListener("dragend", globalDragEnd as any, true);
+  window.addEventListener("mousemove", trackSortablePaneTarget, true);
   window.addEventListener("transfer-genie:composer-fullscreen-change", syncFullscreenState as EventListener);
   window.addEventListener("resize", closeDestructivePromptOnLayoutChange);
   syncFullscreenState();
   composerStore.restore();
+  nextTick(syncTabSortables);
   const bridge = (window as any).transferGenieComposer || {};
   bridge._editorFocused = false;
   bridge.isActive = () => true;
@@ -369,6 +486,10 @@ onMounted(() => {
   };
   (window as any).transferGenieComposer = bridge;
 });
+watch(() => state.paneOrder.join("|"), async () => {
+  await nextTick();
+  syncTabSortables();
+});
 onUnmounted(() => {
   tabNameAiSession.cancel();
   stopSentDraftCountdown();
@@ -376,8 +497,11 @@ onUnmounted(() => {
     delete (window as any).transferGenieComposer.promptCloseSentDraft;
   }
   if (dragEndHandler) window.removeEventListener("dragend", dragEndHandler as any, true);
+  window.removeEventListener("mousemove", trackSortablePaneTarget, true);
   window.removeEventListener("transfer-genie:composer-fullscreen-change", syncFullscreenState as EventListener);
   window.removeEventListener("resize", closeDestructivePromptOnLayoutChange);
+  tabSortables.forEach((sortable) => sortable.destroy());
+  tabSortables.clear();
 });
 
 </script>
@@ -495,21 +619,21 @@ onUnmounted(() => {
         v-for="pane in orderedPanes"
         :key="pane.id"
         class="cw-pane"
+        :data-pane-id="pane.id"
         :class="{ 'is-active': pane.id === state.activePaneId }"
         @dragover="onPaneDragOver($event, pane.id)"
         @dragleave="onPaneDragLeave(pane.id, $event)"
         @drop="onPaneDrop($event, pane.id)"
       >
         <header class="cw-tabs">
+          <div class="cw-tabs-list" :data-pane-id="pane.id">
           <button
             v-for="tab in pane.tabs"
             :key="tab.id"
             class="cw-tab"
             :class="{ 'is-active': tab.id === pane.activeTabId }"
+            :data-tab-id="tab.id"
             type="button"
-            draggable="true"
-            @dragstart="onTabDragStart($event, tab, pane.id)"
-            @dragend="onDragEnd"
             @click="switchDraft(pane.id, tab.id)"
             @contextmenu="onTabContextMenu($event, tab, pane.id)"
             :title="draftTitle(tab)"
@@ -518,6 +642,7 @@ onUnmounted(() => {
             <span class="cw-tab-title">{{ draftTitle(tab) }}</span>
             <span class="cw-tab-close" @click.stop="removeDraft(tab.id)" title="删除草稿">×</span>
           </button>
+          </div>
           <button class="cw-tab-add" type="button" @click="addDraft(pane.id)" title="新建草稿">+</button>
         </header>
 

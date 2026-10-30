@@ -181,7 +181,9 @@ export const composerStore = {
     }
     this.closeLeftInPaneConfirmed(paneId, tabId);
   },
-  moveDraft(tabId: string, targetPaneId: string) { commit(core.moveTab(state, tabId, targetPaneId)); },
+  moveDraft(tabId: string, targetPaneId: string, insertIndex?: number) {
+    commit(core.moveTab(state, tabId, targetPaneId, insertIndex == null ? {} : { insertIndex }));
+  },
   dockTab(tabId: string, targetPaneId: string, zone: string) {
     const found = state.panes.flatMap((p) => p.tabs).find((t) => t.id === tabId);
     if (!found) return;

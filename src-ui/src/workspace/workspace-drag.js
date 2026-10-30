@@ -92,6 +92,12 @@
     return detectDropZoneFromRects(pointer, paneRect, mainWindowRect, options);
   }
 
+  /** 把 SortableJS 的最终索引转换为 moveTab 使用的移动前插入索引。 */
+  function getSortableInsertIndex(oldIndex, newIndex, samePane) {
+    if (!Number.isInteger(oldIndex) || !Number.isInteger(newIndex) || newIndex < 0) return null;
+    return samePane && newIndex > oldIndex ? newIndex + 1 : newIndex;
+  }
+
   var api = {
     DROP_CENTER: DROP_CENTER,
     DROP_RIGHT: DROP_RIGHT,
@@ -103,6 +109,7 @@
     createMessageDragPayload: createMessageDragPayload,
     detectDropZoneFromRects: detectDropZoneFromRects,
     detectDropZone: detectDropZone,
+    getSortableInsertIndex: getSortableInsertIndex,
   };
 
   globalScope.transferGenieWorkspaceDrag = api;
