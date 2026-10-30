@@ -151,6 +151,12 @@ try {
   });
   assert.ok(compactStatus.inside && compactStatus.height <= 16 && compactStatus.fontSize <= 11, 'sync status is one small line inside the Space selector');
   await page.locator('.mobile-tabbar button').filter({ hasText: '我的' }).dispatchEvent('click');
+  const defaultFormat = page.getByRole('group', { name: '编辑器默认格式' });
+  assert.equal(await defaultFormat.getByRole('button', { name: '文本' }).getAttribute('aria-pressed'), 'true');
+  await defaultFormat.getByRole('button', { name: 'Markdown' }).click();
+  assert.equal(await defaultFormat.getByRole('button', { name: 'Markdown' }).getAttribute('aria-pressed'), 'true');
+  await defaultFormat.getByRole('button', { name: '文本' }).click();
+  assert.equal(await defaultFormat.getByRole('button', { name: '文本' }).getAttribute('aria-pressed'), 'true');
   assert.equal(await page.locator('.mobile-profile-status').count(), 0, 'profile must not repeat a standalone sync panel');
   assert.equal(await page.locator('.mobile-inline-sync').count(), 0, 'profile must not repeat the compact sync state');
   await page.locator('.mobile-settings-group button').filter({ hasText: '同步与传输' }).dispatchEvent('click');
@@ -222,7 +228,7 @@ try {
   assert.equal(await page.locator('.mobile-attachment-strip > div').count(), 0);
   await page.getByRole('textbox', { name: '消息内容', exact: true }).fill('导入中的草稿');
   await page.evaluate(() => { window.__feedTest.ui.state.composer.selecting = true; });
-  assert.equal(await page.getByRole('status').innerText(), '正在准备所选附件…');
+  assert.equal(await page.locator('.mobile-compose-metadata').getByRole('status').innerText(), '正在准备所选附件…');
   assert.equal(await page.getByRole('button', { name: '发送', exact: true }).isDisabled(), true);
   assert.equal(await page.locator('.mobile-compose-tools button').nth(0).isDisabled(), true);
   assert.equal(await page.locator('.mobile-compose-tools button').nth(1).isDisabled(), true);
@@ -707,7 +713,7 @@ try {
   assert.deepEqual(await page.evaluate(() => window.__feedTest.ui.state.composer.tagIds), ['work', 'tag-紧急发送']);
   assert.equal(await page.evaluate(() => window.__feedTest.ui.state.composer.marked), true, 'saving automatically marks without a checkbox');
   assert.equal(await composerMarkButton.getAttribute('title'), '已标记，编辑标记设置');
-  assert.equal(await composerMarkButton.locator('svg').evaluate(el => getComputedStyle(el).fill), 'rgb(53, 83, 70)', 'saved mark uses the same sage visual language as the settings sheet');
+  assert.equal(await composerMarkButton.locator('svg').evaluate(el => getComputedStyle(el).fill), 'rgb(247, 200, 74)', 'saved mark uses the filled yellow star state');
   assert.equal(await page.evaluate(() => window.__feedTest.ui.state.composer.dueDate), '2026-10-30');
   assert.match(await page.locator('.mobile-composer-mark-summary').innerText(), /工作.*紧急发送.*2026-10-30/s);
   if (process.env.MOBILE_COMPOSER_MARK_SCREENSHOT) await page.screenshot({ path: process.env.MOBILE_COMPOSER_MARK_SCREENSHOT });

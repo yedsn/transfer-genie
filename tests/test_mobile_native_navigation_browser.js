@@ -55,9 +55,25 @@ try {
   await page.waitForSelector('.mobile-detail-sheet', { state: 'detached' });
   await page.waitForFunction(() => window.__nativeCommands.at(-1)?.action === 'finish');
   await assertSameDocument();
+  await page.evaluate(() => Object.defineProperty(window.visualViewport, 'height', { configurable: true, value: 9999 }));
   await page.getByRole('button', { name: '新消息' }).click();
   await page.waitForSelector('.mobile-composer-sheet');
   const editor = page.getByRole('textbox', { name: '消息内容', exact: true });
+  await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === '消息内容');
+  assert.equal(await editor.evaluate(el => document.activeElement === el), true, 'the opener gesture must focus before UIKit finishes the push');
+  await page.waitForFunction(() => window.__nativeCommands.at(-1)?.action === 'show');
+  assert.deepEqual(await page.evaluate(() => window.__nativeCommands.filter(item => item.page === 'composer').map(item => item.action)), ['prepare', 'show']);
+  await editor.evaluate(el => el.blur());
+  await page.evaluate(() => {
+    const shown = window.__nativeCommands.at(-1);
+    window.dispatchEvent(new CustomEvent('transfer-genie-navigation-shown', { detail: { ...shown, requestId: 'stale' } }));
+  });
+  assert.equal(await editor.evaluate(el => document.activeElement === el), false, 'stale shown events cannot focus the editor');
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent('transfer-genie-navigation-shown', { detail: window.__nativeCommands.at(-1) })));
+  await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === '消息内容');
+  const shellHeight = await page.locator('.mobile-shell').evaluate(el => el.style.getPropertyValue('--mobile-viewport-height'));
+  assert.equal(shellHeight, await page.evaluate(() => `${document.documentElement.clientHeight}px`), 'native shown must replace stale VisualViewport geometry with the WebView layout height');
+  await page.evaluate(() => Object.defineProperty(window.visualViewport, 'height', { configurable: true, value: 844 }));
   await editor.fill('Same document draft fixture');
   await assertGate(false);
   await page.evaluate(() => window.__nativeCompleteReturn());
@@ -71,6 +87,11 @@ try {
   await assertGate(true);
   await page.getByRole('button', { name: '标记', exact: true }).click();
   await assertGate(false);
+  await page.evaluate(() => {
+    const shown = window.__nativeCommands.filter(item => item.page === 'composer' && item.action === 'show').at(-1);
+    window.dispatchEvent(new CustomEvent('transfer-genie-navigation-shown', { detail: shown }));
+  });
+  assert.equal(await page.locator('.mobile-compose-editor textarea').evaluate(el => document.activeElement === el), false, 'a duplicate shown event must not steal focus from nested mark settings');
   await page.getByRole('button', { name: '关闭编辑标记' }).click();
   await assertGate(true);
   await page.evaluate(() => window.__nativeCompleteReturn());
@@ -82,7 +103,45 @@ try {
   await page.getByRole('button', { name: '关闭新消息' }).click();
   await page.waitForSelector('.mobile-composer-sheet', { state: 'detached' });
   await assertSameDocument();
-  console.log('single-document state checks passed: no reload/loading, nested/IME/stale-return gates, retained draft and native close/finish');
+  // Real iPhone: the keyboard only appears for focus raised inside the tap task,
+  // and the shell must follow UIKit geometry instead of a stale VisualViewport.
+  const iosPage = await browser.newPage({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  await iosPage.addInitScript(() => {
+    Object.defineProperty(navigator, 'userAgent', { configurable: true, get: () => 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1' });
+    Object.defineProperty(navigator, 'platform', { configurable: true, get: () => 'iPhone' });
+  });
+  await iosPage.goto((process.env.MOBILE_PREVIEW_URL || 'http://127.0.0.1:7120') + '/?mobile-preview=1');
+  await iosPage.waitForSelector('.mobile-message-card');
+  await iosPage.evaluate(() => {
+    window.__TRANSFER_GENIE_NATIVE_GESTURE_SPY__ = true;
+    window.__nativeCommands = [];
+    window.__focusOrder = [];
+    window.addEventListener('focusin', event => window.__focusOrder.push(event.target?.className || event.target?.getAttribute?.('aria-label') || event.target?.tagName || ''), true);
+    window.transferGenieApi.mobileIntegration.setNavigationGesturesEnabled = async () => ({ enabled: true, supported: true });
+    window.transferGenieApi.mobileIntegration.navigateNativePage = async (page, action, requestId) => {
+      window.__nativeCommands.push({ page, action, requestId });
+      return { accepted: true, supported: true };
+    };
+  });
+  await iosPage.getByRole('button', { name: '新消息', exact: true }).click();
+  assert.equal(await iosPage.evaluate(() => window.__focusOrder.indexOf('mobile-keyboard-primer')), 1, 'iOS needs an editable focused inside the tap task, before the sheet renders');
+  await iosPage.waitForSelector('.mobile-composer-sheet');
+  await iosPage.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === '消息内容');
+  const iosShellHeight = () => iosPage.locator('.mobile-shell').evaluate(el => el.style.getPropertyValue('--mobile-viewport-height'));
+  const iosLayoutHeight = await iosPage.evaluate(() => document.documentElement.clientHeight);
+  await iosPage.evaluate(() => {
+    Object.defineProperty(window.visualViewport, 'height', { configurable: true, value: 400 });
+    window.visualViewport.dispatchEvent(new Event('resize'));
+  });
+  assert.equal(await iosShellHeight(), `${iosLayoutHeight}px`, 'a stale VisualViewport must not fake the keyboard-sized layout on iOS');
+  await iosPage.evaluate(() => window.dispatchEvent(new CustomEvent('transfer-genie-keyboard-geometry', { detail: { visibleHeight: 447 } })));
+  assert.equal(await iosShellHeight(), '447px', 'UIKit keyboard geometry drives the keyboard layout');
+  assert.equal(await iosPage.locator('.mobile-shell').evaluate(el => el.classList.contains('is-keyboard-visible')), true);
+  await iosPage.evaluate(() => window.dispatchEvent(new CustomEvent('transfer-genie-keyboard-geometry', { detail: { visibleHeight: null } })));
+  assert.equal(await iosShellHeight(), `${iosLayoutHeight}px`);
+  assert.equal(await iosPage.locator('.mobile-shell').evaluate(el => el.classList.contains('is-keyboard-visible')), false, 'dismissing the keyboard (⌄) must clear the keyboard layout while the editor keeps focus');
+  await iosPage.close();
+  console.log('single-document state checks passed: no reload/loading, nested/IME/stale-return gates, retained draft, iOS tap-task focus and UIKit keyboard geometry');
 } finally {
   await browser.close();
 }

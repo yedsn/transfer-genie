@@ -43,11 +43,17 @@ interface DraftAttachment {
 }
 
 const previewMode = new URLSearchParams(window.location.search).get("mobile-preview") === "1";
-const nativeComposerPage = new URLSearchParams(window.location.search).get("tg-mobile-page") === "composer";
-const nativeComposerFormat = nativeComposerPage && sessionStorage.getItem("transfer-genie:native-composer-format") === "markdown"
-  ? "markdown"
-  : "text";
 const api = () => (window as any).transferGenieApi as MobileApi;
+
+function editorFormat(value: unknown): "text" | "markdown" {
+  return value === "markdown" ? "markdown" : "text";
+}
+
+function hasRecoverableDraft(draft: any) {
+  return !!draft?.updatedAtMs || !!String(draft?.text || "") || !!draft?.marked ||
+    !!String(draft?.dueDate || "") || (Array.isArray(draft?.tagIds) && draft.tagIds.length > 0) ||
+    (Array.isArray(draft?.attachments) && draft.attachments.length > 0);
+}
 
 function errorText(error: unknown) {
   if (typeof error === "string") return error;
@@ -175,6 +181,7 @@ export function useMobileController() {
     conflicts: [] as any[],
     appVersion: "",
     sender: { saving: false, error: "" },
+    editorFormat: { saving: false },
     cache: { reclaimableBytes: 0, fileCount: 0, protectedTasks: 0, clearing: false },
     login: { email: "", password: "", sending: false },
     connectionWizard: {
@@ -186,7 +193,7 @@ export function useMobileController() {
     composer: {
       text: "",
       textClientId: `mobile-text-${crypto.randomUUID()}`,
-      format: nativeComposerFormat as "text" | "markdown",
+      format: "text" as "text" | "markdown",
       marked: false,
       tagIds: [] as string[],
       dueDate: "",
@@ -345,7 +352,10 @@ export function useMobileController() {
       restoringComposerDraft = true;
       state.composer.text = String(draft?.text || "");
       state.composer.textClientId = String(draft?.textClientId || `mobile-text-${crypto.randomUUID()}`);
-      state.composer.format = draft?.format === "markdown" ? "markdown" : "text";
+      const restored = hasRecoverableDraft(draft);
+      state.composer.format = restored
+        ? editorFormat(draft?.format)
+        : editorFormat(state.settings?.default_editor_format);
       state.composer.marked = !!draft?.marked;
       state.composer.tagIds = Array.isArray(draft?.tagIds) ? [...draft.tagIds] : [];
       state.composer.dueDate = String(draft?.dueDate || "");
@@ -366,7 +376,6 @@ export function useMobileController() {
         } as DraftAttachment;
       });
       state.composer.draftUpdatedAt = Number(draft?.updatedAtMs || 0);
-      const restored = !!draft?.updatedAtMs;
       state.composer.draftStatus = restored ? "restored" : "idle";
       state.composer.persistenceReady = true;
       persistedDraftFingerprint = composerDraftFingerprint();
@@ -433,6 +442,7 @@ export function useMobileController() {
     const generation = viewGeneration;
     state.busy = false;
     state.login.sending = false;
+    state.editorFormat.saving = false;
     searchGeneration += 1;
     markedGeneration += 1;
     Object.assign(state.search, { query: "", messages: [], offset: 0, hasMore: false, loading: false, error: "" });
@@ -455,7 +465,7 @@ export function useMobileController() {
     state.composer.attachments = [];
     state.composer.text = "";
     state.composer.textClientId = `mobile-text-${crypto.randomUUID()}`;
-    state.composer.format = nativeComposerFormat;
+    state.composer.format = "text";
     state.composer.marked = false;
     state.composer.tagIds = [];
     state.composer.dueDate = "";
@@ -468,7 +478,7 @@ export function useMobileController() {
     clearFeedback();
     state.boot = "loading";
     if (previewMode) {
-      state.settings = { sender_name: "Jam", active_storage_profile_id: "preview-profile" };
+      state.settings = { sender_name: "Jam", active_storage_profile_id: "preview-profile", default_editor_format: "text" };
       state.activeProfile = { id: "preview-profile", name: "Personal", provider_kind: "supabase", enabled: true, supabase: { api_url: "https://preview.supabase.invalid", space_id: "preview-space", binding_state: "bound" } };
       state.profiles = [state.activeProfile];
       state.connectionStates = { "preview-profile": "ready" };
@@ -583,6 +593,39 @@ export function useMobileController() {
       if (generation === viewGeneration) state.sender.error = errorText(error);
       return false;
     } finally { state.sender.saving = false; }
+  }
+
+  async function saveDefaultEditorFormat(value: "text" | "markdown") {
+    if (state.editorFormat.saving || state.boot !== "ready") return false;
+    const format = editorFormat(value);
+    if (format === editorFormat(state.settings?.default_editor_format)) return true;
+    if (previewMode) {
+      state.settings = { ...state.settings, default_editor_format: format };
+      showToast("浏览器预览已更新默认格式，不会保存到本机", "info");
+      return true;
+    }
+    const generation = viewGeneration;
+    state.editorFormat.saving = true;
+    try {
+      const latest = await api().settings.getSettings();
+      if (generation !== viewGeneration) return false;
+      const saved = await api().settings.saveSettings({ ...latest, default_editor_format: format });
+      if (generation !== viewGeneration) return false;
+      state.settings = saved;
+      showToast(format === "markdown" ? "新消息默认使用 Markdown" : "新消息默认使用文本");
+      return true;
+    } catch (error) {
+      if (generation === viewGeneration) showToast("默认格式保存失败：" + errorText(error), "error");
+      return false;
+    } finally {
+      if (generation === viewGeneration) state.editorFormat.saving = false;
+    }
+  }
+
+  function prepareNewComposer() {
+    if (!state.composer.persistenceReady || state.composer.sending ||
+        state.composer.draftStatus === "restored" || hasRecoverableDraft(state.composer)) return;
+    state.composer.format = editorFormat(state.settings?.default_editor_format);
   }
 
   async function refreshCache() {
@@ -1685,7 +1728,7 @@ export function useMobileController() {
 
   return {
     state, currentSpace, selectableProfiles, pendingCount, activeTransfers, signedIn, initialize, refreshAll, refreshRuntimeState, refreshAfterForeground, refreshMessages, loadOlderMessages, searchMessages, loadMoreSearch, setMarkedFilter, loadMoreMarked, loadConflicts, resolveConflict, retryTransfer,
-    selectMedia, selectDocuments, removeAttachment, sendDraft, persistComposerDraft, persistComposerDraftForNavigation, deactivateComposerPersistence, toggleMark, copyMessage, updateMarkedMetadata, createMarkedTag, deleteMessage, applyMessageSelection, previewMessage, prepareVideo, shareMessage, retryPreview, previewImageFailed, previewDraftAttachment,
-    signIn, logout, chooseProfile, diagnoseProfile, setProfileEnabled, beginConnectionEdit, renameProfile, signInProfile, logoutProfile, removeProfile, loadSpaces, switchSpace, testSetupConnection, setupSignIn, completeSetup, resetWizardDownstream, openConnectionWizard, openConnectionRepair, cancelConnectionWizard, selectWizardSpace, backConnectionWizard, createWizardSpace, installTransferListeners, refreshCache, clearCache, clearFeedback, showToast, dismissToast, saveSenderName,
+    selectMedia, selectDocuments, removeAttachment, sendDraft, prepareNewComposer, persistComposerDraft, persistComposerDraftForNavigation, deactivateComposerPersistence, toggleMark, copyMessage, updateMarkedMetadata, createMarkedTag, deleteMessage, applyMessageSelection, previewMessage, prepareVideo, shareMessage, retryPreview, previewImageFailed, previewDraftAttachment,
+    signIn, logout, chooseProfile, diagnoseProfile, setProfileEnabled, beginConnectionEdit, renameProfile, signInProfile, logoutProfile, removeProfile, loadSpaces, switchSpace, testSetupConnection, setupSignIn, completeSetup, resetWizardDownstream, openConnectionWizard, openConnectionRepair, cancelConnectionWizard, selectWizardSpace, backConnectionWizard, createWizardSpace, installTransferListeners, refreshCache, clearCache, clearFeedback, showToast, dismissToast, saveSenderName, saveDefaultEditorFormat,
   };
 }

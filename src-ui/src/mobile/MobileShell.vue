@@ -45,7 +45,6 @@ const initialNativeSheet: NativeHistorySheet | null =
   mobileRoute === "detail" || mobileRoute === "composer" ? mobileRoute : null;
 const nativeMessageStorageKey = "transfer-genie:native-detail-message";
 const nativePickerStorageKey = "transfer-genie:native-composer-picker";
-const nativeComposerFormatKey = "transfer-genie:native-composer-format";
 function readNativeDetailSnapshot(): MobileMessage | null {
   if (initialNativeSheet !== "detail") return null;
   try {
@@ -64,7 +63,13 @@ const navigationSaving = ref(false);
 const navigationError = ref("");
 const composerComposing = ref(false);
 watch(activeSheet, (sheet) => {
-  if (sheet !== "composer") composerComposing.value = false;
+  if (sheet !== "composer") {
+    composerComposing.value = false;
+    pendingComposerFocus = "";
+    // The keyboard primer must never outlive the Composer, otherwise the
+    // software keyboard stays up and the next tap lands in a hidden field.
+    releaseKeyboardPrimer();
+  }
   navigationError.value = "";
 }, { flush: "sync" });
 const managedHistorySheet = ref<NativeHistorySheet | null>(null);
@@ -77,23 +82,30 @@ let nativePickerAfterShow: "media" | "document" | undefined;
 let nativeGestureRequest = 0;
 const connectionRemoveEscalated = ref(false);
 const detailUnderlay = ref(false);
-const viewportHeight = ref(window.visualViewport?.height || window.innerHeight);
+function measureLayoutHeight() {
+  return Math.max(1, document.documentElement?.clientHeight || window.innerHeight || 0);
+}
+const viewportHeight = ref(measureLayoutHeight());
 const viewportTop = ref(window.visualViewport?.offsetTop || 0);
 const viewportKeyboardVisible = ref(false);
 const nativeKeyboardHeight = ref<number | null>((window as any).__TRANSFER_GENIE_KEYBOARD_HEIGHT__ ?? null);
 function updateNativeKeyboard(event: Event) {
   nativeKeyboardHeight.value = (event as CustomEvent<{ visibleHeight: number | null }>).detail.visibleHeight;
-  updateViewport();
+  // The keyboard frame can settle over several frames (dismiss key, predictive
+  // bar, hardware keyboard hand-off); re-measure instead of trusting one pass.
+  refreshLayoutAfterNativeTransition();
 }
-const composerTextInputFocused = ref(false);
+const composerTextarea = ref<HTMLTextAreaElement | null>(null);
+const composerMarkdownEditor = ref<{ focusEditor: () => boolean } | null>(null);
+let composerKeyboardPrimer: HTMLTextAreaElement | null = null;
+let pendingComposerFocus = "";
+let composerShownRequest = "";
 const useIOSKeyboardFocusFallback =
   /iPhone|iPad|iPod/i.test(navigator.userAgent) ||
   (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-const keyboardVisible = computed(
-  () =>
-    viewportKeyboardVisible.value ||
-    (useIOSKeyboardFocusFallback && composerTextInputFocused.value),
-);
+// Focus is not a keyboard proxy on iOS: the keyboard dismiss key (⌄) hides the
+// keyboard while the editor keeps focus, and only UIKit knows the real frame.
+const keyboardVisible = computed(() => viewportKeyboardVisible.value);
 const mobileDiagnostic = ref<MobileDiagnostic | null>(
   (window as any).__TRANSFER_GENIE_MOBILE_DIAGNOSTIC__ || null,
 );
@@ -115,38 +127,86 @@ function updateViewport() {
   // Pin the shell to the visible area, not the layout viewport behind the keyboard.
   // Ignore unexpected browser scale changes; Dynamic Type is applied separately.
   if (viewport && Math.abs(viewport.scale - 1) > 0.01) return;
-  const visualHeight = viewport?.height || window.innerHeight;
+  const layoutHeight = measureLayoutHeight();
+  const visualHeight = viewport?.height || layoutHeight;
+  // On iOS the native shell reports the real keyboard boundary. VisualViewport
+  // can keep a stale shrink across a native push, which makes the sheet look
+  // keyboard-sized while no keyboard is on screen.
+  const usesNativeKeyboardGeometry = useIOSKeyboardFocusFallback && hasNativeNavigation();
+  const visualKeyboardVisible = !usesNativeKeyboardGeometry &&
+    layoutHeight + window.scrollY - visualHeight > 100;
   // UIKit already reports the keyboard boundary in WebView coordinates.
   // Subtracting VisualViewport drag offsets again compresses the editor.
   viewportHeight.value = nativeKeyboardHeight.value === null
-    ? visualHeight
+    ? visualKeyboardVisible ? visualHeight : layoutHeight
     : Math.max(0, nativeKeyboardHeight.value);
-  viewportTop.value = nativeKeyboardHeight.value === null ? viewport?.offsetTop || 0 : 0;
+  viewportTop.value = nativeKeyboardHeight.value === null && visualKeyboardVisible
+    ? viewport?.offsetTop || 0
+    : 0;
   // WKWebView may scroll the layout viewport when refocusing after a native
   // picker, reducing innerHeight by the same amount as the page scroll.
   viewportKeyboardVisible.value =
-    nativeKeyboardHeight.value !== null || window.innerHeight + window.scrollY - viewportHeight.value > 100;
+    nativeKeyboardHeight.value !== null || visualKeyboardVisible;
 }
-function isComposerTextInput(element: EventTarget | null): element is HTMLElement {
-  return (
-    element instanceof HTMLElement &&
-    (element.matches("textarea, input") || element.isContentEditable)
-  );
-}
-function handleComposerFocusIn(event: FocusEvent) {
-  if (isComposerTextInput(event.target)) composerTextInputFocused.value = true;
-}
-function handleComposerFocusOut() {
-  window.requestAnimationFrame(() => {
-    const active = document.activeElement;
-    composerTextInputFocused.value =
-      isComposerTextInput(active) &&
-      Boolean(active.closest(".mobile-composer-sheet"));
+function refreshLayoutAfterNativeTransition() {
+  updateViewport();
+  requestAnimationFrame(() => {
+    updateViewport();
+    requestAnimationFrame(updateViewport);
   });
 }
 function dismissComposerKeyboard() {
   if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
-  handleComposerFocusOut();
+}
+async function focusComposerEditor(requestId = "local") {
+  pendingComposerFocus = requestId;
+  await nextTick();
+  if (pendingComposerFocus !== requestId || activeSheet.value !== "composer" ||
+      !state.composer.persistenceReady || state.composer.sending || composerUnderlay.value) return false;
+  if (requestId !== "local" && (requestId !== nativePageRequestId.value || requestId !== composerShownRequest)) return false;
+  const focused = state.composer.format === "markdown"
+    ? composerMarkdownEditor.value?.focusEditor() === true
+    : (() => {
+        const target = composerTextarea.value;
+        if (!target || target.disabled) return false;
+        target.focus({ preventScroll: true });
+        return document.activeElement === target;
+      })();
+  if (focused) {
+    pendingComposerFocus = "";
+    releaseKeyboardPrimer();
+  }
+  return focused;
+}
+function primeComposerKeyboard() {
+  // iOS only shows the software keyboard when an editable receives focus inside
+  // the tap handler itself. The real Composer editor does not exist yet at that
+  // moment, so focus a throwaway textarea first and hand focus over once the
+  // sheet has rendered. It is removed again so it never lingers in the DOM.
+  if (!useIOSKeyboardFocusFallback || !hasNativeNavigation()) return;
+  releaseKeyboardPrimer();
+  const primer = document.createElement("textarea");
+  primer.className = "mobile-keyboard-primer";
+  primer.setAttribute("aria-hidden", "true");
+  primer.tabIndex = -1;
+  primer.autocomplete = "off";
+  primer.spellcheck = false;
+  document.body.appendChild(primer);
+  composerKeyboardPrimer = primer;
+  primer.focus({ preventScroll: true });
+}
+function releaseKeyboardPrimer() {
+  const primer = composerKeyboardPrimer;
+  if (!primer) return;
+  composerKeyboardPrimer = null;
+  primer.remove();
+}
+function handleComposerEditorReady() {
+  if (pendingComposerFocus) void focusComposerEditor(pendingComposerFocus);
+}
+function switchComposerFormat(format: "text" | "markdown") {
+  state.composer.format = format;
+  void focusComposerEditor(managedHistorySheet.value && hasNativeNavigation() ? nativePageRequestId.value : "local");
 }
 const detailVideo = ref<HTMLVideoElement | null>(null);
 const detailVideoUrl = ref("");
@@ -247,6 +307,7 @@ watch(() => state.composer.draftStatus, (status) => {
     }, 2400);
   }
 });
+watch(() => state.composer.persistenceReady, handleComposerEditorReady);
 
 const visibleMessages = computed(() => searchQuery.value.trim() ? state.search.messages : state.messages);
 const selectedMessages = computed(() => visibleMessages.value.filter((message) => selectedFilenames.value.includes(message.filename)));
@@ -419,12 +480,23 @@ async function waitForNavigationPaint() {
 
 async function openNativeSheet(sheet: NativeHistorySheet, options: { message?: MobileMessage; picker?: "media" | "document" } = {}) {
   if (nativePagePreparing.value || managedHistorySheet.value) return;
+  if (sheet === "composer") {
+    controller.prepareNewComposer();
+    primeComposerKeyboard();
+  }
+  composerShownRequest = "";
   const requestId = crypto.randomUUID();
   const previousSheet = activeSheet.value;
   nativePagePreparing.value = true;
   let prepared = false;
   try {
-    if (hasNativeNavigation()) {
+    let pendingPrepare: Promise<{ accepted?: boolean } | undefined> | null = null;
+    if (hasNativeNavigation() && sheet === "composer") {
+      // Start the native snapshot immediately, but do not await it before the
+      // render/focus below. Awaiting the bridge first leaves WKWebView's user
+      // gesture context and the software keyboard stays down on a real iPhone.
+      pendingPrepare = Promise.resolve(nativePageCommand(sheet, "prepare", requestId));
+    } else if (hasNativeNavigation()) {
       const result = await nativePageCommand(sheet, "prepare", requestId);
       if (!result?.accepted) throw new Error("原生页面暂时无法打开，请重试");
       prepared = true;
@@ -434,6 +506,18 @@ async function openNativeSheet(sheet: NativeHistorySheet, options: { message?: M
     nativePageRequestId.value = requestId;
     nativePickerAfterShow = options.picker;
     openSheet(sheet);
+    if (sheet === "composer") {
+      await nextTick();
+      // Focus inside the opener's task. On a physical iPhone, focusing from
+      // UIKit's later didShow callback moves DOM focus without opening the
+      // keyboard because the WKWebView user-gesture context is already gone.
+      await focusComposerEditor("local");
+    }
+    if (pendingPrepare) {
+      const result = await pendingPrepare;
+      if (!result?.accepted) throw new Error("原生页面暂时无法打开，请重试");
+      prepared = true;
+    }
     await waitForNavigationPaint();
     if (prepared) {
       const result = await nativePageCommand(sheet, "show", requestId);
@@ -511,20 +595,22 @@ function returnFingerprint() {
 async function handleNativePageShown(event: Event) {
   const { page, requestId } = (event as CustomEvent).detail || {};
   if (page !== managedHistorySheet.value || requestId !== nativePageRequestId.value) return;
+  if (page === "composer" && composerShownRequest === requestId) return;
+  refreshLayoutAfterNativeTransition();
   const picker = nativePickerAfterShow;
   nativePickerAfterShow = undefined;
+  if (page === "composer") composerShownRequest = requestId;
   if (picker === "media") await controller.selectMedia();
   else if (picker === "document") await controller.selectDocuments();
-  else {
-    const selector = page === "composer" ? '.mobile-compose-editor textarea, .mobile-compose-editor [contenteditable="true"]' : '.mobile-detail-sheet header button';
-    document.querySelector<HTMLElement>(selector)?.focus({ preventScroll: true });
-  }
+  else if (page === "composer") void focusComposerEditor(requestId);
+  else document.querySelector<HTMLElement>('.mobile-detail-sheet header button')?.focus({ preventScroll: true });
 }
 
 function openSheet(name: SheetName) {
   window.clearTimeout(composerCloseTimer);
   window.clearTimeout(draftStatusTimer);
   if (name === "composer" && !state.composer.sending) {
+    if (!nativePagePreparing.value) controller.prepareNewComposer();
     state.composer.savedLocally = false;
     state.composer.error = "";
   }
@@ -546,6 +632,10 @@ function openSheet(name: SheetName) {
     void refreshMobileDiagnostic();
   void nextTick(() => {
     if (nativePagePreparing.value && hasNativeNavigation()) return;
+    if (name === "composer") {
+      void focusComposerEditor();
+      return;
+    }
     const sheet = document.querySelector<HTMLElement>(
       ".mobile-sheet-layer .mobile-sheet:not([aria-hidden='true'])",
     );
@@ -990,6 +1080,7 @@ onMounted(async () => {
   window.visualViewport?.addEventListener("resize", updateViewport);
   window.visualViewport?.addEventListener("scroll", updateViewport);
   window.addEventListener("resize", updateViewport);
+  window.addEventListener("orientationchange", updateViewport);
   window.addEventListener("transfer-genie-keyboard-geometry", updateNativeKeyboard);
   window.addEventListener(
     "transfer-genie-mobile-diagnostic",
@@ -1020,7 +1111,7 @@ onMounted(async () => {
       await nextTick();
       if (picker === "media") await controller.selectMedia();
       else await controller.selectDocuments();
-    }
+    } else void focusComposerEditor();
   }
   removeTransferListeners = await controller.installTransferListeners();
   statusTimer = window.setInterval(() => {
@@ -1029,6 +1120,7 @@ onMounted(async () => {
   }, 30000);
 });
 onBeforeUnmount(() => {
+  releaseKeyboardPrimer();
   window.clearTimeout(editorWarmTimer);
   if (editorWarmIdle !== undefined) (window as any).cancelIdleCallback?.(editorWarmIdle);
   void controller.deactivateComposerPersistence();
@@ -1036,6 +1128,7 @@ onBeforeUnmount(() => {
   window.visualViewport?.removeEventListener("resize", updateViewport);
   window.visualViewport?.removeEventListener("scroll", updateViewport);
   window.removeEventListener("resize", updateViewport);
+  window.removeEventListener("orientationchange", updateViewport);
   window.removeEventListener("transfer-genie-keyboard-geometry", updateNativeKeyboard);
   window.removeEventListener(
     "transfer-genie-mobile-diagnostic",
@@ -1517,6 +1610,14 @@ onBeforeUnmount(() => {
           </section>
           <section class="mobile-settings-group">
             <h2>应用</h2>
+            <div class="mobile-editor-default-setting">
+              <span class="mobile-setting-icon is-green">Aa</span>
+              <span><strong>编辑器默认格式</strong><small>只应用于没有草稿的新消息</small></span>
+              <div class="mobile-setting-segment" role="group" aria-label="编辑器默认格式">
+                <button type="button" :aria-pressed="state.settings?.default_editor_format !== 'markdown'" :disabled="state.editorFormat.saving" @click="controller.saveDefaultEditorFormat('text')">文本</button>
+                <button type="button" :aria-pressed="state.settings?.default_editor_format === 'markdown'" :disabled="state.editorFormat.saving" @click="controller.saveDefaultEditorFormat('markdown')">Markdown</button>
+              </div>
+            </div>
             <button type="button" @click="openSheet('sender')">
               <span class="mobile-setting-icon is-charcoal">TG</span>
               <span><strong>发送者名称</strong><small>{{ state.settings?.sender_name }}</small></span>
@@ -1643,8 +1744,6 @@ onBeforeUnmount(() => {
           :inert="composerUnderlay"
           aria-labelledby="mobile-composer-title"
           tabindex="-1"
-          @focusin="handleComposerFocusIn"
-          @focusout="handleComposerFocusOut"
           @compositionstart="composerComposing = true"
           @compositionend="composerComposing = false"
         >
@@ -1658,18 +1757,19 @@ onBeforeUnmount(() => {
           <div class="mobile-composer-content" role="region" aria-label="消息编辑与附件" :inert="navigationSaving">
           <div v-if="state.composer.format === 'markdown'" id="mobile-composer-toolbar-dock" class="mobile-composer-toolbar-dock"></div>
           <div class="mobile-compose-editor">
-          <MobileMarkdownEditor v-if="state.composer.format === 'markdown'" v-model="state.composer.text" toolbar-target="#mobile-composer-toolbar-dock" :show-dismiss-keyboard="keyboardVisible" :disabled="state.composer.sending || !state.composer.persistenceReady" @dismiss-keyboard="dismissComposerKeyboard" />
+          <MobileMarkdownEditor v-if="state.composer.format === 'markdown'" ref="composerMarkdownEditor" v-model="state.composer.text" toolbar-target="#mobile-composer-toolbar-dock" :show-dismiss-keyboard="keyboardVisible" :disabled="state.composer.sending || !state.composer.persistenceReady" @ready="handleComposerEditorReady" @dismiss-keyboard="dismissComposerKeyboard" />
           <textarea
             v-else
+            ref="composerTextarea"
             v-model="state.composer.text"
             :disabled="state.composer.sending || !state.composer.persistenceReady"
             rows="6"
             aria-label="消息内容"
             placeholder="输入文字，或加入照片和文件…"
-            :autofocus="!hasNativeNavigation()"
           ></textarea>
           </div>
           <div class="mobile-compose-actions">
+          <div class="mobile-compose-metadata">
           <div
             v-if="state.composer.attachments.length"
             class="mobile-attachment-strip"
@@ -1739,10 +1839,11 @@ onBeforeUnmount(() => {
           <p v-if="state.composer.error" class="mobile-inline-error" role="alert">
             {{ state.composer.error }}
           </p>
+          </div>
           <div class="mobile-compose-bottom">
           <div class="mobile-composer-format" aria-label="消息格式">
-            <button type="button" :aria-pressed="state.composer.format === 'text'" :disabled="state.composer.sending || !state.composer.persistenceReady" @click="state.composer.format = 'text'">文字</button>
-            <button type="button" :aria-pressed="state.composer.format === 'markdown'" :disabled="state.composer.sending || !state.composer.persistenceReady" @click="state.composer.format = 'markdown'">Markdown</button>
+            <button type="button" :aria-pressed="state.composer.format === 'text'" :disabled="state.composer.sending || !state.composer.persistenceReady" @click="switchComposerFormat('text')">文字</button>
+            <button type="button" :aria-pressed="state.composer.format === 'markdown'" :disabled="state.composer.sending || !state.composer.persistenceReady" @click="switchComposerFormat('markdown')">Markdown</button>
           </div>
           <div class="mobile-compose-tools">
             <button type="button" aria-label="照片" :disabled="state.busy || state.composer.sending || state.composer.selecting" @click="controller.selectMedia"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="8.5" cy="9" r="1.5"/><path d="m4 18 5-5 3 3 3-4 5 6"/></svg><span class="mobile-visually-hidden">照片</span></button>

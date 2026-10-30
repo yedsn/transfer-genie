@@ -151,6 +151,7 @@ mod tests {
             webdav_endpoints: Vec::new(),
             active_webdav_id: None,
             sender_name: String::new(),
+            default_editor_format: None,
             refresh_interval_secs: 5,
             download_dir: String::new(),
             save_filename_rule: crate::types::default_save_filename_rule(),

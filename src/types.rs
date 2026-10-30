@@ -912,6 +912,9 @@ pub struct Settings {
     pub active_webdav_id: Option<String>,
     #[serde(default)]
     pub sender_name: String,
+    // None preserves the desktop's pre-existing local preference on upgrade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_editor_format: Option<String>,
     #[serde(default)]
     pub refresh_interval_secs: u64,
     #[serde(default)]

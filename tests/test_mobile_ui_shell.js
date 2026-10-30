@@ -16,6 +16,7 @@ assert.equal(apiWindow.transferGenieApi.path.convertFileSrc('/sandbox/preview.jp
 apiWindow.__TAURI__ = { path: { convertFileSrc: path => 'legacy:' + path } };
 assert.equal(apiWindow.transferGenieApi.path.convertFileSrc('/preview.jpg'), 'legacy:/preview.jpg');
 const styles = fs.readFileSync(new URL('../src-ui/src/mobile/mobile.css', import.meta.url), 'utf8');
+const composerStyles = fs.readFileSync(new URL('../src-ui/src/mobile/composer.css', import.meta.url), 'utf8');
 const accessibilityNative = fs.readFileSync(new URL('../plugins/mobile-integration/ios/Sources/MobileAccessibility.swift', import.meta.url), 'utf8');
 const pluginNative = fs.readFileSync(new URL('../plugins/mobile-integration/ios/Sources/ExamplePlugin.swift', import.meta.url), 'utf8');
 assert.match(accessibilityNative, /UIFont.preferredFont/);
@@ -33,6 +34,8 @@ assert.ok(shell.includes('window.visualViewport?.removeEventListener("resize", u
 assert.ok(shell.includes('window.visualViewport?.removeEventListener("scroll", updateViewport)'));
 assert.match(shell, /viewport.scale - 1/);
 assert.match(styles, /--mobile-viewport-height/);
+assert.doesNotMatch(composerStyles, /is-keyboard-visible[^{}]*mobile-compose-actionss*{s*display:s*none/);
+assert.match(composerStyles, /mobile-composer-sheet.is-fullscreen-editor .mobile-compose-actions { display: flex; flex: 0 0 auto;/);
 assert.match(styles, /.mobile-composer-sheet textarea { font-size: calc\(16px \* var\(--mobile-text-scale, 1\)\); }/);
 
 assert.match(html, /id="mobile-app-shell"/);
@@ -65,6 +68,14 @@ assert.ok(shell.split(`:aria-hidden="activeSheet ? 'true' : undefined"`).length 
 assert.match(shell, /sheetOpener/);
 assert.ok(shell.includes('querySelector<HTMLElement>("[autofocus]")'));
 assert.match(shell, /aria-label="消息内容"/);
+assert.ok(shell.includes('ref="composerTextarea"'));
+assert.ok(shell.includes('ref="composerMarkdownEditor"'));
+assert.ok(shell.includes('@ready="handleComposerEditorReady"'));
+assert.ok(shell.includes('focusComposerEditor(requestId)'));
+assert.equal(shell.includes('nativeComposerFormatKey'), false);
+assert.ok(shell.includes('aria-label="编辑器默认格式"'));
+assert.ok(shell.includes("controller.saveDefaultEditorFormat('text')"));
+assert.ok(shell.includes("controller.saveDefaultEditorFormat('markdown')"));
 assert.ok(shell.includes('v-if="state.composer.error" class="mobile-inline-error" role="alert"'));
 assert.match(shell, /tabindex="-1"/);
 assert.match(shell, /ref="feedScroller"/);

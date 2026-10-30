@@ -29,7 +29,7 @@ try {
       { width: 390, height: 844, visibleHeight: 447 },
       { width: 320, height: 568, visibleHeight: 300 },
       { width: 844, height: 390, visibleHeight: 210 },
-      { width: 844, height: 390, visibleHeight: 114 },
+      { width: 844, height: 390, visibleHeight: 110 },
     ]) {
       await page.setViewportSize({ width, height });
       await visibleViewport(height);
@@ -51,8 +51,20 @@ try {
         assert.equal(shell.height, visibleHeight);
         assert.equal(shell.y, 12);
         assert.equal(await page.locator('.is-keyboard-visible').count(), 1);
-        assert.equal(await sheet.locator('.mobile-compose-actions').isVisible(), false, 'send, attachments and mode controls do not follow the keyboard');
-        assert.equal(await sheet.evaluate(el => el.scrollWidth > el.clientWidth), false);
+        assert.equal(await sheet.locator('.mobile-compose-actions').isVisible(), true, 'send, attachments and mode controls remain visible with the keyboard');
+        const bottom = sheet.locator('.mobile-compose-bottom');
+        const bottomBox = await bottom.boundingBox();
+        assert.ok(bottomBox.y >= shell.y && bottomBox.y + bottomBox.height <= shell.y + visibleHeight + 1, 'the bottom action row remains inside the visible canvas: ' + JSON.stringify({ width, visibleHeight, large, format, shell, bottomBox }));
+        for (const label of ['照片', '文件', '标记', '发送']) {
+          const control = sheet.getByRole('button', { name: label, exact: true });
+          await control.scrollIntoViewIfNeeded();
+          assert.ok(await control.evaluate(el => {
+            const r = el.getBoundingClientRect();
+            const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+            return r.width >= 44 && r.height >= 44 && (hit === el || el.contains(hit));
+          }), 'action center is not clipped: ' + label + JSON.stringify({ width, visibleHeight, large, format }));
+        }
+        assert.equal(await sheet.evaluate(el => el.scrollWidth > el.clientWidth), false, JSON.stringify({ width, height, visibleHeight, large, format }));
         const close = sheet.getByRole('button', { name: '关闭新消息', exact: true });
         const dismiss = sheet.getByRole('button', { name: '收起键盘', exact: true });
         for (const control of [close]) {
@@ -66,7 +78,7 @@ try {
           assert.equal(await tools.getByRole('button').first().getAttribute('aria-label'), '收起键盘', 'dismiss keyboard is the first toolbar icon');
           assert.ok(await dismiss.isVisible());
           const box = await tools.boundingBox();
-          assert.equal(box.x, 0); assert.equal(box.width, width);
+          assert.equal(box.x, 0); assert.ok(box.width <= width);
           const headerBox = await sheet.locator('header').boundingBox();
           assert.ok(box.y >= headerBox.y + headerBox.height && box.y <= headerBox.y + headerBox.height + 8, 'toolbar stays directly below the quiet header');
           const host = sheet.locator('.mobile-rich-editor-host');
@@ -119,7 +131,7 @@ try {
   assert.equal(nativeBox.y, beforeNativeBox.y, 'native keyboard geometry does not move the toolbar from the top');
   const nativeHostBox = await sheet.locator('.mobile-rich-editor-host').boundingBox();
   assert.ok(nativeHostBox.y >= nativeBox.y + nativeBox.height && nativeHostBox.y + nativeHostBox.height <= 616, 'native geometry only bounds the writing surface');
-  assert.equal(await sheet.locator('.mobile-compose-actions').isVisible(), false);
+  assert.equal(await sheet.locator('.mobile-compose-actions').isVisible(), true);
   assert.equal(await sheet.getByRole('textbox', { name: '消息内容', exact: true }).getAttribute('contenteditable'), 'true');
   await visibleViewport(540, 76);
   const draggedShell = await page.locator('.mobile-shell').boundingBox();
@@ -148,24 +160,29 @@ try {
     const iosSheet = iosPage.locator('.mobile-composer-sheet');
     const plain = iosSheet.getByRole('textbox', { name: '消息内容', exact: true });
     await plain.waitFor();
+    // iOS has no resize event for WKWebView here; only UIKit knows the keyboard frame.
+    await iosPage.evaluate(() => window.dispatchEvent(new CustomEvent('transfer-genie-keyboard-geometry', { detail: { visibleHeight: 600 } })));
     await iosPage.waitForSelector('.mobile-shell.is-keyboard-visible');
-    assert.equal(await iosSheet.locator('.mobile-compose-actions').isVisible(), false, 'iOS focus hides actions when WKWebView does not resize VisualViewport');
+    assert.equal(await iosSheet.locator('.mobile-compose-actions').isVisible(), true, 'iOS keyboard geometry keeps actions visible');
     await iosPage.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     await plain.evaluate(el => el.blur());
+    await iosPage.evaluate(() => window.dispatchEvent(new CustomEvent('transfer-genie-keyboard-geometry', { detail: { visibleHeight: null } })));
     await iosPage.waitForSelector('.mobile-shell:not(.is-keyboard-visible)');
     await iosSheet.getByRole('button', { name: 'Markdown', exact: true }).click();
     const rich = iosSheet.getByRole('textbox', { name: '消息内容', exact: true });
     await rich.waitFor();
+    await iosPage.evaluate(() => window.dispatchEvent(new CustomEvent('transfer-genie-keyboard-geometry', { detail: { visibleHeight: 600 } })));
     await iosPage.waitForSelector('.mobile-shell.is-keyboard-visible');
     const toolbar = iosSheet.getByRole('toolbar', { name: 'Markdown 格式工具' });
     assert.equal(await toolbar.getByRole('button').first().getAttribute('aria-label'), '收起键盘');
     await toolbar.getByRole('button', { name: '收起键盘', exact: true }).click();
+    await iosPage.evaluate(() => window.dispatchEvent(new CustomEvent('transfer-genie-keyboard-geometry', { detail: { visibleHeight: null } })));
     await iosPage.waitForSelector('.mobile-shell:not(.is-keyboard-visible)');
     assert.equal(await iosSheet.locator('.mobile-compose-actions').isVisible(), true, 'dismiss icon restores the unchanged action area');
   } finally {
     await iosContext.close();
   }
-  console.log('mobile keyboard browser tests passed: fixed top toolbar, hidden send/actions, dismiss and draft preservation, plain/Markdown, narrow/landscape/max text');
+  console.log('mobile keyboard browser tests passed: fixed top toolbar, visible send/actions, dismiss and draft preservation, plain/Markdown, narrow/landscape/max text');
 } finally {
   await browser.close();
 }

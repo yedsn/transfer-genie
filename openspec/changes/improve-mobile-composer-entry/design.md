@@ -2,7 +2,7 @@
 
 ## Context
 
-移动端 Composer 是同一个 Vue/WKWebView 运行时内的全屏页面，并通过 UIKit 单 WebView 导航协调器完成 push/pop。当前原生 shown 回调已尝试聚焦编辑器，但文本输入没有稳定的组件引用，Markdown 编辑器又是异步加载；同时键盘态样式直接隐藏 mobile-compose-actions。设置模型和桌面端已经使用 default_editor_format，移动端初始化仍以会话字段或固定文本值为主。
+移动端 Composer 是同一个 Vue/WKWebView 运行时内的全屏页面，并通过 UIKit 单 WebView 导航协调器完成 push/pop。当前原生 shown 回调已尝试聚焦编辑器，但文本输入没有稳定的组件引用，Markdown 编辑器又是异步加载；同时键盘态样式直接隐藏 mobile-compose-actions。桌面端已有默认格式和提交字段，但 Rust 设置模型此前没有持久化该字段；移动端初始化仍以会话字段或固定文本值为主。
 
 ## Goals / Non-Goals
 
@@ -47,6 +47,8 @@ Controller 读取设置后先把 default_editor_format 规范化为 text 或 mar
 ### 3. 设置页使用紧凑的双选分段控件并立即持久化
 
 在移动端“应用”设置组中增加与现有卡片视觉一致的行，行内提供“文本 / Markdown”双选控件，当前选项同时通过文字、选中状态和 aria-pressed 表达。切换时使用“读取最新设置—合并字段—保存”的现有模式，防止覆盖其他页面刚更新的设置。
+
+Rust 设置模型增加可选的 default_editor_format，并纳入 iOS 设置合并及导入导出；非法值归一为文本。旧配置缺省时不强行写入默认值，以保留桌面端原有 localStorage 偏好的回退行为。此字段为各设备的应用设置，不表示通过 Supabase 跨设备同步。
 
 保存期间禁用两个选项；成功后更新本地设置快照并显示全局 Toast；失败时恢复原值并显示错误 Toast。预览模式只更新内存并明确提示不会写入本机。
 

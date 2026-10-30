@@ -493,6 +493,8 @@ struct ExportSettings {
     webdav_endpoints: Vec<WebDavEndpoint>,
     #[serde(default)]
     active_webdav_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_editor_format: Option<String>,
     #[serde(default)]
     refresh_interval_secs: u64,
     #[serde(default = "crate::types::default_save_filename_rule")]
@@ -1357,6 +1359,7 @@ fn ios_settings_view(settings: &Settings) -> Settings {
 fn merge_ios_settings(previous: &Settings, submitted: Settings) -> Settings {
     let mut merged = previous.clone();
     merged.sender_name = submitted.sender_name;
+    merged.default_editor_format = submitted.default_editor_format;
     merged.refresh_interval_secs = submitted.refresh_interval_secs;
 
     let submitted_supabase = submitted
@@ -8694,6 +8697,7 @@ fn export_settings(
         active_storage_profile_id: settings.active_storage_profile_id.clone(),
         webdav_endpoints: settings.webdav_endpoints.clone(),
         active_webdav_id: settings.active_webdav_id.clone(),
+        default_editor_format: settings.default_editor_format.clone(),
         refresh_interval_secs: settings.refresh_interval_secs,
         save_filename_rule: settings.save_filename_rule.clone(),
         shortcuts_enabled: Some(settings.shortcuts_enabled),
@@ -8769,6 +8773,10 @@ async fn import_settings(
         webdav_endpoints: bundle.settings.webdav_endpoints,
         active_webdav_id: bundle.settings.active_webdav_id,
         sender_name: existing.sender_name,
+        default_editor_format: bundle
+            .settings
+            .default_editor_format
+            .or(existing.default_editor_format),
         refresh_interval_secs: bundle.settings.refresh_interval_secs,
         save_filename_rule: bundle.settings.save_filename_rule,
         shortcuts_enabled: bundle
@@ -17177,6 +17185,11 @@ fn normalize_settings(
     mut settings: Settings,
     default_download_dir: &Path,
 ) -> Result<Settings, String> {
+    if let Some(format) = settings.default_editor_format.as_mut() {
+        if format != "markdown" {
+            *format = "text".into();
+        }
+    }
     if settings.refresh_interval_secs == 0 {
         settings.refresh_interval_secs = 5;
     }
@@ -18983,6 +18996,7 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
                 webdav_endpoints: endpoints,
                 active_webdav_id: active_id,
                 sender_name,
+                default_editor_format: None,
                 refresh_interval_secs: legacy.refresh_interval_secs,
                 download_dir: legacy.download_dir,
                 save_filename_rule: crate::types::default_save_filename_rule(),
@@ -19010,6 +19024,7 @@ fn load_settings(path: &Path, fallback_download_dir: &Path) -> Result<Settings, 
             webdav_endpoints: Vec::new(),
             active_webdav_id: None,
             sender_name: random_sender_name(),
+            default_editor_format: None,
             refresh_interval_secs: 5,
             download_dir: normalize_download_dir("", fallback_download_dir),
             save_filename_rule: crate::types::default_save_filename_rule(),
@@ -23685,6 +23700,7 @@ mod tests {
             }],
             active_webdav_id: Some("endpoint-1".to_string()),
             sender_name: "tester".to_string(),
+            default_editor_format: None,
             refresh_interval_secs: 5,
             download_dir: String::new(),
             save_filename_rule: crate::types::default_save_filename_rule(),
@@ -27869,6 +27885,21 @@ mod tests {
     }
 
     #[test]
+    fn editor_default_format_settings_round_trip_and_legacy_fallback() {
+        let mut settings = test_settings();
+        let legacy = serde_json::to_value(&settings).unwrap();
+        assert!(legacy.get("default_editor_format").is_none());
+        assert!(serde_json::from_value::<Settings>(legacy).unwrap().default_editor_format.is_none());
+        for (input, expected) in [("markdown", "markdown"), ("text", "text"), ("invalid", "text")] {
+            settings.default_editor_format = Some(input.into());
+            let normalized = normalize_settings(settings.clone(), Path::new("downloads")).unwrap();
+            let restored: Settings = serde_json::from_value(serde_json::to_value(normalized).unwrap()).unwrap();
+            assert_eq!(restored.default_editor_format.as_deref(), Some(expected));
+            assert_eq!(ios_settings_view(&restored).default_editor_format.as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
     fn normalize_settings_applies_telegram_defaults() {
         let mut settings = test_settings();
         settings.telegram.enabled = false;
@@ -28408,6 +28439,7 @@ mod tests {
         assert!(mobile.ai.provider.api_key.is_empty());
         assert!(mobile.speech_to_text.api_key.is_empty());
         mobile.sender_name = "iPhone".into();
+        mobile.default_editor_format = Some("markdown".into());
         mobile.refresh_interval_secs = 12;
         mobile.active_storage_profile_id = Some("supabase-1".into());
         mobile.storage_profiles[0].name = "Mobile Cloud".into();
@@ -28439,6 +28471,7 @@ mod tests {
             normalize_ios_settings_submission(&previous, mobile, Path::new("downloads")).unwrap();
 
         assert_eq!(normalized.sender_name, "iPhone");
+        assert_eq!(normalized.default_editor_format.as_deref(), Some("markdown"));
         assert_eq!(normalized.refresh_interval_secs, 12);
         assert_eq!(
             normalized.active_storage_profile_id.as_deref(),
@@ -35278,6 +35311,7 @@ mod tests {
             active_storage_profile_id: None,
             webdav_endpoints: Vec::new(),
             active_webdav_id: None,
+            default_editor_format: Some("markdown".into()),
             refresh_interval_secs: 5,
             save_filename_rule: crate::types::default_save_filename_rule(),
             shortcuts_enabled: Some(false),
@@ -35295,6 +35329,7 @@ mod tests {
         let value = serde_json::to_value(settings).expect("serialize export settings");
 
         assert_eq!(value["shortcuts_enabled"], false);
+        assert_eq!(value["default_editor_format"], "markdown");
         assert_eq!(value["global_hotkey_enabled"], false);
         assert_eq!(value["global_hotkey"], "");
         assert_eq!(value["send_hotkey"], "");
@@ -35355,6 +35390,7 @@ mod tests {
             webdav_endpoints: legacy.webdav_endpoints,
             active_webdav_id: legacy.active_webdav_id,
             sender_name: "tester".into(),
+            default_editor_format: legacy.default_editor_format,
             refresh_interval_secs: legacy.refresh_interval_secs,
             download_dir: String::new(),
             save_filename_rule: legacy.save_filename_rule,

@@ -179,6 +179,7 @@ html.is-ios-platform #mobile-app-shell { display: block; }
 
 .mobile-profile-page { padding-left: 16px; padding-right: 16px; }.mobile-profile-hero { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 13px; padding: 12px 3px 20px; }.mobile-profile-avatar { display: grid; place-items: center; width: 57px; height: 57px; border-radius: 19px; color: #fff; background: linear-gradient(145deg, #292722, #595147); font-size: calc(21px * var(--mobile-text-scale, 1)); font-weight: 700; box-shadow: 0 9px 20px rgba(43,37,31,.17); }.mobile-profile-hero h1 { margin: 0; font-family: Georgia, "Songti SC", serif; font-size: calc(25px * var(--mobile-text-scale, 1)); line-height: 1.1; }.mobile-profile-hero p { margin: 3px 0 0; color: var(--mobile-muted); font-size: calc(11px * var(--mobile-text-scale, 1)); }.mobile-account-state { padding: 6px 9px; border-radius: 99px; color: var(--mobile-green); background: #e5f0e7; font-size: calc(9px * var(--mobile-text-scale, 1)); font-weight: 750; }
 .mobile-settings-group { margin-bottom: 22px; }.mobile-settings-group h2 { margin: 0 4px 8px; color: #817a72; font-size: calc(10px * var(--mobile-text-scale, 1)); letter-spacing: .12em; }.mobile-settings-group > button { display: grid; grid-template-columns: auto 1fr auto; align-items: center; width: 100%; min-height: 66px; gap: 11px; padding: 9px 12px; border: 0; border-bottom: 1px solid #eee7de; background: rgba(255,253,249,.88); text-align: left; }.mobile-settings-group > button:first-of-type { border-radius: 18px 18px 0 0; }.mobile-settings-group > button:last-child { border-bottom: 0; border-radius: 0 0 18px 18px; }.mobile-settings-group > button:only-of-type { border-radius: 18px; }.mobile-settings-group > button > span:nth-child(2) { display: flex; flex-direction: column; min-width: 0; }.mobile-settings-group > button strong { font-size: calc(13px * var(--mobile-text-scale, 1)); }.mobile-settings-group > button small { margin-top: 2px; overflow: hidden; color: var(--mobile-muted); font-size: calc(10px * var(--mobile-text-scale, 1)); text-overflow: ellipsis; white-space: nowrap; }.mobile-settings-group > button > svg { color: #a59d94; }.mobile-setting-icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 12px; font-size: calc(12px * var(--mobile-text-scale, 1)); font-weight: 800; }.mobile-setting-icon.is-orange { color: #c74717; background: #fbe6d8; }.mobile-setting-icon.is-green { color: #39754c; background: #e2eee5; }.mobile-setting-icon.is-blue { color: #487181; background: #e2eef0; }.mobile-setting-icon.is-charcoal { color: #fff; background: #4a4741; }.mobile-setting-icon.is-cream { color: #756b5f; background: #efe8df; }
+.mobile-editor-default-setting { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px 11px; min-height: 94px; padding: 12px; border-bottom: 1px solid #eee7de; border-radius: 18px 18px 0 0; background: rgba(255,253,249,.88); }.mobile-editor-default-setting > span:nth-child(2) { display: flex; flex-direction: column; min-width: 0; }.mobile-editor-default-setting strong { font-size: calc(13px * var(--mobile-text-scale, 1)); }.mobile-editor-default-setting small { margin-top: 2px; color: var(--mobile-muted); font-size: calc(10px * var(--mobile-text-scale, 1)); }.mobile-editor-default-setting + button:first-of-type { border-radius: 0; }.mobile-setting-segment { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 3px; padding: 3px; border-radius: 13px; background: #eceee7; }.mobile-setting-segment button { min-height: 40px; padding: 0 8px; border: 0; border-radius: 10px; color: #777b72; background: transparent; font-size: calc(11px * var(--mobile-text-scale, 1)); font-weight: 650; }.mobile-setting-segment button[aria-pressed="true"] { color: #355346; background: #fffefa; box-shadow: 0 1px 5px rgba(45,62,43,.1); }.mobile-setting-segment button:disabled { opacity: .55; }
 .mobile-logout-button { width: 100%; height: 50px; border: 1px solid rgba(201,71,50,.18); border-radius: 17px; color: var(--mobile-red); background: rgba(255,253,249,.72); font-size: calc(12px * var(--mobile-text-scale, 1)); font-weight: 700; }.mobile-prototype-note { margin: 12px 0 0; color: #999188; font-size: calc(9px * var(--mobile-text-scale, 1)); text-align: center; }
 
 .mobile-empty-state { display: flex; flex-direction: column; align-items: center; margin-top: 52px; color: var(--mobile-muted); text-align: center; }.mobile-empty-state > span { display: grid; place-items: center; width: 52px; height: 52px; margin-bottom: 12px; border-radius: 18px; color: var(--mobile-orange); background: #f9e6d9; font-size: calc(22px * var(--mobile-text-scale, 1)); }.mobile-empty-state strong { color: var(--mobile-ink); font-size: calc(14px * var(--mobile-text-scale, 1)); }.mobile-empty-state p { margin: 5px 0; font-size: calc(11px * var(--mobile-text-scale, 1)); }.mobile-empty-compact { margin-top: 48px; }
@@ -201,6 +202,27 @@ html.is-ios-platform #mobile-app-shell { display: block; }
   .mobile-feed-page { padding-bottom: calc(146px + env(safe-area-inset-bottom)); }
   .mobile-topbar { position: sticky; top: 0; z-index: 2; padding-bottom: 8px; background: linear-gradient(var(--mobile-paper) 72%, transparent); }
   .mobile-section-heading { margin-top: 13px; }.mobile-message-list { grid-template-columns: 1fr; }.mobile-feed-dock { left: max(20px, env(safe-area-inset-left)); right: max(20px, env(safe-area-inset-right)); }.mobile-sheet { padding-left: max(24px, env(safe-area-inset-left)); padding-right: max(24px, env(safe-area-inset-right)); }.mobile-composer-sheet textarea { min-height: 90px; }
+}
+
+/* iOS only raises the software keyboard for focus that happens inside the tap
+   handler. This near-invisible textarea takes that focus until the Composer
+   editor is mounted, then focus moves on without dismissing the keyboard. */
+.mobile-keyboard-primer {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0.01;
+  overflow: hidden;
+  resize: none;
+  pointer-events: none;
+  font-size: 16px;
+  line-height: 1;
+  caret-color: transparent;
 }
 
 .mobile-secondary-button { width: 100%; min-height: 44px; margin-top: 10px; padding: 10px 14px; border: 1px solid var(--mobile-line); border-radius: 14px; color: var(--mobile-ink); background: rgba(255,255,255,.58); font: inherit; font-weight: 700; }

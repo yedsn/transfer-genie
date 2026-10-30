@@ -1946,16 +1946,16 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         XCTAssertTrue(editor.isHittable)
         editor.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
-        XCTAssertFalse(button(containing: "照片").isHittable, "Attachment actions must stay below the keyboard")
-        XCTAssertFalse(button(containing: "文件").isHittable, "Attachment actions must stay below the keyboard")
-        XCTAssertFalse(button(containing: "标记").isHittable, "Mark settings must stay below the keyboard")
-        XCTAssertFalse(app.buttons["发送"].isHittable, "Send must stay below the keyboard")
+        XCTAssertTrue(button(containing: "照片").isHittable, "Attachment actions must remain visible above the keyboard")
+        XCTAssertTrue(button(containing: "文件").isHittable, "File actions must remain visible above the keyboard")
+        XCTAssertTrue(app.switches["标记"].isHittable, "Mark settings must remain visible above the keyboard")
+        XCTAssertTrue(app.buttons["发送"].exists, "Send must remain visible above the keyboard")
 
         dismissKeyboardIfNeeded()
         XCTAssertTrue(button(containing: "照片").waitForExistence(timeout: 5))
         XCTAssertTrue(button(containing: "照片").isHittable)
         XCTAssertTrue(button(containing: "文件").isHittable)
-        XCTAssertTrue(button(containing: "标记").isHittable)
+        XCTAssertTrue(app.switches["标记"].isHittable)
         button(containing: "照片").tap()
         let cancel = firstExistingButton(labels: ["取消", "Cancel"], timeout: 10)
         XCTAssertNotNil(cancel, "The native photo picker did not provide a cancellation path")
@@ -1985,8 +1985,159 @@ final class TransferGenieSimulatorUITests: XCTestCase {
         try verifyComposerWithSoftwareKeyboard(scrollForActions: false)
     }
 
+    func testComposerDefaultFormatsAutomaticallyOpenKeyboard() throws {
+        app.buttons["新消息"].tap()
+        let existingEditor = composerEditor()
+        XCTAssertTrue(existingEditor.waitForExistence(timeout: 5))
+        let original = existingEditor.value as? String ?? ""
+        guard ["", "输入文字，或加入照片和文件…", "写下你的想法…"].contains(original.trimmingCharacters(in: .whitespacesAndNewlines)),
+              app.buttons.matching(identifier: "移除附件").count == 0 else {
+            app.buttons["关闭新消息"].tap()
+            throw XCTSkip("Preserve an existing unsent draft")
+        }
+        app.buttons["关闭新消息"].tap()
+        app.buttons["我的"].tap()
+        let markdownDefault = app.switches["Markdown"]
+        let textDefault = app.switches["文本"]
+        for _ in 0..<3 { if markdownDefault.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(markdownDefault.waitForExistence(timeout: 5))
+        let originalMarkdown = (markdownDefault.value as? String) == "1"
+        defer {
+            if app.buttons["关闭新消息"].exists { app.buttons["关闭新消息"].tap() }
+            app.buttons["我的"].tap()
+            for _ in 0..<3 { if markdownDefault.isHittable { break }; app.swipeUp() }
+            (originalMarkdown ? markdownDefault : textDefault).tap()
+            app.buttons["消息"].tap()
+        }
+        for markdown in [false, true] {
+            let option = markdown ? markdownDefault : textDefault
+            option.tap()
+            let selected = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "1"), object: option)
+            XCTAssertEqual(XCTWaiter.wait(for: [selected], timeout: 10), .completed, "The default format must finish saving")
+            app.buttons["消息"].tap()
+            app.buttons["新消息"].tap()
+            XCTAssertTrue(composerEditor().waitForExistence(timeout: 5))
+            // No editor tap: keyboard presentation must follow the opener itself.
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "Opening either default format must present the keyboard without a second tap")
+            XCTAssertGreaterThan(app.keyboards.firstMatch.frame.height, 100)
+            for label in ["照片", "文件"] {
+                XCTAssertTrue(button(containing: label).isHittable)
+                XCTAssertLessThanOrEqual(button(containing: label).frame.maxY, app.keyboards.firstMatch.frame.minY + 1)
+            }
+            XCTAssertTrue(app.switches["标记"].isHittable)
+            XCTAssertTrue(app.buttons["发送"].exists)
+            if markdown { XCTAssertTrue(app.switches["粗体"].exists) }
+            else { XCTAssertFalse(app.switches["粗体"].exists) }
+            attachScreenshot(named: markdown ? "default-markdown-auto-keyboard" : "default-text-auto-keyboard")
+            app.buttons["关闭新消息"].tap()
+            app.buttons["我的"].tap()
+            for _ in 0..<3 { if markdownDefault.isHittable { break }; app.swipeUp() }
+        }
+    }
+
+    func testComposerExistingDraftOpensWithKeyboardAndStableActions() throws {
+        XCTAssertTrue(app.buttons["新消息"].waitForExistence(timeout: 30))
+        app.buttons["新消息"].tap()
+        let editor = composerEditor()
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "Opening the Composer must focus its existing draft without a second tap")
+        let window = app.windows.firstMatch.frame
+        let keyboardTop = app.keyboards.firstMatch.frame.minY
+        let controls: [(String, XCUIElement)] = [
+            ("照片", app.buttons["照片"]),
+            ("文件", app.buttons["文件"]),
+            ("标记", app.switches["标记"]),
+            ("发送", app.buttons["发送"]),
+            ("关闭新消息", app.buttons["关闭新消息"]),
+        ]
+        for (label, control) in controls {
+            XCTAssertTrue(control.exists, label)
+            XCTAssertTrue(control.isHittable, label)
+            XCTAssertTrue(control.frame.minY >= window.minY && control.frame.maxY <= min(window.maxY, keyboardTop) + 1, "\(label) must stay inside the visible Composer canvas")
+        }
+        attachScreenshot(named: "composer-existing-draft-first-frame")
+        app.buttons["关闭新消息"].tap()
+        XCTAssertTrue(app.buttons["新消息"].waitForExistence(timeout: 5))
+    }
+
     func testAccessibilityComposerActionsRemainReachableWithSoftwareKeyboard() throws {
         try verifyComposerWithSoftwareKeyboard(scrollForActions: true)
+    }
+
+    func testComposerDraftFormatOverridesDefaultAndSurvivesNativeBack() throws {
+        let fixture = "TG-COMPOSER-ENTRY-" + UUID().uuidString
+        app.buttons["新消息"].tap()
+        var editor = composerEditor()
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        let original = (editor.value as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard ["", "输入文字，或加入照片和文件…", "写下你的想法…", "写下你的想法…\n选中文字，用上方工具添加格式。"].contains(original),
+              app.buttons.matching(identifier: "移除附件").count == 0,
+              !app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "已标记")).firstMatch.exists else {
+            app.buttons["关闭新消息"].tap()
+            throw XCTSkip("Preserve an unknown user draft")
+        }
+        app.buttons["关闭新消息"].tap()
+        app.buttons["我的"].tap()
+        let markdownDefault = app.switches["Markdown"]
+        for _ in 0..<3 { if markdownDefault.isHittable { break }; app.swipeUp() }
+        let originalMarkdown = (markdownDefault.value as? String) == "1"
+        func setDefault(_ markdown: Bool) {
+            app.buttons["我的"].tap()
+            let option = app.switches[markdown ? "Markdown" : "文本"]
+            for _ in 0..<3 { if option.isHittable { break }; app.swipeUp() }
+            option.tap()
+            let saved = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "1"), object: option)
+            XCTAssertEqual(XCTWaiter.wait(for: [saved], timeout: 10), .completed)
+            app.buttons["消息"].tap()
+        }
+        defer {
+            if !app.buttons["关闭新消息"].exists, app.buttons["新消息"].exists { app.buttons["新消息"].tap() }
+            editor = composerEditor()
+            if editor.exists, (editor.value as? String)?.trimmingCharacters(in: .newlines) == fixture {
+                clearVerifiedComposerFixture(editor)
+            }
+            if app.buttons["关闭新消息"].exists { app.buttons["关闭新消息"].tap() }
+            setDefault(originalMarkdown)
+        }
+        app.buttons["消息"].tap()
+        for markdown in [false, true] {
+            app.buttons["新消息"].tap()
+            app.switches["文字"].tap()
+            editor = composerEditor()
+            XCTAssertTrue(editor.waitForExistence(timeout: 5))
+            editor.typeText(fixture)
+            if markdown { app.switches["Markdown"].tap() }
+            XCTAssertTrue(app.staticTexts["草稿已自动保存"].waitForExistence(timeout: 10))
+            app.buttons["关闭新消息"].tap()
+            setDefault(!markdown)
+            app.terminate()
+            app.launch()
+            XCTAssertTrue(app.buttons["新消息"].waitForExistence(timeout: 30))
+            app.buttons["新消息"].tap()
+            editor = composerEditor()
+            XCTAssertTrue(editor.waitForExistence(timeout: 5))
+            XCTAssertEqual(app.switches[markdown ? "Markdown" : "文字"].value as? String, "1")
+            XCTAssertEqual((editor.value as? String)?.trimmingCharacters(in: .newlines), fixture)
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+            dismissKeyboardIfNeeded()
+            XCTAssertTrue(button(containing: "照片").isHittable)
+            editor.tap()
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+            XCTAssertTrue(button(containing: "文件").isHittable)
+            attachScreenshot(named: markdown ? "markdown-draft-overrides-default" : "text-draft-overrides-default")
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            let y = app.frame.height * 0.22
+            origin.withOffset(CGVector(dx: 2, dy: y)).press(forDuration: 0.05,
+                thenDragTo: origin.withOffset(CGVector(dx: app.frame.width * 0.85, dy: y)),
+                withVelocity: .slow, thenHoldForDuration: 0)
+            XCTAssertTrue(app.buttons["新消息"].waitForExistence(timeout: 10), "Durable drafts allow system edge-back")
+            app.buttons["新消息"].tap()
+            editor = composerEditor()
+            XCTAssertTrue(editor.waitForExistence(timeout: 5))
+            XCTAssertEqual((editor.value as? String)?.trimmingCharacters(in: .newlines), fixture)
+            clearVerifiedComposerFixture(editor)
+            app.buttons["关闭新消息"].tap()
+        }
     }
 
     func testComposerPickersCanBeCancelledWithSoftwareKeyboard() throws {

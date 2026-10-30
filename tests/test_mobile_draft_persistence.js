@@ -11,11 +11,15 @@ let activeProfile = { id: 'profile-a', provider_kind: 'supabase', supabase: { sp
 let activeUser = 'user-a';
 let textSends = 0;
 let fileSends = 0;
+let defaultEditorFormat = 'markdown';
+let settingsWrites = 0;
+let lastSavedSettings;
 const key = () => `${activeProfile.id}/${activeUser}/${activeProfile.supabase.space_id}`;
 const emptyDraft = () => ({ text: '', format: 'text', marked: false, tagIds: [], dueDate: null, attachments: [], updatedAtMs: null });
 const api = {
   settings: {
-    getSettings: async () => ({ active_storage_profile_id: activeProfile.id, storage_profiles: [activeProfile] }),
+    getSettings: async () => ({ active_storage_profile_id: activeProfile.id, storage_profiles: [activeProfile], default_editor_format: defaultEditorFormat, desktop_only: 'preserved' }),
+    saveSettings: async settings => { settingsWrites += 1; lastSavedSettings = settings; defaultEditorFormat = settings.default_editor_format; return settings; },
     supabaseCurrentUser: async () => ({ signedIn: true, userId: activeUser }),
     listSupabaseSpaces: async () => [
       { id: 'space-a', name: 'A', current: activeProfile.supabase.space_id === 'space-a' },
@@ -62,6 +66,7 @@ const terminate = async (controller) => { await controller.deactivateComposerPer
 const attachment = (path = '/sandbox/report.pdf') => ({ id: crypto.randomUUID(), clientId: 'stable-client', path, originalName: 'report.pdf', mediaType: 'file', sizeBytes: 100, previewState: 'unsupported', available: true });
 
 let controller = await makeController();
+assert.equal(controller.state.composer.format, 'markdown', 'an empty new draft uses the configured Markdown default');
 controller.state.composer.text = '# restart-safe';
 controller.state.composer.format = 'markdown';
 controller.state.composer.marked = true;
@@ -91,6 +96,41 @@ activeUser = 'user-b';
 await terminate(controller);
 controller = await makeController();
 assert.equal(controller.state.composer.text, '', 'another Auth user must not see the previous account draft');
+assert.equal(controller.state.composer.format, 'markdown', 'another scoped empty draft still uses the configured default');
+
+assert.equal(await controller.saveDefaultEditorFormat('text'), true);
+assert.equal(settingsWrites, 1);
+assert.equal(lastSavedSettings.default_editor_format, 'text');
+assert.equal(lastSavedSettings.desktop_only, 'preserved', 'saving the mobile default must retain unrelated desktop settings');
+assert.equal(controller.state.settings.default_editor_format, 'text');
+assert.equal(controller.state.composer.format, 'markdown', 'changing the default does not rewrite the already-open draft');
+controller.prepareNewComposer();
+assert.equal(controller.state.composer.format, 'text', 'the next empty open uses the new default without a restart');
+await terminate(controller);
+controller = await makeController();
+assert.equal(controller.state.composer.format, 'text', 'the next empty composer uses the saved text default');
+
+defaultEditorFormat = 'invalid';
+await terminate(controller);
+controller = await makeController();
+assert.equal(controller.state.composer.format, 'text', 'an invalid stored default falls back to text');
+
+const realSaveSettings = api.settings.saveSettings;
+api.settings.saveSettings = async () => { throw new Error('fixture settings failure'); };
+assert.equal(await controller.saveDefaultEditorFormat('markdown'), false);
+assert.equal(controller.state.settings.default_editor_format, 'invalid', 'a failed save keeps the previous persisted snapshot');
+assert.equal(controller.state.toast.tone, 'error');
+api.settings.saveSettings = realSaveSettings;
+defaultEditorFormat = 'markdown';
+
+activeUser = 'user-a';
+await terminate(controller);
+controller = await makeController();
+assert.equal(controller.state.composer.format, 'markdown', 'a restored Markdown draft retains its format');
+assert.equal(await controller.saveDefaultEditorFormat('text'), true);
+controller.prepareNewComposer();
+assert.equal(controller.state.composer.format, 'markdown', 'a saved draft wins over a different default');
+activeUser = 'user-b';
 
 draftRows.set(key(), { ...emptyDraft(), attachments: [{ clientId: 'missing-client', path: '/sandbox/missing.pdf', originalName: 'missing.pdf', mediaType: 'file', sizeBytes: 10, available: false }], updatedAtMs: Date.now() });
 await terminate(controller);

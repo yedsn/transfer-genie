@@ -12,8 +12,9 @@ import { lift } from '@milkdown/kit/prose/commands';
 import '@milkdown/kit/prose/view/style/prosemirror.css';
 
 const props = defineProps<{ modelValue: string; disabled?: boolean; toolbarTarget?: string; showDismissKeyboard?: boolean }>();
-const emit = defineEmits<{ 'update:modelValue': [value: string]; dismissKeyboard: [] }>();
+const emit = defineEmits<{ 'update:modelValue': [value: string]; dismissKeyboard: []; ready: [] }>();
 const host = ref<HTMLElement | null>(null);
+const fallback = ref<HTMLTextAreaElement | null>(null);
 const ready = ref(false);
 const failed = ref(false);
 const active = ref<string[]>([]);
@@ -77,7 +78,7 @@ onMounted(async () => {
       ctx.set(defaultValueCtx, props.modelValue);
       ctx.set(editorViewOptionsCtx, {
         editable: () => !props.disabled,
-        attributes: { role: 'textbox', 'aria-label': '消息内容', 'aria-multiline': 'true', 'data-placeholder': '写下你的想法…', tabindex: '0', autofocus: 'true' },
+        attributes: { role: 'textbox', 'aria-label': '消息内容', 'aria-multiline': 'true', 'data-placeholder': '写下你的想法…', tabindex: '0' },
         // Image nodes retain their Markdown identity without fetching private
         // or tracking URLs. Raw HTML uses Milkdown's inert text node.
         nodeViews: { image: node => {
@@ -97,14 +98,24 @@ onMounted(async () => {
     ready.value = true;
     if (props.modelValue !== lastSource) setSource(props.modelValue);
     updateActive();
-    editor.ctx.get(editorViewCtx).dom.focus({ preventScroll: true });
+    emit('ready');
   } catch {
     // Preserve unsupported source rather than silently losing a restored draft.
+    if (destroyed) { void editor?.destroy().catch(() => undefined); return; }
     failed.value = true;
     void editor?.destroy().catch(() => undefined);
     editor = undefined;
+    requestAnimationFrame(() => { if (!destroyed) emit('ready'); });
   }
 });
+function focusEditor() {
+  if (props.disabled) return false;
+  const target = failed.value ? fallback.value : ready.value && editor ? editor.ctx.get(editorViewCtx).dom : null;
+  if (!target) return false;
+  target.focus({ preventScroll: true });
+  return document.activeElement === target;
+}
+defineExpose({ focusEditor });
 function setSource(value: string) {
   if (!ready.value || !editor || value === lastSource) return;
   replacing = true;
@@ -189,7 +200,7 @@ onBeforeUnmount(() => { destroyed = true; if (ready.value) void editor?.destroy(
     </div>
     </Teleport>
     <p v-if="failed" class="mobile-inline-error" role="status">此内容暂不能以富文本编辑，已保留原文。</p>
-    <textarea v-if="failed" :value="modelValue" :disabled="disabled" aria-label="消息内容" @input="emit('update:modelValue', ($event.target as HTMLTextAreaElement).value)"></textarea>
+    <textarea v-if="failed" ref="fallback" :value="modelValue" :disabled="disabled" aria-label="消息内容" @input="emit('update:modelValue', ($event.target as HTMLTextAreaElement).value)"></textarea>
     <div ref="host" v-show="!failed" class="mobile-rich-editor-host mobile-markdown" :aria-busy="!ready"></div>
   </div>
 </template>
