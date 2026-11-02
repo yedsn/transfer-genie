@@ -233,8 +233,10 @@ function waitForMobileShell(timeoutMs = 30_000) {
       continue;
     }
     const currentLabels = labels(lastTree);
-    const setup = currentLabels.some((label) => label.includes("SUPABASE ONLY"))
-      && currentLabels.some((label) => label.includes("连接你的云端空间"));
+    const setup = currentLabels.some((label) => label.includes("登录 Supabase"))
+      || (currentLabels.some((label) => label.includes("我的 Supabase"))
+        && currentLabels.includes("Supabase 登录邮箱")
+        && currentLabels.includes("Supabase 登录密码"));
     const signedIn = currentLabels.includes("消息") && currentLabels.includes("标记") && currentLabels.includes("我的");
     if (setup || signedIn) return { state: signedIn ? "signed-in" : "setup", ui: lastTree };
     command("sleep", ["1"]);

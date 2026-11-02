@@ -75,6 +75,23 @@ function simulatorDraftGuard(udid) {
   log('Simulator database and empty saved-draft guard passed');
 }
 
+function openVirtualDeviceUi(simulator) {
+  const developerDir = command('xcode-select', ['-p']).stdout.trim();
+  const simulatorApp = join(developerDir, 'Applications/Simulator.app');
+  if (existsSync(simulatorApp)) {
+    command('open', [simulatorApp, '--args', '-CurrentDeviceUDID', simulator.udid], { allowFailure: true });
+    return 'Simulator';
+  }
+  // Xcode 27 replaced the standalone Simulator window with Device Hub.
+  const deviceHubApp = resolve(developerDir, '../Applications/DeviceHub.app');
+  if (existsSync(deviceHubApp)) {
+    command('open', [deviceHubApp], { allowFailure: true });
+    return 'Device Hub';
+  }
+  command('open', ['-a', 'Simulator'], { allowFailure: true });
+  return 'Simulator';
+}
+
 function simulatorDevArgs(simulator) {
   assertSimulatorDevTarget(json('xcrun', ['xcdevice', 'list']), simulator);
   const args = ['tauri', 'ios', 'dev', simulator.name];
@@ -162,7 +179,9 @@ export async function main(args = process.argv.slice(2)) {
     if (target === 'simulator') {
       if (simulator.state !== 'Booted') command('xcrun', ['simctl', 'boot', simulator.udid]);
       await run('xcrun', ['simctl', 'bootstatus', simulator.udid, '-b'], env);
-      command('open', ['-a', 'Simulator', '--args', '-CurrentDeviceUDID', simulator.udid]);
+      // Xcode can provide simctl without installing the Simulator GUI app.
+      // Opening the window is best-effort; installation and launch remain headless-capable.
+      log('Virtual device UI: ' + openVirtualDeviceUi(simulator));
       simulatorDraftGuard(simulator.udid);
       if (action === 'dev') {
         const sameName = Object.values(json('xcrun', ['simctl', 'list', 'devices', 'available', '--json']).devices).flat().filter((device) => device.name === simulator.name);
@@ -197,7 +216,17 @@ export async function main(args = process.argv.slice(2)) {
       staging = mkdtempSync(join(buildDir, 'vphone-deploy-'));
       const guestApp = join(staging, apps[0]);
       command('ditto', [app, guestApp]);
-      command('codesign', ['--force', '--deep', '--sign', '-', '--entitlements', join(projectRoot, 'gen/apple/transfer-genie_iOS/transfer-genie_iOS.entitlements'), guestApp]);
+      // Ad-hoc signing does not expand Xcode build settings. Resolve the same application
+      // identifier used by the existing development build so VPhone can upgrade in place.
+      const team = value('APPLE_DEVELOPMENT_TEAM');
+      assert(team && !team.startsWith('YOUR_'), 'Configure APPLE_DEVELOPMENT_TEAM in .env for the VPhone ad-hoc entitlement');
+      const entitlementSource = readFileSync(join(projectRoot, 'gen/apple/transfer-genie_iOS/transfer-genie_iOS.entitlements'), 'utf8')
+        .replaceAll('$(AppIdentifierPrefix)', team + '.')
+        .replaceAll('$(PRODUCT_BUNDLE_IDENTIFIER)', bundleId);
+      assert(!entitlementSource.includes('$('), 'The VPhone entitlement contains an unresolved Xcode build setting');
+      const guestEntitlements = join(staging, 'vphone-entitlements.plist');
+      writeFileSync(guestEntitlements, entitlementSource);
+      command('codesign', ['--force', '--deep', '--sign', '-', '--entitlements', guestEntitlements, guestApp]);
       command('codesign', ['--verify', '--deep', '--strict', guestApp]);
       const artifacts = resolve(projectRoot, value('VPHONE_ARTIFACT_DIR') || join(buildDir, 'vphone-smoke'), new Date().toISOString().replace(/[:.]/g, '-'));
       log('Ad-hoc VPhone-only package. Existing draft guards must pass before install/termination');

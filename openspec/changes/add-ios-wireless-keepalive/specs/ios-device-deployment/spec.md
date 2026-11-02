@@ -3,16 +3,20 @@
 ## ADDED Requirements
 
 ### Requirement: Daily install attempt budget
-保活任务 SHALL 在本地时间同一天内最多只记录一次成功安装；一旦当天安装成功，后续计划轮次 SHALL 直接跳过且不重复连接设备。
+无线部署任务 SHALL 对每个 artifactId 最多记录一次成功安装；一旦当前 artifactId 安装成功，后续计划轮次 SHALL 直接跳过且不重复连接设备。新的 artifactId 即使在同一天生成，也 SHALL 重新触发安装尝试。
 
-#### Scenario: First successful install of the day
+#### Scenario: First successful install of an artifact
 - **WHEN** 保活任务在某轮将缓存包成功安装到已配置设备
-- **THEN** 任务写入包含当天日期、版本号、构建号和 profile 到期时间的成功状态
-- **AND** 同一天后续轮次跳过设备连接
+- **THEN** 任务写入包含 artifactId、安装时间、版本号、构建号和 profile 到期时间的成功状态
+- **AND** 当前 artifactId 的后续轮次跳过设备连接
 
-#### Scenario: Scheduled run after a success
-- **WHEN** 任务启动时已完成当天成功的状态记录
+#### Scenario: Scheduled run after current artifact succeeds
+- **WHEN** 任务启动时 lastInstalledArtifactId 与最新 manifest.artifactId 一致
 - **THEN** 任务输出跳过原因并以退出码 0 结束
+
+#### Scenario: A new artifact is created on the same day
+- **WHEN** 每日任务在同一天发布了不同的 artifactId
+- **THEN** 无线部署任务忽略当天已有的旧成功记录，并尝试安装新产物
 
 ### Requirement: Unattended failures never surface as task errors
 无人值守模式下的可恢复失败（设备离线、锁屏、通道未连接、缓存缺失、安装被拒绝）SHALL 输出结构化的 `attempt-result: skipped <reason>` 并以退出码 0 结束。
@@ -27,19 +31,31 @@
 - **THEN** 前置条件失败仍然以非零退出码结束并给出错误说明
 
 ### Requirement: Cache freshness governs renewal
-保活任务 SHALL 在缓存缺失、缓存不是当天构建、或嵌入 profile 剩余有效期低于阈值时重新构建，再执行安装；SHALL NOT 仅重复安装即将过期的缓存来当作续期。
+每日续签构建任务 SHALL 独立于无线部署任务，每天强制换发当前 Team 与 Bundle ID 对应的 provisioning profile，再构建和发布缓存。无线部署任务 SHALL NOT 构建、删除或移动 profile。
 
 #### Scenario: Cache built on an earlier day
-- **WHEN** 当天的第一次保活执行发现缓存构建日期不是今天
-- **THEN** 任务先重新构建签名缓存，再执行安装
+- **WHEN** 每日续签构建任务运行
+- **THEN** 任务备份并移走当前应用的旧 profile，构建包含新 profile 的签名缓存
 
 #### Scenario: Rebuild fails
 - **WHEN** 重建缓存失败
-- **THEN** 任务停止本轮安装、保持当天未成功状态、记录构建日志，并以退出码 0 结束
+- **THEN** 任务恢复旧 profile、保留上一份成功缓存、记录构建日志，并以非零退出码结束
 
 #### Scenario: Cached profile expired
-- **WHEN** 安装器报告 `skipped profile-expired`
-- **THEN** 任务重建缓存并重试安装一次
+- **WHEN** 无线部署任务发现缓存 profile 已过期
+- **THEN** 任务静默跳过并等待下一次每日续签构建，不在安装任务中触发构建
+
+### Requirement: Signed artifact identity
+每日续签构建任务 SHALL 在 manifest 中发布 profileUuid、profileCreatedAt、deviceUdids 和 artifactId。artifactId SHALL 由 profile UUID 与 executable UUID 组成，并唯一标识实际签名产物。
+
+#### Scenario: Same app version gets a new profile
+- **WHEN** 版本号不变但 Xcode 签发了新的 provisioning profile
+- **THEN** 新 manifest.artifactId 与旧产物不同
+
+#### Scenario: Failed staging build
+- **WHEN** 新包在 Team、Bundle ID、设备 UDID、到期时间或 strict codesign 校验中失败
+- **THEN** latest manifest 和 app bundle 保持上一份成功内容
+- **AND** 本轮移走的 profile 被恢复
 
 ### Requirement: Draft safety in unattended mode
 保活任务 SHALL 在能读到移动端草稿数据且存在已保存草稿时跳过安装；锁屏导致草稿数据不可读时 SHALL 继续原位安装，并记录门禁不可用。

@@ -491,6 +491,9 @@ security cms -D -i "$profile_path" >"$profile_plist" \
   || skip_or_fail "cache-invalid" "The embedded provisioning profile could not be decoded"
 profile_team="$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' "$profile_plist" 2>/dev/null || true)"
 profile_expiration="$(plutil -extract ExpirationDate raw -o - "$profile_plist" 2>/dev/null || true)"
+profile_uuid="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$profile_plist" 2>/dev/null || true)"
+profile_created_at="$(plutil -extract CreationDate raw -o - "$profile_plist" 2>/dev/null || true)"
+profile_devices_json="$(plutil -extract ProvisionedDevices json -o - "$profile_plist" 2>/dev/null || printf '[]')"
 [[ "$profile_team" == "$development_team" ]] \
   || skip_or_fail "profile-team-mismatch" "Profile team '$profile_team' does not match '$development_team'"
 if [[ "$build_latest" != "true" ]]; then
@@ -539,11 +542,15 @@ if [[ "$build_latest" == "true" ]]; then
     --arg bundleId "$candidate_bundle_id" \
     --arg platform "$platform_name" \
     --arg team "$profile_team" \
+    --arg profileUuid "$profile_uuid" \
+    --arg profileCreatedAt "$profile_created_at" \
     --arg profileExpiration "$profile_expiration" \
     --arg executableUuid "$candidate_uuid" \
+    --arg artifactId "$profile_uuid:$candidate_uuid" \
     --arg sourceRevision "$source_revision" \
+    --argjson deviceUdids "$profile_devices_json" \
     --argjson sourceDirty "$source_dirty" \
-    '{builtAt: $builtAt, version: $version, build: $build, bundleId: $bundleId, platform: $platform, team: $team, profileExpiration: $profileExpiration, executableUuid: $executableUuid, sourceRevision: $sourceRevision, sourceDirty: $sourceDirty, app: "Transfer Genie.app"}' \
+    '{builtAt: $builtAt, version: $version, build: $build, bundleId: $bundleId, platform: $platform, team: $team, profileUuid: $profileUuid, profileCreatedAt: $profileCreatedAt, profileExpiration: $profileExpiration, deviceUdids: $deviceUdids, executableUuid: $executableUuid, artifactId: $artifactId, sourceRevision: $sourceRevision, sourceDirty: $sourceDirty, app: "Transfer Genie.app"}' \
     >"$cache_staging/manifest.json"
   previous_build="$latest_build_dir.previous.$$"
   if [[ -e "$latest_build_dir" ]]; then

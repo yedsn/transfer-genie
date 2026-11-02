@@ -419,17 +419,17 @@ npm run ios:update
 npm run ios:build-latest
 ```
 
-这个命令只构建、校验并原子更新 `gen/apple/build/ios-wireless-latest` 缓存，不连接、安装或启动 iPhone；缓存不会被后续 Simulator 或 VPhone 共用 archive 覆盖。TaskTick 任务 `Transfer Genie · iOS 每日预构建` 每天 00:00 执行项目内的 `scripts/tasktick-ios-build-latest.sh`，成功与失败记录在 TaskTick 运行日志中。Mac 在该时刻需要处于开机可运行状态，并能访问签名证书与 Xcode。
+这个命令只构建、校验并原子更新 `gen/apple/build/ios-wireless-latest` 缓存，不连接、安装或启动 iPhone；缓存不会被后续 Simulator 或 VPhone 共用 archive 覆盖。
 
 ### 无线保活任务
 
-`npm run ios:keepalive` 是无人值守的一轮尝试：当天还没有成功安装过时，先按需刷新缓存，再通过 Wi-Fi 原位安装；当天任意一次成功后，后续轮次直接跳过。设备离线、锁屏、缓存不可用、安装被拒绝等可恢复情况都会以退出码 0 结束并输出 `[ios-wifi] attempt-result: skipped <reason>`，因此 TaskTick 不会把它们显示成失败。
+当前 TaskTick 的每日任务是普通的 `ios:build-latest` 预构建：它始终从项目 `.env` 读取 `APPLE_DEVELOPMENT_TEAM`，构建并校验真机包，但不会主动删除或换发 provisioning profile。`npm run ios:renew-build` 是单独保留的人工续签入口；当前原 Team 的 Bundle ID 在 Apple 端重新注册仍会被拒绝，因此暂未加入定时任务。
 
-TaskTick 任务 `Transfer Genie · iOS 无线保活` 使用 cron `0 0,10-23 * * *`（00:00 与 10:00-23:00 每小时），执行 `scripts/tasktick-ios-keepalive.sh`，超时 3600 秒。运行状态、成功标记与日志都在 `gen/apple/build/ios-keepalive/`：`state.json` 记录当天成功日期与版本，`attempts.log` 是每轮结论，`build.log` 与 `install-attempt.log` 保留构建和安装的完整输出。构建失败后有 3 小时冷却（`TRANSFER_GENIE_IOS_KEEPALIVE_BUILD_COOLDOWN_HOURS`），避免每小时重复失败。
+TaskTick 当前有两个已启用任务：`Transfer Genie · iOS 每日预构建` 每天 00:00 执行 `scripts/tasktick-ios-build-latest.sh`，以及 `Transfer Genie · iOS 无线保活` 按 `0 0,10-23 * * *` 执行 `scripts/tasktick-ios-keepalive.sh`。两个包装脚本都会强制从 `.env` 读取原 Team，防止 TaskTick 的旧进程环境误用另一个账号。无线任务不构建、不移动 profile，只比较最新 manifest.artifactId 与 `state.json` 的 lastInstalledArtifactId；两者不同才通过 Wi-Fi 尝试安装。设备离线等可恢复失败以退出码 0 结束，下一个轮次继续；当前 artifactId 安装成功后不再重复连接。
 
-需要明确一条实测结论：**重装不会延长 7 天有效期**。有效期写在包里的 provisioning profile 上，Xcode 在本地 profile 仍然有效时会直接复用它，因此每天重建、每小时重装都只是把同一份 profile 再装一遍。真正的换发发生在本地 profile 失效或缺失之后，而 CLI 构建换发新 profile 需要 Xcode 已登录 Apple ID（`xcodebuild` 才能访问凭据）。当前这台机器的 Xcode 账号列表是空的，删掉本地 profile 后构建立即报 `No Accounts`，所以到期后无法自动续签。
+需要明确一条实测结论：**重装不会延长 7 天有效期**。当前原 Team profile 的准确到期时间以缓存 manifest 和包内 `embedded.mobileprovision` 为准；本次核验显示为 `2026-11-03T07:55:27Z`。每日普通预构建会复用该 profile，不代表续签成功。
 
-保活任务的现实价值是：构建失败能自愈（例如某天夜间构建因依赖缺失失败，白天会自动重跑）、有新包时一小时内自动送到手机、以及到期前提醒。默认在剩余 48 小时且当天没有成功安装时发一条 macOS 通知（`TRANSFER_GENIE_IOS_KEEPALIVE_ALERT_HOURS`），如果检测到 Xcode 未登录 Apple ID，通知会直接说明无法自动续签。要彻底摆脱每 7 天手动重装，应加入付费 Apple Developer Program 并用 TestFlight 分发。
+TaskTick 是本机调度，Mac 在任务时间睡眠、外置盘未挂载或 Xcode/钥匙串不可用时不会补跑。要真正延长免费开发签名有效期，仍需人工解决原 Team 的 profile 换发；要彻底摆脱本地开发签名限制，应加入付费 Apple Developer Program 并用 TestFlight 分发。
 
 需要更新手机时，在 VS Code 选择 `ios:wireless-install-latest`，或在终端执行：
 

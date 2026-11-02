@@ -8,7 +8,10 @@ export function assertNoActiveEditing(uiTree) {
     throw new Error("An editor is open in VPhone; finish editing or explicitly clear the draft before running smoke tests");
   }
   const ready = labels.includes("消息") && labels.includes("我的");
-  const setup = labels.some((label) => label.includes("连接你的云端空间"));
+  const setup = labels.some((label) => label.includes("连接你的云端空间"))
+    || (labels.some((label) => label.includes("登录 Supabase"))
+      && labels.includes("Supabase 登录邮箱")
+      && labels.includes("Supabase 登录密码"));
   if (!ready && !setup) {
     throw new Error("The app is not at its idle shell or setup page; refusing installation or termination");
   }

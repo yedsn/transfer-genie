@@ -24,3 +24,14 @@
 - [x] 3.3 在 `docs/develop/ios.md` 补充保活任务的适用条件、触发时间和排查入口
 - [x] 3.4 手动执行一次保活任务，确认构建、安装、状态记录与日志符合预期
 
+## 4. 拆分每日续签与小时部署
+
+- [x] 4.1 扩展 build-latest manifest，加入 profile UUID、创建时间、设备 UDID 列表与 artifactId
+- [x] 4.2 新增每日续签构建脚本：精确备份当前 Team/Bundle profile、强制换发、验证到期时间并安全回滚
+- [x] 4.3 将 ios-keepalive-attempt.sh 收缩为纯安装消费者，不再构建或移动 profile
+- [x] 4.4 把安装成功状态迁移为 lastInstalledArtifactId；新 artifactId 即使同日也要重试
+- [x] 4.5 新增独立 TaskTick 包装脚本和 npm 命令，更新 iOS 开发文档
+- [ ] 4.6 创建并验证 09:00 每日续签构建任务与 10:00–23:00 小时部署任务
+- [ ] 4.7 禁用旧的 00:00 每日预构建和旧无线保活任务，避免重复运行
+- [ ] 4.8 实测每日构建、首次安装、同 artifact 跳过、设备离线 exit 0 与失败回滚路径
+

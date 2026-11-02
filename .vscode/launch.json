@@ -83,7 +83,7 @@
       "name": "ios:wireless-update:launch",
       "request": "launch",
       "type": "node-terminal"
-    }
+    },
     { "name":"----------------------------", "command":"---------------------","request":"launch","type":"node-terminal"}
   ]
 }
