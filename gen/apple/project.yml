@@ -12,7 +12,7 @@ settingGroups:
     base:
       PRODUCT_NAME: Transfer Genie
       PRODUCT_BUNDLE_IDENTIFIER: com.transfergenie
-      DEVELOPMENT_TEAM: 9RV293JR6V
+      DEVELOPMENT_TEAM: 32XG8U6WLA
 targetTemplates:
   app:
     type: application

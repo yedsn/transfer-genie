@@ -14,7 +14,7 @@
     "targets": ["app"],
     "resources": [],
     "iOS": {
-      "developmentTeam": "9RV293JR6V",
+      "developmentTeam": "32XG8U6WLA",
       "infoPlist": "Info.ios.plist",
       "minimumSystemVersion": "16.0"
     }

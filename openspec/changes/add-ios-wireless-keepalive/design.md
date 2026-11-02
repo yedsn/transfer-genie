@@ -4,13 +4,13 @@
 
 现有实现把“按需构建/续签”和“无线安装”放在同一个小时级脚本中，并用本地日期判断当天是否已经成功。实际验证发现：同一版本可以因为 profile 重新签发而产生新的签名包；此时版本号和日期都不能可靠表示手机是否安装了最新产物。构建只依赖 Mac、Xcode 账号和钥匙串，安装还依赖 iPhone 在线、同一 Wi-Fi、配对与开发者通道，因此两者的调度条件和失败语义不同。
 
-实测确认：当前旧 Team 虽然已登录且可正常复用现有 profile 打包，但移走当前 Team 与 Bundle ID 对应的 profile 后，Apple 拒绝重新注册 `com.transfergenie`。另一个 Personal Team 曾为同一 Bundle ID 生成 Xcode 管理的 profile；即使临时隔离该本地 profile，原 Team 仍收到相同错误，确认阻塞位于 Apple 服务端。免费 Personal Team 不能在开发者后台自行删除该 App ID，需要 Apple Developer Support 从错误 Team 释放后才能完成首次自动续签验收。codesign 首次访问私钥需要用户在钥匙串对话框中选择“始终允许”。
+实测确认：原 Team `9RV293JR6V` 无法为 `com.transfergenie` 重新注册，但 Personal Team `32XG8U6WLA` 可以成功换发。迁移到新 Team 后，Profile UUID 为 `10d296f0-5c53-4290-9632-aa4f504ad20f`，到期时间为 `2026-11-09T05:49:05Z`。由于 Team/Application Identifier/Keychain access group 发生变化，真机必须卸载旧 App 后安装新 Team 包；Supabase 云端数据不受影响。codesign 首次访问私钥需要用户在钥匙串对话框中选择“始终允许”。
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- 让每日构建任务独立完成原 Team 的 Release 构建、签名核验与原子发布；profile 换发只有在 Apple 端允许时才执行。
+- 让每日构建任务独立完成当前 Team 的 Release 构建、签名核验与原子发布；profile 换发只有在 Apple 端允许时才执行。
 - 让小时安装任务只消费最新成功产物，不构建、不修改 profile。
 - 用稳定的 artifactId 协调两个任务，即使版本号不变也能识别新签名包。
 - 任何续签失败都保留旧 profile 和上一份成功包；任何设备离线都不把安装任务标红。
@@ -31,7 +31,7 @@
 
 ### 每日构建与 profile 换发
 
-普通定时构建仅匹配本机 `.env` 中的 Team 与固定 Bundle ID 对应的 profile，复用它完成构建并核对 Team、Bundle ID、目标设备 UDID、profile 到期时间和 strict codesign。`ios-daily-renew-build.sh` 仍保留为人工尝试入口：只有 Apple 允许重新注册并换发 profile 时才会移动旧 profile；失败必须恢复旧 profile 和上一份成功缓存。
+每日续签构建匹配本机 `.env` 中当前 Team 与固定 Bundle ID 对应的 profile，备份并移走旧 profile，强制请求换发，再核对 Team、Bundle ID、目标设备 UDID、profile 到期时间和 strict codesign。`ios-daily-renew-build.sh` 仍可手动执行；失败必须恢复旧 profile 和上一份成功缓存。
 
 不直接删除 profile，因为签发或构建失败时需要可恢复；不清理其他 Team 或其他 Bundle ID 的 profile。
 
