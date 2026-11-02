@@ -4,7 +4,7 @@
 
 现有实现把“按需构建/续签”和“无线安装”放在同一个小时级脚本中，并用本地日期判断当天是否已经成功。实际验证发现：同一版本可以因为 profile 重新签发而产生新的签名包；此时版本号和日期都不能可靠表示手机是否安装了最新产物。构建只依赖 Mac、Xcode 账号和钥匙串，安装还依赖 iPhone 在线、同一 Wi-Fi、配对与开发者通道，因此两者的调度条件和失败语义不同。
 
-实测确认：当前旧 Team 虽然已登录且可正常复用现有 profile 打包，但移走当前 Team 与 Bundle ID 对应的 profile 后，Apple 拒绝重新注册 `com.transfergenie`，因此 Xcode CLI 不能稳定换发新的 7 天 profile。codesign 首次访问私钥需要用户在钥匙串对话框中选择“始终允许”。
+实测确认：当前旧 Team 虽然已登录且可正常复用现有 profile 打包，但移走当前 Team 与 Bundle ID 对应的 profile 后，Apple 拒绝重新注册 `com.transfergenie`。另一个 Personal Team 曾为同一 Bundle ID 生成 Xcode 管理的 profile；即使临时隔离该本地 profile，原 Team 仍收到相同错误，确认阻塞位于 Apple 服务端。免费 Personal Team 不能在开发者后台自行删除该 App ID，需要 Apple Developer Support 从错误 Team 释放后才能完成首次自动续签验收。codesign 首次访问私钥需要用户在钥匙串对话框中选择“始终允许”。
 
 ## Goals / Non-Goals
 

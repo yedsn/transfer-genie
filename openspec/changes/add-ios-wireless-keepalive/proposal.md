@@ -34,9 +34,9 @@
 
 ## Architecture Refinement
 
-后续实测确认“构建”和“无线安装”必须保持两个职责明确的 TaskTick 任务；但当前原 Team 的 Bundle ID 在 Apple 端重新注册仍被拒绝，因此每日强制续签脚本暂不加入定时任务：
+后续实测确认“构建”和“无线安装”必须保持两个职责明确的 TaskTick 任务。每日强制续签任务已经创建并取代旧的 00:00 普通预构建，但当前原 Team 的 Bundle ID 在 Apple 端重新注册仍被拒绝，任务会安全失败并恢复旧 profile 与上一份成功包：
 
-- 每日构建任务：每天固定时间使用原 Team 构建、验证并发布最新签名包；是否能换发 profile 需要 Apple/Xcode 端另行解决。
+- 每日续签任务：每天 09:00 使用原 Team 强制换发、构建、验证并发布最新签名包；当前需要 Apple Developer Support 先从错误 Personal Team 释放同名 App ID。
 - 小时无线部署任务：只比较 artifactId 并尝试安装最新包，失败时下一小时重试，成功后不再重复安装同一产物。
 
 部署判断从“当天是否成功”改为“最新 artifactId 是否已安装”，以覆盖同版本重新签名、跨天未部署和同日多次签发。

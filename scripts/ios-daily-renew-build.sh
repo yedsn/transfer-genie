@@ -102,7 +102,21 @@ if [[ -d "$latest_build_dir" ]]; then
 fi
 
 cd "$project_root"
-npm run ios:build-latest
+build_log="$state_dir/build-$stamp.log"
+set +e
+npm run ios:build-latest 2>&1 | tee "$build_log"
+build_status=${PIPESTATUS[0]}
+set -e
+if (( build_status != 0 )); then
+  if grep -Fq 'Failed Registering Bundle Identifier' "$build_log" \
+    && grep -Fq "The app identifier \"$bundle_id\" cannot be registered" "$build_log"; then
+    printf '[ios-renew] Error: Apple rejected %s for Team %s because that Bundle ID is registered to another team.\n' "$bundle_id" "$development_team" >&2
+    printf '[ios-renew] Error: Removing a local .mobileprovision file or Xcode account does not release the server-side App ID.\n' >&2
+    printf '[ios-renew] Error: Ask Apple Developer Support to remove %s from the incorrect Personal Team, then rerun npm run ios:renew-build.\n' "$bundle_id" >&2
+    printf '[ios-renew] Support: https://developer.apple.com/contact/\n' >&2
+  fi
+  fail "Signed iOS build failed (exit $build_status); details: $build_log"
+fi
 
 manifest="$latest_build_dir/manifest.json"
 app="$latest_build_dir/Transfer Genie.app"

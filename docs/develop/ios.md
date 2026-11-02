@@ -423,13 +423,11 @@ npm run ios:build-latest
 
 ### 无线保活任务
 
-当前 TaskTick 的每日任务是普通的 `ios:build-latest` 预构建：它始终从项目 `.env` 读取 `APPLE_DEVELOPMENT_TEAM`，构建并校验真机包，但不会主动删除或换发 provisioning profile。`npm run ios:renew-build` 是单独保留的人工续签入口；当前原 Team 的 Bundle ID 在 Apple 端重新注册仍会被拒绝，因此暂未加入定时任务。
-
-TaskTick 当前有两个已启用任务：`Transfer Genie · iOS 每日预构建` 每天 00:00 执行 `scripts/tasktick-ios-build-latest.sh`，以及 `Transfer Genie · iOS 无线保活` 按 `0 0,10-23 * * *` 执行 `scripts/tasktick-ios-keepalive.sh`。两个包装脚本都会强制从 `.env` 读取原 Team，防止 TaskTick 的旧进程环境误用另一个账号。无线任务不构建、不移动 profile，只比较最新 manifest.artifactId 与 `state.json` 的 lastInstalledArtifactId；两者不同才通过 Wi-Fi 尝试安装。设备离线等可恢复失败以退出码 0 结束，下一个轮次继续；当前 artifactId 安装成功后不再重复连接。
+TaskTick 当前使用两个独立任务：`Transfer Genie · iOS 每日续签构建` 每天 09:00 执行 `scripts/tasktick-ios-renew-build.sh`，以及 `Transfer Genie · iOS 无线保活` 按 `0 0,10-23 * * *` 执行 `scripts/tasktick-ios-keepalive.sh`。两个包装脚本都会强制从 `.env` 读取原 Team，防止 TaskTick 的旧进程环境误用另一个账号。每日任务会备份并移走当前 Team/Bundle ID 的旧 profile，尝试换发新 profile，再验证并原子发布签名缓存；任何失败都会恢复旧 profile 和上一份成功缓存。无线任务不构建、不移动 profile，只比较最新 manifest.artifactId 与 `state.json` 的 lastInstalledArtifactId；两者不同才通过 Wi-Fi 尝试安装。设备离线等可恢复失败以退出码 0 结束，下一个轮次继续；当前 artifactId 安装成功后不再重复连接。
 
 需要明确一条实测结论：**重装不会延长 7 天有效期**。当前原 Team profile 的准确到期时间以缓存 manifest 和包内 `embedded.mobileprovision` 为准；本次核验显示为 `2026-11-03T07:55:27Z`。每日普通预构建会复用该 profile，不代表续签成功。
 
-TaskTick 是本机调度，Mac 在任务时间睡眠、外置盘未挂载或 Xcode/钥匙串不可用时不会补跑。要真正延长免费开发签名有效期，仍需人工解决原 Team 的 profile 换发；要彻底摆脱本地开发签名限制，应加入付费 Apple Developer Program 并用 TestFlight 分发。
+TaskTick 是本机调度，Mac 在任务时间睡眠、外置盘未挂载或 Xcode/钥匙串不可用时不会补跑。当前机器还存在一个需要先解除的 Apple 服务端冲突：另一个 Personal Team `32XG8U6WLA` 曾为同一个 `com.transfergenie` 生成 Xcode 管理的 App ID/profile，导致原 Team `9RV293JR6V` 在强制换发时收到 `Failed Registering Bundle Identifier`。已经实测，临时隔离另一个 Team 的本地 profile 仍然报相同错误，说明删除本地 `.mobileprovision`、证书或 Xcode 账号不能释放服务端 App ID，也不应把这些操作当成修复。免费 Personal Team 无法在开发者后台自行管理该 App ID；需要联系 [Apple Developer Support](https://developer.apple.com/contact/)，要求从错误 Personal Team 释放 `com.transfergenie`。支持人员释放后重新运行 `npm run ios:renew-build`，确认新 profile 的 UUID 和到期时间已变化，再让 09:00 任务持续自动续签。要彻底摆脱本地开发签名限制，应加入付费 Apple Developer Program 并用 TestFlight 分发。
 
 需要更新手机时，在 VS Code 选择 `ios:wireless-install-latest`，或在终端执行：
 
@@ -437,7 +435,7 @@ TaskTick 是本机调度，Mac 在任务时间睡眠、外置盘未挂载或 Xco
 npm run ios:wireless-install-latest -- --confirm
 ```
 
-该入口读取最近一次成功缓存，不重新编译；它仍会确认同一 Wi-Fi 和 `.env` 生效配置，检查缓存平台、bundle ID、strict codesign、Team、描述文件有效期与目标设备 UDID，并在安装前后执行草稿和 SQLite 完整性门禁。缓存构建失败时保留上一份成功产物；若从未成功构建，会明确提示先运行 `ios:build-latest`。缓存对应每日 00:00 时的源码快照，因此当天 00:00 之后的新代码不会自动进入该包，可手动执行一次 `npm run ios:build-latest` 刷新。
+该入口读取最近一次成功缓存，不重新编译；它仍会确认同一 Wi-Fi 和 `.env` 生效配置，检查缓存平台、bundle ID、strict codesign、Team、描述文件有效期与目标设备 UDID，并在安装前后执行草稿和 SQLite 完整性门禁。每日续签失败时保留上一份成功产物；若从未成功构建，会明确提示先运行 `ios:renew-build` 或 `ios:build-latest`。缓存对应每日 09:00 时的源码快照，因此当天 09:00 之后的新代码不会自动进入该包，可手动执行一次 `npm run ios:renew-build` 重新续签，或执行 `npm run ios:build-latest` 仅刷新代码包。
 
 默认流程不会打开系统“设置”，也不会在安装完成后主动启动 App 或抢占手机前台。如果希望更新后立即打开 Transfer Genie，可以选择 `ios:wireless-update:launch`，或执行：
 
