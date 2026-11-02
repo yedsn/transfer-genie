@@ -12,7 +12,6 @@
 		3C38F7908A639A3195AE1CE6 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 31452C3DC736710A7E0912DA /* Security.framework */; };
 		48D9610DF8B9165DB882F744 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BE103C78DEE79EAA602CDFC5 /* UIKit.framework */; };
 		56D212A8D391736DAA4E08B5 /* assets in Resources */ = {isa = PBXBuildFile; fileRef = 5EA5B4D495CD746BB69B8596 /* assets */; };
-		8D70587E1E47527FC37873C3 /* libapp.a in Resources */ = {isa = PBXBuildFile; fileRef = 290CB6BAD66AAB9B5A53BBDE /* libapp.a */; };
 		9076A47F89F6697B10C3F18A /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 195A78D2D3B0AAE07F70BEDD /* CoreGraphics.framework */; };
 		9F1B4509DBFB61505915AFCA /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = D8DA5667F6A332B349AF4B4C /* LaunchScreen.storyboard */; };
 		A54E7767698349657478CFCD /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 333D20C5586515597E3BA3FB /* QuartzCore.framework */; };
@@ -33,9 +32,9 @@
 		22CAAC69794D71A24B17B876 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		2300B4F86A3E9781CDFD8062 /* supabase_connection.rs */ = {isa = PBXFileReference; path = supabase_connection.rs; sourceTree = "<group>"; };
 		264A72B8FD7D9D3E8AA07A57 /* workspace.rs */ = {isa = PBXFileReference; path = workspace.rs; sourceTree = "<group>"; };
-		290CB6BAD66AAB9B5A53BBDE /* libapp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libapp.a; sourceTree = "<group>"; };
 		31452C3DC736710A7E0912DA /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
 		333D20C5586515597E3BA3FB /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
+		44E8A38ACA5CF335669A7F10 /* preview_generator.rs */ = {isa = PBXFileReference; path = preview_generator.rs; sourceTree = "<group>"; };
 		45A5AE7567D9A12C988E9B35 /* webdav.rs */ = {isa = PBXFileReference; path = webdav.rs; sourceTree = "<group>"; };
 		51E4D24E01A870B773E24244 /* telegram_bridge.rs */ = {isa = PBXFileReference; path = telegram_bridge.rs; sourceTree = "<group>"; };
 		57178773E9871DF70E084344 /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WebKit.framework; path = System/Library/Frameworks/WebKit.framework; sourceTree = SDKROOT; };
@@ -93,28 +92,12 @@
 			path = "transfer-genie_iOS";
 			sourceTree = "<group>";
 		};
-		0252C66B9DD690287BA3EB37 /* arm64 */ = {
-			isa = PBXGroup;
-			children = (
-				225311232951C482C84CA80F /* debug */,
-			);
-			path = arm64;
-			sourceTree = "<group>";
-		};
 		06F2B855C0E59A5EA6652767 /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				C97A2EBAF1DF557B37061E9C /* transfer-genie_iOS.app */,
 			);
 			name = Products;
-			sourceTree = "<group>";
-		};
-		225311232951C482C84CA80F /* debug */ = {
-			isa = PBXGroup;
-			children = (
-				290CB6BAD66AAB9B5A53BBDE /* libapp.a */,
-			);
-			path = debug;
 			sourceTree = "<group>";
 		};
 		449EC5A21B495085F79CD950 /* src */ = {
@@ -131,6 +114,7 @@
 				BBC104C15043277D347FA7C1 /* main.rs.broken-recovery.bak */,
 				576B78014019FDE448D72B2B /* media_playback.rs */,
 				FA10CFF5F7179F372E918F6A /* media_preview.rs */,
+				44E8A38ACA5CF335669A7F10 /* preview_generator.rs */,
 				C90453D3A8981D827F53745B /* storage_provider.rs */,
 				E7A485E2AC85EF2F6F12C80A /* supabase_auth.rs */,
 				2300B4F86A3E9781CDFD8062 /* supabase_connection.rs */,
@@ -153,7 +137,6 @@
 				5EA5B4D495CD746BB69B8596 /* assets */,
 				22CAAC69794D71A24B17B876 /* Assets.xcassets */,
 				D8DA5667F6A332B349AF4B4C /* LaunchScreen.storyboard */,
-				64A2F7FFF134F1A8DCB1FEA7 /* Externals */,
 				533D2448D44212897AA2806B /* Sources */,
 				449EC5A21B495085F79CD950 /* src */,
 				012D3E17C9D134389486BB5F /* transfer-genie_iOS */,
@@ -168,14 +151,6 @@
 				82D8AE3841B5DAB65279C4FC /* transfer-genie */,
 			);
 			path = Sources;
-			sourceTree = "<group>";
-		};
-		64A2F7FFF134F1A8DCB1FEA7 /* Externals */ = {
-			isa = PBXGroup;
-			children = (
-				0252C66B9DD690287BA3EB37 /* arm64 */,
-			);
-			path = Externals;
 			sourceTree = "<group>";
 		};
 		6BAE66AA67535E5AD511A98D /* bindings */ = {
@@ -219,13 +194,6 @@
 			path = bin;
 			sourceTree = "<group>";
 		};
-		"TEMP_E24849EC-187B-4C53-BCA9-A1CEE4F98B6F" /* x86_64 */ = {
-			isa = PBXGroup;
-			children = (
-			);
-			path = x86_64;
-			sourceTree = "<group>";
-		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -259,7 +227,7 @@
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					309709395D42B6E576ECE3EF = {
-						DevelopmentTeam = LW6QTNHNV4;
+						DevelopmentTeam = 32XG8U6WLA;
 					};
 				};
 			};
@@ -290,7 +258,6 @@
 				33EC2F9C5A52B309F3DC447A /* Assets.xcassets in Resources */,
 				9F1B4509DBFB61505915AFCA /* LaunchScreen.storyboard in Resources */,
 				56D212A8D391736DAA4E08B5 /* assets in Resources */,
-				8D70587E1E47527FC37873C3 /* libapp.a in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -342,7 +309,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "transfer-genie_iOS/transfer-genie_iOS.entitlements";
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				DEVELOPMENT_TEAM = "9RV293JR6V";
+				DEVELOPMENT_TEAM = "32XG8U6WLA";
 				ENABLE_BITCODE = NO;
 				"EXCLUDED_ARCHS[sdk=iphoneos*]" = x86_64;
 				FRAMEWORK_SEARCH_PATHS = (
@@ -493,7 +460,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "transfer-genie_iOS/transfer-genie_iOS.entitlements";
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				DEVELOPMENT_TEAM = "9RV293JR6V";
+				DEVELOPMENT_TEAM = "32XG8U6WLA";
 				ENABLE_BITCODE = NO;
 				"EXCLUDED_ARCHS[sdk=iphoneos*]" = x86_64;
 				FRAMEWORK_SEARCH_PATHS = (

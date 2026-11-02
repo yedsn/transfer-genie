@@ -15,10 +15,12 @@ install_latest=false
 check_only=false
 launch_after_install=false
 confirm_before_update=false
+attempt_mode=false
 temp_root=""
 cache_staging=""
 owns_build_lock=false
 build_lock="$project_root/gen/apple/build/.virtual-deploy.lock"
+build_lock_wait_seconds="900"
 latest_build_dir="${TRANSFER_GENIE_IOS_LATEST_BUILD_DIR:-}"
 
 # Keep redirected logs and terminals without color support clean.
@@ -52,6 +54,10 @@ Options:
   --check-only           Run all safety checks but do not install or launch
   --launch               Open Transfer Genie after the update
   --confirm              Show effective iOS settings and ask before connecting
+  --attempt              Unattended install attempt for --install-latest:
+                         never exits non-zero, never launches the app, and
+                         prints one `[ios-wifi] attempt-result:` line with
+                         `installed` or `skipped <reason>`
   -h, --help             Show this help
 
 Environment equivalents:
@@ -74,6 +80,20 @@ fail() {
   exit 1
 }
 
+# In --attempt mode every precondition becomes a skipped attempt: the hourly
+# scheduled job must stay quiet in TaskTick when the phone is asleep, online
+# elsewhere, or temporarily unreachable.
+skip_or_fail() {
+  local reason="$1"
+  shift
+  if [[ "$attempt_mode" == "true" ]]; then
+    printf '%s[ios-wifi] Attempt skipped (%s):%s %s\n' "$color_yellow" "$reason" "$color_reset" "$*"
+    printf '[ios-wifi] attempt-result: skipped %s\n' "$reason"
+    exit 0
+  fi
+  fail "$*"
+}
+
 cleanup() {
   if [[ -n "$temp_root" && -d "$temp_root" ]]; then
     rm -rf -- "$temp_root"
@@ -89,8 +109,55 @@ cleanup() {
 
 acquire_build_lock() {
   mkdir -p "$(dirname "$build_lock")"
+  local wait_deadline=$(( $(date '+%s') + build_lock_wait_seconds ))
+  local announced_wait=false
+  while [[ -d "$build_lock" ]]; do
+    local owner_pid=""
+    local owner_command=""
+    if [[ -f "$build_lock/pid" ]]; then
+      owner_pid="$(tr -cd '0-9' <"$build_lock/pid")"
+    fi
+    if [[ -n "$owner_pid" ]]; then
+      owner_command="$(ps -p "$owner_pid" -o command= 2>/dev/null || true)"
+    fi
+    if [[ -n "$owner_pid" ]] && kill -0 "$owner_pid" >/dev/null 2>&1; then
+      if (( $(date '+%s') >= wait_deadline )); then
+        fail "Timed out waiting for the active iOS build/deployment (pid $owner_pid: $owner_command)"
+      fi
+      if [[ "$announced_wait" == "false" ]]; then
+        log "Waiting for the active iOS build/deployment (pid $owner_pid) before starting this build"
+        announced_wait=true
+      fi
+      sleep 5
+      continue
+    fi
+    break
+  done
   if ! mkdir "$build_lock" 2>/dev/null; then
-    fail "Another iOS build/deployment is active. If it ended abnormally, verify no build is running before removing $build_lock"
+    local owner_pid=""
+    local owner_command=""
+    local lock_mtime="0"
+    local now_epoch="0"
+    if [[ -f "$build_lock/pid" ]]; then
+      owner_pid="$(tr -cd '0-9' <"$build_lock/pid")"
+    fi
+    if [[ -n "$owner_pid" ]]; then
+      owner_command="$(ps -p "$owner_pid" -o command= 2>/dev/null || true)"
+    fi
+    if [[ -n "$owner_pid" ]] && kill -0 "$owner_pid" >/dev/null 2>&1; then
+      fail "Another iOS build/deployment is active (pid $owner_pid: $owner_command). Wait for it to finish before retrying"
+    fi
+    lock_mtime="$(stat -f '%m' "$build_lock" 2>/dev/null || printf '0')"
+    now_epoch="$(date '+%s')"
+    if [[ ! "$lock_mtime" =~ ^[0-9]+$ ]] || (( lock_mtime == 0 || now_epoch - lock_mtime < 10 )); then
+      fail "An iOS build lock was created moments ago but its owner is not observable; refusing to remove $build_lock"
+    fi
+    log "Recovering stale iOS build lock: $build_lock (previous pid $owner_pid exited)"
+    rm -f -- "$build_lock/pid"
+    rmdir "$build_lock" 2>/dev/null \
+      || fail "Unable to recover stale iOS build lock safely: $build_lock"
+    mkdir "$build_lock" \
+      || fail "Another iOS build/deployment acquired the lock while stale-lock recovery was in progress"
   fi
   printf '%s\n' "$$" >"$build_lock/pid"
   owns_build_lock=true
@@ -188,6 +255,9 @@ copy_container_file() {
   fi
 
   if [[ "$required" == "true" ]]; then
+    if [[ "$attempt_mode" == "true" ]]; then
+      return 1
+    fi
     fail "Unable to copy $source_path from $device_name"
   fi
   return 1
@@ -195,6 +265,7 @@ copy_container_file() {
 
 inspect_drafts() {
   local label="$1"
+  local strict="${2:-true}"
   local snapshot_dir="$temp_root/$label"
   local remote_dir="Library/Application Support/com.transfergenie"
   local database_path="$snapshot_dir/messages.sqlite"
@@ -202,24 +273,33 @@ inspect_drafts() {
   local draft_count
 
   mkdir -p "$snapshot_dir"
-  copy_container_file "$remote_dir/messages.sqlite" "$database_path" true
+  if ! copy_container_file "$remote_dir/messages.sqlite" "$database_path" true; then
+    log "$label draft guard unavailable: $device_name did not expose the app data container (phone likely locked or off-network)"
+    return 10
+  fi
   copy_container_file "$remote_dir/messages.sqlite-wal" "$snapshot_dir/messages.sqlite-wal" false || true
   copy_container_file "$remote_dir/messages.sqlite-shm" "$snapshot_dir/messages.sqlite-shm" false || true
 
   [[ "$(sqlite3 -readonly "$database_path" 'PRAGMA integrity_check;')" == "ok" ]] \
-    || fail "The copied messages database failed its integrity check"
+    || skip_or_fail "draft-guard-failed" "The copied messages database failed its integrity check"
 
   table_count="$(sqlite3 -readonly "$database_path" \
     "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='mobile_composer_drafts';")"
   [[ "$table_count" == "1" ]] \
-    || fail "The installed app does not expose a verifiable mobile draft table"
+    || skip_or_fail "draft-guard-failed" "The installed app does not expose a verifiable mobile draft table"
 
   draft_count="$(sqlite3 -readonly "$database_path" \
     'SELECT COUNT(*) FROM mobile_composer_drafts;')"
-  [[ "$draft_count" == "0" ]] \
-    || fail "$device_name has $draft_count saved mobile draft(s). Finish or clear them before updating"
+  if [[ "$draft_count" != "0" ]]; then
+    if [[ "$strict" == "false" ]]; then
+      log "Warning: $device_name has $draft_count saved mobile draft(s); finish or clear them before the next update"
+      return 0
+    fi
+    skip_or_fail "saved-drafts" "$device_name has $draft_count saved mobile draft(s). Finish or clear them before updating"
+  fi
 
   log "$label draft guard passed: SQLite ok, saved drafts=0"
+  return 0
 }
 
 if [[ -z "$device_name" ]]; then
@@ -285,6 +365,10 @@ while [[ $# -gt 0 ]]; do
       confirm_before_update=true
       shift
       ;;
+    --attempt)
+      attempt_mode=true
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -300,6 +384,14 @@ if [[ "$build_latest" == "true" && ( "$install_latest" == "true" || "$skip_build
 fi
 if [[ "$install_latest" == "true" && "$skip_build" == "true" ]]; then
   fail "--install-latest and --skip-build select different archive sources"
+fi
+if [[ "$attempt_mode" == "true" ]]; then
+  [[ "$install_latest" == "true" ]] \
+    || fail "--attempt requires --install-latest"
+  [[ "$launch_after_install" != "true" ]] \
+    || fail "--attempt never launches the app; drop --launch"
+  [[ "$confirm_before_update" != "true" ]] \
+    || fail "--attempt is unattended; drop --confirm"
 fi
 
 if [[ "$confirm_before_update" == "true" && "$build_latest" != "true" ]]; then
@@ -342,43 +434,59 @@ device_udid=""
 installed_before=0
 if [[ "$build_latest" != "true" ]]; then
   details_json="$temp_root/device-details.json"
-  xcrun devicectl device info details \
+  if ! xcrun devicectl device info details \
     --device "$device_name" \
     --timeout 60 \
-    --json-output "$details_json" >/dev/null
+    --json-output "$details_json" >/dev/null 2>"$temp_root/device-details.err"; then
+    tail -n 2 "$temp_root/device-details.err" >&2 || true
+    skip_or_fail "device-unreachable" "Could not read device details for $device_name (phone asleep, off this network, or not paired)"
+  fi
 
-  device_udid="$(jq -r '.result.hardwareProperties.udid // empty' "$details_json")"
-  pairing_state="$(jq -r '.result.connectionProperties.pairingState // empty' "$details_json")"
-  transport_type="$(jq -r '.result.connectionProperties.transportType // empty' "$details_json")"
-  tunnel_state="$(jq -r '.result.connectionProperties.tunnelState // empty' "$details_json")"
-  developer_mode="$(jq -r '.result.deviceProperties.developerModeStatus // empty' "$details_json")"
-  ddi_available="$(jq -r '.result.deviceProperties.ddiServicesAvailable // false' "$details_json")"
+  device_udid="$(jq -r '.result.hardwareProperties.udid // empty' "$details_json" 2>/dev/null || true)"
+  pairing_state="$(jq -r '.result.connectionProperties.pairingState // empty' "$details_json" 2>/dev/null || true)"
+  transport_type="$(jq -r '.result.connectionProperties.transportType // empty' "$details_json" 2>/dev/null || true)"
+  tunnel_state="$(jq -r '.result.connectionProperties.tunnelState // empty' "$details_json" 2>/dev/null || true)"
+  developer_mode="$(jq -r '.result.deviceProperties.developerModeStatus // empty' "$details_json" 2>/dev/null || true)"
+  ddi_available="$(jq -r '.result.deviceProperties.ddiServicesAvailable // false' "$details_json" 2>/dev/null || printf false)"
 
-  [[ -n "$device_udid" ]] || fail "Could not read the UDID for $device_name"
-  [[ "$pairing_state" == "paired" ]] || fail "$device_name is not paired with this Mac"
+  [[ -n "$device_udid" ]] || skip_or_fail "device-unreachable" "Could not read the UDID for $device_name"
+  [[ "$pairing_state" == "paired" ]] || skip_or_fail "device-unpaired" "$device_name is not paired with this Mac"
   [[ "$transport_type" == "localNetwork" ]] \
-    || fail "$device_name is using '$transport_type', not the local-network transport"
-  [[ "$tunnel_state" == "connected" ]] || fail "The Wi-Fi developer tunnel is not connected"
-  [[ "$developer_mode" == "enabled" ]] || fail "Developer Mode is not enabled on $device_name"
-  [[ "$ddi_available" == "true" ]] || fail "Developer disk image services are unavailable"
+    || skip_or_fail "transport-not-local-network" "$device_name is using '$transport_type', not the local-network transport"
+  [[ "$tunnel_state" == "connected" ]] \
+    || skip_or_fail "tunnel-not-connected" "The Wi-Fi developer tunnel is not connected"
+  [[ "$developer_mode" == "enabled" ]] \
+    || skip_or_fail "developer-mode-disabled" "Developer Mode is not enabled on $device_name"
+  [[ "$ddi_available" == "true" ]] \
+    || skip_or_fail "ddi-unavailable" "Developer disk image services are unavailable"
   log "Connected to $device_name over Wi-Fi ($device_udid)"
 
   apps_before_json="$temp_root/apps-before.json"
-  xcrun devicectl device info apps \
+  if ! xcrun devicectl device info apps \
     --device "$device_name" \
     --bundle-id "$bundle_id" \
     --timeout 60 \
-    --json-output "$apps_before_json" >/dev/null
-  installed_before="$(jq -r '[.result.apps[]? | select(.bundleIdentifier == "com.transfergenie")] | length' "$apps_before_json")"
+    --json-output "$apps_before_json" >/dev/null 2>&1; then
+    skip_or_fail "device-unreachable" "Could not list installed apps on $device_name"
+  fi
+  installed_before="$(jq -r '[.result.apps[]? | select(.bundleIdentifier == "com.transfergenie")] | length' "$apps_before_json" 2>/dev/null || printf 0)"
 
   if [[ "$installed_before" == "1" ]]; then
     # Do not foreground Settings or another app. The composer saves 350 ms after
     # each mutation, so wait for the debounce and verify twice before replacing
     # the installed bundle. Any saved draft blocks the update.
     sleep 2
-    inspect_drafts "preinstall-1"
-    sleep 1
-    inspect_drafts "preinstall-2"
+    guard_status=0
+    inspect_drafts "preinstall-1" || guard_status=$?
+    if [[ "$guard_status" == "0" ]]; then
+      sleep 1
+      inspect_drafts "preinstall-2" || guard_status=$?
+    fi
+    if [[ "$guard_status" == "10" ]]; then
+      # A locked phone cannot be composing a draft, and an in-place install
+      # keeps the data container. Continue and record that the guard was blind.
+      log "Attempt: draft state unreadable (device locked); continuing with the in-place install"
+    fi
   else
     log "$bundle_id is not installed yet; the draft guard is not applicable"
   fi
@@ -388,8 +496,10 @@ archive_path="$project_root/gen/apple/build/transfer-genie_iOS.xcarchive"
 if [[ "$install_latest" == "true" ]]; then
   manifest_path="$latest_build_dir/manifest.json"
   app_path="$latest_build_dir/Transfer Genie.app"
-  [[ -f "$manifest_path" ]] || fail "Latest build manifest not found: $manifest_path. Run npm run ios:build-latest first"
-  [[ -d "$app_path" ]] || fail "Latest cached app not found: $app_path. Run npm run ios:build-latest first"
+  [[ -f "$manifest_path" ]] \
+    || skip_or_fail "cache-missing" "Latest build manifest not found: $manifest_path. Run npm run ios:build-latest first"
+  [[ -d "$app_path" ]] \
+    || skip_or_fail "cache-missing" "Latest cached app not found: $app_path. Run npm run ios:build-latest first"
   log "Using cached build from $(jq -r '.builtAt // "unknown time"' "$manifest_path")"
 elif [[ "$skip_build" != "true" ]]; then
   build_args=(ios build --target aarch64 --archive-only --ci --export-method debugging)
@@ -411,23 +521,29 @@ if [[ "$install_latest" != "true" ]]; then
   application_path="$(/usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:ApplicationPath' "$archive_path/Info.plist")"
   app_path="$archive_path/Products/$application_path"
 fi
-[[ -d "$app_path" ]] || fail "App bundle not found in the archive: $app_path"
+[[ -d "$app_path" ]] || skip_or_fail "cache-missing" "App bundle not found in the archive: $app_path"
 
-platform_name="$(/usr/libexec/PlistBuddy -c 'Print :DTPlatformName' "$app_path/Info.plist")"
-candidate_bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app_path/Info.plist")"
-candidate_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app_path/Info.plist")"
-candidate_build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app_path/Info.plist")"
-[[ "$platform_name" == "iphoneos" ]] || fail "Archive targets '$platform_name', not iphoneos"
-[[ "$candidate_bundle_id" == "$bundle_id" ]] || fail "Unexpected bundle ID: $candidate_bundle_id"
-codesign --verify --deep --strict --verbose=2 "$app_path"
+platform_name="$(/usr/libexec/PlistBuddy -c 'Print :DTPlatformName' "$app_path/Info.plist" 2>/dev/null || true)"
+candidate_bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app_path/Info.plist" 2>/dev/null || true)"
+candidate_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app_path/Info.plist" 2>/dev/null || true)"
+candidate_build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app_path/Info.plist" 2>/dev/null || true)"
+[[ "$platform_name" == "iphoneos" ]] || skip_or_fail "cache-invalid" "Archive targets '$platform_name', not iphoneos"
+[[ "$candidate_bundle_id" == "$bundle_id" ]] || skip_or_fail "cache-invalid" "Unexpected bundle ID: $candidate_bundle_id"
+codesign --verify --deep --strict "$app_path" >/dev/null 2>&1 \
+  || skip_or_fail "cache-invalid" "The cached app failed strict code signature verification"
 
 profile_path="$app_path/embedded.mobileprovision"
 profile_plist="$temp_root/profile.plist"
-[[ -f "$profile_path" ]] || fail "The app does not contain an embedded provisioning profile"
-security cms -D -i "$profile_path" >"$profile_plist"
+[[ -f "$profile_path" ]] || skip_or_fail "cache-invalid" "The app does not contain an embedded provisioning profile"
+security cms -D -i "$profile_path" >"$profile_plist" \
+  || skip_or_fail "cache-invalid" "The embedded provisioning profile could not be decoded"
 profile_team="$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' "$profile_plist" 2>/dev/null || true)"
-profile_expiration="$(plutil -extract ExpirationDate raw -o - "$profile_plist")"
-[[ "$profile_team" == "$development_team" ]] || fail "Profile team '$profile_team' does not match '$development_team'"
+profile_expiration="$(plutil -extract ExpirationDate raw -o - "$profile_plist" 2>/dev/null || true)"
+profile_uuid="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$profile_plist" 2>/dev/null || true)"
+profile_created_at="$(plutil -extract CreationDate raw -o - "$profile_plist" 2>/dev/null || true)"
+profile_devices_json="$(plutil -extract ProvisionedDevices json -o - "$profile_plist" 2>/dev/null || printf '[]')"
+[[ "$profile_team" == "$development_team" ]] \
+  || skip_or_fail "profile-team-mismatch" "Profile team '$profile_team' does not match '$development_team'"
 if [[ "$build_latest" != "true" ]]; then
   if /usr/libexec/PlistBuddy -c 'Print :ProvisionedDevices' "$profile_plist" 2>/dev/null \
     | grep -Fqx "    $device_udid"; then
@@ -435,20 +551,23 @@ if [[ "$build_latest" != "true" ]]; then
   else
     profile_has_device=false
   fi
-  [[ "$profile_has_device" == "true" ]] || fail "The provisioning profile does not include $device_udid"
+  [[ "$profile_has_device" == "true" ]] \
+    || skip_or_fail "profile-device-missing" "The provisioning profile does not include $device_udid"
 fi
 
-expiration_epoch="$(date -j -f '%Y-%m-%dT%H:%M:%SZ' "$profile_expiration" '+%s' 2>/dev/null || true)"
-[[ -n "$expiration_epoch" ]] || fail "Could not parse profile expiration: $profile_expiration"
+expiration_epoch="$(TZ=UTC date -j -f '%Y-%m-%dT%H:%M:%SZ' "$profile_expiration" '+%s' 2>/dev/null || true)"
+[[ -n "$expiration_epoch" ]] \
+  || skip_or_fail "cache-invalid" "Could not parse profile expiration: $profile_expiration"
 now_epoch="$(date '+%s')"
-(( expiration_epoch > now_epoch )) || fail "The provisioning profile expired at $profile_expiration"
+(( expiration_epoch > now_epoch )) \
+  || skip_or_fail "profile-expired" "The provisioning profile expired at $profile_expiration"
 remaining_hours=$(( (expiration_epoch - now_epoch) / 3600 ))
 if (( remaining_hours < 48 )); then
   log "Warning: the development profile expires in about $remaining_hours hour(s)"
 fi
 
-executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_path/Info.plist")"
-candidate_uuid="$(dwarfdump --uuid "$app_path/$executable_name" | awk '{print $2}')"
+executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_path/Info.plist" 2>/dev/null || true)"
+candidate_uuid="$(dwarfdump --uuid "$app_path/$executable_name" 2>/dev/null | awk '{print $2}' || true)"
 log "Candidate $candidate_version ($candidate_build), UUID $candidate_uuid"
 log "Development profile expires at $profile_expiration"
 
@@ -471,11 +590,15 @@ if [[ "$build_latest" == "true" ]]; then
     --arg bundleId "$candidate_bundle_id" \
     --arg platform "$platform_name" \
     --arg team "$profile_team" \
+    --arg profileUuid "$profile_uuid" \
+    --arg profileCreatedAt "$profile_created_at" \
     --arg profileExpiration "$profile_expiration" \
     --arg executableUuid "$candidate_uuid" \
+    --arg artifactId "$profile_uuid:$candidate_uuid" \
     --arg sourceRevision "$source_revision" \
+    --argjson deviceUdids "$profile_devices_json" \
     --argjson sourceDirty "$source_dirty" \
-    '{builtAt: $builtAt, version: $version, build: $build, bundleId: $bundleId, platform: $platform, team: $team, profileExpiration: $profileExpiration, executableUuid: $executableUuid, sourceRevision: $sourceRevision, sourceDirty: $sourceDirty, app: "Transfer Genie.app"}' \
+    '{builtAt: $builtAt, version: $version, build: $build, bundleId: $bundleId, platform: $platform, team: $team, profileUuid: $profileUuid, profileCreatedAt: $profileCreatedAt, profileExpiration: $profileExpiration, deviceUdids: $deviceUdids, executableUuid: $executableUuid, artifactId: $artifactId, sourceRevision: $sourceRevision, sourceDirty: $sourceDirty, app: "Transfer Genie.app"}' \
     >"$cache_staging/manifest.json"
   previous_build="$latest_build_dir.previous.$$"
   if [[ -e "$latest_build_dir" ]]; then
@@ -504,16 +627,42 @@ fi
 
 install_json="$temp_root/install.json"
 log "Installing $bundle_id in place over Wi-Fi"
-xcrun devicectl device install app \
+if ! xcrun devicectl device install app \
   --device "$device_name" \
   "$app_path" \
   --timeout 120 \
-  --json-output "$install_json"
-[[ "$(jq -r '.info.outcome // empty' "$install_json")" == "success" ]] \
-  || fail "CoreDevice did not report a successful install"
+  --json-output "$install_json" >"$temp_root/install.log" 2>&1; then
+  tail -n 5 "$temp_root/install.log" >&2 || true
+  skip_or_fail "install-failed" "devicectl could not install over Wi-Fi (device locked, off-network, or bundle rejected)"
+fi
+[[ "$(jq -r '.info.outcome // empty' "$install_json" 2>/dev/null)" == "success" ]] \
+  || skip_or_fail "install-failed" "CoreDevice did not report a successful install"
 
 if [[ "$installed_before" == "1" ]]; then
-  inspect_drafts "postinstall"
+  if [[ "$attempt_mode" == "true" ]]; then
+    inspect_drafts "postinstall" false || log "Post-install draft guard skipped on $device_name"
+  else
+    inspect_drafts "postinstall"
+  fi
+fi
+
+# Trust the device's own record of the installed build instead of only the
+# devicectl exit status; a stale install would otherwise look successful.
+apps_after_json="$temp_root/apps-after.json"
+installed_build=""
+if xcrun devicectl device info apps \
+  --device "$device_name" \
+  --bundle-id "$bundle_id" \
+  --timeout 60 \
+  --json-output "$apps_after_json" >/dev/null 2>&1; then
+  installed_build="$(jq -r '[.result.apps[]? | select(.bundleIdentifier == "com.transfergenie")][0] | .bundleVersion // empty' "$apps_after_json" 2>/dev/null || true)"
+fi
+if [[ "$installed_build" == "$candidate_build" || "$installed_build" == "$candidate_version" ]]; then
+  log "Verified installed version on device: $installed_build"
+elif [[ "$attempt_mode" == "true" ]]; then
+  skip_or_fail "version-mismatch" "The device reports '${installed_build:-unknown}' after installing $candidate_build"
+else
+  log "Warning: could not confirm the installed version on the device (reported '${installed_build:-unknown}')"
 fi
 
 installed_path="$(jq -r '.result.installedApplications[0].installationURL // empty' "$install_json")"
@@ -528,17 +677,21 @@ if [[ "$launch_after_install" == "true" ]]; then
     --timeout 60 \
     --json-output "$launch_json" >/dev/null
   process_id="$(jq -r '.result.process.processIdentifier // empty' "$launch_json")"
-  [[ -n "$process_id" ]] || fail "The updated app did not return a process ID"
+  [[ -n "$process_id" ]] \
+    || skip_or_fail "launch-failed" "The updated app did not return a process ID"
   sleep 5
   process_list="$(xcrun lldb -b \
     -o "device select $device_name" \
     -o 'device process list' \
     -o 'quit' 2>/dev/null)"
   printf '%s\n' "$process_list" | awk -v pid="$process_id" '$1 == pid { found=1 } END { exit found ? 0 : 1 }' \
-    || fail "The updated app process $process_id was not running after 5 seconds"
+    || skip_or_fail "launch-failed" "The updated app process $process_id was not running after 5 seconds"
   log "Update complete: $device_name is running PID $process_id"
 else
   log "Silent update complete; no app was opened on $device_name"
 fi
 log "Installed bundle: $installed_path"
 log "Preserved data container UUID: $database_uuid"
+if [[ "$attempt_mode" == "true" ]]; then
+  printf '[ios-wifi] attempt-result: installed %s %s\n' "$candidate_version" "$candidate_build"
+fi

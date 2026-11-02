@@ -11443,9 +11443,17 @@ fn mobile_draft_import_path(root: &Path, raw: &str) -> Result<PathBuf, String> {
     let path = Path::new(raw);
     let relative = if path.is_absolute() {
         path.strip_prefix(root)
+            .map(Path::to_path_buf)
+            .or_else(|_| {
+                // Foundation and Rust may use /var and /private/var for the
+                // same iOS container. Compare real paths before rejecting it.
+                normalize_path(path)
+                    .strip_prefix(normalize_path(root))
+                    .map(Path::to_path_buf)
+            })
             .map_err(|_| "草稿附件不在应用导入沙盒中")?
     } else {
-        path
+        path.to_path_buf()
     };
     let parts: Vec<_> = relative.components().collect();
     if parts.len() != 2
@@ -11456,7 +11464,7 @@ fn mobile_draft_import_path(root: &Path, raw: &str) -> Result<PathBuf, String> {
     {
         return Err("草稿附件路径无效".into());
     }
-    let resolved = root.join(relative);
+    let resolved = root.join(&relative);
     if resolved.exists() && !is_within_dir(&resolved, root) {
         return Err("草稿附件路径超出应用导入沙盒".into());
     }
@@ -26059,6 +26067,43 @@ mod tests {
         ] {
             assert!(mobile_draft_import_path(&root, invalid).is_err());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mobile_composer_draft_paths_accept_directory_aliases_and_reject_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = std::env::temp_dir()
+            .join(format!("tg-mobile-import-alias-{}", uuid::Uuid::new_v4()));
+        let root = temp_dir.join("MobileImports");
+        let relative = PathBuf::from(uuid::Uuid::new_v4().to_string()).join("photo.jpg");
+        fs::create_dir_all(root.join(&relative).parent().unwrap()).unwrap();
+        fs::write(root.join(&relative), b"photo").unwrap();
+        let alias = temp_dir.join("alias");
+        symlink(&root, &alias).unwrap();
+
+        for (import_root, attachment) in [
+            (&root, alias.join(&relative)),
+            (&alias, root.canonicalize().unwrap().join(&relative)),
+        ] {
+            let resolved = mobile_draft_import_path(import_root, &attachment.to_string_lossy())
+                .unwrap();
+            assert_eq!(resolved, import_root.join(&relative));
+            assert_eq!(resolved.strip_prefix(import_root).unwrap(), relative);
+            assert_eq!(fs::read(resolved).unwrap(), b"photo");
+        }
+
+        let outside = temp_dir.join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("photo.jpg"), b"outside").unwrap();
+        let escape = PathBuf::from(uuid::Uuid::new_v4().to_string()).join("photo.jpg");
+        symlink(&outside, root.join(escape.parent().unwrap())).unwrap();
+        for attachment in [root.join(&escape), alias.join(&escape), outside.join("photo.jpg")] {
+            assert!(mobile_draft_import_path(&root, &attachment.to_string_lossy()).is_err());
+        }
+        assert!(mobile_draft_import_path(&root, &escape.to_string_lossy()).is_err());
+        fs::remove_dir_all(temp_dir).unwrap();
     }
 
     #[test]

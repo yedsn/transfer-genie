@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, rmdirSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -75,6 +75,23 @@ function simulatorDraftGuard(udid) {
   log('Simulator database and empty saved-draft guard passed');
 }
 
+function openVirtualDeviceUi(simulator) {
+  const developerDir = command('xcode-select', ['-p']).stdout.trim();
+  const simulatorApp = join(developerDir, 'Applications/Simulator.app');
+  if (existsSync(simulatorApp)) {
+    command('open', [simulatorApp, '--args', '-CurrentDeviceUDID', simulator.udid], { allowFailure: true });
+    return 'Simulator';
+  }
+  // Xcode 27 replaced the standalone Simulator window with Device Hub.
+  const deviceHubApp = resolve(developerDir, '../Applications/DeviceHub.app');
+  if (existsSync(deviceHubApp)) {
+    command('open', [deviceHubApp], { allowFailure: true });
+    return 'Device Hub';
+  }
+  command('open', ['-a', 'Simulator'], { allowFailure: true });
+  return 'Simulator';
+}
+
 function simulatorDevArgs(simulator) {
   assertSimulatorDevTarget(json('xcrun', ['xcdevice', 'list']), simulator);
   const args = ['tauri', 'ios', 'dev', simulator.name];
@@ -89,6 +106,40 @@ function simulatorDevArgs(simulator) {
     args.push('--config', JSON.stringify({ build: { beforeDevCommand: '' } }));
   }
   return args;
+}
+
+function recoverStaleVirtualLock(lock) {
+  const pidPath = join(lock, 'pid');
+  let ownerPid = '';
+  try { ownerPid = readFileSync(pidPath, 'utf8').trim(); } catch {}
+  const lockAgeMs = (() => {
+    try { return Date.now() - statSync(lock).mtimeMs; } catch { return 0; }
+  })();
+  if (lockAgeMs < 6_000) {
+    throw new Error('Another virtual deployment is active or its lock was just created; refusing to remove ' + lock);
+  }
+  if (ownerPid && /^\d+$/.test(ownerPid)) {
+    try {
+      process.kill(Number(ownerPid), 0);
+      throw new Error('Another virtual deployment is active (pid ' + ownerPid + '); wait for it to finish before retrying');
+    } catch (error) {
+      if (error?.code !== 'ESRCH') throw error;
+    }
+  }
+  try { rmSync(pidPath, { force: true }); } catch {}
+  try { rmdirSync(lock); } catch { throw new Error('Unable to recover stale virtual deployment lock safely: ' + lock); }
+  log('Recovered stale virtual deployment lock from pid ' + (ownerPid || 'unknown'));
+}
+
+function acquireVirtualLock(lock) {
+  mkdirSync(join(lock, '..'), { recursive: true });
+  try { mkdirSync(lock); }
+  catch {
+    recoverStaleVirtualLock(lock);
+    try { mkdirSync(lock); }
+    catch { throw new Error('Another virtual deployment acquired the lock during stale-lock recovery: ' + lock); }
+  }
+  writeFileSync(join(lock, 'pid'), String(process.pid));
 }
 
 // Tauri tries fuzzy matching connected devices before looking at Simulators.
@@ -155,14 +206,15 @@ export async function main(args = process.argv.slice(2)) {
   const originalTeams = readFileSync(pbxPath, 'utf8').match(teamPattern) || [];
   mkdirSync(buildDir, { recursive: true });
   const lock = join(buildDir, '.virtual-deploy.lock');
-  try { mkdirSync(lock); } catch { throw new Error('Another virtual deployment is active. After an abnormal exit, verify no build/dev process is running before removing ' + lock); }
-  writeFileSync(join(lock, 'pid'), String(process.pid));
+  acquireVirtualLock(lock);
   let staging;
   try {
     if (target === 'simulator') {
       if (simulator.state !== 'Booted') command('xcrun', ['simctl', 'boot', simulator.udid]);
       await run('xcrun', ['simctl', 'bootstatus', simulator.udid, '-b'], env);
-      command('open', ['-a', 'Simulator', '--args', '-CurrentDeviceUDID', simulator.udid]);
+      // Xcode can provide simctl without installing the Simulator GUI app.
+      // Opening the window is best-effort; installation and launch remain headless-capable.
+      log('Virtual device UI: ' + openVirtualDeviceUi(simulator));
       simulatorDraftGuard(simulator.udid);
       if (action === 'dev') {
         const sameName = Object.values(json('xcrun', ['simctl', 'list', 'devices', 'available', '--json']).devices).flat().filter((device) => device.name === simulator.name);
@@ -197,7 +249,17 @@ export async function main(args = process.argv.slice(2)) {
       staging = mkdtempSync(join(buildDir, 'vphone-deploy-'));
       const guestApp = join(staging, apps[0]);
       command('ditto', [app, guestApp]);
-      command('codesign', ['--force', '--deep', '--sign', '-', '--entitlements', join(projectRoot, 'gen/apple/transfer-genie_iOS/transfer-genie_iOS.entitlements'), guestApp]);
+      // Ad-hoc signing does not expand Xcode build settings. Resolve the same application
+      // identifier used by the existing development build so VPhone can upgrade in place.
+      const team = value('APPLE_DEVELOPMENT_TEAM');
+      assert(team && !team.startsWith('YOUR_'), 'Configure APPLE_DEVELOPMENT_TEAM in .env for the VPhone ad-hoc entitlement');
+      const entitlementSource = readFileSync(join(projectRoot, 'gen/apple/transfer-genie_iOS/transfer-genie_iOS.entitlements'), 'utf8')
+        .replaceAll('$(AppIdentifierPrefix)', team + '.')
+        .replaceAll('$(PRODUCT_BUNDLE_IDENTIFIER)', bundleId);
+      assert(!entitlementSource.includes('$('), 'The VPhone entitlement contains an unresolved Xcode build setting');
+      const guestEntitlements = join(staging, 'vphone-entitlements.plist');
+      writeFileSync(guestEntitlements, entitlementSource);
+      command('codesign', ['--force', '--deep', '--sign', '-', '--entitlements', guestEntitlements, guestApp]);
       command('codesign', ['--verify', '--deep', '--strict', guestApp]);
       const artifacts = resolve(projectRoot, value('VPHONE_ARTIFACT_DIR') || join(buildDir, 'vphone-smoke'), new Date().toISOString().replace(/[:.]/g, '-'));
       log('Ad-hoc VPhone-only package. Existing draft guards must pass before install/termination');

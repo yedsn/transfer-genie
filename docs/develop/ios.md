@@ -10,7 +10,7 @@
 | iOS SDK / Simulator Runtime | 26.4 |
 | 最低 iOS 版本 | 16.0 |
 | Tauri CLI | 2.11.3（Cargo 与 npm CLI 一致） |
-| 真机 / VPhone 开发团队 | `9RV293JR6V`（当前已安装包） |
+| 真机 / VPhone 开发团队 | `32XG8U6WLA`（当前迁移后安装包） |
 | 官方 Simulator 模拟签名组 | `LW6QTNHNV4.com.transfergenie`（保留已有登录） |
 | 官方模拟器 | `Transfer Genie - iPhone 12` |
 | Bundle ID | `com.transfergenie` |
@@ -132,7 +132,7 @@ xcrun simctl spawn booted log stream \
 
 1. 用数据线连接并解锁 iPhone，在手机上选择“信任此电脑”。
 2. 在 iPhone 的“设置 → 隐私与安全性 → 开发者模式”中启用开发者模式并按提示重启。
-3. 确认 Xcode 已登录 Apple ID，并在 Signing & Capabilities 中选择当前真机团队 `9RV293JR6V`、启用 Automatically manage signing。证书显示名括号中的标识不等于当前包的 `TeamIdentifier`，以实际签名与 provisioning profile 为准。
+3. 确认 Xcode 已登录 `yedsn@163.com` 对应的 Personal Team `32XG8U6WLA`，并在 Signing & Capabilities 中选择该真机团队、启用 Automatically manage signing。证书显示名括号中的标识不等于当前包的 `TeamIdentifier`，以实际签名与 provisioning profile 为准。
 4. 检查 CoreDevice 状态：
 
 ```bash
@@ -143,7 +143,7 @@ xcrun devicectl list devices
 
 ```bash
 ipconfig getifaddr en0
-APPLE_DEVELOPMENT_TEAM=9RV293JR6V CARGO_HOME="$PWD/.cargo-ios" \
+APPLE_DEVELOPMENT_TEAM=32XG8U6WLA CARGO_HOME="$PWD/.cargo-ios" \
   npx tauri ios dev "Jam" --host "$(ipconfig getifaddr en0)"
 ```
 
@@ -173,7 +173,7 @@ xcodebuild build-for-testing \
   -destination 'generic/platform=iOS' \
   -derivedDataPath "$TG_PHYSICAL_TEST_DIR" \
   CODE_SIGNING_ALLOWED=YES CODE_SIGN_STYLE=Automatic \
-  DEVELOPMENT_TEAM=9RV293JR6V \
+  DEVELOPMENT_TEAM=32XG8U6WLA \
   PRODUCT_BUNDLE_IDENTIFIER=com.transfergenie.tests.physical-ui \
   GENERATE_INFOPLIST_FILE=YES -allowProvisioningUpdates
 
@@ -388,11 +388,11 @@ VPhone 独有失败必须在官方 Simulator 或 `Jam` 上复现后才能成为�
 
 ### 开发签名直装
 
-前提：`Jam` 已解锁并信任 Mac、已启用开发者模式，Xcode 登录的 Apple ID 对当前真机团队 `9RV293JR6V` 有开发证书和 `com.transfergenie` provisioning profile，工程启用 Automatically manage signing。官方 Simulator 保留登录时使用的 `LW6QTNHNV4` 模拟签名组不能直接作为真机团队依据。
+前提：`Jam` 已解锁并信任 Mac、已启用开发者模式，并在“设置 → 通用 → VPN 与设备管理”中信任 `yedsn@163.com` 对应的开发者身份；Xcode 登录的 Apple ID 对当前真机团队 `32XG8U6WLA` 有开发证书和 `com.transfergenie` provisioning profile，工程启用 Automatically manage signing。官方 Simulator 保留登录时使用的 `LW6QTNHNV4` 模拟签名组不能直接作为真机团队依据。
 
 ```bash
 xcrun devicectl list devices
-APPLE_DEVELOPMENT_TEAM=9RV293JR6V CARGO_HOME="$PWD/.cargo-ios" \
+APPLE_DEVELOPMENT_TEAM=32XG8U6WLA CARGO_HOME="$PWD/.cargo-ios" \
   npx tauri ios build --debug --target aarch64 \
   --ci --export-method debugging
 ```
@@ -419,7 +419,15 @@ npm run ios:update
 npm run ios:build-latest
 ```
 
-这个命令只构建、校验并原子更新 `gen/apple/build/ios-wireless-latest` 缓存，不连接、安装或启动 iPhone；缓存不会被后续 Simulator 或 VPhone 共用 archive 覆盖。TaskTick 任务 `Transfer Genie · iOS 每日预构建` 每天 00:00 执行项目内的 `scripts/tasktick-ios-build-latest.sh`，成功与失败记录在 TaskTick 运行日志中。Mac 在该时刻需要处于开机可运行状态，并能访问签名证书与 Xcode。
+这个命令只构建、校验并原子更新 `gen/apple/build/ios-wireless-latest` 缓存，不连接、安装或启动 iPhone；缓存不会被后续 Simulator 或 VPhone 共用 archive 覆盖。
+
+### 无线保活任务
+
+TaskTick 当前使用两个独立任务：`Transfer Genie · iOS 每日续签构建` 每天 09:00 执行 `scripts/tasktick-ios-renew-build.sh`，以及 `Transfer Genie · iOS 无线保活` 按 `0 0,10-23 * * *` 执行 `scripts/tasktick-ios-keepalive.sh`。两个包装脚本都会强制从 `.env` 读取当前 Team `32XG8U6WLA`，防止 TaskTick 的旧进程环境误用另一个账号。每日任务会备份并移走当前 Team/Bundle ID 的旧 profile，尝试换发新 profile，再验证并原子发布签名缓存；任何失败都会恢复旧 profile 和上一份成功缓存。无线任务不构建、不移动 profile，只比较最新 manifest.artifactId 与 `state.json` 的 lastInstalledArtifactId；两者不同才通过 Wi-Fi 尝试安装。设备离线等可恢复失败以退出码 0 结束，下一个轮次继续；当前 artifactId 安装成功后不再重复连接。
+
+需要明确一条实测结论：**重装不会延长 7 天有效期，但使用新 Team 重新签发会生成新的有效期**。当前 Team `32XG8U6WLA` 的缓存 Profile UUID 为 `10d296f0-5c53-4290-9632-aa4f504ad20f`，到期时间为 `2026-11-09T05:49:05Z`（北京时间 2026-11-09 13:49:05）。
+
+TaskTick 是本机调度，Mac 在任务时间睡眠、外置盘未挂载或 Xcode/钥匙串不可用时不会补跑。当前已迁移到 Personal Team `32XG8U6WLA`：续签任务最近一次已成功生成新 Profile，artifactId 为 `10d296f0-5c53-4290-9632-aa4f504ad20f:775849BC-4376-3AF3-9DC1-E1BFD1FB6BEE`，到期时间为 `2026-11-09T05:49:05Z`。由于从原 Team `9RV293JR6V` 迁移到新 Team，必须在 iPhone 上卸载旧 App 后安装新包；这会清除旧 App 沙盒与旧 Team Keychain 身份，Supabase 云端数据不受影响。
 
 需要更新手机时，在 VS Code 选择 `ios:wireless-install-latest`，或在终端执行：
 
@@ -427,7 +435,7 @@ npm run ios:build-latest
 npm run ios:wireless-install-latest -- --confirm
 ```
 
-该入口读取最近一次成功缓存，不重新编译；它仍会确认同一 Wi-Fi 和 `.env` 生效配置，检查缓存平台、bundle ID、strict codesign、Team、描述文件有效期与目标设备 UDID，并在安装前后执行草稿和 SQLite 完整性门禁。缓存构建失败时保留上一份成功产物；若从未成功构建，会明确提示先运行 `ios:build-latest`。缓存对应每日 00:00 时的源码快照，因此当天 00:00 之后的新代码不会自动进入该包，可手动执行一次 `npm run ios:build-latest` 刷新。
+该入口读取最近一次成功缓存，不重新编译；它仍会确认同一 Wi-Fi 和 `.env` 生效配置，检查缓存平台、bundle ID、strict codesign、Team、描述文件有效期与目标设备 UDID，并在安装前后执行草稿和 SQLite 完整性门禁。每日续签失败时保留上一份成功产物；若从未成功构建，会明确提示先运行 `ios:renew-build` 或 `ios:build-latest`。缓存对应每日 09:00 时的源码快照，因此当天 09:00 之后的新代码不会自动进入该包，可手动执行一次 `npm run ios:renew-build` 重新续签，或执行 `npm run ios:build-latest` 仅刷新代码包。
 
 默认流程不会打开系统“设置”，也不会在安装完成后主动启动 App 或抢占手机前台。如果希望更新后立即打开 Transfer Genie，可以选择 `ios:wireless-update:launch`，或执行：
 
@@ -446,7 +454,7 @@ npm run ios:update:launch
 TestFlight 需要付费 Apple Developer Program、有效 Distribution 证书、App Store Connect 中已创建的 `com.transfergenie` 应用记录，以及每次递增的 build number：
 
 ```bash
-APPLE_DEVELOPMENT_TEAM=9RV293JR6V CARGO_HOME="$PWD/.cargo-ios" \
+APPLE_DEVELOPMENT_TEAM=32XG8U6WLA CARGO_HOME="$PWD/.cargo-ios" \
   npx tauri ios build --target aarch64 --ci \
   --build-number 1 --export-method app-store-connect
 ```

@@ -4,6 +4,7 @@ import { assertEmptyComposer, assertNoActiveEditing } from "./vphone/draft-safet
 const tree = (...labels) => ({ elements: labels.map((label) => ({ label })) });
 assert.doesNotThrow(() => assertNoActiveEditing(tree("消息", "标记", "我的")));
 assert.doesNotThrow(() => assertNoActiveEditing(tree("SUPABASE ONLY", "连接你的云端空间")));
+assert.doesNotThrow(() => assertNoActiveEditing(tree("登录 Supabase", "Supabase 登录邮箱", "Supabase 登录密码")));
 for (const editor of ["关闭新消息", "消息内容", "关闭编辑标记", "新标签名称", "关闭发送者名称"]) {
   assert.throws(() => assertNoActiveEditing(tree("消息", "我的", editor)), /editor is open/);
 }
