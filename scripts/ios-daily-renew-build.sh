@@ -85,7 +85,7 @@ for profile in "$profiles_dir"/*.mobileprovision; do
   app_id="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$decoded" 2>/dev/null || true)"
   [[ "$team" == "$development_team" && "$app_id" == "$development_team.$bundle_id" ]] || continue
   expiration="$(plutil -extract ExpirationDate raw -o - "$decoded" 2>/dev/null || true)"
-  expiration_epoch="$(date -j -f '%Y-%m-%dT%H:%M:%SZ' "$expiration" '+%s' 2>/dev/null || true)"
+  expiration_epoch="$(TZ=UTC date -j -f '%Y-%m-%dT%H:%M:%SZ' "$expiration" '+%s' 2>/dev/null || true)"
   [[ -n "$expiration_epoch" ]] && (( expiration_epoch > old_expiration_epoch )) && old_expiration_epoch="$expiration_epoch"
   devices="$(plutil -extract ProvisionedDevices json -o - "$decoded" 2>/dev/null || printf '[]')"
   old_device_udids="$(jq -cn --argjson a "$old_device_udids" --argjson b "$devices" '$a + $b | unique')"
@@ -112,7 +112,7 @@ new_team="$(jq -r '.team // empty' "$manifest")"
 new_bundle="$(jq -r '.bundleId // empty' "$manifest")"
 new_profile_uuid="$(jq -r '.profileUuid // empty' "$manifest")"
 new_expiration="$(jq -r '.profileExpiration // empty' "$manifest")"
-new_expiration_epoch="$(date -j -f '%Y-%m-%dT%H:%M:%SZ' "$new_expiration" '+%s' 2>/dev/null || true)"
+new_expiration_epoch="$(TZ=UTC date -j -f '%Y-%m-%dT%H:%M:%SZ' "$new_expiration" '+%s' 2>/dev/null || true)"
 new_devices="$(jq -c '.deviceUdids // []' "$manifest")"
 artifact_id="$(jq -r '.artifactId // empty' "$manifest")"
 

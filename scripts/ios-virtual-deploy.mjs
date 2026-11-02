@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, rmdirSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -108,6 +108,40 @@ function simulatorDevArgs(simulator) {
   return args;
 }
 
+function recoverStaleVirtualLock(lock) {
+  const pidPath = join(lock, 'pid');
+  let ownerPid = '';
+  try { ownerPid = readFileSync(pidPath, 'utf8').trim(); } catch {}
+  const lockAgeMs = (() => {
+    try { return Date.now() - statSync(lock).mtimeMs; } catch { return 0; }
+  })();
+  if (lockAgeMs < 6_000) {
+    throw new Error('Another virtual deployment is active or its lock was just created; refusing to remove ' + lock);
+  }
+  if (ownerPid && /^\d+$/.test(ownerPid)) {
+    try {
+      process.kill(Number(ownerPid), 0);
+      throw new Error('Another virtual deployment is active (pid ' + ownerPid + '); wait for it to finish before retrying');
+    } catch (error) {
+      if (error?.code !== 'ESRCH') throw error;
+    }
+  }
+  try { rmSync(pidPath, { force: true }); } catch {}
+  try { rmdirSync(lock); } catch { throw new Error('Unable to recover stale virtual deployment lock safely: ' + lock); }
+  log('Recovered stale virtual deployment lock from pid ' + (ownerPid || 'unknown'));
+}
+
+function acquireVirtualLock(lock) {
+  mkdirSync(join(lock, '..'), { recursive: true });
+  try { mkdirSync(lock); }
+  catch {
+    recoverStaleVirtualLock(lock);
+    try { mkdirSync(lock); }
+    catch { throw new Error('Another virtual deployment acquired the lock during stale-lock recovery: ' + lock); }
+  }
+  writeFileSync(join(lock, 'pid'), String(process.pid));
+}
+
 // Tauri tries fuzzy matching connected devices before looking at Simulators.
 export function assertSimulatorDevTarget(devices, simulator) {
   const normalize = (name) => name.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
@@ -172,8 +206,7 @@ export async function main(args = process.argv.slice(2)) {
   const originalTeams = readFileSync(pbxPath, 'utf8').match(teamPattern) || [];
   mkdirSync(buildDir, { recursive: true });
   const lock = join(buildDir, '.virtual-deploy.lock');
-  try { mkdirSync(lock); } catch { throw new Error('Another virtual deployment is active. After an abnormal exit, verify no build/dev process is running before removing ' + lock); }
-  writeFileSync(join(lock, 'pid'), String(process.pid));
+  acquireVirtualLock(lock);
   let staging;
   try {
     if (target === 'simulator') {

@@ -20,6 +20,7 @@ temp_root=""
 cache_staging=""
 owns_build_lock=false
 build_lock="$project_root/gen/apple/build/.virtual-deploy.lock"
+build_lock_wait_seconds="900"
 latest_build_dir="${TRANSFER_GENIE_IOS_LATEST_BUILD_DIR:-}"
 
 # Keep redirected logs and terminals without color support clean.
@@ -108,8 +109,55 @@ cleanup() {
 
 acquire_build_lock() {
   mkdir -p "$(dirname "$build_lock")"
+  local wait_deadline=$(( $(date '+%s') + build_lock_wait_seconds ))
+  local announced_wait=false
+  while [[ -d "$build_lock" ]]; do
+    local owner_pid=""
+    local owner_command=""
+    if [[ -f "$build_lock/pid" ]]; then
+      owner_pid="$(tr -cd '0-9' <"$build_lock/pid")"
+    fi
+    if [[ -n "$owner_pid" ]]; then
+      owner_command="$(ps -p "$owner_pid" -o command= 2>/dev/null || true)"
+    fi
+    if [[ -n "$owner_pid" ]] && kill -0 "$owner_pid" >/dev/null 2>&1; then
+      if (( $(date '+%s') >= wait_deadline )); then
+        fail "Timed out waiting for the active iOS build/deployment (pid $owner_pid: $owner_command)"
+      fi
+      if [[ "$announced_wait" == "false" ]]; then
+        log "Waiting for the active iOS build/deployment (pid $owner_pid) before starting this build"
+        announced_wait=true
+      fi
+      sleep 5
+      continue
+    fi
+    break
+  done
   if ! mkdir "$build_lock" 2>/dev/null; then
-    fail "Another iOS build/deployment is active. If it ended abnormally, verify no build is running before removing $build_lock"
+    local owner_pid=""
+    local owner_command=""
+    local lock_mtime="0"
+    local now_epoch="0"
+    if [[ -f "$build_lock/pid" ]]; then
+      owner_pid="$(tr -cd '0-9' <"$build_lock/pid")"
+    fi
+    if [[ -n "$owner_pid" ]]; then
+      owner_command="$(ps -p "$owner_pid" -o command= 2>/dev/null || true)"
+    fi
+    if [[ -n "$owner_pid" ]] && kill -0 "$owner_pid" >/dev/null 2>&1; then
+      fail "Another iOS build/deployment is active (pid $owner_pid: $owner_command). Wait for it to finish before retrying"
+    fi
+    lock_mtime="$(stat -f '%m' "$build_lock" 2>/dev/null || printf '0')"
+    now_epoch="$(date '+%s')"
+    if [[ ! "$lock_mtime" =~ ^[0-9]+$ ]] || (( lock_mtime == 0 || now_epoch - lock_mtime < 10 )); then
+      fail "An iOS build lock was created moments ago but its owner is not observable; refusing to remove $build_lock"
+    fi
+    log "Recovering stale iOS build lock: $build_lock (previous pid $owner_pid exited)"
+    rm -f -- "$build_lock/pid"
+    rmdir "$build_lock" 2>/dev/null \
+      || fail "Unable to recover stale iOS build lock safely: $build_lock"
+    mkdir "$build_lock" \
+      || fail "Another iOS build/deployment acquired the lock while stale-lock recovery was in progress"
   fi
   printf '%s\n' "$$" >"$build_lock/pid"
   owns_build_lock=true
@@ -507,7 +555,7 @@ if [[ "$build_latest" != "true" ]]; then
     || skip_or_fail "profile-device-missing" "The provisioning profile does not include $device_udid"
 fi
 
-expiration_epoch="$(date -j -f '%Y-%m-%dT%H:%M:%SZ' "$profile_expiration" '+%s' 2>/dev/null || true)"
+expiration_epoch="$(TZ=UTC date -j -f '%Y-%m-%dT%H:%M:%SZ' "$profile_expiration" '+%s' 2>/dev/null || true)"
 [[ -n "$expiration_epoch" ]] \
   || skip_or_fail "cache-invalid" "Could not parse profile expiration: $profile_expiration"
 now_epoch="$(date '+%s')"
