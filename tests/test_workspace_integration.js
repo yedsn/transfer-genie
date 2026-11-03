@@ -26,7 +26,7 @@ function testTabDragStartUsesExportedPayloadFactory() {
   assert.match(workspaceComponent, /switchDraft\(paneId, tabId\)/);
   assert.match(workspaceComponent, /composerStore\.dockTab\(dragSession\.tabId, paneId, zone\)/);
   assert.match(workspaceComponent, /drag\.createTabDragPayload\(tab, paneId\)/);
-  assert.match(workspaceComponent, /composerStore\.moveDraft\(dragSession\.tabId, targetPaneId, insertIndex\)/);
+  assert.ok(workspaceComponent.includes('composerStore.moveDraftBefore(dragSession.tabId, targetPaneId, nextTab?.dataset.tabId || null)'));
   assert.match(workspaceComponent, /closest\("\.cw-tabs-list"\)/);
   assert.doesNotMatch(workspaceComponent, /targetTab\.getBoundingClientRect/);
   assert.doesNotMatch(workspaceComponent, /drag\.createDragPayload\(/);

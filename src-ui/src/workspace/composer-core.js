@@ -28,6 +28,7 @@
       format: spec.format || "text",
       message: spec.message ? clone(spec.message) : null,
       missing: false,
+      collapsed: false,
     };
   }
 
@@ -177,7 +178,7 @@
     var pane = core.findPane(next, paneId);
     if (!pane) return next;
     pane.tabs = pane.tabs.filter(function (t) { return t.id === keepTabId; });
-    pane.activeTabId = keepTabId;
+    core.setActiveTab(pane, keepTabId);
     return next;
   }
   /** 关闭分栏内全部草稿，并留一条空草稿。返回新状态。 */
@@ -199,6 +200,7 @@
     var idx = pane.tabs.findIndex(function (t) { return t.id === tabId; });
     if (idx < 0) return next;
     pane.tabs = pane.tabs.slice(0, idx + 1);
+    core.normalizePaneVisibility(pane);
     return next;
   }
   /** 关闭分栏内指定草稿左侧的草稿。返回新状态。 */
@@ -212,6 +214,7 @@
     if (pane.activeTabId && pane.tabs.indexOf(pane.tabs.find(function (t) { return t.id === pane.activeTabId; })) < 0) {
       pane.activeTabId = tabId;
     }
+    core.normalizePaneVisibility(pane);
     return next;
   }
   /** 计算一组草稿中非空的数量，供批量关闭前确认。 */

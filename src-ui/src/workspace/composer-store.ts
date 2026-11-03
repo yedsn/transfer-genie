@@ -32,6 +32,7 @@ export interface DraftTab {
   format: DraftFormat;
   message: any | null;
   missing: boolean;
+  collapsed?: boolean;
 }
 
 export interface DraftPane {
@@ -55,6 +56,7 @@ export interface ComposerState {
 const state = reactive<ComposerState>(ccore.createInitialComposer()) as ComposerState;
 
 function commit(next: ComposerState) {
+  next.panes.forEach(core.normalizePaneVisibility);
   state.panes = next.panes;
   state.layout = next.layout;
   state.paneOrder = next.paneOrder;
@@ -108,6 +110,12 @@ export const composerStore = {
     return state.panes.flatMap((p) => p.tabs).find((t) => t.id === tabId) || null;
   },
   renameDraft(tabId: string, title: string) { commit(core.renameTab(state, tabId, title)); },
+  collapseDraft(tabId: string) { commit(core.collapseTab(state, tabId)); },
+  collapseOtherDrafts(paneId: string, tabId: string) { commit(core.collapseOtherTabs(state, paneId, tabId)); },
+  expandAllDrafts(paneId: string) { commit(core.expandAllTabs(state, paneId)); },
+  moveDraftBefore(tabId: string, paneId: string, beforeTabId: string | null) {
+    commit(core.moveTabBefore(state, tabId, paneId, beforeTabId));
+  },
   setDraftText(tabId: string, text: string) { commit(ccore.setDraftText(state, tabId, text)); },
   setDraftFormat(tabId: string, format: DraftFormat) { commit(ccore.setDraftFormat(state, tabId, format)); },
   clearWorkspaceConfirmed() {

@@ -54,6 +54,7 @@
       title: spec.title || "",
       sourceRef: spec.sourceRef || null,
       dirty: !!spec.dirty,
+      collapsed: !!spec.collapsed,
       // 消息类标签保留原始消息内容快照，避免依赖远端历史仍可用
       message: spec.message ? clone(spec.message) : null,
       missing: false,
@@ -63,11 +64,11 @@
   function createPane(spec) {
     spec = spec || {};
     var tabs = Array.isArray(spec.tabs) ? spec.tabs.map(createTab) : [];
-    return {
+    return normalizePaneVisibility({
       id: spec.id || nextId("pane"),
       tabs: tabs,
       activeTabId: spec.activeTabId || (tabs.length > 0 ? tabs[0].id : null),
-    };
+    });
   }
 
   function createPaneNode(paneId) {
@@ -204,8 +205,61 @@
 
   function setActiveTab(pane, tabId) {
     if (!pane) return;
-    var exists = pane.tabs.some(function (t) { return t.id === tabId; });
-    pane.activeTabId = exists ? tabId : (pane.tabs.length > 0 ? pane.tabs[0].id : null);
+    var tab = pane.tabs.find(function (t) { return t.id === tabId; });
+    if (tab) {
+      tab.collapsed = false;
+      pane.activeTabId = tab.id;
+    } else {
+      pane.activeTabId = null;
+      normalizePaneVisibility(pane);
+    }
+  }
+
+  function normalizePaneVisibility(pane) {
+    var active = pane.tabs.find(function (tab) { return tab.id === pane.activeTabId; });
+    if (!active || active.collapsed) {
+      active = pane.tabs.find(function (tab) { return !tab.collapsed; }) || active || pane.tabs[0];
+    }
+    if (active) active.collapsed = false;
+    pane.activeTabId = active ? active.id : null;
+    return pane;
+  }
+
+  function activateAfterRemoval(pane, removedIndex) {
+    var previous = pane.tabs.slice(0, removedIndex).filter(function (tab) { return !tab.collapsed; }).pop();
+    var visible = pane.tabs.find(function (tab) { return !tab.collapsed; });
+    setActiveTab(pane, (previous || visible || pane.tabs[Math.max(0, removedIndex - 1)] || {}).id);
+  }
+
+  function collapseTab(state, tabId) {
+    var next = clone(state);
+    var found = findTab(next, tabId);
+    if (!found || found.tab.collapsed) return next;
+    var visible = found.pane.tabs.filter(function (tab) { return !tab.collapsed; });
+    if (visible.length <= 1) return next;
+    found.tab.collapsed = true;
+    if (found.pane.activeTabId === tabId) {
+      var index = visible.findIndex(function (tab) { return tab.id === tabId; });
+      found.pane.activeTabId = (visible[index + 1] || visible[index - 1]).id;
+    }
+    return next;
+  }
+
+  function collapseOtherTabs(state, paneId, tabId) {
+    var next = clone(state);
+    var pane = findPane(next, paneId);
+    if (!pane || !pane.tabs.some(function (tab) { return tab.id === tabId; })) return next;
+    pane.tabs.forEach(function (tab) { tab.collapsed = tab.id !== tabId; });
+    pane.activeTabId = tabId;
+    next.activePaneId = paneId;
+    return next;
+  }
+
+  function expandAllTabs(state, paneId) {
+    var next = clone(state);
+    var pane = findPane(next, paneId);
+    if (pane) pane.tabs.forEach(function (tab) { tab.collapsed = false; });
+    return next;
   }
 
   function getActiveTab(pane) {
@@ -217,6 +271,7 @@
   }
 
   function normalizeAfterPaneChange(state) {
+    state.panes.forEach(normalizePaneVisibility);
     var nonEmpty = state.panes.filter(function (p) { return p.tabs.length > 0; });
     if (nonEmpty.length === 0) {
       var placeholder = createPane({ tabs: [] });
@@ -286,7 +341,7 @@
     if (!found) return next;
     found.pane.tabs.splice(found.tabIndex, 1);
     if (found.pane.activeTabId === tabId) {
-      setActiveTab(found.pane, found.pane.tabs.length > 0 ? found.pane.tabs[Math.max(0, found.tabIndex - 1)].id : null);
+      activateAfterRemoval(found.pane, found.tabIndex);
     }
     normalizeAfterPaneChange(next);
     return next;
@@ -335,7 +390,7 @@
     var targetLengthBeforeMove = target.tabs.length;
     found.pane.tabs.splice(found.tabIndex, 1);
     if (found.pane.activeTabId === tabId) {
-      setActiveTab(found.pane, found.pane.tabs.length > 0 ? found.pane.tabs[Math.max(0, found.tabIndex - 1)].id : null);
+      activateAfterRemoval(found.pane, found.tabIndex);
     }
 
     var insertIndex = target.tabs.length;
@@ -352,6 +407,13 @@
     next.activePaneId = targetPaneId;
     if (!samePane) normalizeAfterPaneChange(next);
     return next;
+  }
+
+  // 可见索引不包含收起项，使用后继标签 ID 定位完整数组中的插入点。
+  function moveTabBefore(state, tabId, targetPaneId, beforeTabId) {
+    var pane = findPane(state, targetPaneId);
+    var index = pane ? pane.tabs.findIndex(function (tab) { return tab.id === beforeTabId; }) : -1;
+    return moveTab(state, tabId, targetPaneId, { insertIndex: index >= 0 ? index : null });
   }
 
   /** 归一化拖拽负载：标签与消息统一为统一结构。 */
@@ -392,7 +454,7 @@
       tab = found.tab;
       found.pane.tabs.splice(found.tabIndex, 1);
       if (found.pane.activeTabId === tab.id) {
-        setActiveTab(found.pane, found.pane.tabs.length > 0 ? found.pane.tabs[Math.max(0, found.tabIndex - 1)].id : null);
+        activateAfterRemoval(found.pane, found.tabIndex);
       }
     } else {
       tab = createTab({
@@ -475,6 +537,7 @@
     if (!Array.isArray(state.paneOrder)) {
       state.paneOrder = state.panes.map(function (p) { return p.id; });
     }
+    state.panes.forEach(normalizePaneVisibility);
     return syncLayoutMetadata(state);
   }
 
@@ -540,6 +603,10 @@
     findTab: findTab,
     getActiveTab: getActiveTab,
     setActiveTab: setActiveTab,
+    normalizePaneVisibility: normalizePaneVisibility,
+    collapseTab: collapseTab,
+    collapseOtherTabs: collapseOtherTabs,
+    expandAllTabs: expandAllTabs,
     splitHorizontal: splitHorizontal,
     splitVertical: splitVertical,
     collapseToSingle: collapseToSingle,
@@ -549,6 +616,7 @@
     setActivePane: setActivePane,
     renameTab: renameTab,
     moveTab: moveTab,
+    moveTabBefore: moveTabBefore,
     createDragPayload: createDragPayload,
     dockToPane: dockToPane,
     copyTabToZone: copyTabToZone,

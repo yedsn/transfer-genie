@@ -874,6 +874,8 @@ function destroyMarkdown() {
   markdownBindTimer = null;
   try {
     if (editor) {
+      window.clearTimeout(editor._previewTimer);
+      window.clearTimeout(editor._diagramTimer);
       if (markdownChangeHandler && editor.cm && typeof editor.cm.off === "function") {
         editor.cm.off("change", markdownChangeHandler);
       }

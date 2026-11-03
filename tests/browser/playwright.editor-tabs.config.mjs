@@ -2,7 +2,7 @@ import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   testDir: '.',
-  testMatch: 'editor-tab-sortable.spec.js',
+  testMatch: ['editor-tab-sortable.spec.js', 'editor-tab-collapse.spec.js', 'sent-draft-keyboard.spec.js', 'markdown-preview.spec.js'],
   outputDir: '../../target/playwright/editor-tabs',
   timeout: 30_000,
   use: {
