@@ -844,14 +844,14 @@ onUnmounted(() => {
           <strong>已收起的草稿</strong>
         </header>
         <div class="cw-collapsed-list">
-          <button v-for="tab in collapsedTabs(collapsedMenu.paneId)" :key="tab.id" class="cw-collapsed-item" type="button" :title="draftTitle(tab)" :aria-label="draftTitle(tab)" @click="restoreCollapsedTab(tab.id)">
+          <button v-for="tab in collapsedTabs(collapsedMenu.paneId)" :key="tab.id" class="cw-collapsed-item" type="button" :title="draftTitle(tab)" :aria-label="draftTitle(tab)" @pointerdown.prevent @click="restoreCollapsedTab(tab.id)">
             <span class="cw-collapsed-format" :data-fmt="tab.format" aria-hidden="true">{{ tab.format === 'markdown' ? 'M' : 'T' }}</span>
             <span class="cw-collapsed-title">{{ draftTitle(tab) }}</span>
             <svg class="cw-collapsed-restore" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15.5 5.5v5a3 3 0 0 1-3 3H4.5m4-4-4 4 4 4"/></svg>
           </button>
         </div>
         <footer class="cw-collapsed-footer">
-          <button class="cw-collapsed-expand-all" type="button" @click="restoreCollapsedTab()">
+          <button class="cw-collapsed-expand-all" type="button" @pointerdown.prevent @click="restoreCollapsedTab()">
             <span>全部展开</span>
           </button>
         </footer>

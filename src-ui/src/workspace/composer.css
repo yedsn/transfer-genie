@@ -260,7 +260,6 @@
 .cw-collapsed-item:focus-visible, .cw-collapsed-expand-all:focus-visible {
   outline: none;
   background: color-mix(in srgb, var(--accent) 8%, var(--panel));
-  box-shadow: inset 2px 0 var(--accent-strong);
 }
 
 .cw-editor {

@@ -70,6 +70,48 @@ test('collapse preserves drafts, restores individual tabs and survives reload', 
   await expect.poll(async () => (await saved(page)).panes[0].tabs.map((t) => t.text)).toEqual(['正文 A', '正文 B', '正文 C', '正文 D']);
 });
 
+test('mouse clicks move individual collapsed drafts out and expand-all restores every remaining draft', async ({ page }) => {
+  await seed(page);
+  const pane = leftPane(page);
+  const dialog = page.getByRole('dialog', { name: '已收起草稿' });
+  await collapse(page, 'A', true);
+
+  async function mouseRestore(name) {
+    await pane.locator('.cw-collapsed-trigger').click();
+    const firstItem = dialog.locator('.cw-collapsed-item').first();
+    await expect(firstItem).toBeFocused();
+    const action = dialog.getByRole('button', { name, exact: true });
+    const box = await action.boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await expect(dialog).toBeVisible();
+    await expect(firstItem).toBeFocused();
+    await page.mouse.up();
+    await expect(dialog).toHaveCount(0);
+  }
+
+  await mouseRestore('草稿 C');
+  await expect.poll(() => ids(pane)).toEqual(['A', 'C']);
+  await expect(pane.locator('.cw-tab.is-active')).toHaveAttribute('data-tab-id', 'C');
+  await expect(pane.locator('.cw-collapsed-trigger')).toContainText('已收起 2 个');
+  await pane.locator('.cw-collapsed-trigger').click();
+  await expect(dialog.locator('.cw-collapsed-title')).toHaveText(['草稿 B', '草稿 D']);
+  await page.keyboard.press('Escape');
+  await mouseRestore('草稿 D');
+  await expect.poll(() => ids(pane)).toEqual(['A', 'C', 'D']);
+  await mouseRestore('草稿 B');
+  await expect.poll(() => ids(pane)).toEqual(['A', 'B', 'C', 'D']);
+  await expect(pane.locator('.cw-collapsed-trigger')).toHaveCount(0);
+
+  await collapse(page, 'B', true);
+  await mouseRestore('全部展开');
+  await expect.poll(() => ids(pane)).toEqual(['A', 'B', 'C', 'D']);
+  await expect(pane.locator('.cw-collapsed-trigger')).toHaveCount(0);
+  await expect.poll(async () => (await saved(page)).panes[0].tabs.every((tab) => !tab.collapsed)).toBe(true);
+  await page.reload({ waitUntil: 'networkidle' });
+  await expect.poll(() => ids(pane)).toEqual(['A', 'B', 'C', 'D']);
+});
+
 test('active collapse and closing the last visible tab keep an editable draft', async ({ page }) => {
   await seed(page);
   const pane = leftPane(page);
