@@ -92,3 +92,27 @@ pub(crate) async fn cancel_video_poster<R: Runtime>(
 ) -> Result<CancelVideoPosterResponse> {
     app.mobile_integration().cancel_video_poster(payload)
 }
+
+#[command]
+pub(crate) async fn list_shared_imports<R: Runtime>(
+    app: AppHandle<R>,
+    payload: ListSharedImportsRequest,
+) -> Result<ListSharedImportsResponse> {
+    app.mobile_integration().list_shared_imports(payload)
+}
+
+#[command]
+pub(crate) async fn stage_shared_imports<R: Runtime>(
+    app: AppHandle<R>,
+    payload: StageSharedImportsRequest,
+) -> Result<StageSharedImportsResponse> {
+    app.mobile_integration().stage_shared_imports(payload)
+}
+
+#[command]
+pub(crate) async fn acknowledge_shared_imports<R: Runtime>(
+    app: AppHandle<R>,
+    payload: AcknowledgeSharedImportsRequest,
+) -> Result<AcknowledgeSharedImportsResponse> {
+    app.mobile_integration().acknowledge_shared_imports(payload)
+}

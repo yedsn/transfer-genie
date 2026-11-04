@@ -75,6 +75,64 @@ function simulatorDraftGuard(udid) {
   log('Simulator database and empty saved-draft guard passed');
 }
 
+function expandEntitlements(source, team, bundleId) {
+  const expanded = source
+    .replaceAll('$(AppIdentifierPrefix)', team + '.')
+    .replaceAll('$(PRODUCT_BUNDLE_IDENTIFIER)', bundleId);
+  assert(!expanded.includes('$('), 'The iOS entitlement contains an unresolved Xcode build setting');
+  return expanded;
+}
+
+// The Simulator rejects ad-hoc signatures that claim a development team: launchd
+// fails to spawn the process with "Security policy issue". App Groups are the only
+// entitlement the Simulator build needs, so drop the team-scoped ones there.
+const SIMULATOR_DROPPED_ENTITLEMENTS = ['application-identifier', 'keychain-access-groups'];
+
+function dropEntitlements(entitlementsPath, keys) {
+  for (const key of keys) {
+    command('plutil', ['-remove', key, entitlementsPath], { allowFailure: true });
+  }
+}
+
+function signShareBundlesAdHoc(app, team, staging, { simulator = false } = {}) {
+  assert(team && !team.startsWith('YOUR_'), 'Configure APPLE_DEVELOPMENT_TEAM in .env for ad-hoc iOS entitlements');
+  const pluginsRoot = join(app, 'PlugIns');
+  const appexes = existsSync(pluginsRoot)
+    ? readdirSync(pluginsRoot).filter((name) => name.endsWith('.appex'))
+    : [];
+  assert(appexes.length === 1, 'Expected exactly one embedded share extension before signing');
+  const appex = join(pluginsRoot, appexes[0]);
+  const appEntitlements = join(staging, 'transfer-genie-app-entitlements.plist');
+  const appexEntitlements = join(staging, 'transfer-genie-share-entitlements.plist');
+  writeFileSync(appEntitlements, expandEntitlements(
+    readFileSync(join(projectRoot, 'gen/apple/transfer-genie_iOS/transfer-genie_iOS.entitlements'), 'utf8'),
+    team,
+    bundleId,
+  ));
+  writeFileSync(appexEntitlements, expandEntitlements(
+    readFileSync(join(projectRoot, 'gen/apple/ShareExtension/ShareExtension.entitlements'), 'utf8'),
+    team,
+    'com.transfergenie.ShareExtension',
+  ));
+  if (simulator) {
+    dropEntitlements(appEntitlements, SIMULATOR_DROPPED_ENTITLEMENTS);
+    dropEntitlements(appexEntitlements, SIMULATOR_DROPPED_ENTITLEMENTS);
+  }
+  command('codesign', ['--force', '--sign', '-', '--entitlements', appexEntitlements, appex]);
+  command('codesign', ['--force', '--sign', '-', '--entitlements', appEntitlements, app]);
+  command('codesign', ['--verify', '--deep', '--strict', app]);
+  return appex;
+}
+
+function verifyShareArchive(app, team) {
+  command('bash', [
+    join(projectRoot, 'scripts/verify-ios-share-archive.sh'),
+    app,
+    '--team',
+    team,
+  ]);
+}
+
 function openVirtualDeviceUi(simulator) {
   const developerDir = command('xcode-select', ['-p']).stdout.trim();
   const simulatorApp = join(developerDir, 'Applications/Simulator.app');
@@ -239,7 +297,10 @@ export async function main(args = process.argv.slice(2)) {
     assert(plist('CFBundleIdentifier') === bundleId, 'Archive bundle ID mismatch; refusing install');
     log('Built ' + plist('CFBundleShortVersionString') + ' for ' + plist('DTPlatformName'));
     if (target === 'simulator') {
-      command('codesign', ['--verify', '--deep', '--strict', app]);
+      const simulatorEntitlementDir = mkdtempSync(join(buildDir, 'simulator-entitlements-'));
+      try { signShareBundlesAdHoc(app, env.APPLE_DEVELOPMENT_TEAM, simulatorEntitlementDir, { simulator: true }); }
+      finally { rmSync(simulatorEntitlementDir, { recursive: true, force: true }); }
+      verifyShareArchive(app, env.APPLE_DEVELOPMENT_TEAM);
       simulatorDraftGuard(simulator.udid);
       command('xcrun', ['simctl', 'terminate', simulator.udid, bundleId], { allowFailure: true });
       await run('xcrun', ['simctl', 'install', simulator.udid, app], env);
@@ -249,18 +310,9 @@ export async function main(args = process.argv.slice(2)) {
       staging = mkdtempSync(join(buildDir, 'vphone-deploy-'));
       const guestApp = join(staging, apps[0]);
       command('ditto', [app, guestApp]);
-      // Ad-hoc signing does not expand Xcode build settings. Resolve the same application
-      // identifier used by the existing development build so VPhone can upgrade in place.
       const team = value('APPLE_DEVELOPMENT_TEAM');
-      assert(team && !team.startsWith('YOUR_'), 'Configure APPLE_DEVELOPMENT_TEAM in .env for the VPhone ad-hoc entitlement');
-      const entitlementSource = readFileSync(join(projectRoot, 'gen/apple/transfer-genie_iOS/transfer-genie_iOS.entitlements'), 'utf8')
-        .replaceAll('$(AppIdentifierPrefix)', team + '.')
-        .replaceAll('$(PRODUCT_BUNDLE_IDENTIFIER)', bundleId);
-      assert(!entitlementSource.includes('$('), 'The VPhone entitlement contains an unresolved Xcode build setting');
-      const guestEntitlements = join(staging, 'vphone-entitlements.plist');
-      writeFileSync(guestEntitlements, entitlementSource);
-      command('codesign', ['--force', '--deep', '--sign', '-', '--entitlements', guestEntitlements, guestApp]);
-      command('codesign', ['--verify', '--deep', '--strict', guestApp]);
+      signShareBundlesAdHoc(guestApp, team, staging);
+      verifyShareArchive(guestApp, team);
       const artifacts = resolve(projectRoot, value('VPHONE_ARTIFACT_DIR') || join(buildDir, 'vphone-smoke'), new Date().toISOString().replace(/[:.]/g, '-'));
       log('Ad-hoc VPhone-only package. Existing draft guards must pass before install/termination');
       await run(process.execPath, ['tests/vphone/test_vphone_smoke.mjs', '--app', guestApp, '--machine', machine.name, '--root', library, '--artifact-dir', artifacts, '--reinstall-count', '1', '--cold-starts', '1'], {

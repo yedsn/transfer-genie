@@ -12,22 +12,28 @@
 		3C38F7908A639A3195AE1CE6 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 31452C3DC736710A7E0912DA /* Security.framework */; };
 		48D9610DF8B9165DB882F744 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BE103C78DEE79EAA602CDFC5 /* UIKit.framework */; };
 		56D212A8D391736DAA4E08B5 /* assets in Resources */ = {isa = PBXBuildFile; fileRef = 5EA5B4D495CD746BB69B8596 /* assets */; };
+		8B32B03BE7B631A47627340D /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09257278CF1DEA51C3F93FEE /* ShareViewController.swift */; };
 		9076A47F89F6697B10C3F18A /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 195A78D2D3B0AAE07F70BEDD /* CoreGraphics.framework */; };
 		9F1B4509DBFB61505915AFCA /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = D8DA5667F6A332B349AF4B4C /* LaunchScreen.storyboard */; };
 		A54E7767698349657478CFCD /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 333D20C5586515597E3BA3FB /* QuartzCore.framework */; };
+		AC30888E948F84857FB7F9DB /* ShareViewControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 549D66CF7F12C7CCF7DD1FD4 /* ShareViewControllerTests.swift */; };
 		B1D42EA0FB11165A40CC01D4 /* MetalKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BEC17038531948F8DB9295B7 /* MetalKit.framework */; };
 		B31C5200DAF809735488E6B6 /* libapp.a in Frameworks */ = {isa = PBXBuildFile; fileRef = AAD2705FD02035D228254441 /* libapp.a */; };
+		BA7375DB2423DE12DD74C155 /* MobileShareInbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 698EDBA1C729431221983268 /* MobileShareInbox.swift */; };
 		D9680974DD8004359F78410F /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 203CF0D19AC58E30B0D60960 /* Metal.framework */; };
 		E5980F2D7E059F13EBF44B07 /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 57178773E9871DF70E084344 /* WebKit.framework */; };
+		EAD25983CA5B83AD37A1255C /* MobileShareInboxTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AF4D687D4A5CDC22D243AA2 /* MobileShareInboxTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		00B77015718CA681E1B84F33 /* telegram_bridge_runtime.rs */ = {isa = PBXFileReference; path = telegram_bridge_runtime.rs; sourceTree = "<group>"; };
 		056635B3A028A7436CE3DF07 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		09257278CF1DEA51C3F93FEE /* ShareViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareViewController.swift; sourceTree = "<group>"; };
 		0D2E44068E0D8E15F7BF6A2B /* integration_runtime.rs */ = {isa = PBXFileReference; path = integration_runtime.rs; sourceTree = "<group>"; };
 		136907B444FC5C41C88EA0F7 /* bindings.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = bindings.h; sourceTree = "<group>"; };
 		15A050418507909176105497 /* lib.rs */ = {isa = PBXFileReference; path = lib.rs; sourceTree = "<group>"; };
 		195A78D2D3B0AAE07F70BEDD /* CoreGraphics.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreGraphics.framework; path = System/Library/Frameworks/CoreGraphics.framework; sourceTree = SDKROOT; };
+		1AF4D687D4A5CDC22D243AA2 /* MobileShareInboxTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileShareInboxTests.swift; sourceTree = "<group>"; };
 		203CF0D19AC58E30B0D60960 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
 		22CAAC69794D71A24B17B876 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		2300B4F86A3E9781CDFD8062 /* supabase_connection.rs */ = {isa = PBXFileReference; path = supabase_connection.rs; sourceTree = "<group>"; };
@@ -37,9 +43,12 @@
 		44E8A38ACA5CF335669A7F10 /* preview_generator.rs */ = {isa = PBXFileReference; path = preview_generator.rs; sourceTree = "<group>"; };
 		45A5AE7567D9A12C988E9B35 /* webdav.rs */ = {isa = PBXFileReference; path = webdav.rs; sourceTree = "<group>"; };
 		51E4D24E01A870B773E24244 /* telegram_bridge.rs */ = {isa = PBXFileReference; path = telegram_bridge.rs; sourceTree = "<group>"; };
+		549D66CF7F12C7CCF7DD1FD4 /* ShareViewControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareViewControllerTests.swift; sourceTree = "<group>"; };
 		57178773E9871DF70E084344 /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WebKit.framework; path = System/Library/Frameworks/WebKit.framework; sourceTree = SDKROOT; };
 		576B78014019FDE448D72B2B /* media_playback.rs */ = {isa = PBXFileReference; path = media_playback.rs; sourceTree = "<group>"; };
+		59C1272AA7E53C43B4F825CA /* ShareExtensionTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = ShareExtensionTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		5EA5B4D495CD746BB69B8596 /* assets */ = {isa = PBXFileReference; lastKnownFileType = folder; path = assets; sourceTree = SOURCE_ROOT; };
+		698EDBA1C729431221983268 /* MobileShareInbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileShareInbox.swift; sourceTree = "<group>"; };
 		741946A01D3763209B48835A /* history.rs */ = {isa = PBXFileReference; path = history.rs; sourceTree = "<group>"; };
 		8AB94B2047BA754411CE7DFE /* main.rs */ = {isa = PBXFileReference; path = main.rs; sourceTree = "<group>"; };
 		9B2EA64BBC4C0AF9D2AA4AE3 /* supabase_probe.rs */ = {isa = PBXFileReference; path = supabase_probe.rs; sourceTree = "<group>"; };
@@ -60,6 +69,7 @@
 		E32FE4E56230A7547CFD1B8E /* credential_store.rs */ = {isa = PBXFileReference; path = credential_store.rs; sourceTree = "<group>"; };
 		E5CD33C56A8E089AAD2246A8 /* db.rs.new */ = {isa = PBXFileReference; path = db.rs.new; sourceTree = "<group>"; };
 		E7A485E2AC85EF2F6F12C80A /* supabase_auth.rs */ = {isa = PBXFileReference; path = supabase_auth.rs; sourceTree = "<group>"; };
+		EA946F4602F66ECBB2381D95 /* mobile_share.rs */ = {isa = PBXFileReference; path = mobile_share.rs; sourceTree = "<group>"; };
 		FA10CFF5F7179F372E918F6A /* media_preview.rs */ = {isa = PBXFileReference; path = media_preview.rs; sourceTree = "<group>"; };
 		FC89B86E365F40273F2987E0 /* telegram_bridge.rs */ = {isa = PBXFileReference; path = telegram_bridge.rs; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -95,9 +105,29 @@
 		06F2B855C0E59A5EA6652767 /* Products */ = {
 			isa = PBXGroup;
 			children = (
+				59C1272AA7E53C43B4F825CA /* ShareExtensionTests.xctest */,
 				C97A2EBAF1DF557B37061E9C /* transfer-genie_iOS.app */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		12F7ECE1517C71378CDE48B3 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				1AF4D687D4A5CDC22D243AA2 /* MobileShareInboxTests.swift */,
+				549D66CF7F12C7CCF7DD1FD4 /* ShareViewControllerTests.swift */,
+			);
+			name = Sources;
+			path = ShareExtensionTests/Sources;
+			sourceTree = "<group>";
+		};
+		40D7AABEA24A7F90FEFD118E /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				09257278CF1DEA51C3F93FEE /* ShareViewController.swift */,
+			);
+			name = Sources;
+			path = ShareExtension/Sources;
 			sourceTree = "<group>";
 		};
 		449EC5A21B495085F79CD950 /* src */ = {
@@ -114,6 +144,7 @@
 				BBC104C15043277D347FA7C1 /* main.rs.broken-recovery.bak */,
 				576B78014019FDE448D72B2B /* media_playback.rs */,
 				FA10CFF5F7179F372E918F6A /* media_preview.rs */,
+				EA946F4602F66ECBB2381D95 /* mobile_share.rs */,
 				44E8A38ACA5CF335669A7F10 /* preview_generator.rs */,
 				C90453D3A8981D827F53745B /* storage_provider.rs */,
 				E7A485E2AC85EF2F6F12C80A /* supabase_auth.rs */,
@@ -138,6 +169,9 @@
 				22CAAC69794D71A24B17B876 /* Assets.xcassets */,
 				D8DA5667F6A332B349AF4B4C /* LaunchScreen.storyboard */,
 				533D2448D44212897AA2806B /* Sources */,
+				7C1287ADD8AD338F63C78117 /* Sources */,
+				40D7AABEA24A7F90FEFD118E /* Sources */,
+				12F7ECE1517C71378CDE48B3 /* Sources */,
 				449EC5A21B495085F79CD950 /* src */,
 				012D3E17C9D134389486BB5F /* transfer-genie_iOS */,
 				81D560E7C6CA5B03B2D25858 /* Frameworks */,
@@ -159,6 +193,15 @@
 				136907B444FC5C41C88EA0F7 /* bindings.h */,
 			);
 			path = bindings;
+			sourceTree = "<group>";
+		};
+		7C1287ADD8AD338F63C78117 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				698EDBA1C729431221983268 /* MobileShareInbox.swift */,
+			);
+			name = Sources;
+			path = "../../plugins/mobile-integration/ios/Sources";
 			sourceTree = "<group>";
 		};
 		81D560E7C6CA5B03B2D25858 /* Frameworks */ = {
@@ -217,6 +260,23 @@
 			productReference = C97A2EBAF1DF557B37061E9C /* transfer-genie_iOS.app */;
 			productType = "com.apple.product-type.application";
 		};
+		726B989C6B682DF7D7A3B593 /* ShareExtensionTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 80A4D7395A2C0B6F23A57BAE /* Build configuration list for PBXNativeTarget "ShareExtensionTests" */;
+			buildPhases = (
+				D15F2E6F43E1B89C34521E9D /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = ShareExtensionTests;
+			packageProductDependencies = (
+			);
+			productName = ShareExtensionTests;
+			productReference = 59C1272AA7E53C43B4F825CA /* ShareExtensionTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -245,6 +305,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
+				726B989C6B682DF7D7A3B593 /* ShareExtensionTests */,
 				309709395D42B6E576ECE3EF /* transfer-genie_iOS */,
 			);
 		};
@@ -288,6 +349,17 @@
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		D15F2E6F43E1B89C34521E9D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BA7375DB2423DE12DD74C155 /* MobileShareInbox.swift in Sources */,
+				EAD25983CA5B83AD37A1255C /* MobileShareInboxTests.swift in Sources */,
+				8B32B03BE7B631A47627340D /* ShareViewController.swift in Sources */,
+				AC30888E948F84857FB7F9DB /* ShareViewControllerTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		F2A66FAB6275BD942412924A /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -299,6 +371,23 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
+		20EE0CDCBD01F29AFD456007 /* debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.transfergenie.ShareExtensionTests;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = debug;
+		};
 		2A56470D92FF4053BD128A07 /* release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -307,7 +396,6 @@
 					arm64,
 				);
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CODE_SIGN_ENTITLEMENTS = "transfer-genie_iOS/transfer-genie_iOS.entitlements";
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				DEVELOPMENT_TEAM = "32XG8U6WLA";
 				ENABLE_BITCODE = NO;
@@ -458,7 +546,6 @@
 					arm64,
 				);
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CODE_SIGN_ENTITLEMENTS = "transfer-genie_iOS/transfer-genie_iOS.entitlements";
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				DEVELOPMENT_TEAM = "32XG8U6WLA";
 				ENABLE_BITCODE = NO;
@@ -482,6 +569,23 @@
 			};
 			name = debug;
 		};
+		AC5C4654AA55719A1A32CE24 /* release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.transfergenie.ShareExtensionTests;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -490,6 +594,15 @@
 			buildConfigurations = (
 				955D9740087C7CE341EE5029 /* debug */,
 				7C27B892DD33DEDE8CA91534 /* release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = debug;
+		};
+		80A4D7395A2C0B6F23A57BAE /* Build configuration list for PBXNativeTarget "ShareExtensionTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				20EE0CDCBD01F29AFD456007 /* debug */,
+				AC5C4654AA55719A1A32CE24 /* release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = debug;

@@ -45,7 +45,10 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::share_file,
             commands::generate_image_thumbnail,
             commands::generate_video_poster,
-            commands::cancel_video_poster
+            commands::cancel_video_poster,
+            commands::list_shared_imports,
+            commands::stage_shared_imports,
+            commands::acknowledge_shared_imports
         ])
         .setup(|app, api| {
             #[cfg(mobile)]

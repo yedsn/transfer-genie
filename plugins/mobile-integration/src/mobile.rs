@@ -102,4 +102,31 @@ impl<R: Runtime> MobileIntegration<R> {
             .run_mobile_plugin("cancelVideoPoster", payload)
             .map_err(Into::into)
     }
+
+    pub fn list_shared_imports(
+        &self,
+        payload: ListSharedImportsRequest,
+    ) -> crate::Result<ListSharedImportsResponse> {
+        self.0
+            .run_mobile_plugin("listSharedImports", payload)
+            .map_err(Into::into)
+    }
+
+    pub fn stage_shared_imports(
+        &self,
+        payload: StageSharedImportsRequest,
+    ) -> crate::Result<StageSharedImportsResponse> {
+        self.0
+            .run_mobile_plugin("stageSharedImports", payload)
+            .map_err(Into::into)
+    }
+
+    pub fn acknowledge_shared_imports(
+        &self,
+        payload: AcknowledgeSharedImportsRequest,
+    ) -> crate::Result<AcknowledgeSharedImportsResponse> {
+        self.0
+            .run_mobile_plugin("acknowledgeSharedImports", payload)
+            .map_err(Into::into)
+    }
 }

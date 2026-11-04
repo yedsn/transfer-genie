@@ -9,6 +9,9 @@ const COMMANDS: &[&str] = &[
     "generate_image_thumbnail",
     "generate_video_poster",
     "cancel_video_poster",
+    "list_shared_imports",
+    "stage_shared_imports",
+    "acknowledge_shared_imports",
 ];
 
 fn main() {

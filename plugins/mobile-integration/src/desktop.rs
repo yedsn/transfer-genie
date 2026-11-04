@@ -89,4 +89,25 @@ impl<R: Runtime> MobileIntegration<R> {
     ) -> crate::Result<CancelVideoPosterResponse> {
         Err(crate::Error::UnsupportedPlatform)
     }
+
+    pub fn list_shared_imports(
+        &self,
+        _payload: ListSharedImportsRequest,
+    ) -> crate::Result<ListSharedImportsResponse> {
+        Err(crate::Error::UnsupportedPlatform)
+    }
+
+    pub fn stage_shared_imports(
+        &self,
+        _payload: StageSharedImportsRequest,
+    ) -> crate::Result<StageSharedImportsResponse> {
+        Err(crate::Error::UnsupportedPlatform)
+    }
+
+    pub fn acknowledge_shared_imports(
+        &self,
+        _payload: AcknowledgeSharedImportsRequest,
+    ) -> crate::Result<AcknowledgeSharedImportsResponse> {
+        Err(crate::Error::UnsupportedPlatform)
+    }
 }

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-stage-shared-imports"
+description = "Enables the stage_shared_imports command without any pre-configured scope."
+commands.allow = ["stage_shared_imports"]
+
+[[permission]]
+identifier = "deny-stage-shared-imports"
+description = "Denies the stage_shared_imports command without any pre-configured scope."
+commands.deny = ["stage_shared_imports"]

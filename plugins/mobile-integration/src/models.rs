@@ -150,3 +150,85 @@ pub struct CancelVideoPosterRequest {
 pub struct CancelVideoPosterResponse {
     pub cancelled: bool,
 }
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListSharedImportsRequest {}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedImportFile {
+    pub file_id: String,
+    pub import_name: String,
+    pub original_name: String,
+    pub content_type: Option<String>,
+    pub size_bytes: i64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedImportBatchSummary {
+    pub batch_id: String,
+    pub created_at_ms: i64,
+    pub files: Vec<SharedImportFile>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListSharedImportsResponse {
+    pub batches: Vec<SharedImportBatchSummary>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StageSharedImportsRequest {
+    pub batch_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StagedSharedImportFile {
+    pub file_id: String,
+    pub path: String,
+    pub import_name: String,
+    pub original_name: String,
+    pub content_type: Option<String>,
+    pub size_bytes: i64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedImportFailure {
+    pub file_id: String,
+    pub import_name: String,
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StagedSharedImportBatch {
+    pub batch_id: String,
+    pub created_at_ms: i64,
+    pub complete: bool,
+    pub files: Vec<StagedSharedImportFile>,
+    pub failures: Vec<SharedImportFailure>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StageSharedImportsResponse {
+    pub batches: Vec<StagedSharedImportBatch>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcknowledgeSharedImportsRequest {
+    pub batch_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcknowledgeSharedImportsResponse {
+    pub acknowledged_batch_ids: Vec<String>,
+}
