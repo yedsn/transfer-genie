@@ -102,6 +102,24 @@ pub struct DbPartialDownload {
     pub updated_at_ms: i64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DbPartialDownloadSegment {
+    pub endpoint_id: String,
+    pub owner_scope: String,
+    pub filename: String,
+    pub segment_index: i64,
+    pub start_offset: i64,
+    pub end_offset: i64,
+    pub downloaded_bytes: i64,
+    pub status: String,
+    pub retry_count: i64,
+    pub temp_path: String,
+    pub object_path: String,
+    pub expected_size: i64,
+    pub expected_sha256: Option<String>,
+    pub updated_at_ms: i64,
+}
+
 #[derive(Clone, Debug)]
 pub struct DbBulkDownloadResource {
     pub filename: String,
@@ -744,6 +762,8 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
             .map_err(|err| format!("初始化账号隔离主键失败: {err}"))?;
         ensure_local_first_sync_schema(&conn)
             .map_err(|err| format!("重建账号隔离索引失败: {err}"))?;
+        ensure_partial_download_segments_schema(&conn)
+            .map_err(|err| format!("初始化下载分段表失败: {err}"))?;
         repair_acknowledged_message_deletes(&conn)
             .map_err(|err| format!("修复已确认消息删除状态失败: {err}"))?;
         ensure_indexes(&conn).map_err(|err| format!("初始化数据库索引失败: {err}"))?;
@@ -1040,6 +1060,8 @@ pub fn init_db(path: &Path, default_endpoint_id: Option<&str>) -> Result<(), Str
     ensure_account_scoped_business_keys(&mut conn)
         .map_err(|err| format!("初始化账号隔离主键失败: {err}"))?;
     ensure_local_first_sync_schema(&conn).map_err(|err| format!("重建账号隔离索引失败: {err}"))?;
+    ensure_partial_download_segments_schema(&conn)
+        .map_err(|err| format!("初始化下载分段表失败: {err}"))?;
     repair_acknowledged_message_deletes(&conn)
         .map_err(|err| format!("修复已确认消息删除状态失败: {err}"))?;
     ensure_indexes(&conn).map_err(|err| format!("初始化数据库索引失败: {err}"))?;
@@ -1074,6 +1096,32 @@ fn ensure_pending_marked_sync_schema(conn: &Connection) -> rusqlite::Result<()> 
         )?;
     }
     Ok(())
+}
+
+fn ensure_partial_download_segments_schema(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS partial_download_segments (
+           endpoint_id TEXT NOT NULL,
+           owner_scope TEXT NOT NULL,
+           filename TEXT NOT NULL,
+           segment_index INTEGER NOT NULL,
+           start_offset INTEGER NOT NULL,
+           end_offset INTEGER NOT NULL,
+           downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+           status TEXT NOT NULL DEFAULT 'pending',
+           retry_count INTEGER NOT NULL DEFAULT 0,
+           temp_path TEXT NOT NULL,
+           object_path TEXT NOT NULL,
+           expected_size INTEGER NOT NULL DEFAULT 0,
+           expected_sha256 TEXT,
+           updated_at_ms INTEGER NOT NULL,
+           PRIMARY KEY(endpoint_id, owner_scope, filename, segment_index)
+         );
+         CREATE INDEX IF NOT EXISTS idx_partial_download_segments_updated
+           ON partial_download_segments(endpoint_id, owner_scope, updated_at_ms);
+         CREATE INDEX IF NOT EXISTS idx_partial_download_segments_status
+           ON partial_download_segments(endpoint_id, owner_scope, filename, status);",
+    )
 }
 
 fn ensure_indexes(conn: &Connection) -> rusqlite::Result<()> {
@@ -6222,6 +6270,95 @@ pub fn delete_partial_download(
     )
 }
 
+pub fn list_partial_download_segments(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    filename: &str,
+) -> rusqlite::Result<Vec<DbPartialDownloadSegment>> {
+    let conn = Connection::open(path)?;
+    let mut statement = conn.prepare(
+        "SELECT endpoint_id,owner_scope,filename,segment_index,start_offset,end_offset,
+                downloaded_bytes,status,retry_count,temp_path,object_path,expected_size,
+                expected_sha256,updated_at_ms
+           FROM partial_download_segments
+          WHERE endpoint_id=?1 AND owner_scope=?2 AND filename=?3
+          ORDER BY segment_index",
+    )?;
+    let segments = statement
+        .query_map(params![endpoint_id, owner_scope, filename], |row| {
+            Ok(DbPartialDownloadSegment {
+                endpoint_id: row.get(0)?,
+                owner_scope: row.get(1)?,
+                filename: row.get(2)?,
+                segment_index: row.get(3)?,
+                start_offset: row.get(4)?,
+                end_offset: row.get(5)?,
+                downloaded_bytes: row.get(6)?,
+                status: row.get(7)?,
+                retry_count: row.get(8)?,
+                temp_path: row.get(9)?,
+                object_path: row.get(10)?,
+                expected_size: row.get(11)?,
+                expected_sha256: row.get(12)?,
+                updated_at_ms: row.get(13)?,
+            })
+        })?
+        .collect();
+    segments
+}
+
+pub fn upsert_partial_download_segment(
+    path: &Path,
+    segment: &DbPartialDownloadSegment,
+) -> rusqlite::Result<()> {
+    let conn = Connection::open(path)?;
+    conn.execute(
+        "INSERT INTO partial_download_segments
+          (endpoint_id,owner_scope,filename,segment_index,start_offset,end_offset,
+           downloaded_bytes,status,retry_count,temp_path,object_path,expected_size,
+           expected_sha256,updated_at_ms)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+         ON CONFLICT(endpoint_id,owner_scope,filename,segment_index) DO UPDATE SET
+           start_offset=excluded.start_offset,end_offset=excluded.end_offset,
+           downloaded_bytes=excluded.downloaded_bytes,status=excluded.status,
+           retry_count=excluded.retry_count,temp_path=excluded.temp_path,
+           object_path=excluded.object_path,expected_size=excluded.expected_size,
+           expected_sha256=excluded.expected_sha256,updated_at_ms=excluded.updated_at_ms",
+        params![
+            segment.endpoint_id,
+            segment.owner_scope,
+            segment.filename,
+            segment.segment_index,
+            segment.start_offset,
+            segment.end_offset,
+            segment.downloaded_bytes,
+            segment.status,
+            segment.retry_count,
+            segment.temp_path,
+            segment.object_path,
+            segment.expected_size,
+            segment.expected_sha256,
+            segment.updated_at_ms,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn delete_partial_download_segments(
+    path: &Path,
+    endpoint_id: &str,
+    owner_scope: &str,
+    filename: &str,
+) -> rusqlite::Result<usize> {
+    let conn = Connection::open(path)?;
+    conn.execute(
+        "DELETE FROM partial_download_segments
+          WHERE endpoint_id=?1 AND owner_scope=?2 AND filename=?3",
+        params![endpoint_id, owner_scope, filename],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -11072,6 +11209,44 @@ mod tests {
             get_mobile_composer_draft(&path, "profile-a", "user-a", "space-a")
                 .expect("read deleted draft")
                 .is_none()
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn partial_download_segments_are_account_scoped_and_survive_reinitialization() {
+        let path = temp_db_path("partial-download-segments");
+        init_db(&path, None).expect("initialize database");
+        let segment = DbPartialDownloadSegment {
+            endpoint_id: "supabase-1".into(),
+            owner_scope: "user-a".into(),
+            filename: "large.bin".into(),
+            segment_index: 1,
+            start_offset: 100,
+            end_offset: 199,
+            downloaded_bytes: 42,
+            status: "pending".into(),
+            retry_count: 2,
+            temp_path: "large.bin.part.001".into(),
+            object_path: "user-a/space/attachment/large.bin".into(),
+            expected_size: 400,
+            expected_sha256: Some("hash".into()),
+            updated_at_ms: 10,
+        };
+        upsert_partial_download_segment(&path, &segment).expect("save segment");
+        init_db(&path, None).expect("reinitialize database");
+        assert_eq!(
+            list_partial_download_segments(&path, "supabase-1", "user-a", "large.bin").unwrap(),
+            vec![segment]
+        );
+        assert!(
+            list_partial_download_segments(&path, "supabase-1", "user-b", "large.bin")
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            delete_partial_download_segments(&path, "supabase-1", "user-a", "large.bin").unwrap(),
+            1
         );
         let _ = std::fs::remove_file(path);
     }

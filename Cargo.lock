@@ -5592,7 +5592,7 @@ dependencies = [
 
 [[package]]
 name = "transfer-genie"
-version = "0.5.9"
+version = "0.5.11"
 dependencies = [
  "aes-gcm",
  "async-recursion",

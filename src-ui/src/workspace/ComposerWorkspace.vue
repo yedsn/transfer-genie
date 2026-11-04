@@ -10,6 +10,85 @@ const state = composerStore.state;
 const mainEl = ref<HTMLElement | null>(null);
 const hoverZone = ref<Record<string, string>>({});
 const tabSortables = new Map<string, Sortable>();
+const collapsedMenu = ref<{ paneId: string; left: number; top: number; maxHeight: number } | null>(null);
+const collapsedMenuEl = ref<HTMLElement | null>(null);
+let collapsedMenuTrigger: HTMLElement | null = null;
+function visibleTabs(paneId: string) {
+  return (paneById(paneId)?.tabs || []).filter((tab) => !tab.collapsed);
+}
+function collapsedTabs(paneId: string) {
+  return (paneById(paneId)?.tabs || []).filter((tab) => tab.collapsed);
+}
+function closeCollapsedMenu(restoreFocus = false) {
+  collapsedMenu.value = null;
+  if (restoreFocus) collapsedMenuTrigger?.focus();
+  collapsedMenuTrigger = null;
+}
+async function toggleCollapsedMenu(event: MouseEvent, paneId: string) {
+  if (collapsedMenu.value?.paneId === paneId) {
+    closeCollapsedMenu(true);
+    return;
+  }
+  closeCtxMenu();
+  collapsedMenuTrigger = event.currentTarget as HTMLElement;
+  const rect = collapsedMenuTrigger.getBoundingClientRect();
+  const width = Math.min(260, window.innerWidth - 16);
+  const height = Math.min(300, collapsedTabs(paneId).length * 32 + 68);
+  const below = window.innerHeight - rect.bottom - 12;
+  const above = rect.top - 12;
+  const useAbove = below < height && above > below;
+  const maxHeight = Math.min(height, useAbove ? above : below);
+  collapsedMenu.value = {
+    paneId,
+    left: Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8)),
+    top: useAbove ? rect.top - maxHeight - 6 : rect.bottom + 6,
+    maxHeight,
+  };
+  await nextTick();
+  collapsedMenuEl.value?.querySelector<HTMLButtonElement>("button")?.focus();
+}
+async function restoreCollapsedTab(tabId?: string) {
+  const paneId = collapsedMenu.value?.paneId;
+  if (!paneId) return;
+  if (tabId) switchDraft(paneId, tabId);
+  else composerStore.expandAllDrafts(paneId);
+  closeCollapsedMenu();
+  await nextTick();
+  const pane = Array.from(mainEl.value?.querySelectorAll<HTMLElement>(".cw-pane") || [])
+    .find((element) => element.dataset.paneId === paneId);
+  const active = pane?.querySelector<HTMLElement>(".cw-tab.is-active");
+  active?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  active?.focus({ preventScroll: true });
+}
+function onCollapsedMenuPointerDown(event: PointerEvent) {
+  if (!collapsedMenu.value) return;
+  const target = event.target as Node;
+  if (!collapsedMenuEl.value?.contains(target) && !collapsedMenuTrigger?.contains(target)) closeCollapsedMenu();
+}
+function onCollapsedMenuKeydown(event: KeyboardEvent) {
+  if (!collapsedMenu.value) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closeCollapsedMenu(true);
+  } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+    const buttons = Array.from(collapsedMenuEl.value?.querySelectorAll<HTMLButtonElement>("button") || []);
+    if (!buttons.length) return;
+    event.preventDefault();
+    const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1
+      : (index + (event.key === "ArrowUp" ? -1 : 1) + buttons.length) % buttons.length;
+    buttons[next].focus();
+  }
+}
+function onCollapsedMenuFocusOut(event: FocusEvent) {
+  const target = event.relatedTarget as Node | null;
+  if (!collapsedMenuEl.value?.contains(target) && !collapsedMenuTrigger?.contains(target)) closeCollapsedMenu();
+}
+function closeCollapsedMenuOnResize() { closeCollapsedMenu(); }
+watch(() => collapsedMenu.value ? collapsedTabs(collapsedMenu.value.paneId).length : 0, (count) => {
+  if (!count) closeCollapsedMenu();
+});
 let sortableDrag: {
   tabId: string;
   sourcePaneId: string;
@@ -77,6 +156,14 @@ function closeSentDraft() {
   if (prompt && composerStore.getDraft(prompt.id)) composerStore.removeDraftConfirmed(prompt.id);
   else keepSentDraft();
 }
+function handleSentDraftKeydown(event: KeyboardEvent) {
+  if (event.isComposing || (event.key !== "Enter" && event.key !== "Escape")) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (event.repeat) return;
+  if (event.key === "Enter") closeSentDraft();
+  else keepSentDraft();
+}
 watch(() => state.panes.flatMap((pane) => pane.tabs.map((tab) => tab.id)).join("|"), () => {
   sentDraftPrompts.value = sentDraftPrompts.value.filter((prompt) => !!composerStore.getDraft(prompt.id));
 });
@@ -127,6 +214,7 @@ function removeDraft(tabId: string) {
 const ctxMenu = ref<{ x: number; y: number; tabId: string; paneId: string } | null>(null);
 function onTabContextMenu(event: MouseEvent, tab: any, paneId: string) {
   event.preventDefault();
+  closeCollapsedMenu();
   ctxMenu.value = { x: event.clientX, y: event.clientY, tabId: tab.id, paneId };
 }
 function closeCtxMenu() { ctxMenu.value = null; }
@@ -186,6 +274,12 @@ function ctxAction(action: string) {
   const { tabId, paneId } = m;
   ctxMenu.value = null;
   switch (action) {
+    case "collapse":
+      composerStore.collapseDraft(tabId);
+      break;
+    case "collapseOthers":
+      composerStore.collapseOtherDrafts(paneId, tabId);
+      break;
     case "rename":
       openRenameDialog(tabId);
       break;
@@ -315,11 +409,11 @@ function onSortableEnd(event: SortableEvent) {
     if (zone === "center") composerStore.moveDraft(dragSession.tabId, paneId);
     else composerStore.dockTab(dragSession.tabId, paneId, zone);
   } else if (dragSession?.target?.kind === "tabs" && event.oldIndex != null && event.newIndex != null) {
-    const sourcePaneId = dragSession.sourcePaneId;
     const targetPaneId = dragSession.target.paneId;
-    const drag = (window as any).transferGenieWorkspaceDrag;
-    const insertIndex = drag.getSortableInsertIndex(dragSession.sourceIndex, event.newIndex, sourcePaneId === targetPaneId);
-    if (targetPaneId && insertIndex != null) composerStore.moveDraft(dragSession.tabId, targetPaneId, insertIndex);
+    if (dragSession.sourcePaneId !== targetPaneId || event.oldIndex !== event.newIndex) {
+      const nextTab = (event.item as HTMLElement).nextElementSibling as HTMLElement | null;
+      composerStore.moveDraftBefore(dragSession.tabId, targetPaneId, nextTab?.dataset.tabId || null);
+    }
   }
   nextTick(() => {
     document.querySelectorAll("body > .cw-tab-sortable-fallback").forEach((element) => element.remove());
@@ -459,6 +553,9 @@ onMounted(() => {
   window.addEventListener("mousemove", trackSortablePaneTarget, true);
   window.addEventListener("transfer-genie:composer-fullscreen-change", syncFullscreenState as EventListener);
   window.addEventListener("resize", closeDestructivePromptOnLayoutChange);
+  window.addEventListener("resize", closeCollapsedMenuOnResize);
+  window.addEventListener("pointerdown", onCollapsedMenuPointerDown, true);
+  window.addEventListener("keydown", onCollapsedMenuKeydown, true);
   syncFullscreenState();
   composerStore.restore();
   nextTick(syncTabSortables);
@@ -511,6 +608,9 @@ onUnmounted(() => {
   window.removeEventListener("mousemove", trackSortablePaneTarget, true);
   window.removeEventListener("transfer-genie:composer-fullscreen-change", syncFullscreenState as EventListener);
   window.removeEventListener("resize", closeDestructivePromptOnLayoutChange);
+  window.removeEventListener("resize", closeCollapsedMenuOnResize);
+  window.removeEventListener("pointerdown", onCollapsedMenuPointerDown, true);
+  window.removeEventListener("keydown", onCollapsedMenuKeydown, true);
   tabSortables.forEach((sortable) => sortable.destroy());
   tabSortables.clear();
 });
@@ -556,7 +656,7 @@ onUnmounted(() => {
       <span class="cw-info">{{ state.panes.length }} 栏 · {{ state.panes.reduce((n:number,p:any)=>n+p.tabs.length,0) }} 草稿</span>
     </div>
 
-    <div v-if="sentDraftPrompt" ref="sentDraftPromptEl" class="cw-modal-backdrop cw-sent-backdrop" tabindex="-1">
+    <div v-if="sentDraftPrompt" ref="sentDraftPromptEl" class="cw-modal-backdrop cw-sent-backdrop" tabindex="-1" @keydown.capture="handleSentDraftKeydown">
       <div class="cw-modal cw-sent-dialog" role="dialog" aria-modal="true" aria-labelledby="cw-sent-title">
         <div class="cw-sent-header">
           <span class="cw-sent-icon" aria-hidden="true">
@@ -638,10 +738,11 @@ onUnmounted(() => {
         @dragleave="onPaneDragLeave(paneId, $event)"
         @drop="onPaneDrop($event, paneId)"
       >
-        <header class="cw-tabs">
+        <header class="cw-tab-bar">
+          <div class="cw-tabs">
           <div class="cw-tabs-list" :data-pane-id="paneId">
           <button
-            v-for="tab in paneById(paneId)?.tabs || []"
+            v-for="tab in visibleTabs(paneId)"
             :key="tab.id"
             class="cw-tab"
             :class="{ 'is-active': tab.id === paneById(paneId)?.activeTabId }"
@@ -657,6 +758,19 @@ onUnmounted(() => {
           </button>
           </div>
           <button class="cw-tab-add" type="button" @click="addDraft(paneId)" title="新建草稿">+</button>
+          </div>
+          <button
+            v-if="collapsedTabs(paneId).length"
+            class="cw-collapsed-trigger"
+            type="button"
+            :aria-expanded="collapsedMenu?.paneId === paneId"
+            aria-haspopup="dialog"
+            @click="toggleCollapsedMenu($event, paneId)"
+          >
+            <svg class="cw-collapsed-trigger-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6" width="14" height="11" rx="2"/><path d="M6 3h8M7.5 10h5"/></svg>
+            <span>已收起 <span class="cw-collapsed-count">{{ collapsedTabs(paneId).length }}</span> 个</span>
+            <svg class="cw-collapsed-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 6.5 3.5 3.5 3.5-3.5"/></svg>
+          </button>
         </header>
 
        <DraftEditor
@@ -687,6 +801,9 @@ onUnmounted(() => {
         <span>重命名</span>
       </button>
       <div class="cw-ctx-sep"></div>
+      <button class="cw-ctx-item" type="button" :disabled="visibleTabs(ctxMenu.paneId).length <= 1" @click="ctxAction('collapse')">收起当前</button>
+      <button class="cw-ctx-item" type="button" :disabled="visibleTabs(ctxMenu.paneId).length <= 1" @click="ctxAction('collapseOthers')">收起其他</button>
+      <div class="cw-ctx-sep"></div>
       <div class="cw-ctx-submenu">
         <button class="cw-ctx-item cw-ctx-sub-trigger" type="button">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
@@ -713,5 +830,32 @@ onUnmounted(() => {
         </div>
       </div>
     </div>
+    <Teleport to="body">
+      <div
+        v-if="collapsedMenu"
+        ref="collapsedMenuEl"
+        class="cw-collapsed-menu"
+        role="dialog"
+        aria-label="已收起草稿"
+        :style="{ left: collapsedMenu.left + 'px', top: collapsedMenu.top + 'px', maxHeight: collapsedMenu.maxHeight + 'px' }"
+        @focusout="onCollapsedMenuFocusOut"
+      >
+        <header class="cw-collapsed-heading">
+          <strong>已收起的草稿</strong>
+        </header>
+        <div class="cw-collapsed-list">
+          <button v-for="tab in collapsedTabs(collapsedMenu.paneId)" :key="tab.id" class="cw-collapsed-item" type="button" :title="draftTitle(tab)" :aria-label="draftTitle(tab)" @pointerdown.prevent @click="restoreCollapsedTab(tab.id)">
+            <span class="cw-collapsed-format" :data-fmt="tab.format" aria-hidden="true">{{ tab.format === 'markdown' ? 'M' : 'T' }}</span>
+            <span class="cw-collapsed-title">{{ draftTitle(tab) }}</span>
+            <svg class="cw-collapsed-restore" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15.5 5.5v5a3 3 0 0 1-3 3H4.5m4-4-4 4 4 4"/></svg>
+          </button>
+        </div>
+        <footer class="cw-collapsed-footer">
+          <button class="cw-collapsed-expand-all" type="button" @pointerdown.prevent @click="restoreCollapsedTab()">
+            <span>全部展开</span>
+          </button>
+        </footer>
+      </div>
+    </Teleport>
   </div>
 </template>

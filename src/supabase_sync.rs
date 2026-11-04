@@ -2,6 +2,7 @@ use crate::db::OutboxOperation;
 use crate::supabase_auth::SupabaseSession;
 use crate::types::SupabaseStorageConfig;
 use futures_util::{SinkExt, StreamExt};
+use reqwest::header::{CONTENT_LENGTH, CONTENT_RANGE, ETAG, RANGE};
 use reqwest::Client;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -25,6 +26,52 @@ pub struct RealtimeSubscription {
 
 pub struct StorageDownloadStreamResponse {
     pub stream: Pin<Box<dyn futures_util::Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>,
+    pub status_code: u16,
+    pub content_length: Option<u64>,
+    pub content_range: Option<StorageContentRange>,
+    pub etag: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StorageContentRange {
+    pub start: u64,
+    pub end: u64,
+    pub total: Option<u64>,
+}
+
+fn parse_content_range(value: Option<&str>) -> Result<StorageContentRange, String> {
+    let value = value.ok_or_else(|| "Supabase Range 响应缺少 Content-Range".to_string())?;
+    let (unit, range) = value
+        .split_once(' ')
+        .ok_or_else(|| format!("Supabase Content-Range 格式无效: {value}"))?;
+    if unit != "bytes" {
+        return Err(format!("Supabase Content-Range 单位无效: {value}"));
+    }
+    let (range, total) = range
+        .split_once('/')
+        .ok_or_else(|| format!("Supabase Content-Range 格式无效: {value}"))?;
+    let (start, end) = range
+        .split_once('-')
+        .ok_or_else(|| format!("Supabase Content-Range 区间无效: {value}"))?;
+    let start = start
+        .parse::<u64>()
+        .map_err(|_| format!("Supabase Content-Range 起点无效: {value}"))?;
+    let end = end
+        .parse::<u64>()
+        .map_err(|_| format!("Supabase Content-Range 终点无效: {value}"))?;
+    if end < start {
+        return Err(format!("Supabase Content-Range 顺序无效: {value}"));
+    }
+    let total = (total != "*")
+        .then(|| total.parse::<u64>())
+        .transpose()
+        .map_err(|_| format!("Supabase Content-Range 总大小无效: {value}"))?;
+    if let Some(total) = total {
+        if end >= total {
+            return Err(format!("Supabase Content-Range 超出文件大小: {value}"));
+        }
+    }
+    Ok(StorageContentRange { start, end, total })
 }
 
 #[derive(Clone, Debug)]
@@ -685,15 +732,32 @@ pub async fn download_storage_object_stream(
     session: &SupabaseSession,
     object_path: &str,
 ) -> Result<StorageDownloadStreamResponse, String> {
+    download_storage_object_stream_with_range(client, config, session, object_path, None).await
+}
+
+pub async fn download_storage_object_stream_with_range(
+    client: &Client,
+    config: &SupabaseStorageConfig,
+    session: &SupabaseSession,
+    object_path: &str,
+    range: Option<(u64, u64)>,
+) -> Result<StorageDownloadStreamResponse, String> {
     let download_url = storage_object_url(
         &config.api_url,
         "storage/v1/object/authenticated/transfer-genie-files",
         object_path,
     )?;
-    let response = client
+    let mut request = client
         .get(download_url)
         .header("apikey", &config.anon_key)
-        .bearer_auth(&session.access_token)
+        .bearer_auth(&session.access_token);
+    if let Some((start, end)) = range {
+        if end < start {
+            return Err(format!("Supabase 下载区间无效: {start}-{end}"));
+        }
+        request = request.header(RANGE, format!("bytes={start}-{end}"));
+    }
+    let response = request
         .send()
         .await
         .map_err(|error| format!("下载 Supabase 附件失败: {error}"))?;
@@ -705,8 +769,45 @@ pub async fn download_storage_object_stream(
             sanitize_error(&body)
         ));
     }
+    let content_length = response
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok());
+    let etag = response
+        .headers()
+        .get(ETAG)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim_matches('"').to_string());
+    let content_range = response
+        .headers()
+        .get(CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| parse_content_range(Some(value)))
+        .transpose()?;
+    if let Some((expected_start, expected_end)) = range {
+        if status.as_u16() != 206 {
+            return Err(format!(
+                "Supabase Range 请求返回非 206 状态: {}",
+                status.as_u16()
+            ));
+        }
+        let actual = content_range
+            .as_ref()
+            .ok_or_else(|| "Supabase Range 响应缺少 Content-Range".to_string())?;
+        if actual.start != expected_start || actual.end != expected_end {
+            return Err(format!(
+                "Supabase Content-Range 与请求不匹配: {}-{} != {}-{}",
+                actual.start, actual.end, expected_start, expected_end
+            ));
+        }
+    }
     Ok(StorageDownloadStreamResponse {
         stream: Box::pin(response.bytes_stream()),
+        status_code: status.as_u16(),
+        content_length,
+        content_range,
+        etag,
     })
 }
 

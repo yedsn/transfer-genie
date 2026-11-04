@@ -41,6 +41,48 @@ async function expectUniqueTabIds(page) {
   }).toEqual({ domUnique: true, stateUnique: true, sameIds: true });
 }
 
+test('new draft button follows the last tab in single, split and overflowing panes', async ({ page }) => {
+  await page.goto('/', { waitUntil: 'networkidle' });
+  await page.evaluate(() => localStorage.removeItem('transfer-genie:workspace-state'));
+  await page.reload({ waitUntil: 'networkidle' });
+
+  async function expectButtonAfterLastTab(pane) {
+    const gap = await pane.evaluate((element) => {
+      const tabs = element.querySelectorAll('.cw-tab');
+      const lastTab = tabs[tabs.length - 1].getBoundingClientRect();
+      const addButton = element.querySelector('.cw-tab-add').getBoundingClientRect();
+      return addButton.left - lastTab.right;
+    });
+    expect(Math.abs(gap)).toBeLessThanOrEqual(1);
+  }
+
+  const firstPane = page.locator('.cw-pane').first();
+  await expect(firstPane.locator('.cw-tab')).toHaveCount(1);
+  await expectButtonAfterLastTab(firstPane);
+  await firstPane.locator('.cw-tab-add').click();
+  await expect(firstPane.locator('.cw-tab')).toHaveCount(2);
+  await expectButtonAfterLastTab(firstPane);
+
+  await page.getByTitle('横向分栏').click();
+  await expect(page.locator('.cw-pane')).toHaveCount(2);
+  for (const pane of await page.locator('.cw-pane').all()) {
+    await expectButtonAfterLastTab(pane);
+  }
+
+  for (let i = 0; i < 10; i += 1) {
+    await firstPane.locator('.cw-tab-add').click();
+  }
+  await expect(firstPane.locator('.cw-tab')).toHaveCount(12);
+  expect(await firstPane.locator('.cw-tabs').evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
+  await firstPane.locator('.cw-tab-add').scrollIntoViewIfNeeded();
+  await expectButtonAfterLastTab(firstPane);
+  await expect(firstPane.locator('.cw-tab-add')).toBeInViewport();
+  expect((await firstPane.locator('.cw-tab-add').boundingBox()).width).toBeGreaterThanOrEqual(24);
+  await firstPane.locator('.cw-tab-add').click();
+  await expect(firstPane.locator('.cw-tab')).toHaveCount(13);
+  await expectButtonAfterLastTab(firstPane);
+});
+
 test('SortableJS reorders editor tabs and moves them across panes', async ({ page }) => {
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(String(error)));
