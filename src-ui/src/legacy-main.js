@@ -11,6 +11,7 @@ const feedViewModel = window.transferGenieFeedViewModel || null;
 const settingsFormRuntime = window.transferGenieSettingsFormRuntime || null;
 const settingsOpsRuntime = window.transferGenieSettingsOpsRuntime || null;
 const settingsRuntimeStatus = window.transferGenieSettingsRuntimeStatus || null;
+const downloadProgressRuntime = window.transferGenieDownloadProgressRuntime || null;
 const mediaRuntime = window.transferGenieMediaRuntime || null;
 const mediaSession = mediaRuntime?.createMediaSession({
   onActivePath: (path) => invoke?.('set_active_media_playback_path', { path }).catch(() => {}),
@@ -5350,49 +5351,15 @@ function normalizeByteOffset(value) {
   return Number.isFinite(number) && number >= 0 ? number : null;
 }
 
-function getDownloadTransferModeLabel(task) {
-  switch (task?.transferMode) {
-    case 'resumed':
-      return '\u7ee7\u7eed\u4e0b\u8f7d';
-    case 'restarted':
-      return '\u91cd\u65b0\u4e0b\u8f7d';
-    case 'fresh':
-      return '\u65b0\u4e0b\u8f7d';
-    default:
-      return '';
-  }
-}
-
-function formatDownloadActiveRange(task) {
-  const start = normalizeByteOffset(task?.rangeStart);
-  const end = normalizeByteOffset(task?.rangeEnd);
-  if (start === null && end === null) {
-    return '';
-  }
-  if (start !== null && end !== null && end >= start) {
-    return `\u5f53\u524d\u533a\u6bb5 ${formatBytes(start)} - ${formatBytes(end + 1)}`;
-  }
-  if (start !== null) {
-    return `\u5f53\u524d\u4ece ${formatBytes(start)} \u5f00\u59cb`;
-  }
-  return '';
-}
-
 function formatDownloadProgressText(task, speed = 0, includeConnectionLabel = false) {
-  const parts = [];
-  if (includeConnectionLabel) {
-    parts.push('\u5355\u8fde\u63a5');
+  if (downloadProgressRuntime?.formatProgressText) {
+    return downloadProgressRuntime.formatProgressText(task, {
+      formatBytes,
+      speed,
+      includeChannel: includeConnectionLabel,
+    });
   }
-  const mode = getDownloadTransferModeLabel(task);
-  if (mode) {
-    parts.push(mode);
-  }
-  const range = formatDownloadActiveRange(task);
-  if (range) {
-    parts.push(range);
-  }
-  parts.push(formatProgress(task?.received || 0, task?.total, '\u5df2\u4e0b\u8f7d', speed));
-  return parts.filter(Boolean).join(' | ');
+  return formatProgress(task?.received || 0, task?.total, '\u5df2\u4e0b\u8f7d', speed);
 }
 
 function getDownloadTaskDisplayStateLabel(task) {
@@ -5590,7 +5557,7 @@ function createPersistedDownloadTask(record) {
     filename: record?.filename || '',
     originalName: record?.original_name || record?.filename || 'download.bin',
     endpointId: record?.endpoint_id || '',
-    endpointLabel: endpoint ? getEndpointLabel(endpoint) : '链€夋嫨绔偣',
+    endpointLabel: endpoint ? getEndpointLabel(endpoint) : '未选择端点',
     mode: 'history',
     status: record?.status || 'complete',
     received: 0,
@@ -5715,6 +5682,11 @@ function syncDownloadTaskProgress(payload) {
       path: '',
       error: '',
     });
+  const incomingSegments = Number(payload.segments ?? payload.segment_count);
+  const segments =
+    Number.isFinite(incomingSegments) && incomingSegments > 0
+      ? Math.floor(incomingSegments)
+      : current.segments || 0;
   return updateDownloadTaskEntry({
     ...current,
     endpointId,
@@ -5722,6 +5694,7 @@ function syncDownloadTaskProgress(payload) {
     received: payload.received || 0,
     total: payload.total || current.total || 0,
     transferMode: payload.transfer_mode || payload.transferMode || current.transferMode || null,
+    segments,
     rangeStart:
       normalizeByteOffset(payload.range_start ?? payload.rangeStart) ??
       normalizeByteOffset(current.rangeStart),
@@ -5925,9 +5898,13 @@ function buildTransferTaskViewModel(task, options = {}) {
   const isActive = isDownload ? isDownloadTaskActive(task) : task?.status === 'progress';
   const isComplete = task?.status === 'complete';
   const isError = task?.status === 'error';
-  const progressPercent = task?.total
-    ? Math.min(100, Math.round(((task.received || 0) / task.total) * 100))
-    : (isActive ? 30 : 0);
+  const computedPercent = downloadProgressRuntime?.computeProgressPercent
+    ? downloadProgressRuntime.computeProgressPercent(task?.received, task?.total)
+    : null;
+  const progressPercent =
+    computedPercent === null || computedPercent === undefined
+      ? (isActive ? 30 : 0)
+      : computedPercent;
   let detailText = '';
   if (isActive) {
     detailText = isDownload
@@ -5964,6 +5941,7 @@ function buildTransferTaskViewModel(task, options = {}) {
     isSelected: !!options.isSelected,
     selectable: !!options.selectable,
     showProgress: isActive,
+    progress: progressPercent,
     progressPercent,
     showHistoryActions: isDownload && (!!task?.historyId || isError) && !isActive,
     canOpenFile: task?.localExists !== false,

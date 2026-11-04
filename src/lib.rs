@@ -19,8 +19,8 @@ mod webdav_sync_runtime;
 mod workspace;
 
 use crate::db::{
-    DbBulkDownloadResource, DbDownloadHistory, DbMessage, DbPartialDownload, DbUploadHistory,
-    PendingMarkedSync,
+    DbBulkDownloadResource, DbDownloadHistory, DbMessage, DbPartialDownload,
+    DbPartialDownloadSegment, DbUploadHistory, PendingMarkedSync,
 };
 use crate::filenames::{
     build_message_filename, encode_component, media_preview_relative_path,
@@ -155,7 +155,6 @@ struct AppState {
     system_dictation_hidden_main_position: Mutex<Option<PhysicalPosition<i32>>>,
     media_playback: media_playback::PlaybackRegistry,
     media_preview_jobs: AsyncMutex<HashMap<String, Arc<MediaPreviewJob>>>,
-    #[cfg(any(target_os = "ios", test))]
     supabase_download_guard: AsyncMutex<()>,
 }
 
@@ -1168,6 +1167,7 @@ struct DownloadProgress {
     transfer_mode: Option<String>,
     range_start: Option<u64>,
     range_end: Option<u64>,
+    segments: Option<u32>,
     status: String,
     error: Option<String>,
 }
@@ -1913,8 +1913,6 @@ async fn complete_supabase_preview(
         &attachment.attachment_id,
         &preview_object_path,
     );
-    #[allow(unused_mut)]
-    let mut temporary_source: Option<PathBuf> = None;
     if !preview_path.is_file() {
         let source_path = attachment
             .local_path
@@ -1929,100 +1927,36 @@ async fn complete_supabase_preview(
                     .as_deref()
                     .filter(|value| !value.trim().is_empty())
                     .ok_or_else(|| "附件尚未上传，无法补全预览".to_string())?;
-                #[cfg(target_os = "ios")]
-                {
-                    let (message, _) = db::get_message_by_id_for_scope(
-                        &state.db_path,
-                        &profile.id,
-                        &session.user_id,
-                        &attachment.message_id,
-                    )
-                    .map_err(|error| error.to_string())?
-                    .ok_or("媒体消息不存在")?;
-                    let cache_path = endpoint_files_dir(state, &profile.id)
-                        .join(&session.user_id)
-                        .join("downloads")
-                        .join(&message.filename);
-                    ensure_parent_dir(&cache_path)?;
-                    stream_supabase_attachment_download(
-                        None,
-                        state,
-                        profile,
-                        session,
-                        config,
-                        &message.filename,
-                        &attachment.original_name,
-                        object_path,
-                        attachment.size,
-                        attachment.sha256.as_deref(),
-                        &cache_path,
-                    )
-                    .await?;
-                    cache_path
-                }
-                #[cfg(not(target_os = "ios"))]
-                {
-                    let temp_dir = endpoint_files_dir(state, &profile.id)
-                        .join(&session.user_id)
-                        .join("preview-temp");
-                    fs::create_dir_all(&temp_dir)
-                        .map_err(|error| format!("创建预览临时目录失败: {error}"))?;
-                    let temp_path = temp_dir.join(format!(
-                        "{}-{}",
-                        attachment.attachment_id,
-                        sanitize_filename(&attachment.original_name)
-                    ));
-                    let mut response = supabase_sync::download_storage_object_stream(
-                        &state.http,
-                        config,
-                        session,
-                        object_path,
-                    )
-                    .await?;
-                    let temp_file = fs::File::create(&temp_path)
-                        .map_err(|error| format!("创建预览临时原件失败: {error}"))?;
-                    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel(4);
-                    let writer = tokio::task::spawn_blocking(move || {
-                        use std::io::Write as _;
-                        let mut file = temp_file;
-                        while let Some(chunk) = chunk_rx.blocking_recv() {
-                            let chunk: bytes::Bytes = chunk;
-                            file.write_all(&chunk)
-                                .map_err(|error| format!("保存预览临时原件失败: {error}"))?;
-                        }
-                        file.flush()
-                            .map_err(|error| format!("保存预览临时原件失败: {error}"))
-                    });
-                    let mut stream_error = None;
-                    while let Some(chunk) = response.stream.next().await {
-                        match chunk {
-                            Ok(chunk) => {
-                                if chunk_tx.send(chunk).await.is_err() {
-                                    stream_error = Some("保存预览临时原件任务已停止".to_string());
-                                    break;
-                                }
-                            }
-                            Err(error) => {
-                                stream_error = Some(format!("读取预览临时原件失败: {error}"));
-                                break;
-                            }
-                        }
-                    }
-                    drop(chunk_tx);
-                    let write_result = writer
-                        .await
-                        .map_err(|error| format!("保存预览临时原件任务失败: {error}"))?;
-                    if let Some(error) = stream_error {
-                        let _ = fs::remove_file(&temp_path);
-                        return Err(error);
-                    }
-                    if let Err(error) = write_result {
-                        let _ = fs::remove_file(&temp_path);
-                        return Err(error);
-                    }
-                    temporary_source = Some(temp_path.clone());
-                    temp_path
-                }
+                let (message, _) = db::get_message_by_id_for_scope(
+                    &state.db_path,
+                    &profile.id,
+                    &session.user_id,
+                    &attachment.message_id,
+                )
+                .map_err(|error| error.to_string())?
+                .ok_or("媒体消息不存在")?;
+                let cache_path = endpoint_files_dir(state, &profile.id)
+                    .join(&session.user_id)
+                    .join("downloads")
+                    .join(&message.filename);
+                ensure_parent_dir(&cache_path)?;
+                stream_supabase_attachment_download_with_progress(
+                    None,
+                    state,
+                    profile,
+                    session,
+                    config,
+                    &message.filename,
+                    &attachment.original_name,
+                    object_path,
+                    attachment.size,
+                    attachment.sha256.as_deref(),
+                    &cache_path,
+                    None,
+                    SupabaseDownloadPurpose::Cache,
+                )
+                .await?;
+                cache_path
             }
         };
         let generated = generate_preview_file(
@@ -2032,9 +1966,6 @@ async fn complete_supabase_preview(
             preview_path.clone(),
         )
         .await;
-        if let Some(temp_path) = temporary_source {
-            let _ = fs::remove_file(temp_path);
-        }
         if !generated? {
             return Err("当前文件类型不支持视觉预览".to_string());
         }
@@ -11636,7 +11567,6 @@ async fn clear_mobile_cache_impl(state: &AppState) -> Result<MobileCacheSummary,
         .sync_guard
         .try_lock()
         .map_err(|_| "正在同步，请完成后再清理缓存")?;
-    #[cfg(any(target_os = "ios", test))]
     let _downloads = state
         .supabase_download_guard
         .try_lock()
@@ -12810,113 +12740,47 @@ async fn cache_supabase_media_for_playback(
     resource_key: &str,
     job: &media_playback::PlaybackJob,
 ) -> Result<media_playback::MediaPlaybackResult, String> {
-    #[cfg(not(target_os = "ios"))]
-    use std::fs::OpenOptions;
-    #[cfg(target_os = "ios")]
-    let _ = progress_sink;
-
     let config = profile
         .supabase
         .as_ref()
         .ok_or_else(|| "Supabase 存储空间配置不完整".to_string())?;
-    #[cfg(target_os = "ios")]
-    {
-        let canonical_path = endpoint_files_dir(state, &profile.id)
-            .join(&session.user_id)
-            .join("downloads")
-            .join(&message.filename);
-        ensure_parent_dir(&canonical_path)?;
-        tokio::select! {
-            biased;
-            _ = job.cancelled() => return Err("媒体缓存已取消".to_string()),
-            result = stream_supabase_attachment_download(
-                None, state, profile, session, config, &message.filename,
-                &message.original_name, object_path, message.size,
-                message.file_hash.as_deref(), &canonical_path,
-            ) => { result?; }
-        }
-        ensure_parent_dir(cache_path)?;
-        fs::copy(&canonical_path, cache_path)
-            .map_err(|error| format!("保存媒体播放缓存失败: {error}"))?;
-        return Ok(playback_result(cache_path, "remoteCache", resource_key));
-    }
-    #[cfg(not(target_os = "ios"))]
-    {
-        ensure_parent_dir(cache_path)?;
-        let temp_path = cache_path.with_file_name(format!(
-            "{}.part",
-            cache_path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("media")
-        ));
-        let _ = fs::remove_file(&temp_path);
-        let mut response = supabase_sync::download_storage_object_stream(
-            &state.http,
-            config,
-            session,
-            object_path,
-        )
-        .await?;
-        let total = (message.size > 0).then_some(message.size as u64);
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&temp_path)
-            .map_err(|err| format!("创建媒体预览缓存失败: {err}"))?;
-        let mut received = 0_u64;
+    let canonical_path = endpoint_files_dir(state, &profile.id)
+        .join(&session.user_id)
+        .join("downloads")
+        .join(&message.filename);
+    ensure_parent_dir(&canonical_path)?;
+    let progress_sink = progress_sink.clone();
+    let progress_endpoint = profile.id.clone();
+    let progress_filename = message.filename.clone();
+    let progress_resource = resource_key.to_string();
+    let progress: SupabaseTransferProgress = Arc::new(move |received, total| {
         report_media_playback_progress(
-            progress_sink,
-            &profile.id,
-            &message.filename,
-            resource_key,
-            0,
+            &progress_sink,
+            &progress_endpoint,
+            &progress_filename,
+            &progress_resource,
+            received,
             total,
             "progress",
             None,
         );
-        let result = async {
-            loop {
-                let chunk = tokio::select! {
-                    _ = job.cancelled() => return Err("媒体缓存已取消".to_string()),
-                    chunk = response.stream.next() => chunk,
-                };
-                let Some(chunk) = chunk else {
-                    break;
-                };
-                let chunk = chunk.map_err(|err| format!("读取媒体内容失败: {err}"))?;
-                file.write_all(&chunk)
-                    .map_err(|err| format!("写入媒体缓存失败: {err}"))?;
-                received += chunk.len() as u64;
-                report_media_playback_progress(
-                    progress_sink,
-                    &profile.id,
-                    &message.filename,
-                    resource_key,
-                    received,
-                    total,
-                    "progress",
-                    None,
-                );
-            }
-            file.flush()
-                .map_err(|err| format!("完成媒体缓存失败: {err}"))?;
-            if job.is_cancelled() {
-                return Err("媒体缓存已取消".to_string());
-            }
-            if cache_path.exists() {
-                fs::remove_file(cache_path).map_err(|err| format!("替换媒体缓存失败: {err}"))?;
-            }
-            fs::rename(&temp_path, cache_path).map_err(|err| format!("完成媒体缓存失败: {err}"))?;
-            Ok(playback_result(cache_path, "remoteCache", resource_key))
-        }
-        .await;
-        if result.is_err() {
-            let _ = fs::remove_file(&temp_path);
-        }
-        result
+    });
+    progress(0, (message.size > 0).then_some(message.size as u64));
+    tokio::select! {
+        biased;
+        _ = job.cancelled() => return Err("媒体缓存已取消".to_string()),
+        result = stream_supabase_attachment_download_with_progress(
+            None, state, profile, session, config, &message.filename,
+            &message.original_name, object_path, message.size,
+            message.file_hash.as_deref(), &canonical_path,
+            Some(progress),
+            SupabaseDownloadPurpose::Cache,
+        ) => { result?; }
     }
+    ensure_parent_dir(cache_path)?;
+    fs::copy(&canonical_path, cache_path)
+        .map_err(|error| format!("保存媒体播放缓存失败: {error}"))?;
+    Ok(playback_result(cache_path, "remoteCache", resource_key))
 }
 
 async fn resolve_media_playback_source_impl(
@@ -13628,6 +13492,16 @@ async fn download_message_file_impl(
     })
 }
 
+type SupabaseTransferProgress = Arc<dyn Fn(u64, Option<u64>) + Send + Sync>;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SupabaseDownloadPurpose {
+    /// User-visible attachment download: verify size and checksum, keep history.
+    Formal,
+    /// Playback or preview cache: best-effort transfer without download history.
+    Cache,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn stream_supabase_attachment_download(
     window: Option<&Window>,
@@ -13642,8 +13516,41 @@ async fn stream_supabase_attachment_download(
     expected_sha256: Option<&str>,
     cache_path: &Path,
 ) -> Result<i64, String> {
+    stream_supabase_attachment_download_with_progress(
+        window,
+        state,
+        profile,
+        session,
+        config,
+        filename,
+        original_name,
+        object_path,
+        expected_size,
+        expected_sha256,
+        cache_path,
+        None,
+        SupabaseDownloadPurpose::Formal,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stream_supabase_attachment_download_with_progress(
+    window: Option<&Window>,
+    state: &AppState,
+    profile: &StorageProfile,
+    session: &supabase_auth::SupabaseSession,
+    config: &SupabaseStorageConfig,
+    filename: &str,
+    original_name: &str,
+    object_path: &str,
+    expected_size: i64,
+    expected_sha256: Option<&str>,
+    cache_path: &Path,
+    progress: Option<SupabaseTransferProgress>,
+    purpose: SupabaseDownloadPurpose,
+) -> Result<i64, String> {
     // One writer owns the canonical file and durable partial at a time, including recovery.
-    #[cfg(any(target_os = "ios", test))]
     let _guard = state.supabase_download_guard.lock().await;
     ensure_integration_context(
         state,
@@ -13654,7 +13561,6 @@ async fn stream_supabase_attachment_download(
             session: Some(session.clone()),
         },
     )?;
-    #[cfg(any(target_os = "ios", test))]
     if db::get_message_for_scope(&state.db_path, &profile.id, &session.user_id, filename)
         .map_err(|error| error.to_string())?
         .is_some_and(|message| message.local_path.as_deref() == cache_path.to_str())
@@ -13662,12 +13568,13 @@ async fn stream_supabase_attachment_download(
         && fs::metadata(cache_path)
             .map(|metadata| metadata.len() as i64 == expected_size)
             .unwrap_or(false)
-        && expected_sha256
-            .map(|expected| {
-                compute_file_hash_from_path(cache_path).map(|actual| actual == expected)
-            })
-            .transpose()?
-            .unwrap_or(true)
+        && (purpose == SupabaseDownloadPurpose::Cache
+            || expected_sha256
+                .map(|expected| {
+                    compute_file_hash_from_path(cache_path).map(|actual| actual == expected)
+                })
+                .transpose()?
+                .unwrap_or(true))
     {
         return Ok(expected_size);
     }
@@ -13683,6 +13590,8 @@ async fn stream_supabase_attachment_download(
         expected_size,
         expected_sha256,
         cache_path,
+        progress,
+        purpose,
     );
     let result = mobile_foreground_work(state, result).await;
     if let Err(error) = &result {
@@ -13692,28 +13601,44 @@ async fn stream_supabase_attachment_download(
             db::get_partial_download(&state.db_path, &profile.id, &session.user_id, filename)
                 .map_err(|error| error.to_string())?
         {
-            partial.downloaded_bytes = fs::metadata(&partial.temp_path)
-                .map(|metadata| metadata.len() as i64)
-                .unwrap_or(partial.downloaded_bytes);
+            let segments = db::list_partial_download_segments(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                filename,
+            )
+            .map_err(|error| error.to_string())?;
+            partial.downloaded_bytes = if segments.is_empty() {
+                fs::metadata(&partial.temp_path)
+                    .map(|metadata| metadata.len() as i64)
+                    .unwrap_or(partial.downloaded_bytes)
+            } else {
+                segments
+                    .iter()
+                    .map(|segment| segment.downloaded_bytes.max(0))
+                    .sum()
+            };
             partial.updated_at_ms = now_ms();
             persist_partial_download(state, &partial)?;
         }
-        #[cfg(any(target_os = "ios", test))]
-        persist_download_history(
-            state,
-            &profile.id,
-            &session.user_id,
-            filename,
-            original_name,
-            None,
-            if error == MOBILE_TRANSFER_PAUSED {
-                "paused"
-            } else {
-                "error"
-            },
-            Some(error.clone()),
-            expected_size,
-        )?;
+        if purpose == SupabaseDownloadPurpose::Formal {
+            #[cfg(any(target_os = "ios", test))]
+            persist_download_history(
+                state,
+                &profile.id,
+                &session.user_id,
+                filename,
+                original_name,
+                None,
+                if error == MOBILE_TRANSFER_PAUSED {
+                    "paused"
+                } else {
+                    "error"
+                },
+                Some(error.clone()),
+                expected_size,
+            )?;
+        }
     }
     result
 }
@@ -13731,6 +13656,590 @@ async fn stream_supabase_attachment_download_inner(
     expected_size: i64,
     expected_sha256: Option<&str>,
     cache_path: &Path,
+    progress: Option<SupabaseTransferProgress>,
+    purpose: SupabaseDownloadPurpose,
+) -> Result<i64, String> {
+    let expected_sha256 = if purpose == SupabaseDownloadPurpose::Formal {
+        expected_sha256
+    } else {
+        None
+    };
+    if expected_size > SUPABASE_SEGMENT_THRESHOLD {
+        match stream_supabase_attachment_download_segmented(
+            window,
+            state,
+            profile,
+            session,
+            config,
+            filename,
+            original_name,
+            object_path,
+            expected_size,
+            expected_sha256,
+            cache_path,
+            progress.clone(),
+            purpose,
+        )
+        .await
+        {
+            Ok(value) => return Ok(value),
+            Err(error) if error.starts_with(SUPABASE_RANGE_FALLBACK_PREFIX) => {
+                let segments = db::list_partial_download_segments(
+                    &state.db_path,
+                    &profile.id,
+                    &session.user_id,
+                    filename,
+                )
+                .map_err(|db_error| format!("读取 Supabase 下载分段失败: {db_error}"))?;
+                for segment in segments {
+                    let _ = fs::remove_file(segment.temp_path);
+                }
+                db::delete_partial_download_segments(
+                    &state.db_path,
+                    &profile.id,
+                    &session.user_id,
+                    filename,
+                )
+                .map_err(|db_error| format!("清理 Supabase 下载分段失败: {db_error}"))?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    stream_supabase_attachment_download_single(
+        window,
+        state,
+        profile,
+        session,
+        config,
+        filename,
+        original_name,
+        object_path,
+        expected_size,
+        expected_sha256,
+        cache_path,
+        progress,
+        purpose,
+    )
+    .await
+}
+
+const SUPABASE_SEGMENT_THRESHOLD: i64 = 16 * 1024 * 1024;
+const SUPABASE_SEGMENT_COUNT: u64 = 4;
+const SUPABASE_SEGMENT_MAX_RETRIES: i64 = 3;
+const SUPABASE_RANGE_FALLBACK_PREFIX: &str = "SUPABASE_RANGE_FALLBACK:";
+
+fn should_retry_supabase_download_error(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    if ["401", "403", "404", "416"]
+        .iter()
+        .any(|status| normalized.contains(status))
+    {
+        return false;
+    }
+    normalized.contains("timeout")
+        || normalized.contains("timed out")
+        || normalized.contains("connection")
+        || normalized.contains("body")
+        || normalized.contains("eof")
+        || normalized.contains("408")
+        || normalized.contains("429")
+        || (500..=599).any(|status| normalized.contains(&status.to_string()))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stream_supabase_attachment_download_segmented(
+    window: Option<&Window>,
+    state: &AppState,
+    profile: &StorageProfile,
+    session: &supabase_auth::SupabaseSession,
+    config: &SupabaseStorageConfig,
+    filename: &str,
+    original_name: &str,
+    object_path: &str,
+    expected_size: i64,
+    expected_sha256: Option<&str>,
+    cache_path: &Path,
+    progress: Option<SupabaseTransferProgress>,
+    purpose: SupabaseDownloadPurpose,
+) -> Result<i64, String> {
+    use futures_util::stream::{self, StreamExt as _};
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    let total = expected_size as u64;
+    let context = IntegrationTargetContext {
+        generation: None,
+        provider: storage_provider::ProviderConfig::Supabase(profile.clone()),
+        owner_scope: session.user_id.clone(),
+        session: Some(session.clone()),
+    };
+    ensure_integration_context(state, &context)?;
+    ensure_parent_dir(cache_path)?;
+    let cache_path_string = cache_path.to_string_lossy().to_string();
+    let temp_path = build_partial_download_path(cache_path);
+    let temp_path_string = temp_path.to_string_lossy().to_string();
+    let existing =
+        db::get_partial_download(&state.db_path, &profile.id, &session.user_id, filename)
+            .map_err(|error| format!("读取 Supabase 下载进度失败: {error}"))?;
+    if let Some(partial) = existing.as_ref() {
+        if partial.final_path != cache_path_string || partial.temp_path != temp_path_string {
+            discard_partial_download(state, partial)?;
+            db::delete_partial_download_segments(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                filename,
+            )
+            .map_err(|error| format!("清理 Supabase 下载分段失败: {error}"))?;
+        }
+    }
+    let segment_span = total.div_ceil(SUPABASE_SEGMENT_COUNT);
+    let mut segments =
+        db::list_partial_download_segments(&state.db_path, &profile.id, &session.user_id, filename)
+            .map_err(|error| format!("读取 Supabase 下载分段失败: {error}"))?;
+    let valid_identity = |segment: &DbPartialDownloadSegment| {
+        segment.object_path == object_path
+            && segment.expected_size == expected_size
+            && segment.expected_sha256.as_deref() == expected_sha256
+            && segment
+                .temp_path
+                .starts_with(&format!("{temp_path_string}."))
+    };
+    if segments.iter().any(|segment| !valid_identity(segment)) {
+        for segment in &segments {
+            let _ = fs::remove_file(&segment.temp_path);
+        }
+        db::delete_partial_download_segments(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            filename,
+        )
+        .map_err(|error| format!("清理旧 Supabase 下载分段失败: {error}"))?;
+        segments.clear();
+    }
+    let mut planned = Vec::new();
+    for index in 0..SUPABASE_SEGMENT_COUNT {
+        let start = index * segment_span;
+        if start >= total {
+            break;
+        }
+        let end = ((start + segment_span).min(total)).saturating_sub(1);
+        let segment_path = PathBuf::from(format!("{temp_path_string}.{index:03}"));
+        let mut segment = segments
+            .iter()
+            .find(|candidate| candidate.segment_index == index as i64)
+            .cloned()
+            .unwrap_or(DbPartialDownloadSegment {
+                endpoint_id: profile.id.clone(),
+                owner_scope: session.user_id.clone(),
+                filename: filename.to_string(),
+                segment_index: index as i64,
+                start_offset: start as i64,
+                end_offset: end as i64,
+                downloaded_bytes: 0,
+                status: "pending".to_string(),
+                retry_count: 0,
+                temp_path: segment_path.to_string_lossy().to_string(),
+                object_path: object_path.to_string(),
+                expected_size,
+                expected_sha256: expected_sha256.map(str::to_string),
+                updated_at_ms: now_ms(),
+            });
+        segment.start_offset = start as i64;
+        segment.end_offset = end as i64;
+        segment.temp_path = segment_path.to_string_lossy().to_string();
+        let expected_segment_size = end - start + 1;
+        let actual_size = fs::metadata(&segment_path)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        if segment.status == "complete" && actual_size == expected_segment_size {
+            segment.downloaded_bytes = expected_segment_size as i64;
+        } else {
+            segment.status = "pending".to_string();
+            // Only bytes that were flushed and recorded are trusted after a crash, so
+            // trim anything written past the last persisted offset before resuming.
+            let persisted = segment.downloaded_bytes.max(0) as u64;
+            let mut resumable = actual_size.min(persisted).min(expected_segment_size);
+            if actual_size > resumable {
+                let truncated = OpenOptions::new()
+                    .write(true)
+                    .open(&segment_path)
+                    .and_then(|file| file.set_len(resumable));
+                if truncated.is_err() {
+                    let _ = fs::remove_file(&segment_path);
+                    resumable = 0;
+                }
+            }
+            segment.downloaded_bytes = resumable as i64;
+        }
+        segment.updated_at_ms = now_ms();
+        db::upsert_partial_download_segment(&state.db_path, &segment)
+            .map_err(|error| format!("保存 Supabase 下载分段失败: {error}"))?;
+        planned.push(segment);
+    }
+    let partial = DbPartialDownload {
+        endpoint_id: profile.id.clone(),
+        owner_scope: session.user_id.clone(),
+        filename: filename.to_string(),
+        original_name: original_name.to_string(),
+        final_path: cache_path_string.clone(),
+        temp_path: temp_path_string.clone(),
+        downloaded_bytes: planned.iter().map(|segment| segment.downloaded_bytes).sum(),
+        total_bytes: expected_size,
+        etag: Some(object_path.to_string()),
+        mtime: expected_sha256.map(str::to_string),
+        updated_at_ms: now_ms(),
+    };
+    persist_partial_download(state, &partial)?;
+    let resumed_bytes = partial.downloaded_bytes.max(0) as u64;
+    let transfer_mode = if resumed_bytes > 0 {
+        DownloadTransferMode::Resumed
+    } else if existing.is_some() {
+        DownloadTransferMode::Restarted
+    } else {
+        DownloadTransferMode::Fresh
+    };
+    let aggregate_progress =
+        Arc::new(std::sync::Mutex::new(partial.downloaded_bytes.max(0) as u64));
+    let last_emitted_progress = Arc::new(std::sync::atomic::AtomicU64::new(
+        partial.downloaded_bytes.max(0) as u64,
+    ));
+    let db_write_guard = Arc::new(AsyncMutex::new(()));
+    if let Some(window) = window {
+        emit_download_progress(
+            window,
+            &profile.id,
+            filename,
+            resumed_bytes,
+            Some(total),
+            Some(transfer_mode),
+            None,
+            None,
+            Some(SUPABASE_SEGMENT_COUNT as u32),
+            "progress",
+            None,
+        );
+    }
+    if let Some(progress) = progress.as_ref() {
+        progress(partial.downloaded_bytes.max(0) as u64, Some(total));
+    }
+    let state_db = state.db_path.clone();
+    let http = state.http.clone();
+    let session = session.clone();
+    let config = config.clone();
+    let object_path = object_path.to_string();
+    let progress_window = window.cloned();
+    let context_state = state;
+    let futures = planned
+        .into_iter()
+        .filter(|segment| segment.status != "complete")
+        .map(|mut segment| {
+            let state_db = state_db.clone();
+            let http = http.clone();
+            let session = session.clone();
+            let config = config.clone();
+            let object_path = object_path.clone();
+            let aggregate_progress = aggregate_progress.clone();
+            let last_emitted_progress = last_emitted_progress.clone();
+            let db_write_guard = db_write_guard.clone();
+            let progress_window = progress_window.clone();
+            let progress = progress.clone();
+            async move {
+                for attempt in 0..=SUPABASE_SEGMENT_MAX_RETRIES {
+                    if attempt > 0 {
+                        tokio::time::sleep(Duration::from_millis(250 * attempt as u64)).await;
+                    }
+                    segment.retry_count = attempt;
+                    let resume = segment.downloaded_bytes.max(0) as u64;
+                    let range_start = segment.start_offset as u64 + resume;
+                    let range_end = segment.end_offset as u64;
+                    if range_start > range_end {
+                        segment.status = "complete".to_string();
+                        let _db_guard = db_write_guard.lock().await;
+                        db::upsert_partial_download_segment(&state_db, &segment)
+                            .map_err(|error| error.to_string())?;
+                        return Ok::<(), String>(());
+                    }
+                    let mut response =
+                        match supabase_sync::download_storage_object_stream_with_range(
+                            &http,
+                            &config,
+                            &session,
+                            &object_path,
+                            Some((range_start, range_end)),
+                        )
+                        .await
+                        {
+                            Ok(response) => response,
+                            Err(error)
+                                if error.contains("非 206")
+                                    || error.contains("Content-Range")
+                                    || error.contains("416") =>
+                            {
+                                return Err(format!("{SUPABASE_RANGE_FALLBACK_PREFIX}{error}"));
+                            }
+                            Err(error) => {
+                                if attempt == SUPABASE_SEGMENT_MAX_RETRIES
+                                    || !should_retry_supabase_download_error(&error)
+                                {
+                                    return Err(error);
+                                }
+                                continue;
+                            }
+                        };
+                    let expected_response_size = range_end - range_start + 1;
+                    if response.content_length != Some(expected_response_size)
+                        || response
+                            .content_range
+                            .as_ref()
+                            .and_then(|range| range.total)
+                            != Some(segment.expected_size as u64)
+                    {
+                        return Err(format!(
+                            "{SUPABASE_RANGE_FALLBACK_PREFIX}Supabase Range 响应大小不匹配"
+                        ));
+                    }
+                    let _response_identity = (&response.etag, response.status_code);
+                    let mut file = OpenOptions::new()
+                        .create(true)
+                        .write(true)
+                        .append(resume > 0)
+                        .truncate(resume == 0)
+                        .open(&segment.temp_path)
+                        .map_err(|error| format!("创建 Supabase 下载分段失败: {error}"))?;
+                    let mut received = resume;
+                    let mut last_persisted = resume;
+                    let mut failed = None;
+                    let segment_size = (segment.end_offset - segment.start_offset + 1) as u64;
+                    while let Some(chunk) = response.stream.next().await {
+                        match chunk {
+                            Ok(chunk) => {
+                                if received.saturating_add(chunk.len() as u64) > segment_size {
+                                    return Err(format!(
+                                        "{SUPABASE_RANGE_FALLBACK_PREFIX}Supabase Range 响应超出请求区间"
+                                    ));
+                                }
+                                file.write_all(&chunk).map_err(|error| {
+                                    format!("写入 Supabase 下载分段失败: {error}")
+                                })?;
+                                received += chunk.len() as u64;
+                                segment.downloaded_bytes = received as i64;
+                                segment.updated_at_ms = now_ms();
+                                let aggregate_bytes = {
+                                    let mut aggregate =
+                                        aggregate_progress.lock().map_err(|_| {
+                                            "读取 Supabase 下载进度失败".to_string()
+                                        })?;
+                                    *aggregate = aggregate.saturating_add(chunk.len() as u64);
+                                    *aggregate
+                                };
+                                let previous =
+                                    last_emitted_progress.load(std::sync::atomic::Ordering::Relaxed);
+                                if aggregate_bytes.saturating_sub(previous) >= 1024 * 1024
+                                    && last_emitted_progress
+                                        .compare_exchange(
+                                            previous,
+                                            aggregate_bytes,
+                                            std::sync::atomic::Ordering::SeqCst,
+                                            std::sync::atomic::Ordering::Relaxed,
+                                        )
+                                        .is_ok()
+                                {
+                                    if let Some(window) = progress_window.as_ref() {
+                                        emit_download_progress(
+                                            window,
+                                            &profile.id,
+                                            filename,
+                                            aggregate_bytes,
+                                            Some(total),
+                                            Some(transfer_mode),
+                                            None,
+                                            None,
+                                            Some(SUPABASE_SEGMENT_COUNT as u32),
+                                            "progress",
+                                            None,
+                                        );
+                                    }
+                                    if let Some(progress) = progress.as_ref() {
+                                        progress(aggregate_bytes, Some(total));
+                                    }
+                                }
+                                if received.saturating_sub(last_persisted) >= 1024 * 1024 {
+                                    file.sync_data().map_err(|error| {
+                                        format!("持久化 Supabase 下载分段失败: {error}")
+                                    })?;
+                                    let _db_guard = db_write_guard.lock().await;
+                                    db::upsert_partial_download_segment(&state_db, &segment)
+                                        .map_err(|error| error.to_string())?;
+                                    last_persisted = received;
+                                }
+                            }
+                            Err(error) => {
+                                failed = Some(format!("读取 Supabase 下载分段失败: {error}"));
+                                break;
+                            }
+                        }
+                    }
+                    file.flush()
+                        .map_err(|error| format!("刷新 Supabase 下载分段失败: {error}"))?;
+                    if failed.is_none()
+                        && received == (segment.end_offset - segment.start_offset + 1) as u64
+                    {
+                        file.sync_all().map_err(|error| {
+                            format!("持久化 Supabase 下载分段失败: {error}")
+                        })?;
+                        segment.downloaded_bytes = received as i64;
+                        segment.status = "complete".to_string();
+                        segment.updated_at_ms = now_ms();
+                        let _db_guard = db_write_guard.lock().await;
+                        db::upsert_partial_download_segment(&state_db, &segment)
+                            .map_err(|error| error.to_string())?;
+                        return Ok(());
+                    }
+                    file.sync_data()
+                        .map_err(|error| format!("持久化 Supabase 下载分段失败: {error}"))?;
+                    {
+                        let _db_guard = db_write_guard.lock().await;
+                        db::upsert_partial_download_segment(&state_db, &segment)
+                            .map_err(|error| error.to_string())?;
+                    }
+                    if attempt == SUPABASE_SEGMENT_MAX_RETRIES {
+                        return Err(
+                            failed.unwrap_or_else(|| "Supabase 下载分段提前结束".to_string())
+                        );
+                    }
+                    if let Some(error) = failed.as_deref() {
+                        if !should_retry_supabase_download_error(error) {
+                            return Err(error.to_string());
+                        }
+                    }
+                }
+                Ok(())
+            }
+        });
+    let results = stream::iter(futures)
+        .buffer_unordered(4)
+        .collect::<Vec<_>>()
+        .await;
+    for result in results {
+        result?;
+    }
+    ensure_integration_context(context_state, &context)?;
+    let mut merged = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&temp_path)
+        .map_err(|error| format!("创建 Supabase 合并文件失败: {error}"))?;
+    let segments =
+        db::list_partial_download_segments(&state.db_path, &profile.id, &session.user_id, filename)
+            .map_err(|error| format!("读取 Supabase 下载分段失败: {error}"))?;
+    for segment in &segments {
+        if segment.status != "complete" {
+            return Err("Supabase 下载分段未完成".to_string());
+        }
+        let bytes = fs::read(&segment.temp_path)
+            .map_err(|error| format!("读取 Supabase 下载分段失败: {error}"))?;
+        merged
+            .write_all(&bytes)
+            .map_err(|error| format!("合并 Supabase 下载分段失败: {error}"))?;
+    }
+    merged
+        .flush()
+        .map_err(|error| format!("刷新 Supabase 合并文件失败: {error}"))?;
+    merged
+        .sync_all()
+        .map_err(|error| format!("持久化 Supabase 合并文件失败: {error}"))?;
+    drop(merged);
+    let merged_size = fs::metadata(&temp_path)
+        .map_err(|error| error.to_string())?
+        .len();
+    if purpose == SupabaseDownloadPurpose::Formal && merged_size != total {
+        return Err(format!("Supabase 附件大小不一致: {merged_size}/{total}"));
+    }
+    if let Some(expected) = expected_sha256 {
+        let actual = compute_file_hash_from_path(&temp_path)?;
+        if actual != expected {
+            for segment in &segments {
+                let _ = fs::remove_file(&segment.temp_path);
+            }
+            db::delete_partial_download_segments(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                filename,
+            )
+            .map_err(|error| format!("清理校验失败的 Supabase 下载分段失败: {error}"))?;
+            let _ = fs::remove_file(&temp_path);
+            return Err("Supabase 附件摘要不一致".to_string());
+        }
+    }
+    ensure_integration_context(state, &context)?;
+    publish_download_file(&temp_path, cache_path)?;
+    if purpose == SupabaseDownloadPurpose::Formal {
+        #[cfg(any(target_os = "ios", test))]
+        {
+            db::set_message_local_path_for_scope(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                filename,
+                &cache_path.to_string_lossy(),
+            )
+            .map_err(|error| error.to_string())?;
+            persist_download_history(
+                state,
+                &profile.id,
+                &session.user_id,
+                filename,
+                original_name,
+                Some(cache_path),
+                "complete",
+                None,
+                total as i64,
+            )?;
+        }
+    }
+    for segment in &segments {
+        let _ = fs::remove_file(&segment.temp_path);
+    }
+    db::delete_partial_download_segments(&state.db_path, &profile.id, &session.user_id, filename)
+        .map_err(|error| format!("清理 Supabase 下载分段失败: {error}"))?;
+    clear_partial_download(state, &profile.id, &session.user_id, filename)?;
+    if let Some(window) = window {
+        emit_download_progress(
+            window,
+            &profile.id,
+            filename,
+            total,
+            Some(total),
+            Some(transfer_mode),
+            None,
+            None,
+            None,
+            "complete",
+            None,
+        );
+    }
+    Ok(total as i64)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stream_supabase_attachment_download_single(
+    window: Option<&Window>,
+    state: &AppState,
+    profile: &StorageProfile,
+    session: &supabase_auth::SupabaseSession,
+    config: &SupabaseStorageConfig,
+    filename: &str,
+    original_name: &str,
+    object_path: &str,
+    expected_size: i64,
+    expected_sha256: Option<&str>,
+    cache_path: &Path,
+    progress: Option<SupabaseTransferProgress>,
+    purpose: SupabaseDownloadPurpose,
 ) -> Result<i64, String> {
     use std::fs::OpenOptions;
     use std::io::Write;
@@ -13748,12 +14257,10 @@ async fn stream_supabase_attachment_download_inner(
     let existing =
         db::get_partial_download(&state.db_path, &profile.id, &session.user_id, filename)
             .map_err(|error| format!("读取 Supabase 下载进度失败: {error}"))?;
-    let mut transfer_mode = DownloadTransferMode::Fresh;
+    let had_partial = existing.is_some();
     if let Some(partial) = existing.as_ref() {
         if partial.final_path != cache_path_string || partial.temp_path != temp_path_string {
             discard_partial_download(state, partial)?;
-        } else {
-            transfer_mode = DownloadTransferMode::Restarted;
         }
     }
 
@@ -13770,51 +14277,115 @@ async fn stream_supabase_attachment_download_inner(
             .unwrap_or(0),
         total_bytes: expected_size.max(0),
         etag: Some(object_path.to_string()),
-        mtime: None,
+        mtime: expected_sha256.map(str::to_string),
         updated_at_ms: now_ms(),
     };
     persist_partial_download(state, &partial)?;
-    #[cfg(any(target_os = "ios", test))]
-    persist_download_history(
-        state,
-        &profile.id,
-        &session.user_id,
-        filename,
-        original_name,
-        None,
-        "downloading",
-        None,
-        expected_size,
-    )?;
-    let mut response =
+    if purpose == SupabaseDownloadPurpose::Formal {
+        #[cfg(any(target_os = "ios", test))]
+        persist_download_history(
+            state,
+            &profile.id,
+            &session.user_id,
+            filename,
+            original_name,
+            None,
+            "downloading",
+            None,
+            expected_size,
+        )?;
+    }
+    let temp_size = fs::metadata(&temp_path)
+        .ok()
+        .filter(|metadata| metadata.is_file())
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let identity_matches = existing.as_ref().is_some_and(|entry| {
+        entry.final_path == cache_path.to_string_lossy()
+            && entry.temp_path == temp_path.to_string_lossy()
+            && entry.etag.as_deref() == Some(object_path)
+            && entry.mtime.as_deref() == expected_sha256
+            && (entry.total_bytes <= 0 || entry.total_bytes == expected_size)
+            && entry.downloaded_bytes >= 0
+            && temp_size == entry.downloaded_bytes as u64
+    });
+    let mut resume_from = if identity_matches { temp_size } else { 0 };
+    if !identity_matches && temp_size > 0 {
+        let _ = fs::remove_file(&temp_path);
+    }
+    let mut response = if resume_from > 0 && expected_size > 0 && resume_from < expected_size as u64
+    {
+        match supabase_sync::download_storage_object_stream_with_range(
+            &state.http,
+            config,
+            session,
+            object_path,
+            Some((resume_from, expected_size as u64 - 1)),
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(error)
+                if error.contains("非 206")
+                    || error.contains("Content-Range")
+                    || error.contains("HTTP 416") =>
+            {
+                resume_from = 0;
+                supabase_sync::download_storage_object_stream(
+                    &state.http,
+                    config,
+                    session,
+                    object_path,
+                )
+                .await?
+            }
+            Err(error) => return Err(error),
+        }
+    } else {
+        if resume_from >= expected_size.max(0) as u64 && expected_size > 0 {
+            resume_from = 0;
+        }
         supabase_sync::download_storage_object_stream(&state.http, config, session, object_path)
-            .await?;
+            .await?
+    };
     ensure_integration_context(state, &context)?;
+    let transfer_mode = if resume_from > 0 {
+        DownloadTransferMode::Resumed
+    } else if had_partial {
+        DownloadTransferMode::Restarted
+    } else {
+        DownloadTransferMode::Fresh
+    };
     let mut file = OpenOptions::new()
         .create(true)
         .write(true)
-        .truncate(true)
+        .truncate(resume_from == 0)
+        .append(resume_from > 0)
         .open(&temp_path)
         .map_err(|error| format!("创建 Supabase 下载临时文件失败: {error}"))?;
-    partial.downloaded_bytes = 0;
+    partial.downloaded_bytes = resume_from as i64;
     persist_partial_download(state, &partial)?;
-    let mut received = 0_u64;
+    let mut received = resume_from;
     let total = (expected_size > 0).then_some(expected_size as u64);
     if let Some(window) = window {
         emit_download_progress(
             window,
             &profile.id,
             filename,
-            0,
+            received,
             total,
             Some(transfer_mode),
-            Some(0),
+            Some(resume_from),
             total.and_then(|value| value.checked_sub(1)),
+            Some(1),
             "progress",
             None,
         );
     }
-    let mut last_persisted = 0_u64;
+    if let Some(progress) = progress.as_ref() {
+        progress(received, total);
+    }
+    let mut last_persisted = received;
     while let Some(chunk) = response.stream.next().await {
         ensure_integration_context(state, &context)?;
         let chunk = match chunk {
@@ -13835,6 +14406,7 @@ async fn stream_supabase_attachment_download_inner(
                         Some(transfer_mode),
                         Some(0),
                         total.and_then(|value| value.checked_sub(1)),
+                        Some(1),
                         "error",
                         Some(error.clone()),
                     );
@@ -13859,9 +14431,13 @@ async fn stream_supabase_attachment_download_inner(
                 Some(transfer_mode),
                 Some(0),
                 total.and_then(|value| value.checked_sub(1)),
+                Some(1),
                 "progress",
                 None,
             );
+        }
+        if let Some(progress) = progress.as_ref() {
+            progress(received, total);
         }
         if received.saturating_sub(last_persisted) >= 1024 * 1024 {
             partial.downloaded_bytes = received as i64;
@@ -13879,7 +14455,10 @@ async fn stream_supabase_attachment_download_inner(
     partial.total_bytes = total.unwrap_or(received) as i64;
     partial.updated_at_ms = now_ms();
     persist_partial_download(state, &partial)?;
-    if expected_size > 0 && received != expected_size as u64 {
+    if purpose == SupabaseDownloadPurpose::Formal
+        && expected_size > 0
+        && received != expected_size as u64
+    {
         return Err(format!(
             "Supabase 附件大小不一致: {received}/{expected_size}"
         ));
@@ -13887,36 +14466,38 @@ async fn stream_supabase_attachment_download_inner(
     if let Some(expected_sha256) = expected_sha256 {
         let actual_sha256 = compute_file_hash_from_path(&temp_path)?;
         if actual_sha256 != expected_sha256 {
+            let _ = fs::remove_file(&temp_path);
+            partial.downloaded_bytes = 0;
+            partial.updated_at_ms = now_ms();
+            persist_partial_download(state, &partial)?;
             return Err("Supabase 附件摘要不一致".to_string());
         }
     }
     ensure_integration_context(state, &context)?;
-    #[cfg(target_os = "windows")]
-    if cache_path.exists() {
-        fs::remove_file(cache_path).map_err(|error| format!("替换附件缓存失败: {error}"))?;
-    }
-    fs::rename(&temp_path, cache_path).map_err(|error| format!("完成附件缓存失败: {error}"))?;
-    #[cfg(any(target_os = "ios", test))]
-    {
-        db::set_message_local_path_for_scope(
-            &state.db_path,
-            &profile.id,
-            &session.user_id,
-            filename,
-            &cache_path.to_string_lossy(),
-        )
-        .map_err(|error| error.to_string())?;
-        persist_download_history(
-            state,
-            &profile.id,
-            &session.user_id,
-            filename,
-            original_name,
-            Some(cache_path),
-            "complete",
-            None,
-            received as i64,
-        )?;
+    publish_download_file(&temp_path, cache_path)?;
+    if purpose == SupabaseDownloadPurpose::Formal {
+        #[cfg(any(target_os = "ios", test))]
+        {
+            db::set_message_local_path_for_scope(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                filename,
+                &cache_path.to_string_lossy(),
+            )
+            .map_err(|error| error.to_string())?;
+            persist_download_history(
+                state,
+                &profile.id,
+                &session.user_id,
+                filename,
+                original_name,
+                Some(cache_path),
+                "complete",
+                None,
+                received as i64,
+            )?;
+        }
     }
     clear_partial_download(state, &profile.id, &session.user_id, filename)?;
     if let Some(window) = window {
@@ -13929,9 +14510,13 @@ async fn stream_supabase_attachment_download_inner(
             Some(transfer_mode),
             Some(0),
             received.checked_sub(1),
+            Some(1),
             "complete",
             None,
         );
+    }
+    if let Some(progress) = progress.as_ref() {
+        progress(received, Some(received));
     }
     Ok(received as i64)
 }
@@ -14104,6 +14689,78 @@ fn build_partial_download_path(final_path: &Path) -> PathBuf {
     final_path.with_file_name(format!("{file_name}.part"))
 }
 
+fn publish_download_file(temp_path: &Path, final_path: &Path) -> Result<(), String> {
+    if !final_path.exists() {
+        return fs::rename(temp_path, final_path)
+            .map_err(|error| format!("完成附件缓存失败: {error}"));
+    }
+    let backup_path = final_path.with_file_name(format!(
+        "{}.previous",
+        final_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("download")
+    ));
+    let _ = fs::remove_file(&backup_path);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn ReplaceFileW(
+                replaced_file_name: *const u16,
+                replacement_file_name: *const u16,
+                backup_file_name: *const u16,
+                replace_flags: u32,
+                exclude: *mut std::ffi::c_void,
+                reserved: *mut std::ffi::c_void,
+            ) -> i32;
+        }
+        let wide = |path: &Path| {
+            path.as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>()
+        };
+        let replaced = wide(final_path);
+        let replacement = wide(temp_path);
+        let backup = wide(&backup_path);
+        let replaced_result = unsafe {
+            ReplaceFileW(
+                replaced.as_ptr(),
+                replacement.as_ptr(),
+                backup.as_ptr(),
+                0x1 | 0x2,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if replaced_result == 0 {
+            return Err(format!(
+                "完成附件缓存失败: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let _ = fs::remove_file(backup_path);
+        return Ok(());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        fs::rename(final_path, &backup_path)
+            .map_err(|error| format!("备份旧附件缓存失败: {error}"))?;
+        match fs::rename(temp_path, final_path) {
+            Ok(()) => {
+                let _ = fs::remove_file(backup_path);
+                Ok(())
+            }
+            Err(error) => {
+                let _ = fs::rename(&backup_path, final_path);
+                Err(format!("完成附件缓存失败: {error}"))
+            }
+        }
+    }
+}
+
 fn load_message_remote_metadata(
     db_path: &Path,
     endpoint_id: &str,
@@ -14135,6 +14792,25 @@ fn discard_partial_download(state: &AppState, partial: &DbPartialDownload) -> Re
     if !partial.temp_path.trim().is_empty() {
         let _ = fs::remove_file(&partial.temp_path);
     }
+    let segments = db::list_partial_download_segments(
+        &state.db_path,
+        &partial.endpoint_id,
+        &partial.owner_scope,
+        &partial.filename,
+    )
+    .map_err(|error| format!("读取下载分段失败: {error}"))?;
+    for segment in segments {
+        if !segment.temp_path.trim().is_empty() {
+            let _ = fs::remove_file(segment.temp_path);
+        }
+    }
+    db::delete_partial_download_segments(
+        &state.db_path,
+        &partial.endpoint_id,
+        &partial.owner_scope,
+        &partial.filename,
+    )
+    .map_err(|error| format!("清理下载分段失败: {error}"))?;
     clear_partial_download(
         state,
         &partial.endpoint_id,
@@ -14216,6 +14892,7 @@ async fn write_download_stream_to_partial(
         Some(transfer_mode),
         range_start,
         range_end,
+        None,
         "progress",
         None,
     );
@@ -14235,6 +14912,7 @@ async fn write_download_stream_to_partial(
             Some(transfer_mode),
             range_start,
             range_end,
+            None,
             "progress",
             None,
         );
@@ -14360,6 +15038,7 @@ async fn execute_streamed_download(
                         Some(DownloadTransferMode::Resumed),
                         Some(partial.downloaded_bytes as u64),
                         resumed_size.checked_sub(1).map(|value| value as u64),
+                        None,
                         "complete",
                         None,
                     );
@@ -14393,6 +15072,7 @@ async fn execute_streamed_download(
                         } else {
                             None
                         },
+                        None,
                         "error",
                         Some(err.clone()),
                     );
@@ -14462,6 +15142,7 @@ async fn execute_streamed_download(
         Some(transfer_mode),
         Some(0),
         downloaded_size.checked_sub(1).map(|value| value as u64),
+        None,
         "complete",
         None,
     );
@@ -20421,6 +21102,7 @@ fn emit_download_progress(
     transfer_mode: Option<DownloadTransferMode>,
     range_start: Option<u64>,
     range_end: Option<u64>,
+    segments: Option<u32>,
     status: &str,
     error: Option<String>,
 ) {
@@ -20432,6 +21114,7 @@ fn emit_download_progress(
         transfer_mode: transfer_mode.map(|value| value.as_str().to_string()),
         range_start,
         range_end,
+        segments,
         status: status.to_string(),
         error,
     };
@@ -22343,7 +23026,6 @@ pub fn run() {
                 system_dictation_hidden_main_position: Mutex::new(None),
                 media_playback: media_playback::PlaybackRegistry::default(),
                 media_preview_jobs: AsyncMutex::new(HashMap::new()),
-                #[cfg(any(target_os = "ios", test))]
                 supabase_download_guard: AsyncMutex::new(()),
             });
 
@@ -23175,6 +23857,9 @@ mod tests {
         storage_delete_counts: Arc<Mutex<TestHashMap<String, usize>>>,
         failed_storage_puts: Arc<Mutex<HashSet<String>>>,
         slow_storage_gets: Arc<Mutex<HashSet<String>>>,
+        ignored_storage_ranges: Arc<Mutex<HashSet<String>>>,
+        invalid_storage_ranges: Arc<Mutex<HashSet<String>>>,
+        storage_range_requests: Arc<Mutex<Vec<(String, String)>>>,
         slow_storage_puts: Arc<Mutex<HashSet<String>>>,
         restricted_owner: Arc<Mutex<Option<String>>>,
     }
@@ -23504,6 +24189,7 @@ mod tests {
     async fn test_supabase_storage_get(
         TestAxumState(state): TestAxumState<TestSupabaseState>,
         AxumPath(path): AxumPath<String>,
+        headers: HeaderMap,
     ) -> AxumResponse {
         *state
             .storage_get_counts
@@ -23523,7 +24209,89 @@ mod tests {
                 .body(Body::from(r#"{"message":"RLS denied"}"#))
                 .unwrap();
         }
+        if let Some(range) = headers.get("range").and_then(|value| value.to_str().ok()) {
+            state
+                .storage_range_requests
+                .lock()
+                .unwrap()
+                .push((path.clone(), range.to_string()));
+        }
         match state.objects.lock().unwrap().get(&path).cloned() {
+            Some(bytes) if state.ignored_storage_ranges.lock().unwrap().contains(&path) => {
+                AxumResponse::builder()
+                    .status(HttpStatusCode::OK)
+                    .header("content-length", bytes.len().to_string())
+                    .body(Body::from(bytes))
+                    .unwrap()
+            }
+            Some(bytes) if headers.contains_key("range") => {
+                let Some(range) = headers
+                    .get("range")
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.strip_prefix("bytes="))
+                else {
+                    return AxumResponse::builder()
+                        .status(HttpStatusCode::RANGE_NOT_SATISFIABLE)
+                        .body(Body::empty())
+                        .unwrap();
+                };
+                let Some((start, end)) = range.split_once('-') else {
+                    return AxumResponse::builder()
+                        .status(HttpStatusCode::RANGE_NOT_SATISFIABLE)
+                        .body(Body::empty())
+                        .unwrap();
+                };
+                let Ok(start) = start.parse::<usize>() else {
+                    return AxumResponse::builder()
+                        .status(HttpStatusCode::RANGE_NOT_SATISFIABLE)
+                        .body(Body::empty())
+                        .unwrap();
+                };
+                let Ok(end) = end.parse::<usize>() else {
+                    return AxumResponse::builder()
+                        .status(HttpStatusCode::RANGE_NOT_SATISFIABLE)
+                        .body(Body::empty())
+                        .unwrap();
+                };
+                if start > end || end >= bytes.len() {
+                    return AxumResponse::builder()
+                        .status(HttpStatusCode::RANGE_NOT_SATISFIABLE)
+                        .header("content-range", format!("bytes */{}", bytes.len()))
+                        .body(Body::empty())
+                        .unwrap();
+                }
+                let selected = bytes[start..=end].to_vec();
+                let invalid_range = state.invalid_storage_ranges.lock().unwrap().contains(&path);
+                let response_start = if invalid_range {
+                    start.saturating_add(1)
+                } else {
+                    start
+                };
+                let builder = AxumResponse::builder()
+                    .status(HttpStatusCode::PARTIAL_CONTENT)
+                    .header("content-length", selected.len().to_string())
+                    .header(
+                        "content-range",
+                        format!("bytes {response_start}-{end}/{}", bytes.len()),
+                    );
+                if state.slow_storage_gets.lock().unwrap().contains(&path) {
+                    let stream = futures_util::stream::unfold(
+                        (selected, 0_usize),
+                        |(bytes, offset)| async move {
+                            if offset >= bytes.len() {
+                                return None;
+                            }
+                            tokio::time::sleep(TokioDuration::from_millis(80)).await;
+                            let end = (offset + 256 * 1024).min(bytes.len());
+                            let chunk = Bytes::copy_from_slice(&bytes[offset..end]);
+                            Some((Ok::<Bytes, std::convert::Infallible>(chunk), (bytes, end)))
+                        },
+                    );
+                    builder.body(Body::from_stream(stream)).unwrap()
+                } else {
+                    builder.body(Body::from(selected)).unwrap()
+                }
+            }
             Some(bytes) if state.slow_storage_gets.lock().unwrap().contains(&path) => {
                 let content_length = bytes.len();
                 let stream =
@@ -24337,7 +25105,11 @@ mod tests {
         let retained = current_settings(&state).unwrap();
         assert_eq!(retained.storage_profiles.len(), 1);
         assert_eq!(
-            retained.storage_profiles[0].supabase.as_ref().unwrap().space_id,
+            retained.storage_profiles[0]
+                .supabase
+                .as_ref()
+                .unwrap()
+                .space_id,
             "00000000-0000-4000-8000-000000000002"
         );
         assert_eq!(
@@ -24345,11 +25117,19 @@ mod tests {
             session.user_id
         );
         assert_eq!(
-            credential_store::load_session(&source_profile_id).unwrap().unwrap().user_id,
+            credential_store::load_session(&source_profile_id)
+                .unwrap()
+                .unwrap()
+                .user_id,
             session.user_id
         );
         assert_eq!(server.state.rpc_count("space_create"), 0);
-        assert!(server.state.snapshots.lock().unwrap().contains_key(&format!("spaces/{source_space_id}")));
+        assert!(server
+            .state
+            .snapshots
+            .lock()
+            .unwrap()
+            .contains_key(&format!("spaces/{source_space_id}")));
 
         credential_store::delete_session(&source_profile_id).unwrap();
         let _ = fs::remove_dir_all(temp_dir);
@@ -25864,7 +26644,6 @@ mod tests {
             system_dictation_hidden_main_position: Mutex::new(None),
             media_playback: media_playback::PlaybackRegistry::default(),
             media_preview_jobs: AsyncMutex::new(HashMap::new()),
-            #[cfg(any(target_os = "ios", test))]
             supabase_download_guard: AsyncMutex::new(()),
         }
     }
@@ -26074,8 +26853,8 @@ mod tests {
     fn mobile_composer_draft_paths_accept_directory_aliases_and_reject_symlink_escape() {
         use std::os::unix::fs::symlink;
 
-        let temp_dir = std::env::temp_dir()
-            .join(format!("tg-mobile-import-alias-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("tg-mobile-import-alias-{}", uuid::Uuid::new_v4()));
         let root = temp_dir.join("MobileImports");
         let relative = PathBuf::from(uuid::Uuid::new_v4().to_string()).join("photo.jpg");
         fs::create_dir_all(root.join(&relative).parent().unwrap()).unwrap();
@@ -26087,8 +26866,8 @@ mod tests {
             (&root, alias.join(&relative)),
             (&alias, root.canonicalize().unwrap().join(&relative)),
         ] {
-            let resolved = mobile_draft_import_path(import_root, &attachment.to_string_lossy())
-                .unwrap();
+            let resolved =
+                mobile_draft_import_path(import_root, &attachment.to_string_lossy()).unwrap();
             assert_eq!(resolved, import_root.join(&relative));
             assert_eq!(resolved.strip_prefix(import_root).unwrap(), relative);
             assert_eq!(fs::read(resolved).unwrap(), b"photo");
@@ -26099,7 +26878,11 @@ mod tests {
         fs::write(outside.join("photo.jpg"), b"outside").unwrap();
         let escape = PathBuf::from(uuid::Uuid::new_v4().to_string()).join("photo.jpg");
         symlink(&outside, root.join(escape.parent().unwrap())).unwrap();
-        for attachment in [root.join(&escape), alias.join(&escape), outside.join("photo.jpg")] {
+        for attachment in [
+            root.join(&escape),
+            alias.join(&escape),
+            outside.join("photo.jpg"),
+        ] {
             assert!(mobile_draft_import_path(&root, &attachment.to_string_lossy()).is_err());
         }
         assert!(mobile_draft_import_path(&root, &escape.to_string_lossy()).is_err());
@@ -27934,13 +28717,26 @@ mod tests {
         let mut settings = test_settings();
         let legacy = serde_json::to_value(&settings).unwrap();
         assert!(legacy.get("default_editor_format").is_none());
-        assert!(serde_json::from_value::<Settings>(legacy).unwrap().default_editor_format.is_none());
-        for (input, expected) in [("markdown", "markdown"), ("text", "text"), ("invalid", "text")] {
+        assert!(serde_json::from_value::<Settings>(legacy)
+            .unwrap()
+            .default_editor_format
+            .is_none());
+        for (input, expected) in [
+            ("markdown", "markdown"),
+            ("text", "text"),
+            ("invalid", "text"),
+        ] {
             settings.default_editor_format = Some(input.into());
             let normalized = normalize_settings(settings.clone(), Path::new("downloads")).unwrap();
-            let restored: Settings = serde_json::from_value(serde_json::to_value(normalized).unwrap()).unwrap();
+            let restored: Settings =
+                serde_json::from_value(serde_json::to_value(normalized).unwrap()).unwrap();
             assert_eq!(restored.default_editor_format.as_deref(), Some(expected));
-            assert_eq!(ios_settings_view(&restored).default_editor_format.as_deref(), Some(expected));
+            assert_eq!(
+                ios_settings_view(&restored)
+                    .default_editor_format
+                    .as_deref(),
+                Some(expected)
+            );
         }
     }
 
@@ -28516,7 +29312,10 @@ mod tests {
             normalize_ios_settings_submission(&previous, mobile, Path::new("downloads")).unwrap();
 
         assert_eq!(normalized.sender_name, "iPhone");
-        assert_eq!(normalized.default_editor_format.as_deref(), Some("markdown"));
+        assert_eq!(
+            normalized.default_editor_format.as_deref(),
+            Some("markdown")
+        );
         assert_eq!(normalized.refresh_interval_secs, 12);
         assert_eq!(
             normalized.active_storage_profile_id.as_deref(),
@@ -33063,6 +33862,308 @@ mod tests {
                 .is_none()
         );
         let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn supabase_download_retry_classification_is_bounded() {
+        for retryable in [
+            "error reading a body from connection: end of file",
+            "request timed out",
+            "HTTP 408",
+            "HTTP 429",
+            "HTTP 503",
+        ] {
+            assert!(
+                should_retry_supabase_download_error(retryable),
+                "{retryable}"
+            );
+        }
+        for permanent in ["HTTP 401", "HTTP 403", "HTTP 404", "HTTP 416"] {
+            assert!(
+                !should_retry_supabase_download_error(permanent),
+                "{permanent}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn supabase_large_download_uses_four_ranges_and_cleans_segments() {
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-supabase-segmented-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(
+            &temp_dir,
+            test_supabase_settings_with_url(server.base_url.clone()),
+        );
+        db::init_db(&state.db_path, None).unwrap();
+        install_test_supabase_session(&state);
+        let (profile, session) =
+            active_supabase_context(&state, &current_settings(&state).unwrap())
+                .unwrap()
+                .unwrap();
+        let config = profile.supabase.as_ref().unwrap();
+        let object_path = "user-a/space/attachment/large.bin";
+        let bytes = vec![0x3c; 17 * 1024 * 1024];
+        let hash = format!("{:x}", Sha256::digest(&bytes));
+        server
+            .state
+            .objects
+            .lock()
+            .unwrap()
+            .insert(object_path.into(), bytes.clone());
+        let path = temp_dir.join("large.bin");
+        stream_supabase_attachment_download(
+            None,
+            &state,
+            &profile,
+            &session,
+            config,
+            "large",
+            "large.bin",
+            object_path,
+            bytes.len() as i64,
+            Some(&hash),
+            &path,
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        let ranges = server.state.storage_range_requests.lock().unwrap().clone();
+        assert_eq!(ranges.len(), 4, "{ranges:?}");
+        assert!(db::list_partial_download_segments(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            "large"
+        )
+        .unwrap()
+        .is_empty());
+        assert!(
+            db::get_partial_download(&state.db_path, &profile.id, &session.user_id, "large")
+                .unwrap()
+                .is_none()
+        );
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_large_download_resumes_incomplete_segments_from_persisted_offsets() {
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-supabase-segment-resume-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(
+            &temp_dir,
+            test_supabase_settings_with_url(server.base_url.clone()),
+        );
+        db::init_db(&state.db_path, None).unwrap();
+        install_test_supabase_session(&state);
+        let (profile, session) =
+            active_supabase_context(&state, &current_settings(&state).unwrap())
+                .unwrap()
+                .unwrap();
+        let config = profile.supabase.as_ref().unwrap();
+        let object_path = "user-a/space/attachment/resume-large.bin";
+        let bytes = vec![0x52; 17 * 1024 * 1024];
+        let hash = format!("{:x}", Sha256::digest(&bytes));
+        server
+            .state
+            .objects
+            .lock()
+            .unwrap()
+            .insert(object_path.into(), bytes.clone());
+        server
+            .state
+            .slow_storage_gets
+            .lock()
+            .unwrap()
+            .insert(object_path.into());
+        let path = temp_dir.join("resume-large.bin");
+        let interrupted = tokio::time::timeout(TokioDuration::from_secs(20), async {
+            let download = stream_supabase_attachment_download(
+                None,
+                &state,
+                &profile,
+                &session,
+                config,
+                "resume-large",
+                "resume-large.bin",
+                object_path,
+                bytes.len() as i64,
+                Some(&hash),
+                &path,
+            );
+            tokio::pin!(download);
+            loop {
+                if tokio::time::timeout(TokioDuration::from_millis(25), &mut download)
+                    .await
+                    .is_ok()
+                {
+                    panic!("download finished before it could be interrupted");
+                }
+                let segments = db::list_partial_download_segments(
+                    &state.db_path,
+                    &profile.id,
+                    &session.user_id,
+                    "resume-large",
+                )
+                .unwrap();
+                if segments.iter().any(|segment| segment.downloaded_bytes > 0) {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(
+            interrupted.is_ok(),
+            "interrupted download should reach a persisted checkpoint"
+        );
+        let interrupted_segments = db::list_partial_download_segments(
+            &state.db_path,
+            &profile.id,
+            &session.user_id,
+            "resume-large",
+        )
+        .unwrap();
+        assert_eq!(interrupted_segments.len(), 4);
+        assert!(interrupted_segments
+            .iter()
+            .all(|segment| segment.status != "complete"));
+        assert!(
+            interrupted_segments
+                .iter()
+                .any(|segment| fs::metadata(&segment.temp_path)
+                    .map(|meta| meta.len() > 0)
+                    .unwrap_or(false)),
+            "interrupted download should keep partial bytes on disk"
+        );
+        let persisted_bytes: Vec<u64> = interrupted_segments
+            .iter()
+            .map(|segment| segment.downloaded_bytes.max(0) as u64)
+            .collect();
+        assert!(
+            persisted_bytes.iter().any(|bytes| *bytes > 0),
+            "at least one segment should resume from a persisted offset"
+        );
+        let first_ranges = server.state.storage_range_requests.lock().unwrap().clone();
+        assert_eq!(first_ranges.len(), 4);
+        server
+            .state
+            .slow_storage_gets
+            .lock()
+            .unwrap()
+            .remove(object_path);
+        stream_supabase_attachment_download(
+            None,
+            &state,
+            &profile,
+            &session,
+            config,
+            "resume-large",
+            "resume-large.bin",
+            object_path,
+            bytes.len() as i64,
+            Some(&hash),
+            &path,
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        let all_ranges = server.state.storage_range_requests.lock().unwrap().clone();
+        let resumed_ranges = &all_ranges[4..];
+        assert!(!resumed_ranges.is_empty());
+        for (index, segment) in interrupted_segments.iter().enumerate() {
+            let segment_size = (segment.end_offset - segment.start_offset + 1) as u64;
+            if persisted_bytes[index] >= segment_size {
+                continue;
+            }
+            let expected_start = segment.start_offset as u64 + persisted_bytes[index];
+            assert!(
+                resumed_ranges
+                    .iter()
+                    .any(|(_, range)| range.starts_with(&format!("bytes={expected_start}-"))),
+                "segment {index} should resume from {expected_start}: {resumed_ranges:?}"
+            );
+        }
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_large_download_falls_back_when_range_is_ignored_or_invalid() {
+        for invalid in [false, true] {
+            let server = spawn_test_supabase().await;
+            let temp_dir = std::env::temp_dir().join(format!(
+                "transfer-genie-supabase-range-fallback-{}",
+                uuid::Uuid::new_v4()
+            ));
+            fs::create_dir_all(&temp_dir).unwrap();
+            let state = test_app_state(
+                &temp_dir,
+                test_supabase_settings_with_url(server.base_url.clone()),
+            );
+            db::init_db(&state.db_path, None).unwrap();
+            install_test_supabase_session(&state);
+            let (profile, session) =
+                active_supabase_context(&state, &current_settings(&state).unwrap())
+                    .unwrap()
+                    .unwrap();
+            let config = profile.supabase.as_ref().unwrap();
+            let object_path = "user-a/space/attachment/fallback.bin";
+            let bytes = vec![0x24; 17 * 1024 * 1024];
+            let hash = format!("{:x}", Sha256::digest(&bytes));
+            server
+                .state
+                .objects
+                .lock()
+                .unwrap()
+                .insert(object_path.into(), bytes.clone());
+            if invalid {
+                server
+                    .state
+                    .invalid_storage_ranges
+                    .lock()
+                    .unwrap()
+                    .insert(object_path.into());
+            } else {
+                server
+                    .state
+                    .ignored_storage_ranges
+                    .lock()
+                    .unwrap()
+                    .insert(object_path.into());
+            }
+            let path = temp_dir.join("fallback.bin");
+            stream_supabase_attachment_download(
+                None,
+                &state,
+                &profile,
+                &session,
+                config,
+                "fallback",
+                "fallback.bin",
+                object_path,
+                bytes.len() as i64,
+                Some(&hash),
+                &path,
+            )
+            .await
+            .unwrap();
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            assert!(db::list_partial_download_segments(
+                &state.db_path,
+                &profile.id,
+                &session.user_id,
+                "fallback"
+            )
+            .unwrap()
+            .is_empty());
+            let _ = fs::remove_dir_all(temp_dir);
+        }
     }
 
     #[tokio::test]

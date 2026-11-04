@@ -355,15 +355,17 @@ const app = createApp({
     transferTaskRowClasses(task: any): Record<string, boolean> {
       return {
         "is-active": !!(task && task.isActive),
-        "is-completed": !!(task && task.isCompleted),
-        "is-failed": !!(task && task.isFailed),
+        "is-complete": !!(task && task.isComplete),
+        "is-error": !!(task && task.isError),
         "is-selected": !!(task && task.isSelected),
         "with-selection": !!(task && task.selectionMode && task.selectable),
       };
     },
     transferTaskProgressStyle(task: any): Record<string, string> {
-      const progress = Number(task && task.progress != null ? task.progress : 0);
-      return { "--task-progress": Math.min(100, Math.max(0, progress)) + "%" };
+      const raw = task ? (task.progress != null ? task.progress : task.progressPercent) : 0;
+      const progress = Number(raw);
+      const safeProgress = Number.isFinite(progress) ? progress : 0;
+      return { "--task-progress": Math.min(100, Math.max(0, safeProgress)) + "%" };
     },
 
     // --- App version ---
@@ -619,6 +621,7 @@ async function loadLegacyRuntime() {
   await import("./utils/media-runtime.js");
   await import("./utils/bulk-download-runtime.js");
   await import("./utils/settings-form-runtime.js");
+  await import("./utils/download-progress-runtime.js");
   await import("./legacy-main.js");
   await import("./bulk-download-dialog.js");
 }
