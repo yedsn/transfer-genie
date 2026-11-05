@@ -21,3 +21,10 @@
 
 - [x] 4.1 Run Python syntax/unit tests for the sync script and a dry-run or mocked aria2 download through a proxy; verify logs show aria2, retry behavior, final response host, and SHA-256 success.
 - [x] 4.2 Run OpenSpec strict validation for `replace-release-download-with-aria2` and review the final diff for unintended release or Gitee behavior changes.
+
+## 5. Configurable downloader selection
+
+- [x] 5.1 Add `GITEE_SYNC_USE_ARIA2` to both workflows and select aria2 only when its value is `true`; otherwise preflight and use curl.
+- [x] 5.2 Add curl and aria2 download paths to the sync script with shared proxy handling, 3 retries, temporary-file cleanup, size validation, and SHA-256 validation.
+- [x] 5.3 Update project documentation and the `my-github-release` skill/templates to document the switch and default curl behavior.
+- [x] 5.4 Add focused downloader-selection tests and rerun Python, workflow, legacy-reference, and OpenSpec strict validation.

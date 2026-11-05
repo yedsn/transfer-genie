@@ -8,7 +8,7 @@
 
 **Goals:**
 
-- 用 aria2 作为唯一 GitHub Release 资产下载器，并支持 `GITEE_SYNC_PROXY`。
+- 用 `GITEE_SYNC_USE_ARIA2` 在 aria2 多连接和 curl 单连接之间切换，并支持 `GITEE_SYNC_PROXY`。
 - 保留官方 GitHub 资产 API 元数据、重试、临时文件、文件大小和 SHA-256 校验。
 - 保证 Gitee API/上传不经过 GitHub 下载代理。
 - 让 self-hosted Runner 在下载前明确检查 aria2。
@@ -47,10 +47,16 @@ aria2 输出到 `<asset>.part`，成功退出后 Python 校验文件大小和 Gi
 
 两个 Gitee 同步工作流都移除 `RELEASE_DOWNLOAD_PROXY_PREFIXES` 及第三方域名提取步骤，保留 `GITEE_SYNC_PROXY` 的 Checkout/API 代理配置，并在 Checkout 后增加 `aria2c --version` 预检。Runner 安装指南增加 aria2 安装命令和版本检查。
 
+### 6. aria2 由 GitHub Actions Variable 显式启用
+
+仓库变量 `GITEE_SYNC_USE_ARIA2` 只有在值为 `true`（大小写不敏感）时启用 aria2；变量未配置、为空或为其他值时使用 curl。工作流根据同一变量条件检查 `aria2c` 或 `curl`，同步脚本也读取该变量，确保手动执行和 Actions 行为一致。两种下载器使用相同的 URL、代理、3 次外层重试、临时文件、大小和 SHA-256 校验。
+
+默认使用 curl 是基于目标 Runner `10.0.7.31` 的实测：curl 单连接平均约 4.588 MiB/s，aria2 四连接平均约 3.212 MiB/s。变量仍允许其他网络环境按实测启用 aria2。
+
 ## Risks / Trade-offs
 
 - [GitHub 官方地址或代理不支持稳定 Range] → aria2 仍可退化为单连接；失败时按资产重试 3 次并报告 aria2 原始错误。
-- [self-hosted Runner 没有 aria2c] → 预检阶段直接失败，提示安装，不静默回到第三方下载。
+- [启用 aria2 但 self-hosted Runner 没有 aria2c] → 条件预检阶段直接失败；默认 curl 路径不要求安装 aria2。
 - [aria2 并发连接触发代理限流] → 默认只使用 4 个连接，参数集中可调，日志记录最终速度。
 - [临时签名 URL 过期] → 每次资产重试前重新获取/刷新可下载 URL，避免复用过期地址。
 - [GitHub 资产 API URL 需要鉴权] → 优先使用 API 返回的官方可下载响应；不得向非 GitHub 主机发送 `GITHUB_TOKEN`。
@@ -58,7 +64,7 @@ aria2 输出到 `<asset>.part`，成功退出后 Python 校验文件大小和 Gi
 ## Migration Plan
 
 1. 更新同步脚本、两个工作流和发布文档，删除第三方前缀变量说明。
-2. 在目标 self-hosted Runner 安装 aria2，并确认 `aria2c --version` 可执行。
+2. 默认验证 curl 路径；需要多连接时在目标 self-hosted Runner 安装 aria2、确认 `aria2c --version` 可执行，并配置 `GITEE_SYNC_USE_ARIA2=true`。
 3. 配置或确认 `GITEE_SYNC_PROXY`，运行手动同步工作流验证官方 GitHub URL 经代理下载。
 4. 检查日志、文件大小、SHA-256 和 Gitee 上传结果。
 5. 回滚时恢复旧脚本和工作流；不删除已上传的 Gitee Release 资产。

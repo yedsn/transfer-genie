@@ -120,6 +120,10 @@ def normalize_proxy_url(proxy: Optional[str]) -> Optional[str]:
     return f"http://{proxy}"
 
 
+def parse_bool(value: Optional[str]) -> bool:
+    return str(value or "").strip().lower() == "true"
+
+
 def get_expected_sha256(asset: dict) -> Optional[str]:
     digest = str(asset.get("digest") or "").strip().lower()
     if not digest:
@@ -211,6 +215,32 @@ def build_aria2_command(
     return command
 
 
+def build_curl_download_command(
+    url: str,
+    target_path: Path,
+    *,
+    proxy: Optional[str],
+) -> list[str]:
+    command = [
+        "curl",
+        "--fail",
+        "--location",
+        "--show-error",
+        "--connect-timeout",
+        str(UPLOAD_CONNECT_TIMEOUT_SECS),
+        "--max-time",
+        str(DOWNLOAD_TIMEOUT_SECS),
+        "--retry",
+        "0",
+        "--output",
+        str(target_path),
+    ]
+    if proxy:
+        command.extend(["--proxy", normalize_proxy_url(proxy)])
+    command.append(url)
+    return command
+
+
 def download_file_once(
     url: str,
     target_path: Path,
@@ -218,15 +248,22 @@ def download_file_once(
     expected_size: int,
     expected_sha256: Optional[str],
     proxy: Optional[str] = None,
+    use_aria2: bool,
 ) -> None:
     partial_path = target_path.with_name(f"{target_path.name}.part")
     control_path = partial_path.with_name(f"{partial_path.name}.aria2")
     partial_path.unlink(missing_ok=True)
     control_path.unlink(missing_ok=True)
-    command = build_aria2_command(url, partial_path, proxy=proxy)
+    downloader = "aria2" if use_aria2 else "curl"
+    command = (
+        build_aria2_command(url, partial_path, proxy=proxy)
+        if use_aria2
+        else build_curl_download_command(url, partial_path, proxy=proxy)
+    )
     log(f"[sync-gitee] Download response host: {urllib.parse.urlparse(url).hostname or 'unknown'}")
-    log("[sync-gitee] Download method: aria2 via Runner proxy" if proxy else "[sync-gitee] Download method: aria2 direct")
-    log(f"[sync-gitee] aria2 command: split={ARIA2_SPLIT}, max-connection-per-server={ARIA2_MAX_CONNECTIONS_PER_SERVER}")
+    log(f"[sync-gitee] Download method: {downloader} via Runner proxy" if proxy else f"[sync-gitee] Download method: {downloader} direct")
+    if use_aria2:
+        log(f"[sync-gitee] aria2 command: split={ARIA2_SPLIT}, max-connection-per-server={ARIA2_MAX_CONNECTIONS_PER_SERVER}")
     environment = os.environ.copy()
     if not proxy:
         for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
@@ -240,10 +277,10 @@ def download_file_once(
         )
         if result.returncode != 0:
             raise DownloadRouteUnavailable(
-                f"aria2 exited with code {result.returncode}"
+                f"{downloader} exited with code {result.returncode}"
             )
         if not partial_path.exists():
-            raise DownloadRouteUnavailable("aria2 completed without creating the output file")
+            raise DownloadRouteUnavailable(f"{downloader} completed without creating the output file")
         downloaded = partial_path.stat().st_size
         if expected_size > 0 and downloaded != expected_size:
             raise OSError(
@@ -263,9 +300,10 @@ def download_file_once(
             )
         partial_path.replace(target_path)
     except FileNotFoundError as exc:
-        raise DownloadRouteUnavailable("aria2c is not installed or is not available on PATH") from exc
+        command_name = "aria2c" if use_aria2 else "curl"
+        raise DownloadRouteUnavailable(f"{command_name} is not installed or is not available on PATH") from exc
     except subprocess.TimeoutExpired as exc:
-        raise DownloadRouteUnavailable("aria2 timed out") from exc
+        raise DownloadRouteUnavailable(f"{downloader} timed out") from exc
     finally:
         partial_path.unlink(missing_ok=True)
         control_path.unlink(missing_ok=True)
@@ -276,12 +314,14 @@ def download_asset(
     target_path: Path,
     *,
     proxy: Optional[str],
+    use_aria2: bool,
 ) -> None:
     expected_size = int(asset.get("size") or 0)
     expected_sha256 = get_expected_sha256(asset)
     errors = []
     for attempt in range(1, DOWNLOAD_ATTEMPTS_PER_METHOD + 1):
-        log(f"[sync-gitee] aria2 attempt {attempt}/{DOWNLOAD_ATTEMPTS_PER_METHOD}")
+        downloader = "aria2" if use_aria2 else "curl"
+        log(f"[sync-gitee] {downloader} attempt {attempt}/{DOWNLOAD_ATTEMPTS_PER_METHOD}")
         try:
             # Refresh the signed GitHub URL for every retry; short-lived URLs can expire.
             url = resolve_github_download_url(asset)
@@ -291,18 +331,19 @@ def download_asset(
                 expected_size=expected_size,
                 expected_sha256=expected_sha256,
                 proxy=proxy,
+                use_aria2=use_aria2,
             )
             return
         except Exception as exc:
             errors.append(f"attempt {attempt}: {exc}")
             print(
-                f"[sync-gitee] Warning: aria2 download failed: {exc}",
+                f"[sync-gitee] Warning: {downloader} download failed: {exc}",
                 file=sys.stderr,
                 flush=True,
             )
             if attempt < DOWNLOAD_ATTEMPTS_PER_METHOD:
                 time.sleep(attempt * 2)
-    fail("All aria2 download attempts failed:\n- " + "\n- ".join(errors))
+    fail(f"All {downloader} download attempts failed:\n- " + "\n- ".join(errors))
 
 
 def upload_attachment(file_path: Path, upload_url: str) -> None:
@@ -495,6 +536,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("GITEE_SYNC_PROXY", "").strip() or None,
         help="Proxy server for downloading from GitHub (e.g., localhost:7890).",
     )
+    parser.add_argument(
+        "--use-aria2",
+        action=argparse.BooleanOptionalAction,
+        default=parse_bool(os.environ.get("GITEE_SYNC_USE_ARIA2")),
+        help="Use aria2c instead of curl. Reads GITEE_SYNC_USE_ARIA2; defaults to curl.",
+    )
     return parser
 
 
@@ -561,6 +608,7 @@ def main() -> None:
                 asset,
                 target_path,
                 proxy=args.proxy,
+                use_aria2=args.use_aria2,
             )
             gitee_name = strip_version_from_filename(name)
             gitee_path = tmp_root / gitee_name

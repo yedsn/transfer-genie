@@ -7,18 +7,22 @@
 ## ADDED Requirements
 
 ### Requirement: GitHub Release assets use aria2 through the configured Runner proxy
-同步流程 MUST 使用 Runner 上可用的 aria2 下载 GitHub Release 资产；当配置了 `GITEE_SYNC_PROXY` 时，下载器 MUST 通过该代理访问 GitHub，且不得再依赖第三方 URL 前缀或第三方缓存站。
+同步流程 MUST 根据仓库变量 `GITEE_SYNC_USE_ARIA2` 选择下载器：值为 `true` 时使用 Runner 上可用的 aria2，未配置或为 `false` 时使用 curl；当配置了 `GITEE_SYNC_PROXY` 时，所选下载器 MUST 通过该代理访问 GitHub，且不得再依赖第三方 URL 前缀或第三方缓存站。
 
 #### Scenario: Proxy-backed aria2 download succeeds
 - **WHEN** self-hosted Runner 存在可执行的 aria2 且 `GITEE_SYNC_PROXY` 可用
 - **THEN** 资产通过 aria2 经该代理下载，日志记录下载方式和最终响应主机，并继续执行完整性校验
 
 #### Scenario: aria2 is unavailable
-- **WHEN** Runner 未安装 aria2 或 aria2 不可执行
+- **WHEN** `GITEE_SYNC_USE_ARIA2=true` 且 Runner 未安装 aria2 或 aria2 不可执行
 - **THEN** 同步任务在下载前明确失败，并提示安装或配置 aria2，而不是静默退回第三方下载站
 
+#### Scenario: aria2 switch is disabled
+- **WHEN** `GITEE_SYNC_USE_ARIA2` 未配置、为空或为 `false`
+- **THEN** 同步任务使用 curl 单连接下载，不要求 Runner 安装 aria2，并保留代理、重试和完整性校验
+
 ### Requirement: Download retries and fallback preserve release synchronization
-下载流程 MUST 对每个 GitHub 资产执行最多 3 次 aria2 下载尝试；单个资产下载失败后 MUST 清理临时文件并重试，3 次仍失败时 MUST 终止同步或按已确认的官方 GitHub 回退地址继续，不得使用第三方下载代理。
+下载流程 MUST 对每个 GitHub 资产执行最多 3 次所选下载器尝试；单个资产下载失败后 MUST 清理临时文件并重试，3 次仍失败时 MUST 终止同步或按已确认的官方 GitHub 回退地址继续，不得使用第三方下载代理。
 
 #### Scenario: Transient aria2 failure is retried
 - **WHEN** aria2 因网络超时、连接重置或代理暂时不可用而失败

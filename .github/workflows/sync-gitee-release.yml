@@ -17,6 +17,7 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
       GITEE_SYNC_PROXY: ${{ vars.GITEE_SYNC_PROXY }}
+      GITEE_SYNC_USE_ARIA2: ${{ vars.GITEE_SYNC_USE_ARIA2 }}
 
     steps:
       - name: Configure proxy for GitHub access
@@ -44,15 +45,22 @@ jobs:
           echo "::error::Missing repository secret GITEE_ACCESS_TOKEN"
           exit 1
 
-      - name: Check aria2
+      - name: Check selected download tool
         shell: bash
         run: |
-          if ! command -v aria2c >/dev/null 2>&1; then
-            echo "::error::aria2c is required on the self-hosted runner."
-            echo "::error::Install aria2 before running Gitee synchronization."
-            exit 1
+          if [ "${GITEE_SYNC_USE_ARIA2,,}" = "true" ]; then
+            if ! command -v aria2c >/dev/null 2>&1; then
+              echo "::error::GITEE_SYNC_USE_ARIA2=true, but aria2c is not available."
+              exit 1
+            fi
+            aria2c --version
+          else
+            if ! command -v curl >/dev/null 2>&1; then
+              echo "::error::curl is required when GITEE_SYNC_USE_ARIA2 is not true."
+              exit 1
+            fi
+            curl --version
           fi
-          aria2c --version
 
       - name: Sync latest GitHub release to Gitee
         if: ${{ env.GITEE_ACCESS_TOKEN != '' && github.event.inputs.tag == '' }}
