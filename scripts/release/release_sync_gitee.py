@@ -25,6 +25,7 @@ LATEST_RELEASE_TAG = "latest"
 HTTP_TIMEOUT_SECS = 60
 DOWNLOAD_TIMEOUT_SECS = 600
 DOWNLOAD_ATTEMPTS_PER_METHOD = 3
+THIRD_PARTY_CACHE_MISS_MAX_BYTES = 8 * 1024 * 1024
 UPLOAD_CONNECT_TIMEOUT_SECS = 30
 UPLOAD_MAX_TIME_SECS = 1800
 
@@ -133,6 +134,10 @@ def get_expected_sha256(asset: dict) -> Optional[str]:
     return sha256
 
 
+class DownloadRouteUnavailable(Exception):
+    """The selected route is known to be unsuitable; try the next route immediately."""
+
+
 def download_file_once(
     url: str,
     target_path: Path,
@@ -141,6 +146,7 @@ def download_file_once(
     expected_sha256: Optional[str],
     proxy: Optional[str] = None,
     headers=None,
+    reject_large_cache_miss: bool = False,
 ) -> None:
     proxy = normalize_proxy_url(proxy)
     if proxy:
@@ -164,6 +170,15 @@ def download_file_once(
             cache_status = response.headers.get("X-Cache-Status") or response.headers.get("X-Cache")
             if cache_status:
                 log(f"[sync-gitee] Response cache status: {cache_status}")
+            if (
+                reject_large_cache_miss
+                and expected_size >= THIRD_PARTY_CACHE_MISS_MAX_BYTES
+                and cache_status
+                and "miss" in cache_status.lower()
+            ):
+                raise DownloadRouteUnavailable(
+                    "third-party proxy cache MISS for a large asset; switching to the next route"
+                )
             total = int(response.headers.get("Content-Length", 0))
             downloaded = 0
             sha256 = hashlib.sha256()
@@ -240,18 +255,19 @@ def download_asset(
                 build_prefixed_download_url(prefix, browser_url),
                 None,
                 public_headers,
+                True,
             )
         )
     if proxy:
         if api_url:
-            methods.append(("Runner proxy via GitHub asset API", api_url, proxy, github_headers))
-        methods.append(("Runner proxy via release URL", browser_url, proxy, public_headers))
+            methods.append(("Runner proxy via GitHub asset API", api_url, proxy, github_headers, False))
+        methods.append(("Runner proxy via release URL", browser_url, proxy, public_headers, False))
     if api_url:
-        methods.append(("direct GitHub asset API", api_url, None, github_headers))
-    methods.append(("direct GitHub release URL", browser_url, None, public_headers))
+        methods.append(("direct GitHub asset API", api_url, None, github_headers, False))
+    methods.append(("direct GitHub release URL", browser_url, None, public_headers, False))
 
     errors = []
-    for method_name, url, method_proxy, headers in methods:
+    for method_name, url, method_proxy, headers, reject_large_cache_miss in methods:
         for attempt in range(1, DOWNLOAD_ATTEMPTS_PER_METHOD + 1):
             log(
                 f"[sync-gitee] Download method: {method_name} "
@@ -265,8 +281,17 @@ def download_asset(
                     expected_sha256=expected_sha256,
                     proxy=method_proxy,
                     headers=headers,
+                    reject_large_cache_miss=reject_large_cache_miss,
                 )
                 return
+            except DownloadRouteUnavailable as exc:
+                errors.append(f"{method_name}: {exc}")
+                print(
+                    f"[sync-gitee] Warning: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                break
             except Exception as exc:
                 errors.append(f"{method_name} attempt {attempt}: {exc}")
                 print(
