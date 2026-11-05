@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -21,6 +24,7 @@ DEFAULT_GITEE_REPO = "transfer-genie"
 LATEST_RELEASE_TAG = "latest"
 HTTP_TIMEOUT_SECS = 60
 DOWNLOAD_TIMEOUT_SECS = 600
+DOWNLOAD_ATTEMPTS_PER_METHOD = 3
 UPLOAD_CONNECT_TIMEOUT_SECS = 30
 UPLOAD_MAX_TIME_SECS = 1800
 
@@ -101,25 +105,69 @@ def build_github_headers() -> dict:
     return headers
 
 
-def download_file(url: str, target_path: Path, proxy: Optional[str] = None) -> None:
-    handlers = []
-    if proxy:
-        handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+def parse_download_proxy_prefixes(value: str) -> list:
+    return [item.strip() for item in re.split(r"[\r\n,;]+", value) if item.strip()]
+
+
+def build_prefixed_download_url(prefix: str, url: str) -> str:
+    if "{url}" in prefix:
+        return prefix.replace("{url}", url)
+    return f"{prefix.rstrip('/')}/{url}"
+
+
+def normalize_proxy_url(proxy: Optional[str]) -> Optional[str]:
+    if not proxy or "://" in proxy:
+        return proxy
+    return f"http://{proxy}"
+
+
+def get_expected_sha256(asset: dict) -> Optional[str]:
+    digest = str(asset.get("digest") or "").strip().lower()
+    if not digest:
+        return None
+    if not digest.startswith("sha256:"):
+        return None
+    sha256 = digest.removeprefix("sha256:")
+    if not re.fullmatch(r"[0-9a-f]{64}", sha256):
+        raise ValueError(f"Invalid GitHub asset SHA-256 digest: {digest}")
+    return sha256
+
+
+def download_file_once(
+    url: str,
+    target_path: Path,
+    *,
+    expected_size: int,
+    expected_sha256: Optional[str],
+    proxy: Optional[str] = None,
+    headers=None,
+) -> None:
+    proxy = normalize_proxy_url(proxy)
+    handlers = [
+        urllib.request.ProxyHandler(
+            {"http": proxy, "https": proxy} if proxy else {},
+        )
+    ]
     opener = urllib.request.build_opener(*handlers)
-    req = urllib.request.Request(url, headers={"User-Agent": "transfer-genie-release-sync"})
+    request_headers = {"User-Agent": "transfer-genie-release-sync", **(headers or {})}
+    req = urllib.request.Request(url, headers=request_headers)
+    partial_path = target_path.with_name(f"{target_path.name}.part")
+    partial_path.unlink(missing_ok=True)
     try:
         with opener.open(req, timeout=DOWNLOAD_TIMEOUT_SECS) as response:
-            total = int(response.getheader("Content-Length", 0))
+            total = int(response.headers.get("Content-Length", 0))
             downloaded = 0
-            start_time = __import__("time").time()
-            with target_path.open("wb") as fh:
+            sha256 = hashlib.sha256()
+            start_time = time.time()
+            with partial_path.open("wb") as fh:
                 while True:
                     chunk = response.read(1024 * 1024)
                     if not chunk:
                         break
                     fh.write(chunk)
                     downloaded += len(chunk)
-                    elapsed = __import__("time").time() - start_time
+                    sha256.update(chunk)
+                    elapsed = time.time() - start_time
                     speed = downloaded / elapsed if elapsed > 0 else 0
                     if total > 0:
                         pct = downloaded / total * 100
@@ -127,11 +175,97 @@ def download_file(url: str, target_path: Path, proxy: Optional[str] = None) -> N
                     else:
                         print(f"\r[sync-gitee] Downloading: {downloaded / 1024 / 1024:.1f} MB @ {speed / 1024 / 1024:.1f} MB/s", end="", flush=True)
             print("", flush=True)
+        if expected_size > 0 and downloaded != expected_size:
+            raise OSError(
+                f"downloaded size {downloaded} does not match GitHub asset size {expected_size}"
+            )
+        actual_sha256 = sha256.hexdigest()
+        if expected_sha256 and actual_sha256 != expected_sha256:
+            raise OSError(
+                f"SHA-256 mismatch: expected {expected_sha256}, got {actual_sha256}"
+            )
+        if expected_sha256:
+            log(f"[sync-gitee] SHA-256 verified: {actual_sha256}")
+        else:
+            log(
+                f"[sync-gitee] SHA-256 calculated: {actual_sha256} "
+                "(GitHub asset metadata has no SHA-256 digest to compare)"
+            )
+        partial_path.replace(target_path)
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", "ignore")
-        fail(f"Download failed for {url} with HTTP {exc.code}: {body}")
+        body = exc.read(1024).decode("utf-8", "ignore")
+        raise OSError(f"HTTP {exc.code}: {body}") from exc
     except urllib.error.URLError as exc:
-        fail(f"Download failed for {url}: {exc}")
+        raise OSError(str(exc)) from exc
+    finally:
+        partial_path.unlink(missing_ok=True)
+
+
+def download_asset(
+    asset: dict,
+    target_path: Path,
+    *,
+    proxy: Optional[str],
+    download_proxy_prefixes: list,
+) -> None:
+    browser_url = asset.get("browser_download_url")
+    api_url = asset.get("url")
+    expected_size = int(asset.get("size") or 0)
+    expected_sha256 = get_expected_sha256(asset)
+    if not browser_url:
+        raise ValueError("GitHub release asset is missing browser_download_url")
+
+    public_headers = {"User-Agent": "transfer-genie-release-sync"}
+    github_headers = {
+        **build_github_headers(),
+        "Accept": "application/octet-stream",
+    }
+    methods = []
+    for prefix in download_proxy_prefixes:
+        methods.append(
+            (
+                f"third-party download proxy {prefix}",
+                build_prefixed_download_url(prefix, browser_url),
+                None,
+                public_headers,
+            )
+        )
+    if proxy:
+        if api_url:
+            methods.append(("Runner proxy via GitHub asset API", api_url, proxy, github_headers))
+        methods.append(("Runner proxy via release URL", browser_url, proxy, public_headers))
+    if api_url:
+        methods.append(("direct GitHub asset API", api_url, None, github_headers))
+    methods.append(("direct GitHub release URL", browser_url, None, public_headers))
+
+    errors = []
+    for method_name, url, method_proxy, headers in methods:
+        for attempt in range(1, DOWNLOAD_ATTEMPTS_PER_METHOD + 1):
+            log(
+                f"[sync-gitee] Download method: {method_name} "
+                f"(attempt {attempt}/{DOWNLOAD_ATTEMPTS_PER_METHOD})"
+            )
+            try:
+                download_file_once(
+                    url,
+                    target_path,
+                    expected_size=expected_size,
+                    expected_sha256=expected_sha256,
+                    proxy=method_proxy,
+                    headers=headers,
+                )
+                return
+            except Exception as exc:
+                errors.append(f"{method_name} attempt {attempt}: {exc}")
+                print(
+                    f"[sync-gitee] Warning: download failed: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                if attempt < DOWNLOAD_ATTEMPTS_PER_METHOD:
+                    time.sleep(attempt * 2)
+
+    fail("All GitHub asset download methods failed:\n- " + "\n- ".join(errors))
 
 
 def upload_attachment(file_path: Path, upload_url: str) -> None:
@@ -186,7 +320,6 @@ def rewrite_latest_json_urls(
 
 
 def strip_version_from_filename(name: str) -> str:
-    import re
     match = re.match(r"^(.+?)-v?\d+\.\d+\.\d+(.*)$", name)
     if match:
         return match.group(1) + match.group(2)
@@ -321,12 +454,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("GITEE_SYNC_PROXY", "").strip() or None,
         help="Proxy server for downloading from GitHub (e.g., localhost:7890).",
     )
+    parser.add_argument(
+        "--download-proxy-prefixes",
+        default=os.environ.get("RELEASE_DOWNLOAD_PROXY_PREFIXES", ""),
+        help=(
+            "Comma/newline-separated URL prefixes tried before the Runner proxy and direct GitHub. "
+            "Use {url} as an optional placeholder."
+        ),
+    )
     return parser
 
 
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    download_proxy_prefixes = parse_download_proxy_prefixes(args.download_proxy_prefixes)
 
     token = os.environ.get("GITEE_ACCESS_TOKEN", "").strip()
     if not token:
@@ -378,13 +520,17 @@ def main() -> None:
         latest_files = []
         for asset in assets:
             name = asset.get("name")
-            download_url = asset.get("browser_download_url")
-            if not name or not download_url:
-                fail(f"GitHub release asset is missing name or browser_download_url: {asset}")
+            if not name:
+                fail(f"GitHub release asset is missing name: {asset}")
 
             target_path = tmp_root / name
             log(f"[sync-gitee] Downloading {name}")
-            download_file(download_url, target_path, proxy=args.proxy)
+            download_asset(
+                asset,
+                target_path,
+                proxy=args.proxy,
+                download_proxy_prefixes=download_proxy_prefixes,
+            )
             gitee_name = strip_version_from_filename(name)
             gitee_path = tmp_root / gitee_name
             if gitee_name != name:
