@@ -100,6 +100,10 @@ const composerMarkdownEditor = ref<{ focusEditor: () => boolean } | null>(null);
 let composerKeyboardPrimer: HTMLTextAreaElement | null = null;
 let pendingComposerFocus = "";
 let composerShownRequest = "";
+let removeShareImportListener: (() => void) | undefined;
+let shareImportRun: Promise<void> | null = null;
+let shareImportRequested = false;
+let pendingShareComposer = false;
 const useIOSKeyboardFocusFallback =
   /iPhone|iPad|iPod/i.test(navigator.userAgent) ||
   (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
@@ -541,6 +545,41 @@ async function openNativeSheet(sheet: NativeHistorySheet, options: { message?: M
   }
 }
 
+async function importPendingSharesAndOpen() {
+  if ((state.previewMode && !(window as any).__TRANSFER_GENIE_SHARE_IMPORT_SPY__) ||
+      state.boot !== "ready" || !state.composer.persistenceReady) return;
+  shareImportRequested = true;
+  if (shareImportRun) return shareImportRun;
+  shareImportRun = (async () => {
+    do {
+      shareImportRequested = false;
+      const outcome = await controller.importPendingShares();
+      if (!outcome.hadBatches) continue;
+      if (managedHistorySheet.value === "composer") continue;
+      if (managedHistorySheet.value) {
+        pendingShareComposer = true;
+        continue;
+      }
+      activeTab.value = "feed";
+      await openNativeSheet("composer");
+    } while (shareImportRequested);
+  })().finally(() => { shareImportRun = null; });
+  return shareImportRun;
+}
+
+async function handleMobileRecovered() {
+  await controller.refreshAfterForeground();
+  await importPendingSharesAndOpen();
+}
+
+watch(
+  () => state.boot,
+  (boot, previous) => {
+    if (boot === "ready" && previous !== "ready") void importPendingSharesAndOpen();
+  },
+  { flush: "post" },
+);
+
 async function requestNativeHistoryBack() {
   if (!managedHistorySheet.value) {
     clearTopLevelSheet();
@@ -584,6 +623,10 @@ async function handleNativePageReturned(event: Event) {
   clearTopLevelSheet();
   await waitForNavigationPaint();
   if (hasNativeNavigation()) await nativePageCommand(page, "finish", requestId);
+  if (pendingShareComposer) {
+    pendingShareComposer = false;
+    void importPendingSharesAndOpen();
+  }
 }
 function returnFingerprint() {
   return JSON.stringify([activeSheet.value, state.boot, state.activeProfile?.id, state.account?.userId,
@@ -1071,6 +1114,17 @@ async function refreshFeed() {
 }
 
 onMounted(async () => {
+  if (!state.previewMode || (window as any).__TRANSFER_GENIE_SHARE_IMPORT_SPY__) {
+    try {
+      const unlisten = await (window as any).transferGenieApi?.event?.listen(
+        "transfer-genie-share-import",
+        () => { void importPendingSharesAndOpen(); },
+      );
+      removeShareImportListener = typeof unlisten === "function" ? unlisten : undefined;
+    } catch {
+      // The startup inbox scan still recovers a share when event delivery is unavailable.
+    }
+  }
   // Warm the editor chunk while the user is reading the feed. Its code remains
   // split out of detail pages, but opening a Markdown draft usually hits cache.
   if (!initialNativeSheet) {
@@ -1092,13 +1146,14 @@ onMounted(async () => {
   );
   window.addEventListener(
     "transfer-genie-mobile-recovered",
-    controller.refreshAfterForeground,
+    handleMobileRecovered,
   );
   window.addEventListener("keydown", handleGlobalKeydown);
   window.addEventListener("transfer-genie-navigation-returned", handleNativePageReturned);
   window.addEventListener("transfer-genie-navigation-shown", handleNativePageShown);
   window.addEventListener("transfer-genie-mobile-backgrounding", persistDraftBeforeBackground);
   await controller.initialize();
+  await importPendingSharesAndOpen();
   // initialize() only reads the local window; pull the remote delta once on
   // launch so a cold start never shows yesterday's list until the next tick.
   if (!state.previewMode && state.boot === "ready") {
@@ -1146,7 +1201,7 @@ onBeforeUnmount(() => {
   window.clearTimeout(searchTimer);
   window.removeEventListener(
     "transfer-genie-mobile-recovered",
-    controller.refreshAfterForeground,
+    handleMobileRecovered,
   );
   window.removeEventListener("keydown", handleGlobalKeydown);
   window.removeEventListener("transfer-genie-navigation-returned", handleNativePageReturned);
@@ -1157,6 +1212,7 @@ onBeforeUnmount(() => {
   window.clearInterval(statusTimer);
   controller.dismissToast();
   removeTransferListeners?.();
+  removeShareImportListener?.();
 });
 </script>
 

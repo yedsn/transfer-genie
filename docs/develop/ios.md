@@ -53,6 +53,15 @@ xcodebuild -list -project gen/apple/transfer-genie.xcodeproj
 
 `tauri.ios.conf.json` 已配置最低系统版本、开发团队和 iOS bundle 范围；`Info.ios.plist` 会向生成工程合并麦克风及开发服务器所需的本地网络用途说明。修改这些输入后，应重新执行初始化命令。
 
+系统分享扩展由 `gen/apple/project.yml` 声明，源文件位于 `gen/apple/ShareExtension/Sources`，共享收件箱实现位于 `plugins/mobile-integration/ios/Sources/MobileShareInbox.swift`。修改 target、Info.plist、entitlement 或共享源文件后，用 XcodeGen 重新生成工程，不要手改 `project.pbxproj`：
+
+```bash
+xcodegen generate --spec gen/apple/project.yml
+xcodebuild -list -project gen/apple/transfer-genie.xcodeproj
+```
+
+输出应同时包含 `transfer-genie_iOS`、`ShareExtension` 和 `ShareExtensionTests`。
+
 ## 3. 官方 Simulator 日常开发
 
 ### VS Code 一键构建、部署和开发
@@ -128,7 +137,56 @@ xcrun simctl spawn booted log stream \
   --predicate 'process == "Transfer Genie"'
 ```
 
+### 系统分享到 Composer
+
+安装包含扩展的 App 后，照片、文件 App 或其他 App 的系统分享面板会显示 Transfer Genie。分享扩展接收图片、视频和普通文件，单次最多 10 项；用户确认后先写入 App Group 的 `TransferGenieShareInbox`，再打开主 App。
+
+主 App 在启动、回到前台或收到 `transfergenie://share-import?batch=<uuid>` 时扫描完整批次，把文件暂存到 `MobileImports/<batch-uuid>/` 并追加到当前草稿。已有草稿文字、格式、标记、日期和附件会保留；导入只更新草稿，不会自动发送。草稿保存成功后才会确认并清理 App Group 批次，保存或复制失败时批次保留，可再次导入。
+
+未登录或未选择可用存储空间时，扩展仍会完成私有收件箱写入，主 App 暂不导入；登录并进入空间后自动继续。重复打开同一分享 URL 或重复前台恢复不会重复添加附件。
+
+模拟器可查看扩展和共享容器的安装路径：
+
+```bash
+xcrun simctl get_app_container booted com.transfergenie app
+xcrun simctl get_app_container booted com.transfergenie groups
+xcrun simctl get_app_container booted com.transfergenie group.com.transfergenie
+```
+
+常见问题：
+
+- 分享面板没有 Transfer Genie：确认安装的是最新签名包，并检查 App 内 `PlugIns/Transfer Genie.appex` 存在、`NSExtensionPointIdentifier` 为 `com.apple.share-services`。
+- 扩展提示已保存但主 App 没打开：手动打开 App，启动扫描会继续处理；批次不会因 URL 打开失败而删除。
+- 导入后没有出现 Composer 或附件：确认已登录且有当前存储空间，并检查主 App 与扩展的 App Group entitlement 都包含 `group.com.transfergenie`。
+- 大视频或 iCloud 文件失败：错误会保留在扩展或 Composer 中；可重试，或回到 App 内用相册/文件选择器作为后备路径。
+- 附件显示重复：关闭并重开 Composer 后检查草稿；导入按批次和确定性路径幂等，重复事件应只保留一组附件。
+
 ## 4. 真机开发与签名
+
+### App Group 与共享扩展签名前置条件
+
+当前默认关闭 Share Extension，以便没有 App Group provisioning 的团队仍可正常构建主 App。无线更新脚本会跳过 `.appex` 检查；配置好主 App 和扩展的 App Group profile 后，设置 `TRANSFER_GENIE_IOS_SHARE_EXTENSION=1` 再重新生成工程并执行归档检查。
+
+在 Apple Developer 后台的 Identifiers → App Groups 中创建 `group.com.transfergenie`，并同时分配给 `com.transfergenie` 与 `com.transfergenie.ShareExtension`。两个 App ID 都要启用 App Groups capability；重新生成两份 development/distribution provisioning profile，确保 profile 的 Entitlements 包含该组。
+
+仓库已把以下内容写入可再生成输入：
+
+- `gen/apple/project.yml`：主 App 嵌入 `ShareExtension`，包含 `com.apple.share-services` 激活规则和 `ShareExtensionTests`。
+- `gen/apple/transfer-genie_iOS/transfer-genie_iOS.entitlements`：主 App 的 `group.com.transfergenie`。
+- `gen/apple/ShareExtension/ShareExtension.entitlements`：扩展的 `group.com.transfergenie`。
+- `Info.ios.plist` 与 `gen/apple/project.yml` 中的 iOS Info 属性：注册 `transfergenie` URL scheme。
+
+若 Xcode 报 `Provisioning profile ... doesn't match the entitlements file's value for com.apple.security.application-groups`，先在开发者后台完成上述 App Group 分配并刷新 profile；个人团队若不支持 App Groups，设备签名/安装会停在此前置条件，不能通过修改 `project.pbxproj` 绕过。
+
+构建或复用 archive 后，用仓库校验脚本同时检查主 App 和扩展：
+
+```bash
+bash scripts/verify-ios-share-archive.sh \
+  "gen/apple/build/transfer-genie_iOS.xcarchive/Products/Applications/Transfer Genie.app" \
+  --require-profile --team 32XG8U6WLA
+```
+
+脚本要求恰好一个 `.appex`、`com.apple.share-services` 扩展点、两份有效签名，以及主 App 和扩展都带 `group.com.transfergenie`；使用 `--require-profile` 时还会检查两边 embedded profile 的团队、application identifier 和 App Group。
 
 1. 用数据线连接并解锁 iPhone，在手机上选择“信任此电脑”。
 2. 在 iPhone 的“设置 → 隐私与安全性 → 开发者模式”中启用开发者模式并按提示重启。

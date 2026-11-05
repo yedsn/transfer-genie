@@ -21,5 +21,16 @@
   <string>Transfer Genie 需要访问本地网络，以便开发版本连接到这台 Mac 上的调试服务器。</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>Transfer Genie 需要访问麦克风，用于录制语音并转换为文字。</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>
+      <string>com.transfergenie.share-import</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>transfergenie</string>
+      </array>
+    </dict>
+  </array>
 </dict>
 </plist>

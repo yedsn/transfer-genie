@@ -11,4 +11,7 @@ permissions = [
   "allow-generate-image-thumbnail",
   "allow-generate-video-poster",
   "allow-cancel-video-poster",
+  "allow-list-shared-imports",
+  "allow-stage-shared-imports",
+  "allow-acknowledge-shared-imports",
 ]

@@ -42,8 +42,20 @@ interface DraftAttachment {
   available?: boolean;
 }
 
+export interface ShareImportOutcome {
+  hadBatches: boolean;
+  added: number;
+  failed: number;
+  acknowledgedBatchIds: string[];
+  error: string;
+}
+
 const previewMode = new URLSearchParams(window.location.search).get("mobile-preview") === "1";
 const api = () => (window as any).transferGenieApi as MobileApi;
+
+function shareImportPreviewEnabled() {
+  return Boolean((window as any).__TRANSFER_GENIE_SHARE_IMPORT_SPY__);
+}
 
 function editorFormat(value: unknown): "text" | "markdown" {
   return value === "markdown" ? "markdown" : "text";
@@ -90,6 +102,16 @@ function formatTime(timestampMs: number) {
     return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
   }
   return date.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
+}
+
+function sharedAttachmentMediaType(item: any): DraftAttachment["mediaType"] {
+  const contentType = String(item?.contentType || "").toLowerCase();
+  if (contentType.startsWith("image/")) return "image";
+  if (contentType.startsWith("video/")) return "video";
+  const name = String(item?.originalName || item?.importName || "").toLowerCase();
+  if (/\.(png|jpe?g|gif|webp|heic|heif|bmp|tiff?)$/.test(name)) return "image";
+  if (/\.(mp4|mov|m4v|webm|avi|mkv)$/.test(name)) return "video";
+  return "file";
 }
 
 function mapMessage(message: any): MobileMessage {
@@ -208,6 +230,12 @@ export function useMobileController() {
       draftUpdatedAt: 0,
       error: "",
     },
+    shareImport: {
+      importing: false,
+      pendingBatches: 0,
+      lastAdded: 0,
+      error: "",
+    },
   });
 
   const currentSpace = computed(() => {
@@ -257,6 +285,7 @@ export function useMobileController() {
   let restoringComposerDraft = false;
   let composerMutationVersion = 0;
   let persistedDraftFingerprint = "";
+  let shareImportTask: Promise<ShareImportOutcome> | null = null;
 
   function composerDraftPayload() {
     return {
@@ -476,6 +505,10 @@ export function useMobileController() {
     state.composer.draftStatus = "idle";
     state.composer.draftUpdatedAt = 0;
     state.composer.error = "";
+    state.shareImport.importing = false;
+    state.shareImport.pendingBatches = 0;
+    state.shareImport.lastAdded = 0;
+    state.shareImport.error = "";
     clearFeedback();
     state.boot = "loading";
     if (previewMode) {
@@ -1039,6 +1072,134 @@ export function useMobileController() {
         setError(error);
       }
     } finally { if (generation === viewGeneration) state.composer.selecting = false; }
+  }
+
+  function importPendingShares(): Promise<ShareImportOutcome> {
+    if (shareImportTask) return shareImportTask;
+    const task = runShareImport().finally(() => {
+      if (shareImportTask === task) shareImportTask = null;
+    });
+    shareImportTask = task;
+    return task;
+  }
+
+  async function runShareImport(): Promise<ShareImportOutcome> {
+    const idle: ShareImportOutcome = {
+      hadBatches: false,
+      added: 0,
+      failed: 0,
+      acknowledgedBatchIds: [],
+      error: "",
+    };
+    if ((previewMode && !shareImportPreviewEnabled()) || state.boot !== "ready" || !state.composer.persistenceReady ||
+        state.composer.sending || state.composer.selecting) return idle;
+
+    const generation = viewGeneration;
+    state.shareImport.importing = true;
+    state.composer.selecting = true;
+    state.shareImport.error = "";
+    state.composer.error = "";
+    try {
+      const listed = await api().mobileIntegration.listSharedImports();
+      if (generation !== viewGeneration) return idle;
+      const batches = Array.isArray(listed?.batches) ? listed.batches : [];
+      state.shareImport.pendingBatches = batches.length;
+      if (!batches.length) return idle;
+
+      const staged = await api().mobileIntegration.stageSharedImports(batches.map((batch: any) => batch.batchId));
+      if (generation !== viewGeneration) return idle;
+      const results = Array.isArray(staged?.batches) ? staged.batches : [];
+      const existingPaths = new Set(state.composer.attachments.map((item) => item.path));
+      let added = 0;
+      let failed = 0;
+      const failureMessages: string[] = [];
+      for (const batch of results) {
+        for (const item of batch?.files || []) {
+          const path = String(item?.path || "");
+          if (!path || existingPaths.has(path)) continue;
+          existingPaths.add(path);
+          const attachment: DraftAttachment = {
+            id: crypto.randomUUID(),
+            clientId: `share-${item.fileId}`,
+            path,
+            originalName: String(item.originalName || item.importName || "分享附件"),
+            mediaType: sharedAttachmentMediaType(item),
+            contentType: item.contentType || undefined,
+            sizeBytes: Number(item.sizeBytes || 0),
+            previewState: "loading",
+            available: true,
+          };
+          state.composer.attachments.push(attachment);
+          added += 1;
+          if (["image", "video"].includes(attachment.mediaType)) void loadDraftAttachmentPreview(attachment);
+        }
+        const batchFailures = Array.isArray(batch?.failures) ? batch.failures : [];
+        failed += batchFailures.length;
+        for (const failure of batchFailures) {
+          const message = String(failure?.message || "分享文件读取失败");
+          if (!failureMessages.includes(message)) failureMessages.push(message);
+        }
+      }
+
+      const persisted = await persistComposerDraft(true);
+      if (generation !== viewGeneration) return idle;
+      if (!persisted) {
+        const message = "分享文件已准备，但草稿保存失败。分享批次已保留，可稍后重试。";
+        state.shareImport.error = message;
+        state.composer.error = message;
+        showToast(message, "error");
+        return { ...idle, hadBatches: true, added, failed, error: message };
+      }
+
+      const acknowledgedBatchIds = (results as any[])
+        .filter((batch) => batch?.complete === true && Array.isArray(batch?.files) && batch.files.length > 0)
+        .map((batch) => String(batch.batchId));
+      let ackError = "";
+      if (acknowledgedBatchIds.length) {
+        try {
+          await api().mobileIntegration.acknowledgeSharedImports(acknowledgedBatchIds);
+          if (generation !== viewGeneration) return idle;
+          state.shareImport.pendingBatches = Math.max(0, state.shareImport.pendingBatches - acknowledgedBatchIds.length);
+        } catch (error) {
+          if (generation !== viewGeneration) return idle;
+          ackError = `已添加到草稿，但分享收件箱清理失败；下次打开会自动重试。${errorText(error)}`;
+        }
+      }
+
+      state.shareImport.lastAdded = added;
+      let error = "";
+      if (failed) {
+        error = `${failed} 个分享文件导入失败；批次已保留，可稍后重试。${failureMessages[0] || "请检查文件是否仍可用"}`;
+      }
+      if (ackError) error = [error, ackError].filter(Boolean).join(" ");
+      state.shareImport.error = error;
+      if (added) showToast(`已从分享添加 ${added} 个文件`, failed ? "info" : "success");
+      else if (failed) showToast("分享文件未能加入草稿，可稍后重试", "error");
+      else showToast("分享内容已在当前草稿中", "info");
+      if (error) {
+        state.composer.error = error;
+        showToast(error, "error");
+      }
+      return {
+        hadBatches: true,
+        added,
+        failed,
+        acknowledgedBatchIds,
+        error,
+      };
+    } catch (error) {
+      if (generation !== viewGeneration) return idle;
+      const message = `分享导入失败：${errorText(error)}。文件仍保留在分享收件箱中，可稍后重试。`;
+      state.shareImport.error = message;
+      state.composer.error = message;
+      showToast(message, "error");
+      return { ...idle, hadBatches: true, error: message };
+    } finally {
+      if (generation === viewGeneration) {
+        state.shareImport.importing = false;
+        state.composer.selecting = false;
+      }
+    }
   }
 
   async function previewDraftAttachment(id: string) {
@@ -1757,7 +1918,7 @@ export function useMobileController() {
 
   return {
     state, currentSpace, selectableProfiles, pendingCount, activeTransfers, signedIn, initialize, refreshAll, pullLatest, refreshRuntimeState, refreshAfterForeground, refreshMessages, loadOlderMessages, searchMessages, loadMoreSearch, setMarkedFilter, loadMoreMarked, loadConflicts, resolveConflict, retryTransfer,
-    selectMedia, selectDocuments, removeAttachment, sendDraft, prepareNewComposer, persistComposerDraft, persistComposerDraftForNavigation, deactivateComposerPersistence, toggleMark, copyMessage, updateMarkedMetadata, createMarkedTag, deleteMessage, applyMessageSelection, previewMessage, prepareVideo, shareMessage, retryPreview, previewImageFailed, previewDraftAttachment,
+    selectMedia, selectDocuments, importPendingShares, removeAttachment, sendDraft, prepareNewComposer, persistComposerDraft, persistComposerDraftForNavigation, deactivateComposerPersistence, toggleMark, copyMessage, updateMarkedMetadata, createMarkedTag, deleteMessage, applyMessageSelection, previewMessage, prepareVideo, shareMessage, retryPreview, previewImageFailed, previewDraftAttachment,
     signIn, logout, chooseProfile, diagnoseProfile, setProfileEnabled, beginConnectionEdit, renameProfile, signInProfile, logoutProfile, removeProfile, loadSpaces, switchSpace, testSetupConnection, setupSignIn, completeSetup, resetWizardDownstream, openConnectionWizard, openConnectionRepair, cancelConnectionWizard, selectWizardSpace, backConnectionWizard, createWizardSpace, installTransferListeners, refreshCache, clearCache, clearFeedback, showToast, dismissToast, saveSenderName, saveDefaultEditorFormat,
   };
 }

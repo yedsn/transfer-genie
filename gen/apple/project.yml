@@ -56,10 +56,16 @@ targets:
           - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-        CFBundleShortVersionString: 0.5.4
-        CFBundleVersion: "0.5.4"
-    entitlements:
-      path: transfer-genie_iOS/transfer-genie_iOS.entitlements
+        CFBundleShortVersionString: 0.5.9
+        CFBundleVersion: "0.5.9"
+        CFBundleURLTypes:
+          - CFBundleURLName: com.transfergenie.share-import
+            CFBundleURLSchemes: [transfergenie]
+        NSAppSleepDisabled: true
+        NSLocalNetworkUsageDescription: Transfer Genie 需要访问本地网络，以便开发版本连接到这台 Mac 上的调试服务器。
+        NSMicrophoneUsageDescription: Transfer Genie 需要访问麦克风，用于录制语音并转换为文字。
+    # Share Extension/App Group entitlements are disabled with the extension.
+    # Restore this block when the Apple Developer profile includes the group.
     scheme:
       environmentVariables:
         RUST_BACKTRACE: full
@@ -77,6 +83,8 @@ targets:
     dependencies:
       - framework: libapp.a
         embed: false
+      # Share Extension is disabled until an Apple Developer App Group profile
+      # is available. Keep the target source below for later re-enablement.
       - sdk: CoreGraphics.framework
       - sdk: Metal.framework
       - sdk: MetalKit.framework
@@ -91,3 +99,21 @@ targets:
         outputFiles:
           - $(SRCROOT)/Externals/x86_64/${CONFIGURATION}/libapp.a
           - $(SRCROOT)/Externals/arm64/${CONFIGURATION}/libapp.a
+  # ShareExtension target intentionally disabled. Re-enable this block, its
+  # host dependency above, and the App Group entitlements when provisioning
+  # for com.transfergenie.ShareExtension is available.
+  ShareExtensionTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: ShareExtensionTests/Sources
+      - path: ../../plugins/mobile-integration/ios/Sources/MobileShareInbox.swift
+      - path: ShareExtension/Sources/ShareViewController.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.transfergenie.ShareExtensionTests
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        SWIFT_VERSION: "5.0"
+    scheme:
+      testTargets:
+        - ShareExtensionTests

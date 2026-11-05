@@ -95,13 +95,15 @@ try {
   assert.ok(!confirmed.stdout.includes('STUB_'), 'Placeholder validation must stop before connecting');
   for (const input of ['y\n', 'yes\n', 'Y\n']) {
     const result = run(['--confirm'], input);
-    assert.equal(result.status, 73, result.stderr);
+    assert.equal(result.status, 1, result.stderr);
     assert.match(result.stdout, /已确认/);
+    assert.match(result.stderr, /Could not read device details/);
     // First stub fails; no device contact or build is possible.
     assert.ok(!result.stdout.includes('STUB_npm'));
   }
   const direct = run([], '');
-  assert.equal(direct.status, 73);
+  assert.equal(direct.status, 1);
+  assert.match(direct.stderr, /Could not read device details/);
   assert.ok(!direct.stdout.includes('[y/N]'));
   const help = run(['--confirm', '--help'], '');
   assert.equal(help.status, 0);

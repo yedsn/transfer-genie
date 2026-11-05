@@ -14,6 +14,9 @@ Allows the Transfer Genie mobile integration diagnostic command.
 - `allow-generate-image-thumbnail`
 - `allow-generate-video-poster`
 - `allow-cancel-video-poster`
+- `allow-list-shared-imports`
+- `allow-stage-shared-imports`
+- `allow-acknowledge-shared-imports`
 
 ## Permission Table
 
@@ -23,6 +26,32 @@ Allows the Transfer Genie mobile integration diagnostic command.
 <th>Description</th>
 </tr>
 
+
+<tr>
+<td>
+
+`mobile-integration:allow-acknowledge-shared-imports`
+
+</td>
+<td>
+
+Enables the acknowledge_shared_imports command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mobile-integration:deny-acknowledge-shared-imports`
+
+</td>
+<td>
+
+Denies the acknowledge_shared_imports command without any pre-configured scope.
+
+</td>
+</tr>
 
 <tr>
 <td>
@@ -124,6 +153,32 @@ Enables the generate_video_poster command without any pre-configured scope.
 <td>
 
 Denies the generate_video_poster command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mobile-integration:allow-list-shared-imports`
+
+</td>
+<td>
+
+Enables the list_shared_imports command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mobile-integration:deny-list-shared-imports`
+
+</td>
+<td>
+
+Denies the list_shared_imports command without any pre-configured scope.
 
 </td>
 </tr>
@@ -280,6 +335,32 @@ Enables the share_file command without any pre-configured scope.
 <td>
 
 Denies the share_file command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mobile-integration:allow-stage-shared-imports`
+
+</td>
+<td>
+
+Enables the stage_shared_imports command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mobile-integration:deny-stage-shared-imports`
+
+</td>
+<td>
+
+Denies the stage_shared_imports command without any pre-configured scope.
 
 </td>
 </tr>

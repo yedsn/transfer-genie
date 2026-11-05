@@ -566,6 +566,19 @@ if (( remaining_hours < 48 )); then
   log "Warning: the development profile expires in about $remaining_hours hour(s)"
 fi
 
+share_check_output="$temp_root/share-archive-check.txt"
+if [[ "${TRANSFER_GENIE_IOS_SHARE_EXTENSION:-0}" == "1" ]]; then
+  if ! bash "$project_root/scripts/verify-ios-share-archive.sh" \
+    "$app_path" \
+    --require-profile \
+    --team "$development_team" >"$share_check_output" 2>&1; then
+    skip_or_fail "share-extension-invalid" "$(tail -n 3 "$share_check_output")"
+  fi
+  log "$(tail -n 1 "$share_check_output")"
+else
+  log "Share Extension disabled (set TRANSFER_GENIE_IOS_SHARE_EXTENSION=1 after provisioning)"
+fi
+
 executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_path/Info.plist" 2>/dev/null || true)"
 candidate_uuid="$(dwarfdump --uuid "$app_path/$executable_name" 2>/dev/null | awk '{print $2}' || true)"
 log "Candidate $candidate_version ($candidate_build), UUID $candidate_uuid"

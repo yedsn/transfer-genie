@@ -71,6 +71,21 @@
         payload: { requestId },
       });
     },
+    async listSharedImports() {
+      return invoke('plugin:mobile-integration|list_shared_imports', {
+        payload: {},
+      });
+    },
+    async stageSharedImports(batchIds) {
+      return invoke('plugin:mobile-integration|stage_shared_imports', {
+        payload: { batchIds: [...batchIds] },
+      });
+    },
+    async acknowledgeSharedImports(batchIds) {
+      return invoke('plugin:mobile-integration|acknowledge_shared_imports', {
+        payload: { batchIds: [...batchIds] },
+      });
+    },
   };
 
   const mobileCacheApi = {

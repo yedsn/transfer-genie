@@ -5,6 +5,7 @@ mod history;
 mod integration_runtime;
 mod media_playback;
 mod media_preview;
+mod mobile_share;
 mod preview_generator;
 mod storage_provider;
 mod supabase_auth;
@@ -23496,6 +23497,23 @@ pub fn run() {
     }
 
     app.run(move |app_handle, event| {
+        #[cfg(target_os = "ios")]
+        if let tauri::RunEvent::Opened { urls } = &event {
+            for url in urls {
+                match mobile_share::parse_share_import_url(url.as_str()) {
+                    Ok(payload) => {
+                        if let Err(error) = app_handle.emit(mobile_share::SHARE_IMPORT_EVENT, payload)
+                        {
+                            log::warn!("iOS share import notification failed: {error}");
+                        }
+                    }
+                    Err(error) => {
+                        log::debug!("Ignoring non-share iOS open URL: {error}");
+                    }
+                }
+            }
+        }
+
         #[cfg(target_os = "ios")]
         if matches!(event, tauri::RunEvent::Resumed) {
             let app_handle = app_handle.clone();
