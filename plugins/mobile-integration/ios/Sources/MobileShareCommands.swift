@@ -14,6 +14,17 @@ final class AcknowledgeSharedImportsArgs: Decodable {
 extension MobileIntegrationPlugin {
   @objc public func listSharedImports(_ invoke: Invoke) {
     let reply = MobileInvocation(invoke)
+    // Host-only builds have no App Group entitlement or inbox to scan.
+    let extensions = Bundle.main.builtInPlugInsURL.flatMap {
+      try? FileManager.default.contentsOfDirectory(at: $0, includingPropertiesForKeys: nil)
+    } ?? []
+    guard extensions.contains(where: {
+      $0.pathExtension == "appex" &&
+        Bundle(url: $0)?.bundleIdentifier == "com.transfergenie.ShareExtension"
+    }) else {
+      reply.resolve(["batches": []])
+      return
+    }
     DispatchQueue.global(qos: .userInitiated).async {
       do {
         let inbox = try Self.shareInboxRoot()
