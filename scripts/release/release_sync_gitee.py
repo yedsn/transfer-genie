@@ -143,6 +143,10 @@ def download_file_once(
     headers=None,
 ) -> None:
     proxy = normalize_proxy_url(proxy)
+    if proxy:
+        log("[sync-gitee] Connection: explicit Runner proxy")
+    else:
+        log("[sync-gitee] Connection: direct (environment proxies disabled)")
     handlers = [
         urllib.request.ProxyHandler(
             {"http": proxy, "https": proxy} if proxy else {},
@@ -155,6 +159,11 @@ def download_file_once(
     partial_path.unlink(missing_ok=True)
     try:
         with opener.open(req, timeout=DOWNLOAD_TIMEOUT_SECS) as response:
+            response_host = urllib.parse.urlparse(response.geturl()).hostname or "unknown"
+            log(f"[sync-gitee] Response host: {response_host}")
+            cache_status = response.headers.get("X-Cache-Status") or response.headers.get("X-Cache")
+            if cache_status:
+                log(f"[sync-gitee] Response cache status: {cache_status}")
             total = int(response.headers.get("Content-Length", 0))
             downloaded = 0
             sha256 = hashlib.sha256()
@@ -175,6 +184,9 @@ def download_file_once(
                     else:
                         print(f"\r[sync-gitee] Downloading: {downloaded / 1024 / 1024:.1f} MB @ {speed / 1024 / 1024:.1f} MB/s", end="", flush=True)
             print("", flush=True)
+        elapsed = time.time() - start_time
+        average_speed = downloaded / elapsed if elapsed > 0 else 0
+        log(f"[sync-gitee] Average speed: {average_speed / 1024 / 1024:.1f} MB/s")
         if expected_size > 0 and downloaded != expected_size:
             raise OSError(
                 f"downloaded size {downloaded} does not match GitHub asset size {expected_size}"

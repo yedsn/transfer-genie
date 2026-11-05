@@ -47,7 +47,7 @@ https://ghfast.top
 https://ghfast.top/https://github.com/yedsn/transfer-genie/releases/download/vX.Y.Z/<asset>
 ```
 
-也可以使用 `{url}` 占位符，例如 `https://example.com/?url={url}`。不配置该变量时会直接从 Runner 代理方式开始。`GITEE_SYNC_PROXY` 必须是 Runner 主机可以访问的代理地址；只有代理程序也运行在 Runner 主机上时才能使用 `127.0.0.1`。Gitee API 和附件上传保持直连。
+也可以使用 `{url}` 占位符，例如 `https://example.com/?url={url}`。不配置该变量时会直接从 Runner 代理方式开始。工作流会自动把所有第三方代理域名加入 `NO_PROXY/no_proxy`，下载脚本也会显式禁用环境代理，因此第三方地址不会经过 `GITEE_SYNC_PROXY`。日志中的 `Connection: direct (environment proxies disabled)`、`Response host`、`Response cache status` 和 `Average speed` 可用于确认实际连接方式和代理站缓存状态。新 Release 首次访问出现 `MISS` 时，代理站可能需要回源 GitHub，因此可能比后续缓存命中慢。`GITEE_SYNC_PROXY` 必须是 Runner 主机可以访问的代理地址；只有代理程序也运行在 Runner 主机上时才能使用 `127.0.0.1`。Gitee API 和附件上传保持直连。
 
 ### GitHub 侧配置
 

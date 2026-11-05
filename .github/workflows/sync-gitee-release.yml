@@ -24,14 +24,37 @@ jobs:
         if: ${{ env.GITEE_SYNC_PROXY != '' }}
         shell: bash
         run: |
+          proxy_hosts="$(python3 - <<'PY'
+          import os
+          import re
+          import urllib.parse
+
+          value = os.environ.get("RELEASE_DOWNLOAD_PROXY_PREFIXES", "")
+          hosts = []
+          for item in re.split(r"[\r\n,;]+", value):
+              item = item.strip()
+              if not item:
+                  continue
+              sample = item.replace("{url}", "https://github.com/example/repo/releases/download/v1/file")
+              host = urllib.parse.urlparse(sample).hostname
+              if host and host not in hosts:
+                  hosts.append(host)
+          print(",".join(hosts))
+          PY
+          )"
+          no_proxy_hosts="gitee.com,.gitee.com,localhost,127.0.0.1"
+          if [ -n "$proxy_hosts" ]; then
+            no_proxy_hosts="$no_proxy_hosts,$proxy_hosts"
+          fi
           {
             echo "HTTP_PROXY=$GITEE_SYNC_PROXY"
             echo "HTTPS_PROXY=$GITEE_SYNC_PROXY"
             echo "http_proxy=$GITEE_SYNC_PROXY"
             echo "https_proxy=$GITEE_SYNC_PROXY"
-            echo "NO_PROXY=gitee.com,.gitee.com,localhost,127.0.0.1"
-            echo "no_proxy=gitee.com,.gitee.com,localhost,127.0.0.1"
+            echo "NO_PROXY=$no_proxy_hosts"
+            echo "no_proxy=$no_proxy_hosts"
           } >> "$GITHUB_ENV"
+          echo "Third-party download hosts bypassing Runner proxy: ${proxy_hosts:-none}"
 
       - name: Checkout repository
         uses: actions/checkout@v5
