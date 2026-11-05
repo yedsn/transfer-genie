@@ -150,18 +150,19 @@ function keepSentDraft() {
   stopSentDraftCountdown();
   sentDraftPrompts.value.shift();
 }
-function closeSentDraft() {
+function closeSentDraft(exitFullscreen = false) {
   stopSentDraftCountdown();
   const prompt = sentDraftPrompt.value;
   if (prompt && composerStore.getDraft(prompt.id)) composerStore.removeDraftConfirmed(prompt.id);
   else keepSentDraft();
+  if (exitFullscreen) (window as any).transferGenieLegacyFullscreen?.exit?.();
 }
 function handleSentDraftKeydown(event: KeyboardEvent) {
   if (event.isComposing || (event.key !== "Enter" && event.key !== "Escape")) return;
   event.preventDefault();
   event.stopPropagation();
   if (event.repeat) return;
-  if (event.key === "Enter") closeSentDraft();
+  if (event.key === "Enter") closeSentDraft(true);
   else keepSentDraft();
 }
 watch(() => state.panes.flatMap((pane) => pane.tabs.map((tab) => tab.id)).join("|"), () => {
@@ -676,7 +677,7 @@ onUnmounted(() => {
         </div>
         <div class="cw-modal-actions cw-sent-actions">
           <button class="cw-btn cw-sent-cancel" type="button" @click="keepSentDraft">取消</button>
-          <button class="cw-btn cw-btn-danger cw-sent-confirm" type="button" @click="closeSentDraft">确认</button>
+          <button class="cw-btn cw-btn-danger cw-sent-confirm" type="button" @click="closeSentDraft(true)">确认</button>
         </div>
       </div>
     </div>

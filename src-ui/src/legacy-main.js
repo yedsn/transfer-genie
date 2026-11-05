@@ -12925,7 +12925,7 @@ async function sendText() {
         }
         renderCurrentMessageView({ preserveScroll: true });
         applySuccessfulSendResult(result);
-        exitComposerFullscreenAfterSendSuccess();
+        if (!usesWorkspaceComposer) exitComposerFullscreenAfterSendSuccess();
         await copySentTextAfterSend(textToSend);
         setTimeout(async () => {
           const shouldStickToBottom = isMessageListAtBottom();
@@ -12981,7 +12981,7 @@ async function sendText() {
               renderUploadTasks();
             }
             applySuccessfulSendResult(result);
-            exitComposerFullscreenAfterSendSuccess();
+            if (!usesWorkspaceComposer) exitComposerFullscreenAfterSendSuccess();
             await loadMessages({ scrollToBottom: true });
             await loadPersistedUploadHistory({ silent: true });
             setSuccessStatus('发送成功');
