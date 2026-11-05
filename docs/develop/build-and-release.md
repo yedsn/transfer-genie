@@ -22,40 +22,19 @@ cargo tauri build
 
 ### Gitee 同步下载容错
 
-同步脚本从 GitHub 下载 Release 附件时，依次尝试以下方式；每种方式连续失败 3 次后才切换到下一种：
+同步脚本使用 `aria2c` 从 GitHub 下载 Release 附件，并通过可选的 Runner 代理 `GITEE_SYNC_PROXY` 访问 GitHub。aria2 默认使用 4 个分段连接、每个服务器最多 4 个连接和 `1M` 最小分段大小；单个附件最多尝试 3 次。self-hosted Runner 必须预装 `aria2c`，工作流会在同步前执行 `aria2c --version` 预检。
 
-1. GitHub Variables 中配置的第三方下载代理前缀
-2. Runner 网络代理 `GITEE_SYNC_PROXY`
-3. GitHub 官方地址直连
+每次下载先写入临时 `.part` 文件，完成后检查 GitHub 资产声明的文件大小并计算 SHA-256。若资产元数据提供 `digest: sha256:...`，脚本会在上传 Gitee 前强制比对；哈希或大小不一致会删除临时文件并重试，3 次失败后停止同步，不会上传不完整文件。若 GitHub 没有提供 digest，日志会输出本地计算值并标记为“无可比对值”。
 
-每次下载完成后都会计算 SHA-256。若 GitHub Release 资产元数据提供 `digest: sha256:...`，脚本会在上传 Gitee 前强制比对；哈希不一致会删除本次临时文件，并按当前方式重试，连续失败 3 次后切换下一种下载方式。若 GitHub 没有提供 digest，日志只会输出本地计算值并明确标记为“无可比对值”。
-
-在仓库 [Actions Variables](https://github.com/yedsn/transfer-genie/settings/variables/actions) 中新建：
-
-- Name：`RELEASE_DOWNLOAD_PROXY_PREFIXES`
-- Value：一个或多个第三方代理前缀，多个值可用逗号、分号或换行分隔
-
-例如：
-
-```text
-https://ghfast.top
-```
-
-脚本会把 GitHub 下载地址拼成：
-
-```text
-https://ghfast.top/https://github.com/yedsn/transfer-genie/releases/download/vX.Y.Z/<asset>
-```
-
-也可以使用 `{url}` 占位符，例如 `https://example.com/?url={url}`。不配置该变量时会直接从 Runner 代理方式开始。工作流会自动把所有第三方代理域名加入 `NO_PROXY/no_proxy`，下载脚本也会显式禁用环境代理，因此第三方地址不会经过 `GITEE_SYNC_PROXY`。对于 8 MiB 以上的大文件，如果第三方代理返回 `MISS`，脚本会立即跳过该路线，不会等待它慢速回源；小文件（例如 `latest.json`）仍可继续使用第三方代理。日志中的 `Connection: direct (environment proxies disabled)`、`Response host`、`Response cache status` 和 `Average speed` 可用于确认实际连接方式和代理站缓存状态。`GITEE_SYNC_PROXY` 必须是 Runner 主机可以访问的代理地址；只有代理程序也运行在 Runner 主机上时才能使用 `127.0.0.1`。Gitee API 和附件上传保持直连。
+在仓库 [Actions Variables](https://github.com/yedsn/transfer-genie/settings/variables/actions) 中仅按需配置：
 
 ### GitHub 侧配置
 
-1. 打开 [Actions Variables](https://github.com/yedsn/transfer-genie/settings/variables/actions)，点击 **New repository variable**，将 `RELEASE_DOWNLOAD_PROXY_PREFIXES` 设置为 `https://ghfast.top`，然后点击 **Add variable**。如果需要配置多个第三方代理，可按优先级用换行分隔。GitHub 禁止自定义 Variable 使用保留的 `GITHUB_` 前缀，因此不能命名为 `GITHUB_DOWNLOAD_PROXY_PREFIXES`。
+1. 打开 [Actions Variables](https://github.com/yedsn/transfer-genie/settings/variables/actions)，如 Runner 访问 GitHub 需要代理，新增 `GITEE_SYNC_PROXY`；Value 必须是 Runner 主机可达的代理 URL。
 2. 打开 [Actions Secrets](https://github.com/yedsn/transfer-genie/settings/secrets/actions)，确认 Secret `GITEE_ACCESS_TOKEN` 已配置；该 Token 所属账号必须能向 `hongxiaojian/transfer-genie` 发布 Release 附件。
-3. 打开 [Actions Runners](https://github.com/yedsn/transfer-genie/settings/actions/runners)，确认 self-hosted Runner 为 Online/Idle，并能匹配工作流中的 `self-hosted` 标签。
-4. Runner 是否需要代理访问 GitHub：**待确认**。如果需要，在 Actions Variables 新建 `GITEE_SYNC_PROXY`；Value 必须是 Runner 主机可达的代理 URL。运行工作流后，确认 `Configure proxy for GitHub access` 没有被跳过，且 Checkout、GitHub API 和附件下载均成功；如果 Runner 服务本身无法注册、上线或领取任务，还需为 Runner 服务配置代理并重启服务。
-5. 在 [Sync Latest Release to Gitee](https://github.com/yedsn/transfer-genie/actions/workflows/sync-gitee-release.yml) 页面手动运行工作流，可留空 tag 同步最新 Release，或填写指定的 `v*` tag。日志中应出现 `SHA-256 verified`；只有所有附件下载并校验完成后，脚本才会更新 Gitee Release。
+3. 打开 [Actions Runners](https://github.com/yedsn/transfer-genie/settings/actions/runners)，确认 self-hosted Runner 为 Online/Idle，并能匹配工作流中的 `self-hosted` 标签，且已安装 `aria2c`。
+4. 运行工作流后，确认 `Configure proxy for GitHub access` 没有被跳过（如果配置了代理），日志出现 `aria2 attempt` 和 `SHA-256 verified`；Gitee API 与附件上传通过 `NO_PROXY` 保持直连。
+5. 在 [Sync Latest Release to Gitee](https://github.com/yedsn/transfer-genie/actions/workflows/sync-gitee-release.yml) 页面手动运行工作流，可留空 tag 同步最新 Release，或填写指定的 `v*` tag。只有所有附件下载并校验完成后，脚本才会更新 Gitee Release。
 
 ## 文档站发布流程
 
