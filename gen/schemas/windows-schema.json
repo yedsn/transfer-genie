@@ -2535,10 +2535,16 @@
           "markdownDescription": "Denies the log command without any pre-configured scope."
         },
         {
-          "description": "Allows the Transfer Genie mobile integration diagnostic command.\n#### This default permission set includes:\n\n- `allow-diagnostic`\n- `allow-set-navigation-gestures-enabled`\n- `allow-navigate-native-page`\n- `allow-select-media`\n- `allow-select-documents`\n- `allow-preview-file`\n- `allow-share-file`\n- `allow-generate-image-thumbnail`\n- `allow-generate-video-poster`\n- `allow-cancel-video-poster`",
+          "description": "Allows the Transfer Genie mobile integration diagnostic command.\n#### This default permission set includes:\n\n- `allow-diagnostic`\n- `allow-set-navigation-gestures-enabled`\n- `allow-navigate-native-page`\n- `allow-select-media`\n- `allow-select-documents`\n- `allow-preview-file`\n- `allow-share-file`\n- `allow-generate-image-thumbnail`\n- `allow-generate-video-poster`\n- `allow-cancel-video-poster`\n- `allow-list-shared-imports`\n- `allow-stage-shared-imports`\n- `allow-acknowledge-shared-imports`",
           "type": "string",
           "const": "mobile-integration:default",
-          "markdownDescription": "Allows the Transfer Genie mobile integration diagnostic command.\n#### This default permission set includes:\n\n- `allow-diagnostic`\n- `allow-set-navigation-gestures-enabled`\n- `allow-navigate-native-page`\n- `allow-select-media`\n- `allow-select-documents`\n- `allow-preview-file`\n- `allow-share-file`\n- `allow-generate-image-thumbnail`\n- `allow-generate-video-poster`\n- `allow-cancel-video-poster`"
+          "markdownDescription": "Allows the Transfer Genie mobile integration diagnostic command.\n#### This default permission set includes:\n\n- `allow-diagnostic`\n- `allow-set-navigation-gestures-enabled`\n- `allow-navigate-native-page`\n- `allow-select-media`\n- `allow-select-documents`\n- `allow-preview-file`\n- `allow-share-file`\n- `allow-generate-image-thumbnail`\n- `allow-generate-video-poster`\n- `allow-cancel-video-poster`\n- `allow-list-shared-imports`\n- `allow-stage-shared-imports`\n- `allow-acknowledge-shared-imports`"
+        },
+        {
+          "description": "Enables the acknowledge_shared_imports command without any pre-configured scope.",
+          "type": "string",
+          "const": "mobile-integration:allow-acknowledge-shared-imports",
+          "markdownDescription": "Enables the acknowledge_shared_imports command without any pre-configured scope."
         },
         {
           "description": "Enables the cancel_video_poster command without any pre-configured scope.",
@@ -2563,6 +2569,12 @@
           "type": "string",
           "const": "mobile-integration:allow-generate-video-poster",
           "markdownDescription": "Enables the generate_video_poster command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the list_shared_imports command without any pre-configured scope.",
+          "type": "string",
+          "const": "mobile-integration:allow-list-shared-imports",
+          "markdownDescription": "Enables the list_shared_imports command without any pre-configured scope."
         },
         {
           "description": "Enables the navigate_native_page command without any pre-configured scope.",
@@ -2601,6 +2613,18 @@
           "markdownDescription": "Enables the share_file command without any pre-configured scope."
         },
         {
+          "description": "Enables the stage_shared_imports command without any pre-configured scope.",
+          "type": "string",
+          "const": "mobile-integration:allow-stage-shared-imports",
+          "markdownDescription": "Enables the stage_shared_imports command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the acknowledge_shared_imports command without any pre-configured scope.",
+          "type": "string",
+          "const": "mobile-integration:deny-acknowledge-shared-imports",
+          "markdownDescription": "Denies the acknowledge_shared_imports command without any pre-configured scope."
+        },
+        {
           "description": "Denies the cancel_video_poster command without any pre-configured scope.",
           "type": "string",
           "const": "mobile-integration:deny-cancel-video-poster",
@@ -2623,6 +2647,12 @@
           "type": "string",
           "const": "mobile-integration:deny-generate-video-poster",
           "markdownDescription": "Denies the generate_video_poster command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the list_shared_imports command without any pre-configured scope.",
+          "type": "string",
+          "const": "mobile-integration:deny-list-shared-imports",
+          "markdownDescription": "Denies the list_shared_imports command without any pre-configured scope."
         },
         {
           "description": "Denies the navigate_native_page command without any pre-configured scope.",
@@ -2659,6 +2689,12 @@
           "type": "string",
           "const": "mobile-integration:deny-share-file",
           "markdownDescription": "Denies the share_file command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the stage_shared_imports command without any pre-configured scope.",
+          "type": "string",
+          "const": "mobile-integration:deny-stage-shared-imports",
+          "markdownDescription": "Denies the stage_shared_imports command without any pre-configured scope."
         },
         {
           "description": "This permission set allows opening `mailto:`, `tel:`, `https://` and `http://` urls using their default application\nas well as reveal file in directories using default file explorer\n#### This default permission set includes:\n\n- `allow-open-url`\n- `allow-reveal-item-in-dir`\n- `allow-default-urls`",

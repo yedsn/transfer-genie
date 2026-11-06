@@ -185,6 +185,8 @@ cargo install tauri-cli --locked
 cargo tauri build
 ```
 
+GitHub Release、Gitee 同步和下载代理配置见：[`docs/develop/build-and-release.md`](docs/develop/build-and-release.md)
+
 构建产物默认位于：
 
 - Windows：`target/release/bundle/`

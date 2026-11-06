@@ -198,17 +198,49 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
       GITEE_SYNC_PROXY: ${{ vars.GITEE_SYNC_PROXY }}
-      https_proxy: ${{ vars.GITEE_SYNC_PROXY }}
-      http_proxy: ${{ vars.GITEE_SYNC_PROXY }}
-      no_proxy: gitee.com,localhost,127.0.0.1
+      GITEE_SYNC_USE_ARIA2: ${{ vars.GITEE_SYNC_USE_ARIA2 }}
 
     steps:
+      - name: Configure proxy for GitHub access
+        shell: bash
+        run: |
+          no_proxy_hosts="gitee.com,.gitee.com,localhost,127.0.0.1"
+          echo "NO_PROXY=$no_proxy_hosts" >> "$GITHUB_ENV"
+          echo "no_proxy=$no_proxy_hosts" >> "$GITHUB_ENV"
+          if [ -n "$GITEE_SYNC_PROXY" ]; then
+            {
+              echo "HTTP_PROXY=$GITEE_SYNC_PROXY"
+              echo "HTTPS_PROXY=$GITEE_SYNC_PROXY"
+              echo "http_proxy=$GITEE_SYNC_PROXY"
+              echo "https_proxy=$GITEE_SYNC_PROXY"
+            } >> "$GITHUB_ENV"
+          fi
+          echo "GitHub downloads use GITEE_SYNC_PROXY; Gitee remains direct via NO_PROXY."
+
       - name: Checkout repository
         uses: actions/checkout@v5
 
       - name: Skip when Gitee token is not configured
         if: ${{ env.GITEE_ACCESS_TOKEN == '' }}
         run: echo "GITEE_ACCESS_TOKEN is not configured, skipping Gitee release sync."
+
+      - name: Check selected download tool
+        if: ${{ env.GITEE_ACCESS_TOKEN != '' }}
+        shell: bash
+        run: |
+          if [ "${GITEE_SYNC_USE_ARIA2,,}" = "true" ]; then
+            if ! command -v aria2c >/dev/null 2>&1; then
+              echo "::error::GITEE_SYNC_USE_ARIA2=true, but aria2c is not available."
+              exit 1
+            fi
+            aria2c --version
+          else
+            if ! command -v curl >/dev/null 2>&1; then
+              echo "::error::curl is required when GITEE_SYNC_USE_ARIA2 is not true."
+              exit 1
+            fi
+            curl --version
+          fi
 
       - name: Sync GitHub release assets to Gitee
         if: ${{ env.GITEE_ACCESS_TOKEN != '' }}
