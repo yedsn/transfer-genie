@@ -170,6 +170,9 @@ function compareMessages(a: MobileMessage, b: MobileMessage) {
 
 export function useMobileController() {
   let viewGeneration = 0;
+  let startupTimer: number | undefined;
+  let startupDeadline = 0;
+  let finishStartupWait: (() => void) | undefined;
   let feedRead: Promise<void> = Promise.resolve();
   let searchGeneration = 0;
   let markedGeneration = 0;
@@ -178,6 +181,8 @@ export function useMobileController() {
   const state = reactive({
     previewMode,
     boot: "loading" as "loading" | "no-profile" | "choose-profile" | "signed-out" | "needs-space" | "ready" | "error",
+    startupTitle: "",
+    startupSettingsLoaded: false,
     busy: false,
     error: "",
     toast: { id: 0, visible: false, message: "", tone: "success" as "success" | "info" | "error" },
@@ -462,7 +467,44 @@ export function useMobileController() {
     { flush: "sync" },
   );
 
+  function clearStartupWait(interrupt = false) {
+    window.clearTimeout(startupTimer);
+    startupDeadline = 0;
+    if (interrupt) finishStartupWait?.();
+    finishStartupWait = undefined;
+  }
+
+  function leaveStartup() {
+    if (state.boot !== "loading") return;
+    viewGeneration += 1;
+    clearStartupWait(true);
+    state.boot = "choose-profile";
+    state.busy = false;
+  }
+
+  function checkStartupDeadline() {
+    if (state.boot !== "loading" || !startupDeadline || Date.now() < startupDeadline) return;
+    viewGeneration += 1;
+    clearStartupWait(true);
+    state.startupTitle = state.startupSettingsLoaded ? "存储空间连不上" : "本地配置读取超时";
+    state.error = state.startupSettingsLoaded
+      ? "连接超时，请检查网络或切换存储空间" : "本地配置读取超时，请重试";
+    state.boot = "error";
+    state.busy = false;
+  }
+
+  function disposeStartup() {
+    viewGeneration += 1;
+    clearStartupWait(true);
+  }
+
   async function initialize() {
+    clearStartupWait(true);
+    const interrupted = new Promise<void>((resolve) => { finishStartupWait = resolve; });
+    await Promise.race([initializeState(), interrupted]);
+  }
+
+  async function initializeState() {
     window.clearTimeout(draftSaveTimer);
     state.composer.persistenceReady = false;
     state.composer.draftPersisted = false;
@@ -511,6 +553,10 @@ export function useMobileController() {
     state.shareImport.error = "";
     clearFeedback();
     state.boot = "loading";
+    state.startupTitle = "";
+    state.startupSettingsLoaded = false;
+    startupDeadline = Date.now() + 10000;
+    startupTimer = window.setTimeout(checkStartupDeadline, 10000);
     if (previewMode) {
       state.settings = { sender_name: "Jam", active_storage_profile_id: "preview-profile", default_editor_format: "text" };
       state.activeProfile = { id: "preview-profile", name: "Personal", provider_kind: "supabase", enabled: true, supabase: { api_url: "https://preview.supabase.invalid", space_id: "preview-space", binding_state: "bound" } };
@@ -529,6 +575,7 @@ export function useMobileController() {
       state.transfers = [{ id: "preview-upload", name: "产品录屏.mov", detail: "等待云端确认", progress: 64, state: "progress" }];
       state.appVersion = "preview";
       state.boot = "ready";
+      clearStartupWait();
       state.composer.persistenceReady = true;
       persistedDraftFingerprint = composerDraftFingerprint();
       state.composer.draftPersisted = true;
@@ -539,6 +586,7 @@ export function useMobileController() {
       const settings = await api().settings.getSettings();
       if (generation !== viewGeneration) return;
       state.settings = settings;
+      state.startupSettingsLoaded = true;
       state.profiles = (state.settings?.storage_profiles || []).filter((profile: any) => profile.provider_kind === "supabase");
       state.connectionStates = Object.fromEntries(state.profiles.map((profile: any) => {
         const bindingState = profile?.supabase?.binding_state || "bound";
@@ -567,7 +615,7 @@ export function useMobileController() {
       }
       state.connectionStates[state.activeProfile.id] = "checking";
       try {
-        const account = await api().settings.supabaseCurrentUser(state.activeProfile.id);
+        const account = await api().settings.supabaseCurrentUser(state.activeProfile.id, true);
         if (generation !== viewGeneration) return;
         state.account = account;
       } catch (error) {
@@ -586,14 +634,28 @@ export function useMobileController() {
       await restoreComposerDraft();
       if (generation !== viewGeneration) return;
       state.boot = "ready";
+      clearStartupWait();
       const results = await Promise.allSettled([refreshMessages(), refreshMarked(), refreshStatus(), refreshTransfers(), refreshCache(), loadAppVersion()]);
       if (generation !== viewGeneration) return;
       const failure = results.find((result) => result.status === "rejected") as PromiseRejectedResult | undefined;
       if (failure) showToast(`部分本机状态暂时无法读取：${errorText(failure.reason)}`, "info");
     } catch (error) {
       if (generation !== viewGeneration) return;
-      setError(error);
-      state.boot = "error";
+      const kind = (error as any)?.kind;
+      if (kind === "session_revoked" || kind === "invalid_credentials") {
+        if (state.activeProfile) state.connectionStates[state.activeProfile.id] = "signed-out";
+        state.boot = "signed-out";
+        state.error = "登录已失效，请重新登录或切换存储空间";
+      } else {
+        state.startupTitle = !state.startupSettingsLoaded ? "本地配置读取失败" : "存储空间连不上";
+        // Native error payloads can contain credentials; use curated recovery copy.
+        state.error = !state.startupSettingsLoaded ? "无法读取本地配置，请重试"
+          : /超时/.test(errorText(error)) ? "连接超时，请检查网络或切换存储空间"
+          : "请检查网络或服务状态，或切换存储空间";
+        state.boot = "error";
+      }
+    } finally {
+      if (generation === viewGeneration) clearStartupWait();
     }
   }
 
@@ -970,6 +1032,7 @@ export function useMobileController() {
   }
 
   async function refreshAfterForeground() {
+    checkStartupDeadline();
     if (previewMode || state.boot !== "ready") return;
     const generation = viewGeneration;
     try { await Promise.all([refreshMessages(), refreshMarked(), refreshStatus(), refreshTransfers()]); }
@@ -1917,7 +1980,7 @@ export function useMobileController() {
   }
 
   return {
-    state, currentSpace, selectableProfiles, pendingCount, activeTransfers, signedIn, initialize, refreshAll, pullLatest, refreshRuntimeState, refreshAfterForeground, refreshMessages, loadOlderMessages, searchMessages, loadMoreSearch, setMarkedFilter, loadMoreMarked, loadConflicts, resolveConflict, retryTransfer,
+    state, currentSpace, selectableProfiles, pendingCount, activeTransfers, signedIn, initialize, leaveStartup, checkStartupDeadline, disposeStartup, refreshAll, pullLatest, refreshRuntimeState, refreshAfterForeground, refreshMessages, loadOlderMessages, searchMessages, loadMoreSearch, setMarkedFilter, loadMoreMarked, loadConflicts, resolveConflict, retryTransfer,
     selectMedia, selectDocuments, importPendingShares, removeAttachment, sendDraft, prepareNewComposer, persistComposerDraft, persistComposerDraftForNavigation, deactivateComposerPersistence, toggleMark, copyMessage, updateMarkedMetadata, createMarkedTag, deleteMessage, applyMessageSelection, previewMessage, prepareVideo, shareMessage, retryPreview, previewImageFailed, previewDraftAttachment,
     signIn, logout, chooseProfile, diagnoseProfile, setProfileEnabled, beginConnectionEdit, renameProfile, signInProfile, logoutProfile, removeProfile, loadSpaces, switchSpace, testSetupConnection, setupSignIn, completeSetup, resetWizardDownstream, openConnectionWizard, openConnectionRepair, cancelConnectionWizard, selectWizardSpace, backConnectionWizard, createWizardSpace, installTransferListeners, refreshCache, clearCache, clearFeedback, showToast, dismissToast, saveSenderName, saveDefaultEditorFormat,
   };

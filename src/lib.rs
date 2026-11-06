@@ -5926,12 +5926,33 @@ async fn supabase_refresh_session(
 async fn supabase_current_user(
     state: State<'_, AppState>,
     profile_id: String,
+    startup: Option<bool>,
 ) -> Result<SupabaseAccountStatus, supabase_auth::SupabaseAuthError> {
-    let session = verified_supabase_session(&state, &profile_id).await?;
+    let session = if startup.unwrap_or(false) {
+        startup_supabase_session(&state, &profile_id, Duration::from_secs(8)).await?
+    } else {
+        verified_supabase_session(&state, &profile_id).await?
+    };
     let Some(session) = session else {
         return Ok(account_status(&profile_id, None));
     };
     Ok(account_status(&profile_id, Some(&session)))
+}
+
+// Bound the whole startup chain, including refresh, guard acquisition and response bodies.
+async fn startup_supabase_session(
+    state: &AppState,
+    profile_id: &str,
+    budget: Duration,
+) -> Result<Option<supabase_auth::SupabaseSession>, supabase_auth::SupabaseAuthError> {
+    tokio::time::timeout(budget, verified_supabase_session(state, profile_id))
+        .await
+        .map_err(|_| {
+            auth_error(
+                supabase_auth::SupabaseAuthErrorKind::Network,
+                "连接超时，请检查网络或切换存储空间",
+            )
+        })?
 }
 
 #[tauri::command]
@@ -24580,6 +24601,52 @@ mod tests {
         assert!(!serialized.contains("accessToken"));
         assert!(!serialized.contains("refreshToken"));
         assert!(!serialized.contains("password"));
+    }
+
+    #[tokio::test]
+    async fn startup_auth_bounds_headers_body_and_refresh_without_deleting_session() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _credential_guard = credential_store::credential_test_guard();
+        for (send_headers, expired) in [(false, false), (true, false), (false, true)] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let read = socket.read(&mut request).await.unwrap();
+                assert!(read > 0);
+                if send_headers {
+                    socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{").await.unwrap();
+                }
+                std::future::pending::<()>().await;
+            });
+            let profile_id = format!("startup-timeout-{}", rand::random::<u64>());
+            let temp_dir = std::env::temp_dir().join(&profile_id);
+            fs::create_dir_all(&temp_dir).unwrap();
+            let mut settings = test_supabase_settings_with_url(format!("http://{address}"));
+            settings.storage_profiles[0].id = profile_id.clone();
+            settings.active_storage_profile_id = Some(profile_id.clone());
+            let saved = supabase_auth::SupabaseSession {
+                access_token: "fixture-access".into(), refresh_token: "fixture-refresh".into(),
+                user_id: "user-a".into(), email: "fixture@example.invalid".into(),
+                expires_at: if expired { 1 } else { now_ms() / 1000 + 3600 },
+            };
+            credential_store::save_session(&profile_id, &saved).unwrap();
+            let state = test_app_state(&temp_dir, settings);
+            state.supabase_sessions.lock().unwrap().insert(profile_id.clone(), saved);
+            let error = tokio::time::timeout(Duration::from_secs(2),
+                startup_supabase_session(&state, &profile_id, Duration::from_millis(100)))
+                .await.unwrap().unwrap_err();
+            assert_eq!(error.kind, supabase_auth::SupabaseAuthErrorKind::Network);
+            assert!(state.supabase_sessions.lock().unwrap().contains_key(&profile_id));
+            assert!(credential_store::load_session(&profile_id).unwrap().is_some());
+            assert_eq!(current_settings(&state).unwrap().active_storage_profile_id.as_deref(), Some(profile_id.as_str()));
+            // Cancellation must also release the refresh mutex for the next connection.
+            assert!(state.supabase_auth_guard.try_lock().is_ok());
+            server.abort();
+            credential_store::delete_session(&profile_id).unwrap();
+            let _ = fs::remove_dir_all(temp_dir);
+        }
     }
 
     #[tokio::test]
