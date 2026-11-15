@@ -137,6 +137,15 @@ function registerFocus() {
     bridge._setActiveText = (text: string) => {
       syncMarkdownTextFromDraft(text || "");
     };
+    bridge.insertTextAtCursor = (text: string) => {
+      if (componentDisposed || !document.hasFocus()) return false;
+      const active = document.activeElement;
+      const focused = isMarkdown.value ? !!active && !!mdWrap.value?.contains(active) : active === textEl.value;
+      if (!focused) return false;
+      replaceEditorSelection(text);
+      focusEditor();
+      return true;
+    };
     bridge._captureActiveScroll = () => {
       try {
         if (isMarkdown.value && editor?.cm && typeof editor.cm.getScrollInfo === "function") {
@@ -949,7 +958,7 @@ onBeforeUnmount(() => {
   if (visibilityListener) window.removeEventListener("transfer-genie:composer-visibility-change", visibilityListener as EventListener);
   if (resizeListener) window.removeEventListener("resize", resizeListener);
   const bridge = (window as any).transferGenieComposer;
-  if (bridge && props.isActive) { bridge._focusActive = null; bridge._clearActive = null; bridge._setActiveText = null; bridge._captureActiveScroll = null; }
+  if (bridge && props.isActive) { bridge._focusActive = null; bridge._clearActive = null; bridge._setActiveText = null; bridge._captureActiveScroll = null; bridge.insertTextAtCursor = null; }
 });
 
 function setFormat(format: string) {

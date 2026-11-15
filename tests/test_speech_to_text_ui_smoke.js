@@ -2527,7 +2527,7 @@ async function run() {
     assert.equal(buttonResult.startClickCueDelta, 1, 'speech button immediately plays cue when opening recording');
     assert.equal(buttonResult.stopClickCueDelta, 1, 'speech button immediately plays cue when closing recording');
     assert.equal(buttonResult.fullscreenBeforeSend, true, 'speech button test starts from fullscreen');
-    assert.equal(buttonResult.fullscreenExitedImmediately, true, 'speech button exits fullscreen before message list refresh completes');
+    assert.equal(buttonResult.fullscreenExitedImmediately, false, 'speech button preserves fullscreen after sending the transcript');
     assert.equal(buttonResult.markdownSyncCount, 1, 'speech button syncs the editor once for the final transcript');
     assert.equal(buttonResult.markdownSyncText, buttonResult.longText, 'speech button editor sync contains the final transcript');
     assert.equal(buttonResult.request.format, 'wav', 'recording is transcoded to WAV before sending to backend');
@@ -4007,7 +4007,9 @@ async function run() {
       window.__speechSmoke.sentMessages = [];
       window.__speechSmoke.pasteReturnsNoPaste = true;
       window.__speechSmoke.longText = '粘贴失败时的识别结果';
-      document.querySelector('.cw-textarea, #text-input')?.focus();
+      const externalInput = document.createElement('input');
+      document.body.appendChild(externalInput);
+      externalInput.focus();
       await window.__speechSmoke.eventHandlers['system-dictation-toggle']({ payload: null });
       await new Promise((resolve, reject) => {
         const start = Date.now();
@@ -4042,6 +4044,7 @@ async function run() {
       };
       window.__speechSmoke.pasteReturnsNoPaste = false;
       window.__speechSmoke.longText = '语音识别文本'.repeat(20);
+      externalInput.remove();
       return result;
     })()`);
     assert.equal(failedPasteDictationResult.pastedText, '', 'failed paste does not claim that text reached the input');

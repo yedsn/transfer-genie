@@ -1804,10 +1804,34 @@ fn supabase_attachment_object_path(
     attachment_id: &str,
     original_name: &str,
 ) -> String {
+    // URL escaping does not bypass Storage's validation of the decoded object key.
+    let safe_name = if supabase_storage_filename_is_safe(original_name) {
+        original_name.to_string()
+    } else {
+        let extension = Path::new(original_name)
+            .extension()
+            .and_then(|value| value.to_str())
+            .filter(|value| {
+                !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            });
+        match extension {
+            Some(extension) => format!("original.{extension}"),
+            None => "original".to_string(),
+        }
+    };
     format!(
         "{user_id}/{space_id}/{attachment_id}/{}",
-        urlencoding::encode(original_name)
+        urlencoding::encode(&safe_name)
     )
+}
+
+fn supabase_storage_filename_is_safe(name: &str) -> bool {
+    !name.trim().is_empty()
+        && name != "."
+        && name != ".."
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!-_.*'() &$@=;:+,?".contains(&byte))
 }
 
 fn supabase_attachment_preview_object_path(
@@ -4510,7 +4534,15 @@ async fn push_supabase_outbox(
                     "{}/{}/{}/",
                     session.user_id, config.space_id, operation.entity_id
                 );
-                if !object_path.starts_with(&expected_prefix) {
+                let unuploaded_unsafe_name = attachment.upload_state != "uploaded"
+                    && object_path
+                        .strip_prefix(&expected_prefix)
+                        .is_some_and(|name| {
+                            let decoded =
+                                percent_encoding::percent_decode_str(name).decode_utf8_lossy();
+                            !supabase_storage_filename_is_safe(&decoded)
+                        });
+                if !object_path.starts_with(&expected_prefix) || unuploaded_unsafe_name {
                     object_path = supabase_attachment_object_path(
                         &session.user_id,
                         &config.space_id,
@@ -23629,8 +23661,37 @@ mod tests {
                 "attachment-id",
                 "客户 合同#1.pdf",
             ),
-            "user-id/space-id/attachment-id/%E5%AE%A2%E6%88%B7%20%E5%90%88%E5%90%8C%231.pdf"
+            "user-id/space-id/attachment-id/original.pdf"
         );
+    }
+
+    #[test]
+    fn supabase_attachment_paths_use_safe_names_without_losing_file_extensions() {
+        for (name, stored_name) in [
+            (
+                "Winserver重置远程桌面授权（定时任务-单文件安装） Reset-RdsGracePeriod.zip",
+                "original.zip",
+            ),
+            ("合同#1.pdf", "original.pdf"),
+            ("100%20.txt", "original.txt"),
+            ("文件", "original"),
+            ("文件.扩展名", "original"),
+            ("../file.zip", "original.zip"),
+            ("source.bin", "source.bin"),
+            ("report (1).zip", "report%20%281%29.zip"),
+            ("report!.zip", "report%21.zip"),
+            ("", "original"),
+            ("..", "original"),
+            ("预览.jpg", "original.jpg"),
+            ("emoji-📦.ZIP", "original.ZIP"),
+        ] {
+            let path = supabase_attachment_object_path("user", "space", "attachment", name);
+            assert_eq!(
+                path,
+                format!("user/space/attachment/{stored_name}"),
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -24351,6 +24412,10 @@ mod tests {
             .unwrap()
             .entry(path.clone())
             .or_default() += 1;
+        // Storage validates the decoded key, not its percent-encoded request URL.
+        if !path.is_ascii() {
+            return HttpStatusCode::BAD_REQUEST;
+        }
         if state
             .restricted_owner
             .lock()
@@ -33444,6 +33509,225 @@ mod tests {
         assert_eq!(outbox, 2);
         assert!(!sent.filename.is_empty());
         drop(conn);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn supabase_unicode_attachment_upload_repairs_pending_paths_and_retries_safely() {
+        let original_name =
+            "Winserver重置远程桌面授权（定时任务-单文件安装） Reset-RdsGracePeriod.zip";
+        for legacy_encoding in [None, Some(false), Some(true)] {
+            let server = spawn_test_supabase().await;
+            let temp_dir = std::env::temp_dir()
+                .join(format!("transfer-genie-safe-key-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(&temp_dir).unwrap();
+            let state = test_app_state(
+                &temp_dir,
+                test_supabase_settings_with_url(server.base_url.clone()),
+            );
+            db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+            install_test_supabase_session(&state);
+            let source = temp_dir.join("source.zip");
+            let bytes = b"unicode attachment contents";
+            fs::write(&source, bytes).unwrap();
+            let sent = send_file_path_impl(
+                &state,
+                None,
+                &source,
+                original_name.into(),
+                Some("safe-key".into()),
+                None,
+            )
+            .await
+            .unwrap();
+            let ids = supabase_client_send_ids("supabase-1", "user-a", "safe-key");
+            let (profile, session) = active_supabase_scope(&state).unwrap();
+            let prefix = format!(
+                "user-a/{}/{}/",
+                profile.supabase.as_ref().unwrap().space_id,
+                ids.attachment_id
+            );
+            let safe_path = format!("{prefix}original.zip");
+            if let Some(encoded) = legacy_encoding {
+                let legacy_name = if encoded {
+                    urlencoding::encode(original_name).into_owned()
+                } else {
+                    original_name.to_string()
+                };
+                let legacy_path = format!("{prefix}{legacy_name}");
+                let operation =
+                    db::get_outbox_operation(&state.db_path, &ids.attachment_operation_id)
+                        .unwrap()
+                        .unwrap();
+                let mut payload: serde_json::Value =
+                    serde_json::from_str(&operation.payload_json).unwrap();
+                payload["objectPath"] = serde_json::json!(legacy_path);
+                let payload_json = serde_json::to_string(&payload).unwrap();
+                let payload_hash = format!("{:x}", Sha256::digest(payload_json.as_bytes()));
+                let conn = rusqlite::Connection::open(&state.db_path).unwrap();
+                conn.execute(
+                    "UPDATE attachment_sync SET object_path=?1 WHERE attachment_id=?2",
+                    rusqlite::params![legacy_path, ids.attachment_id],
+                )
+                .unwrap();
+                conn.execute(
+                    "UPDATE messages SET remote_path=?1 WHERE message_id=?2",
+                    rusqlite::params![legacy_path, ids.message_id],
+                )
+                .unwrap();
+                conn.execute(
+                    "UPDATE sync_outbox SET payload_json=?1,payload_hash=?2,last_error='Invalid key',attempt_count=1,next_attempt_at_ms=?3 WHERE operation_id=?4",
+                    rusqlite::params![payload_json, payload_hash, now_ms() + 60_000, ids.attachment_operation_id],
+                ).unwrap();
+            }
+            // Use an upload failure first so the existing manual retry path is exercised.
+            server
+                .state
+                .failed_storage_puts
+                .lock()
+                .unwrap()
+                .insert(safe_path.clone());
+            assert!(push_supabase_outbox(&state, &profile, &session, true, None)
+                .await
+                .is_err());
+            let pending = db::get_outbox_operation(&state.db_path, &ids.attachment_operation_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(pending.state, "pending");
+            let payload: serde_json::Value = serde_json::from_str(&pending.payload_json).unwrap();
+            assert_eq!(payload["objectPath"], safe_path);
+            assert_eq!(payload["originalName"], original_name);
+            assert_eq!(
+                pending.payload_hash,
+                format!("{:x}", Sha256::digest(pending.payload_json.as_bytes()))
+            );
+            server.state.failed_storage_puts.lock().unwrap().clear();
+            assert_eq!(
+                push_supabase_outbox(&state, &profile, &session, true, None)
+                    .await
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                push_supabase_outbox(&state, &profile, &session, true, None)
+                    .await
+                    .unwrap(),
+                0
+            );
+            let attachment = db::get_attachment_sync_record(
+                &state.db_path,
+                "supabase-1",
+                "user-a",
+                &ids.attachment_id,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(attachment.object_path.as_deref(), Some(safe_path.as_str()));
+            assert_eq!(attachment.original_name, original_name);
+            assert_eq!(attachment.upload_state, "uploaded");
+            assert_eq!(fs::read(attachment.local_path.unwrap()).unwrap(), bytes);
+            let message =
+                db::get_message_for_scope(&state.db_path, "supabase-1", "user-a", &sent.filename)
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(message.remote_path.as_deref(), Some(safe_path.as_str()));
+            assert_eq!(message.original_name, original_name);
+            assert_eq!(
+                server
+                    .state
+                    .objects
+                    .lock()
+                    .unwrap()
+                    .get(&safe_path)
+                    .unwrap(),
+                bytes
+            );
+            let snapshot = server.state.snapshots.lock().unwrap()
+                [&format!("attachments/{}", ids.attachment_id)]
+                .clone();
+            assert_eq!(snapshot["object_path"], safe_path);
+            assert_eq!(snapshot["original_name"], original_name);
+            assert!(
+                db::list_pending_operations(&state.db_path, "supabase-1", "user-a")
+                    .unwrap()
+                    .is_empty()
+            );
+            let _ = fs::remove_dir_all(temp_dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn supabase_attachment_retry_preserves_already_uploaded_legacy_path() {
+        let server = spawn_test_supabase().await;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "transfer-genie-uploaded-key-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(
+            &temp_dir,
+            test_supabase_settings_with_url(server.base_url.clone()),
+        );
+        db::init_db(&state.db_path, Some("supabase-1")).unwrap();
+        install_test_supabase_session(&state);
+        let original_name = "旧附件.zip";
+        let object_path = format!(
+            "user-a/00000000-0000-4000-8000-000000000001/legacy-attachment/{}",
+            urlencoding::encode(original_name)
+        );
+        seed_supabase_preview_message(
+            &state,
+            "legacy-file",
+            original_name,
+            "legacy-attachment",
+            &object_path,
+            None,
+            None,
+        );
+        let attachment = db::get_attachment_sync_record(
+            &state.db_path,
+            "supabase-1",
+            "user-a",
+            "legacy-attachment",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(attachment.upload_state, "uploaded");
+        let operation = outbox_operation(
+            "supabase-1",
+            "user-a",
+            "attachment",
+            "legacy-attachment",
+            "upsert",
+            attachment.remote_revision,
+            supabase_attachment_payload(&attachment, None),
+        )
+        .unwrap();
+        db::set_attachment_preview_and_enqueue(
+            &state.db_path,
+            "supabase-1",
+            "user-a",
+            "legacy-attachment",
+            "user-a/00000000-0000-4000-8000-000000000001/legacy-attachment/preview.jpg",
+            &operation,
+            now_ms(),
+        )
+        .unwrap();
+        server.state.snapshots.lock().unwrap().insert(
+            format!("messages/{}", attachment.message_id),
+            serde_json::json!({"id":attachment.message_id}),
+        );
+        let (profile, session) = active_supabase_scope(&state).unwrap();
+        assert_eq!(
+            push_supabase_outbox(&state, &profile, &session, true, None)
+                .await
+                .unwrap(),
+            1
+        );
+        let snapshot =
+            server.state.snapshots.lock().unwrap()["attachments/legacy-attachment"].clone();
+        assert_eq!(snapshot["object_path"], object_path);
+        assert!(server.state.storage_put_counts.lock().unwrap().is_empty());
         let _ = fs::remove_dir_all(temp_dir);
     }
 

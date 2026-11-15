@@ -3700,6 +3700,10 @@ async function pasteDictationTextToFocusedInput(text) {
 async function copyThenPasteSpeechTranscript(text) {
   const value = String(text || '').trim();
   if (!value) return { copied: false, pasted: false, focusDetected: false };
+  if (window.transferGenieComposer?.insertTextAtCursor?.(value)) {
+    const copied = await copySpeechTranscriptToClipboard(value);
+    return { copied, pasted: true, focusDetected: true };
+  }
   // The native command writes the clipboard immediately before dispatching Ctrl+V.
   if (invoke) return pasteDictationTextToFocusedInput(value);
   const copied = await copySpeechTranscriptToClipboard(value);
@@ -3944,6 +3948,7 @@ function insertTextIntoComposer(text) {
   if (!value) return;
   const cw = window.transferGenieComposer;
   if (cw && cw.isActive && cw.isActive() && cw.getActiveDraft && cw.setActiveDraftText) {
+    if (cw.insertTextAtCursor?.(value)) return;
     const draft = cw.getActiveDraft() || {};
     const previous = String(draft.text || '');
     const separator = previous && !previous.endsWith('\n') ? '\n' : '';
@@ -4320,7 +4325,6 @@ async function finishSpeechRecording() {
       resetLiveSpeechTranscription();
       void finishSpeechMessageSend(speechSendPromise).then(() => {
         logSystemDictation('background message send done', { sendMs: Math.round(performance.now() - sendStartedAt) });
-        exitComposerFullscreenAfterSendSuccess();
         void loadMessages({ scrollToBottom: true });
       }).catch((error) => {
         saveSpeechTaskInBackground({ ...pendingSpeechTask, status: 'failed', error: String(error), updatedAtMs: Date.now() }, '保存失败任务');
@@ -4353,7 +4357,6 @@ async function finishSpeechRecording() {
     const speechSendPromise = Promise.resolve().then(() => sendSpeechTranscriptMessage(audio, result?.text || '', rawText));
     void finishSpeechMessageSend(speechSendPromise).then(() => {
       console.info(`[speech-to-text] background message send ${formatSpeechTimingMs(performance.now() - sendStartedAt)}`);
-      exitComposerFullscreenAfterSendSuccess();
       void loadMessages({ scrollToBottom: true });
     }).catch((error) => {
       saveSpeechTaskInBackground({ ...pendingSpeechTask, status: 'failed', error: String(error), updatedAtMs: Date.now() }, '保存失败任务');
