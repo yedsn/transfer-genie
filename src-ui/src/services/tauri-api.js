@@ -159,8 +159,8 @@
     async cancelSupabaseBindingFlow(flowId) {
       return invoke('cancel_supabase_binding_flow', { input: { flowId } });
     },
-    async supabaseCurrentUser(profileId) {
-      return invoke('supabase_current_user', { profileId });
+    async supabaseCurrentUser(profileId, startup = false) {
+      return invoke('supabase_current_user', { profileId, startup });
     },
     async refreshSupabaseSession(profileId) {
       return invoke('supabase_refresh_session', { profileId });

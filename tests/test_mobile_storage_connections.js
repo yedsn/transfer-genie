@@ -99,7 +99,7 @@ for (const lock of ['sending', 'selecting']) {
   await controller.chooseProfile(profileC);
   assert.deepEqual(calls.activate, [], `${lock} blocks backend activation`);
   assert.equal(controller.state.activeProfile.id, 'profile-a');
-  assert.match(controller.state.notice, /等待/);
+  assert.match(controller.state.toast.message, /等待/);
   controller.state.composer[lock] = false;
 }
 rejectActivation = true;
@@ -236,7 +236,7 @@ assert.equal(calls.bindings.filter(item => item.flowId === 'flow-config-retry').
 assert.equal(controller.state.activeProfile.id, 'profile-c', 'save-only keeps the previous active profile');
 assert.ok(controller.state.profiles.some(item => item.id === 'saved-space-retry'));
 assert.ok(calls.settingsReads > settingsReadsBeforeRetry, 'completion reloads authoritative settings');
-assert.match(controller.state.notice, /当前连接未切换/);
+assert.match(controller.state.toast.message, /当前连接未切换/);
 
 // A committed binding remains saved when the optional activation fails. The
 // consumed flow is closed and a retry must happen from the saved connection.
@@ -255,7 +255,7 @@ assert.equal(controller.state.connectionWizard.open, false);
 assert.equal(controller.state.connectionWizard.flowId, '');
 assert.ok(controller.state.profiles.some(item => item.id === 'saved-space-saved'), 'saved profile is reloaded from authoritative settings');
 assert.equal(controller.state.activeProfile.id, 'profile-c', 'failed activation preserves the previous active profile');
-assert.match(controller.state.notice, /已保存，但未切换/);
+assert.match(controller.state.toast.message, /已保存，但未切换/);
 assert.equal(controller.state.error, '');
 
 // Changing endpoint inputs invalidates every downstream result and cancels the old flow.
@@ -308,7 +308,7 @@ rejectSettingsRead = true;
 await controller.initialize();
 rejectSettingsRead = false;
 assert.equal(controller.state.boot, 'error');
-assert.match(controller.state.error, /fixture settings unavailable/);
+assert.match(controller.state.error, /无法读取本地配置/);
 await controller.chooseProfile(profileC);
 assert.equal(controller.state.boot, 'ready', 'initialization errors still allow selecting a saved connection');
 assert.equal(controller.state.activeProfile.id, 'profile-c');

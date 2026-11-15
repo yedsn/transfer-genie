@@ -650,6 +650,7 @@ async function handleNativePageShown(event: Event) {
 }
 
 function openSheet(name: SheetName) {
+  if (name === "connection-manager") controller.leaveStartup();
   window.clearTimeout(composerCloseTimer);
   window.clearTimeout(draftStatusTimer);
   if (name === "composer" && !state.composer.sending) {
@@ -842,6 +843,7 @@ watch(
       endSelection();
     }
   },
+  { flush: "sync" },
 );
 function selectTab(tab: MobileTab) {
   if (selectionMode.value && state.busy) return;
@@ -1114,6 +1116,7 @@ async function refreshFeed() {
 }
 
 onMounted(async () => {
+  document.addEventListener("visibilitychange", controller.checkStartupDeadline);
   if (!state.previewMode || (window as any).__TRANSFER_GENIE_SHARE_IMPORT_SPY__) {
     try {
       const unlisten = await (window as any).transferGenieApi?.event?.listen(
@@ -1184,6 +1187,8 @@ onMounted(async () => {
   }, 30000);
 });
 onBeforeUnmount(() => {
+  controller.disposeStartup();
+  document.removeEventListener("visibilitychange", controller.checkStartupDeadline);
   releaseKeyboardPrimer();
   window.clearTimeout(editorWarmTimer);
   if (editorWarmIdle !== undefined) (window as any).cancelIdleCallback?.(editorWarmIdle);
@@ -1242,6 +1247,10 @@ onBeforeUnmount(() => {
         <h1>Transfer Genie</h1>
         <p>正在准备你的空间</p>
         <div class="mobile-loading-dots" aria-hidden="true"><i></i><i></i><i></i></div>
+        <template v-if="state.startupSettingsLoaded">
+          <button class="mobile-secondary-button" type="button" @click="controller.leaveStartup">切换存储空间</button>
+          <button class="mobile-secondary-button" type="button" @click="openSheet('connection-manager')">管理存储空间</button>
+        </template>
       </section>
       <section
         v-else-if="state.connectionWizard.open"
@@ -1340,7 +1349,7 @@ onBeforeUnmount(() => {
       </section>
       <section v-else class="mobile-gate-card">
         <span class="mobile-gate-logo">!</span>
-        <h1>暂时无法打开</h1>
+        <h1>{{ state.startupTitle || "暂时无法打开" }}</h1>
         <p>{{ state.error || "移动端初始化失败，本机数据没有被删除。" }}</p>
         <button
           class="mobile-primary-button"
@@ -1349,8 +1358,8 @@ onBeforeUnmount(() => {
         >
           重试
         </button>
-        <button v-if="state.profiles.length" class="mobile-secondary-button" type="button" @click="state.boot = 'choose-profile'; state.error = ''">选择其他连接</button>
-        <button v-if="state.profiles.length" class="mobile-secondary-button" type="button" @click="openSheet('connection-manager')">管理连接</button>
+        <button v-if="state.profiles.length" class="mobile-secondary-button" type="button" @click="state.boot = 'choose-profile'; state.error = ''">切换存储空间</button>
+        <button v-if="state.profiles.length" class="mobile-secondary-button" type="button" @click="openSheet('connection-manager')">管理存储空间</button>
         <button class="mobile-secondary-button" type="button" @click="controller.openConnectionWizard">新增连接</button>
       </section>
       <p

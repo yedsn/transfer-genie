@@ -26,7 +26,7 @@ try {
     ui.state.boot = 'error';
     ui.state.error = 'fixture initialization error';
   });
-  await page.getByRole('button', { name: '管理连接' }).click();
+  await page.getByRole('button', { name: '管理存储空间' }).click();
   await page.waitForSelector('.mobile-connection-manager');
   assert.equal(await page.locator('.mobile-onboarding').getAttribute('inert'), '');
   assert.equal(await page.locator('.mobile-connection-card').count(), 2);
