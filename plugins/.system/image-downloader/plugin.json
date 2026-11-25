@@ -1,0 +1,18 @@
+{
+  "manifest_version": 1,
+  "id": "image-downloader",
+  "name": "图片下载",
+  "version": "1.0.0",
+  "host_api_version": 1,
+  "supported_platforms": ["windows", "macos"],
+  "capabilities": [{"kind":"bot", "input_types":["image","url"], "batch":true}],
+  "runtime": {"mode":"oneshot", "command":"@host-image-bot", "args":[]},
+  "config_schema": [
+    {"key":"name","label":"机器人名称","kind":"text","default":"图片下载"},
+    {"key":"download_dir","label":"下载目录","kind":"directory","required":true},
+    {"key":"max_size_mib","label":"单项大小上限 MiB（1–100）","kind":"number","default":100},
+    {"key":"timeout_seconds","label":"单项总时限 秒（1–600）","kind":"number","default":600},
+    {"key":"idle_timeout_seconds","label":"无数据时限 秒（1–30）","kind":"number","default":30},
+    {"key":"concurrency","label":"并发数量（1–8）","kind":"number","default":2}
+  ]
+}

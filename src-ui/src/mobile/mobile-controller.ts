@@ -1328,7 +1328,7 @@ export function useMobileController() {
   async function sendDraft() {
     if (state.boot !== "ready" || state.busy || state.composer.sending || state.composer.selecting) return false;
     const generation = viewGeneration;
-    const text = state.composer.text.trim();
+    const text = state.composer.text.trim() || ((window as any).transferGeniePlugins?.state?.references?.length ? '处理引用的消息' : '');
     if (!text && !state.composer.attachments.length) return false;
     const missing = state.composer.attachments.filter((attachment) => attachment.available === false);
     if (missing.length) {
@@ -1355,7 +1355,12 @@ export function useMobileController() {
     };
     try {
       if (text) {
-        await api().message.sendText({ text, format: state.composer.format, markedOptions, clientId: state.composer.textClientId });
+        const plugins = (window as any).transferGeniePlugins;
+        await plugins?.setScope?.([state.activeProfile?.id,state.account?.userId,currentSpace.value?.id].map(value => value || '').join(':'));
+        const pluginDraft = plugins?.getCallContext?.() || {};
+        const pluginDraftScope = plugins?.state?.scope;
+        await api().message.sendText({ text, format: state.composer.format, markedOptions, clientId: state.composer.textClientId, ...pluginDraft });
+        plugins?.clearCallContext?.(pluginDraft, pluginDraftScope);
         if (generation !== viewGeneration) return false;
         localSaveCount += 1;
         state.composer.text = "";

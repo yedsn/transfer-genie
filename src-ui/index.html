@@ -176,6 +176,7 @@
                 <div id="selection-bar" class="selection-bar" hidden>
                   <button id="select-all" class="button ghost small" type="button">全选</button>
                   <button id="delete-selected" class="button small" type="button">删除</button>
+                  <button id="quote-selected" class="button ghost small" type="button">引用</button>
                   <button id="cancel-selection" class="button ghost small" type="button">取消</button>
                 </div>
               </div>
@@ -229,7 +230,7 @@
                  @dblclick="openMessagePreview(card.message)"
                 >
                   <div class="message-header">
-                    <span>{{ card.headerText }}</span>
+                    <span><reference-preview :filename="card.filename" identity-only></reference-preview>{{ card.headerText }}</span>
                   </div>
                   <div
                     class="message-body"
@@ -246,9 +247,11 @@
                   >
                     {{ card.expandLabel }}
                   </button>
+                  <reference-preview :filename="card.filename" references-only></reference-preview>
                   <div class="message-footer">
                     <div class="message-meta">{{ card.metaText }}</div>
                     <div class="message-actions">
+                      <button class="button ghost small" type="button" @click="referenceMessage(card.message)">引用</button>
                       <button
                         class="button ghost small icon-only mark-action"
                         :class="{ 'is-marked': card.isMarked }"
@@ -302,6 +305,7 @@
              </div>
             <section class="composer">
               <label for="text-input" class="visually-hidden">发送文本</label>
+              <bot-composer></bot-composer>
         <div class="composer-body">
              <button id="composer-fullscreen-toggle" class="composer-expand-button" type="button" title="放大输入框" aria-label="放大输入框" style="display:none">
                <img id="composer-fullscreen-icon" src="icons/fullscreen.svg" alt="" />
@@ -788,9 +792,14 @@
                   <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-ai">AI 助手</button>
                   <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-telegram">Telegram Bridge</button>
                   <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-data">数据管理</button>
+                  <button class="settings-nav-button" type="button" data-settings-nav-target="settings-section-plugins">插件管理</button>
+                  <div v-if="pluginState.plugins.some(plugin => plugin.enabled)" class="plugin-nav-label">插件设置</div>
+                  <button v-for="plugin in pluginState.plugins.filter(plugin => plugin.enabled)" :key="plugin.manifest.id" class="settings-nav-button plugin-nav-item" type="button" :data-settings-nav-target="'settings-plugin-' + plugin.manifest.id">{{ plugin.manifest.name }}</button>
                 </div>
               </aside>
               <div class="settings-content">
+                <div class="settings-section" id="settings-section-plugins" data-settings-section><plugins-panel></plugins-panel></div>
+                <div v-for="plugin in pluginState.plugins.filter(plugin => plugin.enabled)" :key="plugin.manifest.id" class="settings-section" :id="'settings-plugin-' + plugin.manifest.id" data-settings-section><plugins-panel :plugin-id="plugin.manifest.id"></plugins-panel></div>
                 <div class="endpoint-settings settings-section" id="settings-section-webdav" data-settings-section>
                 <div class="endpoint-header">
                   <div>

@@ -24,6 +24,9 @@ $report = [ordered]@{
   ffmpegVersion = $null
   applicationExecutable = $null
   applicationArchitecture = $null
+  imageBot = $null
+  imageBotSha256 = $null
+  imageBotArchitecture = $null
   launchVerified = $false
 }
 
@@ -54,6 +57,7 @@ $requiredMetadata = @(
   "tools/ffmpeg/README.md",
   "tools/ffmpeg/sidecars.json",
   "THIRD_PARTY_NOTICES.md"
+  "tools/image-bot/plugin.json"
 )
 
 function Assert-Path {
@@ -78,6 +82,16 @@ function Assert-MacArchitecture {
   return $description
 }
 
+function Assert-ImageBotManifest {
+  param([string]$Path)
+  Assert-Path $Path "image bot manifest"
+  $plugin = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+  if ($plugin.id -ne "image-downloader" -or $plugin.manifest_version -ne 1 -or
+      $plugin.host_api_version -ne 1 -or $plugin.runtime.command -ne "@host-image-bot") {
+    throw "Packaged image bot manifest is incompatible: $Path"
+  }
+}
+
 if ($Target -eq "windows-x64") {
   if (-not $IsWindows) { throw "windows-x64 bundle verification must run on Windows." }
 
@@ -89,12 +103,17 @@ if ($Target -eq "windows-x64") {
   $installerScript = Join-Path $profileRoot "nsis/x64/installer.nsi"
   Assert-Path $installerScript "generated NSIS script"
   $scriptText = Get-Content -LiteralPath $installerScript -Raw -Encoding UTF8
-  foreach ($resource in $requiredMetadata + @("tools/ffmpeg/ffmpeg.exe")) {
+  foreach ($resource in $requiredMetadata + @("tools/ffmpeg/ffmpeg.exe", "tools/image-bot/transfer-genie-image-bot.exe")) {
     $nsisPath = $resource.Replace("/", "\")
     if ($scriptText -notmatch [regex]::Escape($nsisPath)) {
       throw "Generated NSIS script does not package $resource."
     }
   }
+  Assert-ImageBotManifest (Join-Path $repoRoot "tools/image-bot/plugin.json")
+  $imageBot = Join-Path $repoRoot "tools/image-bot/transfer-genie-image-bot.exe"
+  Assert-Path $imageBot "image bot executable"
+  $report.imageBot = "tools/image-bot/transfer-genie-image-bot.exe"
+  $report.imageBotSha256 = Get-Sha256 $imageBot
 
   $report.bundle = $installer.FullName
   $report.bundleSha256 = Get-Sha256 $installer.FullName
@@ -133,6 +152,17 @@ if ($Target -eq "windows-x64") {
     foreach ($resource in $requiredMetadata) {
       Assert-Path (Join-Path $resourcesRoot $resource) "packaged resource $resource"
     }
+    Assert-ImageBotManifest (Join-Path $resourcesRoot "tools/image-bot/plugin.json")
+    $imageBot = Join-Path $resourcesRoot "tools/image-bot/transfer-genie-image-bot"
+    Assert-Path $imageBot "packaged image bot executable"
+    $report.imageBotArchitecture = Assert-MacArchitecture $imageBot $expectedArchitecture "image bot"
+    if ((Get-Sha256 $imageBot) -ne (Get-Sha256 (Join-Path $repoRoot "tools/image-bot/transfer-genie-image-bot"))) {
+      throw "Packaged image bot does not match the built executable."
+    }
+    & test -x $imageBot
+    if ($LASTEXITCODE -ne 0) { throw "Packaged image bot is not executable." }
+    $report.imageBot = $imageBot
+    $report.imageBotSha256 = Get-Sha256 $imageBot
 
     $ffmpeg = Join-Path $resourcesRoot "tools/ffmpeg/ffmpeg"
     Assert-Path $ffmpeg "packaged FFmpeg executable"

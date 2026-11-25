@@ -808,6 +808,7 @@ function bindMarkdownInstance(instance: any, draftId: string, editorId: string) 
       markdownChangeHandler = () => {
         if (componentDisposed || editor !== instance || props.draft.id !== draftId || syncingMarkdownFromDraft) return;
         composerStore.setDraftText(draftId, cm.getValue());
+        cm.getInputField().dispatchEvent(new CustomEvent('bot-editor-change',{bubbles:true,detail:{cm}}));
       };
       cm.on("change", markdownChangeHandler);
       cm.on("focus", () => {

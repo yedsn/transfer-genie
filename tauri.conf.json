@@ -5,7 +5,7 @@
     "identifier":  "com.transfergenie",
     "build":  {
                   "beforeDevCommand":  "npm run dev",
-                  "beforeBuildCommand":  "npm run build",
+                  "beforeBuildCommand":  "node scripts/build-image-bot.mjs && npm run build",
                   "devUrl":  "http://127.0.0.1:7120",
                   "frontendDist":  "./dist"
               },
@@ -44,6 +44,7 @@
                             ],
                    "resources":  [
                                      "tools/ffmpeg/*",
+                                     "tools/image-bot/*",
                                      "THIRD_PARTY_NOTICES.md"
                                  ],
                    "macOS":  {

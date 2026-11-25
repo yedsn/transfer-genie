@@ -63,6 +63,7 @@ function commit(next: ComposerState) {
   state.layoutTree = next.layoutTree;
   state.activePaneId = next.activePaneId;
   persistence.save(state);
+  (window as any).transferGeniePlugins?.setComposerDraft?.(ccore.getActiveDraft(state)?.id || '');
 }
 
 
@@ -270,6 +271,7 @@ export const composerStore = {
       }
       commit(restored as ComposerState);
     }
+    (window as any).transferGeniePlugins?.setComposerDraft?.(ccore.getActiveDraft(state)?.id || '');
     return hadSavedState;
   },
   flush() { persistence.saveImmediate(state); },

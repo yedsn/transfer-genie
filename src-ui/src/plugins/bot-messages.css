@@ -1,0 +1,6 @@
+.bot-mention-token{background:#e7f2eb;color:#28764c;border-radius:4px;box-shadow:0 0 0 2px #e7f2eb;font-weight:500;white-space:pre-wrap}
+.mention-editor-host{position:relative}
+.mention-textarea-mirror{position:absolute;pointer-events:none;white-space:pre-wrap;overflow-wrap:break-word;overflow:hidden;color:var(--ink);z-index:1;text-align:start}
+textarea.has-mention-overlay{color:transparent!important;caret-color:var(--ink)!important;background:transparent!important}
+.bot-message-identity{display:inline-flex;align-items:center;justify-content:center;margin-inline:0 5px;color:var(--ink,#374151);vertical-align:-3px;line-height:1}
+.bot-message-identity svg{display:block;width:16px;height:16px;flex:none}

@@ -1238,7 +1238,7 @@ pub fn upsert_message(path: &Path, message: &DbMessage) -> rusqlite::Result<()> 
     Ok(())
 }
 
-fn enqueue_outbox(conn: &Connection, operation: &NewOutboxOperation) -> rusqlite::Result<()> {
+pub(crate) fn enqueue_outbox(conn: &Connection, operation: &NewOutboxOperation) -> rusqlite::Result<()> {
     enqueue_outbox_with_dependency(conn, operation, None)
 }
 
@@ -2993,6 +2993,20 @@ pub fn save_message_with_marked_changes_and_enqueue(
 ) -> rusqlite::Result<()> {
     let mut conn = Connection::open(path)?;
     let tx = conn.transaction()?;
+    save_message_with_marked_changes_in_transaction(&tx, message, created_tags, cleaned_messages, message_operation, deleted_tags, attachment)?;
+    tx.commit()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn save_message_with_marked_changes_in_transaction(
+    tx: &Connection,
+    message: &DbMessage,
+    created_tags: &[(MarkedTag, NewOutboxOperation)],
+    cleaned_messages: &[(String, Vec<String>, NewOutboxOperation)],
+    message_operation: &NewOutboxOperation,
+    deleted_tags: &[(MarkedTag, i64, i64, NewOutboxOperation)],
+    attachment: Option<(&str, &str, Option<&str>, Option<&str>, &NewOutboxOperation)>,
+) -> rusqlite::Result<()> {
     let mut dependency: Option<String> = None;
     for (tag, operation) in created_tags {
         tx.execute(
@@ -3102,7 +3116,7 @@ pub fn save_message_with_marked_changes_and_enqueue(
         )?;
         enqueue_outbox_with_dependency(&tx, operation, dependency.as_deref())?;
     }
-    tx.commit()
+    Ok(())
 }
 
 #[cfg(test)]

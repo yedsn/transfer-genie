@@ -1,0 +1,178 @@
+import { test, expect } from '@playwright/test';
+
+test('plugin settings and structured multi-reference call render and send', async ({ page }) => {
+  await page.addInitScript(() => {
+    const endpoint = { id: 'plugin-test', name: 'Plugin test', url: 'https://example.test/dav', enabled: true };
+    const settings = { sender_name: 'Test', refresh_interval_secs: 3600, default_editor_format: 'text', active_storage_profile_id: endpoint.id, webdav_endpoints: [endpoint], storage_profiles: [{ ...endpoint, provider_kind: 'webdav', webdav: { url: endpoint.url } }], send: {}, telegram: {}, ai: {}, speech_to_text: {}, backup: {} };
+    const plugin = { manifest: { id: 'image-downloader', name: '图片下载', version: '1.0.0', capabilities:[{kind:'bot'}], runtime: { mode: 'oneshot' }, config_schema: [{ key: 'download_dir', label: '下载目录', kind: 'directory' }] }, config: { download_dir: 'D:/Downloads' }, source_kind: 'builtin', enabled: true, has_current_space:true, current_space_allowed:false };
+    window.__pluginTest = { sends: [] };
+    let installed = [plugin];
+    plugin.instance_id='pc-image';
+    window.__TAURI__ = { core: { invoke: async (command, args) => {
+      if (command === 'get_settings') return structuredClone(settings);
+      if (command === 'get_bot_scope') return 'account-space';
+      if (command === 'list_plugins') return structuredClone(installed);
+      if (command === 'list_bot_tasks') return [{task_id:'image-task',target_instance_id:'pc-image',text:'下载引用图片',created_at_ms:Date.now(),status:'running',can_cancel:true},{task_id:'other-task',target_instance_id:'other-instance',text:'其他插件任务',created_at_ms:Date.now(),status:'running'}];
+      if (command === 'configure_plugin') { const entry=installed.find(plugin=>plugin.manifest.id===args.id); entry.enabled=args.enabled; entry.config=args.config; return null; }
+      if (command === 'import_plugin') { installed.push({...structuredClone(plugin),enabled:false,source_kind:'external',manifest:{...structuredClone(plugin.manifest),id:'echo-bot',name:'Echo Bot'}}); return null; }
+      if (command === 'uninstall_plugin') { installed = installed.filter(plugin=>plugin.manifest.id!==args.id); return null; }
+      if (command === 'list_integration_modules') return [{ id: 'webdav-sync', displayName: 'WebDAV Sync', enabled: true, running: true }];
+      if (command === 'set_plugin_space') { plugin.current_space_allowed=args.allowed; return null; }
+      if (command === 'list_bot_instances') return plugin.current_space_allowed ? [{ instance_id: 'pc-image', name: '图片下载', device_name: 'PC', enabled: true, expires_at_ms: Date.now() + 90000 }] : [];
+      if (command === 'get_message_contexts') return [];
+      if (command === 'get_plugin_market') return '';
+      if (command === 'send_text') { window.__pluginTest.sends.push(args); return { filename: 'sent.txt', markedTagIds: [] }; }
+      if (command === 'list_messages_window') return { messages: [], has_more_before: false, has_more_after: false };
+      if (command === 'get_sync_status' || command === 'refresh') return { running: false };
+      if (command === 'get_app_version') return 'test';
+      if (command === 'get_marked_messages' || command === 'list_download_history' || command === 'list_upload_history') return { records: [], total: 0 };
+      if (command.startsWith('list_')) return [];
+      return null;
+    } }, event: { listen: async () => () => {}, emit: async () => {} }, dialog: { open: async () => 'fixture.zip', save: async () => null } };
+  });
+  await page.goto('/', { waitUntil: 'networkidle' });
+  await page.waitForFunction(() => window.transferGenieSendActiveDraft);
+  await page.evaluate(() => window.transferGenieVue.activateTab('settings'));
+  await page.locator('[data-settings-nav-target="settings-section-plugins"]').click();
+  await expect(page.locator('#settings-section-plugins .plugins-panel')).toBeVisible();
+  await expect(page.locator('#settings-section-plugins .plugins-panel')).toContainText('WebDAV Sync');
+  await expect(page.locator('.plugin-install-row').first()).toContainText('内置');
+  await page.screenshot({ path: 'target/playwright/plugins/plugin-management.png' });
+  await page.locator('[data-settings-nav-target="settings-plugin-image-downloader"]').click();
+  await expect(page.locator('#settings-plugin-image-downloader .plugin-field input[type="text"]').first()).toHaveValue('D:/Downloads');
+  await expect(page.locator('#settings-plugin-image-downloader .plugin-task-panel')).toContainText('下载引用图片');
+  await expect(page.locator('#settings-plugin-image-downloader .plugin-task-panel')).not.toContainText('其他插件任务');
+  await expect(page.locator('.bot-composer')).not.toContainText('机器人任务');
+  await page.locator('[data-settings-nav-target="settings-section-plugins"]').click();
+  await page.getByRole('button',{name:'导入插件包',exact:true}).click();
+  const echoMenu = page.locator('[data-settings-nav-target="settings-plugin-echo-bot"]');
+  await expect(echoMenu).toHaveCount(0);
+  await page.locator('[data-plugin-id="echo-bot"]').getByRole('button',{name:'配置',exact:true}).click();
+  await expect(page.locator('.plugin-inline-config')).toBeVisible();
+  await expect(echoMenu).toHaveCount(0);
+  await page.getByRole('button',{name:'收起配置',exact:true}).click();
+  await page.getByRole('checkbox',{name:'启用 Echo Bot',exact:true}).check();
+  await expect(echoMenu).toBeVisible();
+  await echoMenu.click();
+  await expect(page.locator('#settings-plugin-echo-bot h3')).toHaveText('Echo Bot');
+  await page.locator('#settings-plugin-echo-bot').getByRole('checkbox',{name:'启用',exact:true}).click();
+  await expect(echoMenu).toHaveCount(0);
+  await page.getByRole('checkbox',{name:'启用 Echo Bot',exact:true}).check();
+  await echoMenu.click();
+  await page.locator('#settings-plugin-echo-bot').getByRole('button',{name:'卸载并保留数据',exact:true}).click();
+  await expect(echoMenu).toHaveCount(0);
+  await expect(page.locator('#settings-plugin-echo-bot')).toHaveCount(0);
+  await page.evaluate(()=>{ const state=window.transferGeniePlugins.state; const original=state.plugins[0]; for(let i=1;i<=24;i++) state.plugins.push({...JSON.parse(JSON.stringify(original)),enabled:false,manifest:{...JSON.parse(JSON.stringify(original.manifest)),id:'sample-'+i,name:'Sample '+i}}); });
+  const manager=page.locator('#settings-section-plugins');
+  await expect(manager.locator('.plugin-install-row')).toHaveCount(10);
+  await page.screenshot({ path: 'target/playwright/plugins/plugin-list-pagination.png' });
+  await manager.getByRole('button',{name:'下一页',exact:true}).click();
+  await expect(manager.locator('.plugin-pagination')).toContainText('第 2 / 3 页');
+  await manager.getByRole('searchbox',{name:'搜索插件'}).fill('sample-24');
+  await expect(manager.locator('.plugin-install-row')).toHaveCount(1);
+  await expect(manager.locator('.plugin-pagination')).toContainText('第 1 / 1 页');
+  await manager.getByRole('searchbox',{name:'搜索插件'}).fill('no-match');
+  await expect(manager.locator('.plugin-empty')).toContainText('没有找到');
+  await manager.getByRole('searchbox',{name:'搜索插件'}).fill('');
+  await manager.getByRole('combobox',{name:'每页插件数量'}).selectOption('50');
+  await expect(manager.locator('.plugin-install-row')).toHaveCount(26);
+  await page.evaluate(()=>{window.transferGenieVue.activateTab('home');const store=window.transferGenieComposerStore;store.setDraftText(store.getActiveDraft().id,'');store.setDraftFormat(store.getActiveDraft().id,'markdown');});
+  const richEditor=page.locator('.cw-md-wrap .CodeMirror textarea');
+  await page.locator('.cw-md-wrap[data-markdown-ready="true"]').waitFor(); await page.locator('.cw-md-wrap .CodeMirror').click(); await page.keyboard.type('@');
+  await expect(page.getByRole('listbox',{name:'选择机器人'})).toBeVisible();
+  await page.getByRole('button',{name:'允许当前空间调用',exact:true}).click();
+  await expect(page.locator('.bot-mention-menu').getByRole('option')).toContainText('图片下载');
+  await page.locator('.bot-mention-menu').getByRole('option').click();
+  await expect(page.locator('.cw-md-wrap .CodeMirror')).toContainText('@图片下载（PC）');
+  await expect(page.locator('.cw-md-wrap .bot-mention-token')).toHaveCount(1);
+  await richEditor.press('Backspace');
+  await richEditor.press('Backspace');
+  await expect(page.locator('.cw-md-wrap .bot-mention-token')).toHaveCount(0);
+  expect(await page.evaluate(()=>window.transferGeniePlugins.getCallContext().targetBotInstanceId)).toBeNull();
+  await page.evaluate(()=>{const store=window.transferGenieComposerStore;store.setDraftFormat(store.getActiveDraft().id,'text');});
+  await page.evaluate(async () => {
+    window.transferGenieVue.activateTab('home');
+    window.transferGenieComposerStore.clearWorkspaceConfirmed();
+    await window.transferGeniePlugins.setScope('plugin-test');
+    window.transferGeniePlugins.addReferences([{ filename: 'one.png', kind: 'image', original_name: 'one.png', timestamp_ms: 1 }, { filename: 'two.png', kind: 'image', original_name: 'two.png', timestamp_ms: 2 }]);
+    window.transferGeniePlugins.state.target = 'pc-image';
+    const store = window.transferGenieComposerStore;
+    store.setDraftText(store.getActiveDraft().id, '下载这些图片');
+  });
+  await expect(page.locator('.bot-reference-list')).toContainText('已引用 2 条消息');
+  await page.evaluate(()=>{window.__quoteLocated='';window.transferGenieLocateReference=async filename=>{window.__quoteLocated=filename;return false;};});
+  await page.getByRole('button',{name:'定位引用 one.png',exact:true}).click();
+  expect(await page.evaluate(()=>window.__quoteLocated)).toBe('one.png');
+  await expect(page.locator('.quote-notice')).toContainText('原消息已删除或当前不可用');
+  await expect(page.locator('.bot-target-picker')).toHaveCount(0);
+  await page.locator('.cw-textarea:visible').fill('@图');
+  await expect(page.getByRole('listbox', {name:'选择机器人'})).toBeVisible();
+  await expect(page.locator('.bot-mention-menu').getByRole('option')).toContainText('图片下载');
+  await page.locator('.cw-textarea:visible').press('Enter');
+  await expect(page.locator('.cw-textarea:visible')).toHaveValue('@图片下载（PC） ');
+  await expect(page.locator('.mention-textarea-mirror .bot-mention-token')).toHaveCount(1);
+  await page.locator('.cw-textarea:visible').press('Backspace');
+  await page.locator('.cw-textarea:visible').press('Backspace');
+  await expect(page.locator('.cw-textarea:visible')).toHaveValue('');
+  expect(await page.evaluate(()=>window.transferGeniePlugins.getCallContext().targetBotInstanceId)).toBeNull();
+  await page.locator('.cw-textarea:visible').fill('普通消息');
+  expect(await page.evaluate(() => window.transferGeniePlugins.getCallContext().targetBotInstanceId)).toBeNull();
+  await page.locator('.cw-textarea:visible').fill('@图');
+  await page.locator('.cw-textarea:visible').press('Enter');
+  await page.locator('.bot-composer').evaluate(async element => {
+    const animations = document.getAnimations().filter(animation => animation.effect?.target instanceof Element && animation.effect.target.contains(element));
+    await Promise.all(animations.map(animation => animation.finished.catch(() => {})));
+  });
+  await page.screenshot({ path: 'target/playwright/plugins/multiple-references.png' });
+  await page.locator('#send-text').click();
+  await expect.poll(() => page.evaluate(() => window.__pluginTest.sends.length)).toBe(1);
+  const sent = await page.evaluate(() => window.__pluginTest.sends[0]);
+  expect(sent.targetBotInstanceId).toBe('pc-image');
+  expect(sent.references.map(item => item.filename)).toEqual(['one.png', 'two.png']);
+});
+
+test('mobile multi-selection quotes messages into a structured bot call', async ({page}) => {
+  await page.setViewportSize({width:390,height:844});
+  await page.addInitScript(()=>{
+    window.__TAURI__={core:{invoke:async(command)=>{
+      if(command==='get_bot_scope') return 'mobile-fixture';
+      if(command==='get_message_contexts') return [{filename:'preview-photo.jpg',task_id:'reply-task',text:'下载完成',references:[{filename:'preview-plan.pdf',sender:'Mac',kind:'file',original_name:'引用文件.pdf'}]}];
+      if(command==='list_bot_instances') return [{instance_id:'pc',name:'图片下载',device_name:'PC',enabled:true,expires_at_ms:Date.now()+90000}];
+      if(command.startsWith('list_') || command==='get_message_contexts') return [];
+      return null;
+    }},event:{listen:async()=>()=>{},emit:async()=>{}}};
+  });
+  await page.goto('/?mobile-preview=1',{waitUntil:'networkidle'});
+  await expect(page.locator('.mobile-message-card').first()).toBeVisible();
+  await expect(page.locator('.mobile-message-header .bot-message-identity')).toHaveAttribute('aria-label', '机器人');
+  await expect(page.locator('.mobile-message-bubble .bot-message-identity')).toHaveCount(0);
+  const quotedCard=page.locator('[data-message-filename="preview-photo.jpg"]');
+  await expect(quotedCard.locator('.reference-preview')).toContainText('引用文件.pdf');
+  expect(await quotedCard.evaluate(card=>{const body=card.querySelector('.mobile-message-content');const quote=card.querySelector('.reference-preview');return !!(body.compareDocumentPosition(quote)&Node.DOCUMENT_POSITION_FOLLOWING);})).toBe(true);
+  await page.getByRole('button',{name:'更多操作'}).first().click();
+  await page.getByRole('button',{name:'多选',exact:false}).click();
+  await page.locator('.mobile-message-select').nth(1).click();
+  await page.locator('.mobile-selection-toolbar').getByRole('button',{name:'引用',exact:true}).click();
+  await expect(page.locator('.bot-reference-list')).toContainText('已引用 2 条消息');
+  await page.getByRole('textbox',{name:'消息内容',exact:true}).fill('@');
+  await page.getByRole('option').filter({hasText:'图片下载'}).click();
+  await expect(page.getByRole('textbox',{name:'消息内容',exact:true})).toHaveValue('@图片下载（PC） ');
+  await page.getByRole('textbox',{name:'消息内容',exact:true}).press('Backspace');
+  await page.getByRole('textbox',{name:'消息内容',exact:true}).press('Backspace');
+  await expect(page.getByRole('textbox',{name:'消息内容',exact:true})).toHaveValue('');
+  expect(await page.evaluate(()=>window.transferGeniePlugins.getCallContext().targetBotInstanceId)).toBeNull();
+  await page.getByRole('textbox',{name:'消息内容',exact:true}).fill('@');
+  await page.locator('.bot-mention-menu').getByRole('option').click();
+  const context=await page.evaluate(()=>window.transferGeniePlugins.getCallContext());
+  expect(context.references).toHaveLength(2);
+  expect(context.targetBotInstanceId).toBe('pc');
+  await page.locator('.mobile-composer-sheet').evaluate(async element => {
+    const animations = document.getAnimations().filter(animation => animation.effect?.target instanceof Element && (animation.effect.target.contains(element) || element.contains(animation.effect.target)));
+    await Promise.all(animations.map(animation => animation.finished.catch(() => {})));
+  });
+  await page.screenshot({path:'target/playwright/plugins/mobile-multiple-references.png'});
+  const referencedFilename=context.references[0].filename;
+  await page.locator('.quote-jump').first().click();
+  await expect(page.locator('.mobile-composer-sheet')).toHaveCount(0);
+  expect(await page.evaluate(filename=>Array.from(document.querySelectorAll('[data-filename]')).some(node=>node.dataset.filename===filename && node.getBoundingClientRect().top>=0),referencedFilename)).toBe(true);
+});

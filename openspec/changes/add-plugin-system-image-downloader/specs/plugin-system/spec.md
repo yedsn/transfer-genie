@@ -32,6 +32,7 @@
 
 ### Requirement: Plugin management and local configuration
 设置页 SHALL 提供安装、启用、配置、测试、状态、日志、任务记录和卸载，service 额外提供启停及启动策略；配置与密钥 SHALL 留在安装设备，外部插件权限说明 SHALL 准确。
+仅已启用插件 SHALL 在设置侧栏登记独立插件菜单；停用或卸载后 SHALL 移除对应菜单和设置页。插件管理页 SHALL 采用统一安装列表，支持按名称或 ID 搜索与分页，并提供设置入口；未启用插件可在列表内配置，不登记侧栏菜单。
 
 #### Scenario: Configure image destination
 - **WHEN** 用户修改目录选择配置

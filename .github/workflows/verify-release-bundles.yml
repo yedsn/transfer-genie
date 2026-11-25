@@ -21,6 +21,8 @@ on:
       - 'src-ui/**'
       - 'tauri.conf.json'
       - 'tools/ffmpeg/**'
+      - 'plugins/.system/**'
+      - 'scripts/build-image-bot.mjs'
   pull_request:
     paths:
       - '.github/workflows/verify-release-bundles.yml'
@@ -37,6 +39,8 @@ on:
       - 'src-ui/**'
       - 'tauri.conf.json'
       - 'tools/ffmpeg/**'
+      - 'plugins/.system/**'
+      - 'scripts/build-image-bot.mjs'
 
 permissions:
   contents: read

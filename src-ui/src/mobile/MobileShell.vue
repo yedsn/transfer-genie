@@ -19,6 +19,9 @@ import MobileMessageBody from "./MobileMessageBody.vue";
 import MobileMarkedExcerpt from "./MobileMarkedExcerpt.vue";
 import MobileText from "./MobileText.vue";
 import MobileConnectionWizard from "./MobileConnectionWizard.vue";
+import BotComposer from "../plugins/BotComposer.vue";
+import ReferencePreview from "../plugins/ReferencePreview.vue";
+import { addReferences, resolvePluginScope, pluginState } from "../plugins/plugin-store";
 const loadMobileMarkdownEditor = () => import("./MobileMarkdownEditor.vue");
 const MobileMarkdownEditor = defineAsyncComponent(loadMobileMarkdownEditor);
 let editorWarmTimer: number | undefined;
@@ -39,6 +42,22 @@ type SheetName =
 
 const controller = useMobileController();
 const { state, currentSpace, pendingCount, activeTransfers } = controller;
+const locateReference = async (filename:string) => {
+  const profile = state.activeProfile?.id;
+  const space = currentSpace.value?.id;
+  while (!state.messages.some(message=>message.filename===filename) && state.hasMoreBefore && !state.loadingOlder) {
+    const before=state.messages.length;
+    await controller.loadOlderMessages();
+    if(profile!==state.activeProfile?.id || space!==currentSpace.value?.id || state.messages.length<=before) return false;
+  }
+  activeTab.value='feed'; activeSheet.value=null; searchQuery.value='';
+  await nextTick();
+  return state.messages.some(message=>message.filename===filename);
+};
+(window as any).transferGenieLocateReference=locateReference;
+onBeforeUnmount(()=>{if((window as any).transferGenieLocateReference===locateReference) delete (window as any).transferGenieLocateReference;});
+watch(() => [state.activeProfile?.id, state.account?.userId, currentSpace.value?.id], values => { void resolvePluginScope(values.map(value => value || '').join(':')); }, { immediate:true });
+function quoteMessages(messages: MobileMessage[]) { addReferences(messages); activeSheet.value = 'composer'; }
 type NativeHistorySheet = "detail" | "composer";
 const mobileRoute = new URL(window.location.href).searchParams.get("tg-mobile-page");
 const initialNativeSheet: NativeHistorySheet | null =
@@ -1473,6 +1492,7 @@ onBeforeUnmount(() => {
               v-for="message in visibleMessages"
               :key="message.filename"
               :data-message-filename="message.filename"
+              :data-filename="message.filename"
               class="mobile-message-card"
               :class="[`is-${message.kind}`, { 'is-marked': message.marked, 'is-self': isOwnMessage(message, state.settings?.sender_name), 'is-selecting': selectionMode, 'is-selected': selectedFilenames.includes(message.filename) }]"
               @click="openMessage(message)"
@@ -1484,7 +1504,7 @@ onBeforeUnmount(() => {
             >
               <header class="mobile-message-header">
                 <button v-if="selectionMode" class="mobile-message-select" type="button" :aria-label="`选择消息 ${message.title}`" :aria-pressed="selectedFilenames.includes(message.filename)" :disabled="state.busy" @pointerdown.stop @click.stop="toggleMessageSelection(message)">{{ selectedFilenames.includes(message.filename) ? "✓" : "" }}</button>
-                <span>{{ message.source }}</span>
+                <span><ReferencePreview :filename="message.filename" identity-only />{{ message.source }}</span>
                 <time>{{ message.time }}</time>
                 <span v-if="message.marked" class="mobile-message-mark" aria-label="已标记"><svg class="mobile-star-icon is-marked" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.2 2.72 5.5 6.08.89-4.4 4.28 1.04 6.05L12 17.06 6.56 19.92l1.04-6.05-4.4-4.28 6.08-.89L12 3.2Z" /></svg></span>
                 <button v-if="!selectionMode" class="mobile-card-more" type="button" aria-label="更多操作" @pointerdown.stop @click.stop="openActions(message)">•••</button>
@@ -1547,6 +1567,7 @@ onBeforeUnmount(() => {
                 >
               </div>
               </MobileMessageBody>
+              <ReferencePreview :filename="message.filename" references-only />
               </div>
             </article>
           </div>
@@ -1737,6 +1758,7 @@ onBeforeUnmount(() => {
         <div v-if="selectionMode" class="mobile-selection-toolbar" role="toolbar" aria-label="消息批量操作">
           <button type="button" :disabled="state.busy" @click="endSelection">取消</button>
           <button type="button" :disabled="state.busy || !selectedMessages.length" @click="applySelection('mark')">标记</button>
+          <button type="button" :disabled="state.busy || !selectedMessages.length" @click="quoteMessages(selectedMessages)">引用</button>
           <button type="button" :disabled="state.busy || !selectedMessages.length" @click="applySelection('unmark')">取消标记</button>
           <button class="is-danger" type="button" :disabled="state.busy || !selectedMessages.length" @click="applySelection('delete')">删除</button>
         </div>
@@ -1841,6 +1863,7 @@ onBeforeUnmount(() => {
           </header>
           <p v-if="navigationError || navigationSaving" class="mobile-navigation-status" :role="navigationError ? 'alert' : 'status'">{{ navigationError || '正在保存草稿…' }}</p>
           <div class="mobile-composer-content" role="region" aria-label="消息编辑与附件" :inert="navigationSaving">
+          <BotComposer />
           <div v-if="state.composer.format === 'markdown'" id="mobile-composer-toolbar-dock" class="mobile-composer-toolbar-dock"></div>
           <div class="mobile-compose-editor">
           <MobileMarkdownEditor v-if="state.composer.format === 'markdown'" ref="composerMarkdownEditor" v-model="state.composer.text" toolbar-target="#mobile-composer-toolbar-dock" :show-dismiss-keyboard="keyboardVisible" :disabled="state.composer.sending || !state.composer.persistenceReady" @ready="handleComposerEditorReady" @dismiss-keyboard="dismissComposerKeyboard" />
@@ -1943,7 +1966,7 @@ onBeforeUnmount(() => {
             :disabled="
               state.busy || state.composer.selecting ||
               state.composer.sending ||
-              (!state.composer.text.trim() &&
+              (!state.composer.text.trim() && !pluginState.references.length &&
                 !state.composer.attachments.length)
             "
             @click="sendDraft"
@@ -2001,6 +2024,7 @@ onBeforeUnmount(() => {
             </button>
           </div>
           <button class="mobile-action-row" type="button" :disabled="state.busy || state.composer.sending" @click="selectedMessage && startSelection(selectedMessage)"><span>多选</span><b>›</b></button>
+          <button class="mobile-action-row" type="button" @click="selectedMessage && quoteMessages([selectedMessage])"><span>引用</span><b>›</b></button>
           <p v-if="state.error" class="mobile-feedback is-error" role="alert">{{ state.error }}</p>
           <button v-if="selectedMessage?.marked" class="mobile-action-row" type="button" :disabled="state.busy" @click="selectedMessage && openMarkedEditor(selectedMessage)"><span>编辑标签与截止日期</span><b>›</b></button>
           <button

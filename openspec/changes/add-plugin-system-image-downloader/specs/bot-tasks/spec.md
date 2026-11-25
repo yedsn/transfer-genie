@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Explicit instance targeting
-聊天 SHALL 通过 @ 候选选择保存目标实例 id，候选展示机器人、设备与可用状态。插件目录 SHALL 仅发布到用户启用的空间；移动端 SHALL 能调用桌面实例而不执行桌面代码。
+聊天 SHALL 在消息输入框中输入 @ 时展示候选并通过选择保存目标实例 id，候选展示机器人、设备与可用状态，不单独设置输入框上方的机器人选择栏。删除已选提及 SHALL 解除目标。插件目录 SHALL 仅发布到用户启用的空间；移动端 SHALL 能调用桌面实例而不执行桌面代码。
 
 #### Scenario: Same plugin installed on two computers
 - **WHEN** 用户选择家里 PC 的图片实例

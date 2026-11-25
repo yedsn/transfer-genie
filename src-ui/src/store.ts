@@ -216,6 +216,7 @@ function activateTab(tab: string) {
 }
 
 function syncSettings(settings: any) {
+  (window as any).transferGeniePlugins?.setScope?.(String(settings?.active_storage_profile_id || settings?.active_webdav_id || ''));
   transferGenieState.settings = cloneValue(settings);
   transferGenieState.lastSettingsSavedAt = Date.now();
 }

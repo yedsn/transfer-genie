@@ -1,0 +1,11 @@
+{
+  "manifest_version": 1,
+  "id": "echo-bot-example",
+  "name": "协议测试机器人",
+  "version": "1.0.0",
+  "host_api_version": 1,
+  "supported_platforms": ["windows", "macos", "linux"],
+  "capabilities": [{ "kind": "bot", "input_types": ["text", "image", "url"], "batch": true }],
+  "runtime": { "mode": "oneshot", "command": "main.cjs", "interpreter": "node", "args": [] },
+  "config_schema": []
+}

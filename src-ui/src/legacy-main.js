@@ -7232,6 +7232,21 @@ function applyForcedScrollToBottomIfNeeded() {
   }
 }
 
+window.transferGenieLocateReference = async (filename) => {
+  window.transferGenieVue?.activateTab?.('home');
+  const scope = window.transferGeniePlugins?.state?.scope;
+  await closeFeedSearch({ clear: true });
+  if (scope !== window.transferGeniePlugins?.state?.scope) return false;
+  const find = () => Array.from(document.querySelectorAll('[data-filename]')).find(node => node.dataset.filename === filename);
+  while (!find() && hasMoreMessages && !isLoadingMore) {
+    const before = lastMessages.length;
+    await loadMessages({ loadMore:true, scrollToBottom:false, preserveScroll:true });
+    if (scope !== window.transferGeniePlugins?.state?.scope || lastMessages.length <= before) return false;
+  }
+  const target = find();
+  target?.scrollIntoView({block:'center',behavior:'smooth'});
+  return !!target;
+};
 function scrollMessageIntoViewAtBottom(filename) {
   const list = getCurrentMessageList();
   if (!list || !filename) return false;
@@ -7405,12 +7420,13 @@ function setActiveSettingsSection(id) {
     return;
   }
   activeSettingsSectionId = id;
-  settingsNavButtons.forEach((button) => {
+  document.querySelectorAll('[data-settings-nav-target]').forEach((button) => {
     button.classList.toggle('is-active', button.dataset.settingsNavTarget === id);
   });
 }
 
 function updateActiveSettingsSection() {
+  ensureSettingsSectionTargets();
   if (!settingsPanel || !settingsSections.length) {
     return;
   }
@@ -7447,8 +7463,9 @@ function initializeSettingsNavigation() {
   }
 
   if (!settingsPanel.dataset.settingsNavInitialized) {
-    settingsNavButtons.forEach((button) => {
-      button.addEventListener('click', () => {
+    settingsBody.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-settings-nav-target]');
+        if (!button) return;
         const targetId = button.dataset.settingsNavTarget;
         const targetSection = document.getElementById(targetId);
         if (!targetSection) {
@@ -7460,7 +7477,6 @@ function initializeSettingsNavigation() {
           block: 'start',
           inline: 'nearest',
         });
-      });
     });
 
     settingsPanel.addEventListener('scroll', queueSettingsSectionUpdate, { passive: true });
@@ -10268,6 +10284,44 @@ function renderMessages(messages, options = {}) {
 
     const actions = document.createElement('div');
     actions.className = 'message-actions';
+    const quoteButton = document.createElement('button');
+    quoteButton.type = 'button';
+    quoteButton.className = 'button ghost small';
+    quoteButton.textContent = '引用';
+    quoteButton.addEventListener('click', (event) => { event.stopPropagation(); window.transferGeniePlugins?.addReferences?.([message]); });
+    actions.appendChild(quoteButton);
+    const context = window.transferGeniePlugins?.state?.contexts?.find(c => c.filename === message.filename);
+    if (context?.task_id && !context.target_bot_instance_id && typeof context.text === 'string') {
+      const identity = document.createElement('span');
+      identity.className = 'bot-message-identity';
+      identity.setAttribute('role', 'img');
+      identity.setAttribute('aria-label', '机器人');
+      identity.title = '机器人';
+      identity.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M11 3a1 1 0 0 1 2 0v3h4a4 4 0 0 1 4 4v7a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4v-7a4 4 0 0 1 4-4h4V3ZM8.5 10a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3Zm7 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3ZM9 16a1 1 0 0 0 0 2h6a1 1 0 0 0 0-2H9Z" clip-rule="evenodd"/><rect x="0" y="10" width="2" height="7" rx="1"/><rect x="22" y="10" width="2" height="7" rx="1"/></svg>';
+      headerText.prepend(identity);
+    }
+    if (context?.references?.length) {
+      const preview = document.createElement('div');
+      preview.className = 'reference-preview';
+      for (const reference of context.references) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = "reference-quote";
+        const sender = document.createElement("strong");
+        sender.textContent = reference.sender || "引用消息";
+        const excerpt = document.createElement("span");
+        excerpt.textContent = (reference.kind === "image" ? "[图片] " : reference.kind === "text" ? "" : "[文件] ") + (reference.content?.slice(0,100) || reference.original_name || "");
+        button.append(sender, excerpt);
+        button.addEventListener('click', async () => {
+          button.disabled = true;
+          try { if (!await window.transferGenieLocateReference(reference.filename)) button.textContent = '原消息已删除或当前不可用 · ' + (reference.original_name || reference.content?.slice(0,100) || '引用摘要'); }
+          catch { button.textContent = '暂时无法加载原消息，点击重试'; }
+          finally { button.disabled = false; }
+        });
+        preview.appendChild(button);
+      }
+      item.appendChild(preview);
+    }
 
     if (message.kind === 'text') {
       // 显示发送状态
@@ -10549,6 +10603,8 @@ function renderMessages(messages, options = {}) {
       item.appendChild(transcriptToggle);
     }
     item.appendChild(footer);
+    const quotedMessages = item.querySelector(':scope > .reference-preview');
+    if (quotedMessages) item.insertBefore(quotedMessages, footer);
 
     item.addEventListener('dblclick', (event) => {
       if (selectionMode) {
@@ -12854,6 +12910,7 @@ async function sendText() {
     text = textInput.value;
   }
 
+  if (!text.trim() && window.transferGeniePlugins?.state?.references?.length) text = '处理引用的消息';
   if (!text.trim() && selectedFiles.length === 0) {
     return;
   }
@@ -12865,6 +12922,9 @@ async function sendText() {
 
   let activeMarkedOptions = cloneComposerMarkedOptions(getComposerMarkedOptions());
   const textToSend = text;
+  const pluginDraft = window.transferGeniePlugins?.getCallContext?.() || {};
+  const pluginDraftScope = window.transferGeniePlugins?.state?.scope;
+  const pluginDraftIdentity = window.transferGeniePlugins?.getDraftIdentity?.();
   const formatToSend = currentFormat === 'markdown' ? 'markdown' : 'text';
   const filesToUpload = [...selectedFiles];
 
@@ -12918,8 +12978,10 @@ async function sendText() {
         const result = await invoke('send_text', {
           text: textToSend,
           format: formatToSend,
+          ...pluginDraft,
           markedOptions: activeMarkedOptions,
         });
+        if (pluginDraftIdentity === window.transferGeniePlugins?.getDraftIdentity?.()) window.transferGeniePlugins?.clearCallContext?.(pluginDraft, pluginDraftScope);
         if (pendingTextFilename && pendingSends.has(pendingTextFilename)) {
           pendingSends.set(pendingTextFilename, {
             ...pendingSends.get(pendingTextFilename),
@@ -15582,6 +15644,12 @@ if (selectAllButton) {
 }
 if (deleteSelectedButton) {
   deleteSelectedButton.addEventListener('click', deleteSelectedMessages);
+  document.getElementById('quote-selected')?.addEventListener('click', () => {
+    const messages = getSelectableMessages().filter(message => selectedMessages.has(message.filename));
+    if (messages.length > 50) { setErrorStatus('一次最多引用 50 条消息，请减少选择'); return; }
+    window.transferGeniePlugins?.addReferences?.(messages);
+    setSelectionMode(false);
+  });
 }
 if (cancelSelectionButton) {
   cancelSelectionButton.addEventListener('click', () => setSelectionMode(false));

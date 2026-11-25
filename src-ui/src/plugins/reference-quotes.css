@@ -1,0 +1,52 @@
+.reference-preview { display: grid; gap: 4px; margin-top: 8px; min-width: 0; max-width: 100%; }
+
+.reference-preview > button {
+  appearance: none;
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  width: fit-content;
+  max-width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--muted, #777) 9%, transparent);
+  color: var(--muted, #777);
+  box-shadow: none;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.55;
+  text-align: left;
+  cursor: pointer;
+}
+
+.reference-preview > button::before {
+  content: '“';
+  flex: 0 0 10px;
+  align-self: flex-start;
+  height: 18px;
+  font-family: Georgia, serif;
+  font-size: 24px;
+  line-height: 1;
+  opacity: .5;
+}
+
+.reference-preview > button strong {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 30%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: inherit;
+  font-weight: 500;
+}
+
+.reference-preview > button strong::after { content: '：'; }
+.reference-preview > button span { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reference-preview > button:hover { background: color-mix(in srgb, var(--muted, #777) 14%, transparent); }
+.reference-preview > button:focus-visible { outline: 2px solid var(--muted, #777); outline-offset: 2px; }
+.reference-preview > button:disabled { cursor: progress; opacity: .65; }
+.reference-preview > small { color: var(--muted, #777); font-size: 11px; line-height: 1.5; }

@@ -3,6 +3,15 @@ mod db;
 mod filenames;
 mod history;
 mod integration_runtime;
+mod plugin_protocol;
+mod plugin_host;
+#[cfg(desktop)]
+mod plugin_process;
+mod bot_runtime;
+mod image_bot;
+use bot_runtime::{list_plugins, configure_plugin, import_plugin, uninstall_plugin, list_bot_instances, list_bot_events, get_message_contexts, set_plugin_market, get_plugin_market, fetch_plugin_market, install_market_plugin};
+
+pub fn run_image_bot() -> Result<(), String> { image_bot::run() }
 mod media_playback;
 mod media_preview;
 mod mobile_share;
@@ -10787,7 +10796,12 @@ async fn send_text(
     format: Option<String>,
     marked_options: Option<SendMarkedOptionsInput>,
     client_id: Option<String>,
+    references: Option<Vec<plugin_protocol::MessageReference>>,
+    target_bot_instance_id: Option<String>,
 ) -> Result<SendMessageResult, String> {
+    if references.as_ref().is_some_and(|r| !r.is_empty()) || target_bot_instance_id.is_some() {
+        return bot_runtime::send(&state, text, format, references.unwrap_or_default(), target_bot_instance_id, client_id, marked_options).await;
+    }
     send_text_with_client_id_impl(&state, text, format, marked_options, client_id).await
 }
 
@@ -23082,6 +23096,18 @@ pub fn run() {
                 media_preview_jobs: AsyncMutex::new(HashMap::new()),
                 supabase_download_guard: AsyncMutex::new(()),
             });
+            {
+                let state = app.state::<AppState>();
+                bot_runtime::initialize(&state.db_path)?;
+                bot_runtime::recover(&state.db_path)?;
+                let downloads = app.path().download_dir().unwrap_or_default();
+                plugin_host::initialize(&plugin_host::root(&state), &downloads)?;
+                #[cfg(desktop)]
+                if let Ok(resources) = app.path().resource_dir() {
+                    plugin_host::set_builtin_resource(&plugin_host::root(&state), &resources.join("tools/image-bot"))?;
+                }
+            }
+            bot_runtime::start(app.handle().clone());
 
             #[cfg(desktop)]
             {
@@ -23405,6 +23431,20 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_mobile_integration::init())
         .invoke_handler(tauri::generate_handler![
+            list_plugins, configure_plugin, import_plugin, uninstall_plugin,
+            bot_runtime::plugin_service,
+            bot_runtime::plugin_runtime_status,
+            bot_runtime::cancel_bot_task,
+            bot_runtime::retry_bot_task,
+            bot_runtime::list_bot_tasks,
+            bot_runtime::get_bot_scope,
+            bot_runtime::set_plugin_space,
+            bot_runtime::set_plugin_secret,
+            bot_runtime::test_plugin_environment,
+            bot_runtime::set_plugin_auto_start,
+            bot_runtime::rollback_plugin,
+            list_bot_instances, list_bot_events, get_message_contexts,
+            set_plugin_market, get_plugin_market, fetch_plugin_market, install_market_plugin,
             resolve_debug_webview_eval,
             get_settings,
             get_platform_capabilities,
@@ -23594,6 +23634,7 @@ pub fn run() {
             let state = app_handle.state::<AppState>();
             let _ = TelegramBridgeRuntimeAdapter::new(&state).stop();
             let _ = stop_local_http_api_impl(&state);
+            plugin_process::stop_all();
         }
 
         #[cfg(target_os = "macos")]
@@ -23844,12 +23885,147 @@ mod tests {
         HttpStatusCode::CREATED
     }
 
+    #[tokio::test]
+    async fn bot_controls_queue_offline_and_sync_between_devices_for_both_providers() {
+        let dav = spawn_test_dav().await;
+        let supabase = spawn_test_supabase().await;
+        for settings in [test_settings_with_url(dav.base_url.clone()), test_supabase_settings_with_url(supabase.base_url.clone())] {
+            let root = std::env::temp_dir().join(format!("bot-provider-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(root.join("phone")).unwrap();
+            fs::create_dir_all(root.join("pc")).unwrap();
+            let sender = test_app_state(&root.join("phone"), settings.clone());
+            let receiver = test_app_state(&root.join("pc"), settings.clone());
+            for state in [&sender, &receiver] {
+                bot_runtime::initialize(&state.db_path).unwrap();
+                if settings.active_storage_profile_id.is_some() { install_test_supabase_session(state); }
+            }
+            let sender_ctx = resolve_send_target_context(&sender, &settings).unwrap();
+            let receiver_ctx = resolve_send_target_context(&receiver, &settings).unwrap();
+            let payload = serde_json::json!({"task_id":"queued-task","target_instance_id":"offline-pc","references":[{"filename":"a.png"},{"filename":"b.png"}]});
+            let conn = rusqlite::Connection::open(&sender.db_path).unwrap();
+            conn.execute("INSERT INTO bot_records VALUES(?1,?2,'tasks','queued-task',?3,1)", rusqlite::params![sender_ctx.profile_id(),sender_ctx.owner_scope,payload.to_string()]).unwrap();
+            conn.execute("INSERT INTO bot_records VALUES(?1,'another-account','tasks','private-task','{}',1)", [sender_ctx.profile_id()]).unwrap();
+            // A durable pending record exists before the target device connects.
+            let pending:i64=conn.query_row("SELECT pending FROM bot_records WHERE id='queued-task'",[],|row|row.get(0)).unwrap();
+            assert_eq!(pending,1);
+            let mut unavailable=sender_ctx.clone();
+            match &mut unavailable.provider {
+                storage_provider::ProviderConfig::Webdav(endpoint)=>endpoint.url="http://127.0.0.1:1/".into(),
+                storage_provider::ProviderConfig::Supabase(profile)=>profile.supabase.as_mut().unwrap().api_url="http://127.0.0.1:1/".into(),
+            }
+            assert!(bot_runtime::synchronize(&sender,&unavailable).await.is_err());
+            let pending:i64=conn.query_row("SELECT pending FROM bot_records WHERE id='queued-task'",[],|row|row.get(0)).unwrap();assert_eq!(pending,1);
+            bot_runtime::synchronize(&sender,&sender_ctx).await.unwrap();
+            bot_runtime::synchronize(&receiver,&receiver_ctx).await.unwrap();
+            bot_runtime::synchronize(&receiver,&receiver_ctx).await.unwrap();
+            let pc = rusqlite::Connection::open(&receiver.db_path).unwrap();
+            let rows:i64=pc.query_row("SELECT COUNT(*) FROM bot_records WHERE kind='tasks'",[],|row|row.get(0)).unwrap();
+            assert_eq!(rows,1,"duplicate sync must preserve one task and exclude another account");
+            let received:String=pc.query_row("SELECT payload FROM bot_records WHERE id='queued-task'",[],|row|row.get(0)).unwrap();
+            assert_eq!(serde_json::from_str::<serde_json::Value>(&received).unwrap(),payload);
+            pc.execute("INSERT INTO bot_execution VALUES(?1,?2,'unfinished','running',NULL)",rusqlite::params![receiver_ctx.profile_id(),receiver_ctx.owner_scope]).unwrap();
+            bot_runtime::recover(&receiver.db_path).unwrap();
+            let interrupted:String=pc.query_row("SELECT status FROM bot_execution WHERE task_id='unfinished'",[],|row|row.get(0)).unwrap();assert_eq!(interrupted,"interrupted");
+            bot_runtime::initialize(&receiver.db_path).unwrap();
+            bot_runtime::synchronize(&receiver,&receiver_ctx).await.unwrap();
+            let rows:i64=pc.query_row("SELECT COUNT(*) FROM bot_records WHERE kind='tasks'",[],|row|row.get(0)).unwrap();assert_eq!(rows,1);
+            let pending:i64=conn.query_row("SELECT pending FROM bot_records WHERE id='queued-task'",[],|row|row.get(0)).unwrap();
+            assert_eq!(pending,0);
+            drop(pc); drop(conn); drop(receiver); drop(sender);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+    #[cfg(desktop)]
+    #[tokio::test]
+    async fn two_image_references_execute_on_the_selected_pc_for_both_providers() {
+        let dav=spawn_test_dav().await;
+        let supabase=spawn_test_supabase().await;
+        let executable=PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/image-bot");
+        assert!(executable.join(if cfg!(windows) {"transfer-genie-image-bot.exe"} else {"transfer-genie-image-bot"}).is_file(), "build the bundled image program first");
+        for settings in [test_settings_with_url(dav.base_url.clone()),test_supabase_settings_with_url(supabase.base_url.clone())] {
+            let root=std::env::temp_dir().join(format!("bot-images-e2e-{}",uuid::Uuid::new_v4()));
+            fs::create_dir_all(root.join("phone")).unwrap();fs::create_dir_all(root.join("pc")).unwrap();
+            let phone=test_app_state(&root.join("phone"),settings.clone());
+            let pc=test_app_state(&root.join("pc"),settings.clone());
+            for state in [&phone,&pc] {
+                db::init_db(&state.db_path,None).unwrap();bot_runtime::initialize(&state.db_path).unwrap();
+                plugin_host::initialize(&plugin_host::root(state),&state.default_download_dir).unwrap();
+                if settings.active_storage_profile_id.is_some(){install_test_supabase_session(state);}
+            }
+            let pc_ctx=resolve_send_target_context(&pc,&settings).unwrap();
+            let phone_ctx=resolve_send_target_context(&phone,&settings).unwrap();
+            let plugin_root=plugin_host::root(&pc);
+            plugin_host::set_builtin_resource(&plugin_root,&executable).unwrap();
+            let plugin=plugin_host::get(&plugin_root,"image-downloader").unwrap();
+            plugin_host::configure(&plugin_root,"image-downloader",true,plugin.config).unwrap();
+            let mut pc_settings=current_settings(&pc).unwrap();pc_settings.sender_name="Target PC".into();*pc.settings.lock().unwrap()=pc_settings;
+            plugin_host::set_space_allowed(&plugin_root,"image-downloader",&bot_runtime::context_scope(&pc_ctx),true).unwrap();
+            let source=root.join("source.png");
+            image::RgbImage::from_pixel(1,1,image::Rgb([240,20,30])).save(&source).unwrap();
+            let bytes=fs::read(&source).unwrap();
+            let mut refs=Vec::new();
+            for (index,name) in ["one.png","two.png"].iter().enumerate() {
+                for (state,ctx) in [(&phone,&phone_ctx),(&pc,&pc_ctx)] {
+                    let mut message=test_db_message(ctx.profile_id(),name,name,index as i64+1,bytes.len() as i64);
+                    message.kind="image".into();message.local_path=Some(source.to_string_lossy().into());
+                    db::upsert_message(&state.db_path,&message).unwrap();
+                    rusqlite::Connection::open(&state.db_path).unwrap().execute("UPDATE messages SET owner_scope=?1 WHERE filename=?2",rusqlite::params![ctx.owner_scope,name]).unwrap();
+                }
+                refs.push(plugin_protocol::MessageReference{filename:name.to_string(),..Default::default()});
+            }
+            bot_runtime::tick(&pc).await.unwrap();
+            bot_runtime::synchronize(&phone,&phone_ctx).await.unwrap();
+            let target=plugin_host::get(&plugin_root,"image-downloader").unwrap().instance_id;
+            bot_runtime::send(&phone,"下载引用图片".into(),None,refs.clone(),Some(target.clone()),Some("mobile-call".into()),None).await.unwrap();
+            bot_runtime::synchronize(&phone,&phone_ctx).await.unwrap();
+            bot_runtime::tick(&pc).await.unwrap();
+            bot_runtime::synchronize(&phone,&phone_ctx).await.unwrap();
+            let conn=rusqlite::Connection::open(&phone.db_path).unwrap();
+            let result:String=conn.query_row("SELECT payload FROM bot_records WHERE kind='events' AND json_extract(payload,'$.kind')='succeeded'",[],|row|row.get(0)).unwrap();
+            let result:serde_json::Value=serde_json::from_str(&result).unwrap();
+            assert_eq!(result["payload"]["items"].as_array().unwrap().len(),2);
+            let reply_count:i64=conn.query_row("SELECT COUNT(*) FROM bot_records WHERE kind='contexts' AND json_extract(payload,'$.text') LIKE '%Target PC%'",[],|row|row.get(0)).unwrap();assert_eq!(reply_count,1);
+            for item in result["payload"]["items"].as_array().unwrap(){let path=Path::new(item["saved_path"].as_str().unwrap());assert!(path.starts_with(fs::canonicalize(&pc.default_download_dir).unwrap()));assert_eq!(fs::read(path).unwrap(),bytes);}
+            bot_runtime::tick(&pc).await.unwrap();
+            assert_eq!(fs::read_dir(&pc.default_download_dir).unwrap().count(),2,"repeat sync must not create duplicate downloads");
+            let cancelled=bot_runtime::send(&phone,"取消这次调用".into(),None,refs,Some(target),Some("cancel-call".into()),None).await.unwrap();
+            let task_id:String=conn.query_row("SELECT id FROM bot_records WHERE kind='tasks' AND json_extract(payload,'$.message_filename')=?1",[cancelled.filename],|row|row.get(0)).unwrap();
+            let author=plugin_host::device_id(&plugin_host::root(&phone)).unwrap();
+            let cancel=serde_json::json!({"task_id":task_id,"event_id":"cancel-before-run","device_id":author,"timestamp_ms":now_ms(),"kind":"cancel_requested","payload":{}});
+            conn.execute("INSERT INTO bot_records VALUES(?1,?2,'events','cancel-before-run',?3,1)",rusqlite::params![phone_ctx.profile_id(),phone_ctx.owner_scope,cancel.to_string()]).unwrap();
+            bot_runtime::synchronize(&phone,&phone_ctx).await.unwrap();
+            bot_runtime::tick(&pc).await.unwrap();
+            bot_runtime::synchronize(&phone,&phone_ctx).await.unwrap();
+            let status:String=rusqlite::Connection::open(&pc.db_path).unwrap().query_row("SELECT status FROM bot_execution WHERE task_id=?1",[&task_id],|row|row.get(0)).unwrap();
+            assert_eq!(status,"cancelled");
+            assert_eq!(fs::read_dir(&pc.default_download_dir).unwrap().count(),2);
+            drop(conn);drop(phone);drop(pc);fs::remove_dir_all(root).unwrap();
+        }
+    }
+    async fn test_dav_propfind(
+        TestAxumState(state): TestAxumState<TestDavState>,
+        AxumPath(path): AxumPath<String>,
+        method: axum::http::Method,
+    ) -> AxumResponse {
+        if method.as_str() != "PROPFIND" {
+            return AxumResponse::builder().status(if method.as_str() == "MKCOL" { 201 } else { 405 }).body(Body::empty()).unwrap();
+        }
+        let prefix = format!("{}/", path.trim_matches('/'));
+        let files = state.files.lock().unwrap();
+        let mut xml = String::from("<d:multistatus xmlns:d=\"DAV:\">");
+        for (name, bytes) in files.iter().filter(|(name, _)| name.starts_with(&prefix)) {
+            xml.push_str(&format!("<d:response><d:href>/{name}</d:href><d:propstat><d:prop><d:getcontentlength>{}</d:getcontentlength><d:resourcetype/></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>", bytes.len()));
+        }
+        xml.push_str("</d:multistatus>");
+        AxumResponse::builder().status(207).header("Content-Type", "application/xml").body(Body::from(xml)).unwrap()
+    }
     async fn spawn_test_dav() -> TestDavServer {
         let state = TestDavState::default();
         let app = TestRouter::new()
             .route(
                 "/*path",
-                get(test_dav_get).put(test_dav_put).delete(test_dav_delete),
+                get(test_dav_get).put(test_dav_put).delete(test_dav_delete)
+                    .fallback(test_dav_propfind),
             )
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -24021,6 +24197,16 @@ mod tests {
         AxumPath(table): AxumPath<String>,
         Query(query): Query<TestHashMap<String, String>>,
     ) -> AxumResponse {
+        if table == "bot_records" {
+            let space = query.get("space_id").and_then(|s| s.strip_prefix("eq.")).unwrap_or_default();
+            let kind = query.get("kind").and_then(|s| s.strip_prefix("eq.")).unwrap_or_default();
+            let prefix = format!("bot/{space}/{kind}/");
+            let mut rows: Vec<_> = state.snapshots.lock().unwrap().iter().filter(|(key,_)| key.starts_with(&prefix)).map(|(_,v)| v.clone()).collect();
+            rows.sort_by(|a,b| a["id"].as_str().cmp(&b["id"].as_str()));
+            let offset = query.get("offset").and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+            let limit = query.get("limit").and_then(|s| s.parse::<usize>().ok()).unwrap_or(500);
+            return test_json_response(HttpStatusCode::OK, &serde_json::json!(rows.into_iter().skip(offset).take(limit).collect::<Vec<_>>()), None);
+        }
         if table == "spaces" {
             let gate = state.space_read_gate.lock().unwrap().clone();
             if let Some((started, resume)) = gate {
@@ -24140,6 +24326,13 @@ mod tests {
         AxumPath(rpc): AxumPath<String>,
         Json(body): Json<serde_json::Value>,
     ) -> AxumResponse {
+        if rpc == "bot_record_put" {
+            let key = format!("bot/{}/{}/{}", body["p_space_id"].as_str().unwrap(), body["p_kind"].as_str().unwrap(), body["p_id"].as_str().unwrap());
+            let mut snapshots = state.snapshots.lock().unwrap();
+            let row = serde_json::json!({"id":body["p_id"],"payload":body["p_payload"]});
+            if body["p_kind"] == "directory" { snapshots.insert(key,row); } else { snapshots.entry(key).or_insert(row); }
+            return test_json_response(HttpStatusCode::OK, &serde_json::json!(null), None);
+        }
         *state
             .rpc_counts
             .lock()
@@ -32881,6 +33074,34 @@ mod tests {
         );
         drop(conn);
         let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn referenced_send_keeps_marked_options_and_queues_message_atomically() {
+        let temp_dir = std::env::temp_dir().join(format!("tg-reference-send-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let state = test_app_state(&temp_dir, test_supabase_settings());
+        db::init_db(&state.db_path, None).unwrap();
+        bot_runtime::initialize(&state.db_path).unwrap();
+        install_test_supabase_session(&state);
+        let sent = bot_runtime::send(&state, "referenced message".into(), None, vec![], None, Some("stable-call".into()), Some(SendMarkedOptionsInput {
+            marked: true, due_date: Some("2026-12-31".into()),
+            created_tags: vec![PendingCreatedTagInput { name: "Reference Tag".into(), selected: true }],
+            ..Default::default()
+        })).await.unwrap();
+        let message = db::get_message_for_scope(&state.db_path, "supabase-1", "user-a", &sent.filename).unwrap().unwrap();
+        assert!(message.marked);
+        assert_eq!(message.marked_tag_ids.len(), 1);
+        assert_eq!(message.marked_due_date.as_deref(), Some("2026-12-31"));
+        let conn = rusqlite::Connection::open(&state.db_path).unwrap();
+        let queued: i64 = conn.query_row("SELECT COUNT(*) FROM sync_outbox", [], |row| row.get(0)).unwrap();
+        let contexts: i64 = conn.query_row("SELECT COUNT(*) FROM bot_records WHERE kind='contexts' AND pending=1", [], |row| row.get(0)).unwrap();
+        assert_eq!((queued, contexts), (2, 1));
+        let duplicate = bot_runtime::send(&state, "referenced message".into(), None, vec![], None, Some("stable-call".into()), None).await.unwrap();
+        assert_eq!(duplicate.filename, sent.filename);
+        assert!(bot_runtime::send(&state, "changed".into(), None, vec![], None, Some("stable-call".into()), None).await.is_err());
+        drop(conn);
+        fs::remove_dir_all(temp_dir).unwrap();
     }
 
     #[tokio::test]

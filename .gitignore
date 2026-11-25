@@ -16,3 +16,6 @@ docs/.vitepress/dist
 /tools/ffmpeg/ffmpeg.exe
 /tools/ffmpeg/FFMPEG_LICENSE.txt
 /tools/ffmpeg/FFMPEG_BUILD_README.txt
+/tools/image-bot/transfer-genie-image-bot
+/tools/image-bot/transfer-genie-image-bot.exe
+/tools/image-bot/plugin.json

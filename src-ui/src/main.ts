@@ -2,6 +2,12 @@ import { createApp } from "vue";
 import { installTransferGenieBridge, useTransferGenieStore } from "./store";
 import "./styles.css";
 import ComposerWorkspace from "./workspace/ComposerWorkspace.vue";
+import PluginsPanel from "./plugins/PluginsPanel.vue";
+import BotComposer from "./plugins/BotComposer.vue";
+import "./plugins/reference-quotes.css";
+import "./plugins/bot-messages.css";
+import ReferencePreview from "./plugins/ReferencePreview.vue";
+import { addReferences, pluginState } from "./plugins/plugin-store";
 import MobileShell from "./mobile/MobileShell.vue";
 import "./mobile/mobile.css";
 import "./mobile/composer.css";
@@ -125,7 +131,7 @@ const settingsRuntimeStatus = () => (window as any).transferGenieSettingsRuntime
 
 const app = createApp({
   data() {
-    return { ui: store.state };
+    return { ui: store.state, pluginState };
   },
   computed: {
     runningModuleCount(): number {
@@ -133,6 +139,7 @@ const app = createApp({
     },
   },
   methods: {
+    referenceMessage(message: any) { addReferences([message]); },
     activateTab: store.activateTab,
 
     // --- Formatting ---
@@ -604,6 +611,9 @@ app.component("marked-page-shell", { template: "<div style='display:flex;flex-di
 app.component("downloads-page-shell", { template: "<div style='display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden'><slot /></div>", inheritAttrs: false });
 app.component("settings-page-shell", { template: "<div style='display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden'><slot /></div>", inheritAttrs: false });
 app.component("composer-workspace", ComposerWorkspace);
+app.component("plugins-panel", PluginsPanel);
+app.component("bot-composer", BotComposer);
+app.component("reference-preview", ReferencePreview);
 (window as any).transferGenieComposerStore = composerStore;
 
 if (previewMobile || nativeIosWebview) {

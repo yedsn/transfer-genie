@@ -7,6 +7,9 @@ import { history } from '@milkdown/kit/plugin/history';
 import { clipboard } from '@milkdown/kit/plugin/clipboard';
 import { $prose, callCommand, replaceAll } from '@milkdown/kit/utils';
 import { Plugin, TextSelection } from '@milkdown/kit/prose/state';
+import { Decoration, DecorationSet } from '@milkdown/kit/prose/view';
+import { selectedMention, mentionDeletion } from '../plugins/mention-editor';
+import { selectBot, pluginState } from '../plugins/plugin-store';
 import { undo, redo } from '@milkdown/kit/prose/history';
 import { lift } from '@milkdown/kit/prose/commands';
 import '@milkdown/kit/prose/view/style/prosemirror.css';
@@ -52,6 +55,11 @@ function updateActive() {
   }
 }
 const sync = $prose(ctx => new Plugin({
+  props:{
+    decorations(state){const label=selectedMention();const decorations:Decoration[]=[];if(label)state.doc.descendants((node,pos)=>{if(node.isText){const index=node.text?.indexOf(label) ?? -1;if(index>=0)decorations.push(Decoration.inline(pos+index,pos+index+label.length,{class:'bot-mention-token'}));}});return DecorationSet.create(state.doc,decorations);},
+    handleKeyDown(view,event){if(event.isComposing || !['Backspace','Delete'].includes(event.key))return false;return deleteMention(view,event.key==='Backspace'?'backward':'forward');},
+    handleDOMEvents:{beforeinput(view,event){const type=(event as InputEvent).inputType;if(!type?.startsWith('delete'))return false;const removed=deleteMention(view,type.includes('Backward')?'backward':'forward');if(removed)event.preventDefault();return removed;}},
+  },
   // Synchronous serialization keeps the last keystroke available to Send,
   // background persistence and unmount; do not debounce editor -> draft state.
   view: view => {
@@ -71,6 +79,13 @@ const sync = $prose(ctx => new Plugin({
     } };
   },
 }));
+function deleteMention(view:any,direction:string){
+  let deletion:{from:number;to:number}|null=null;
+  const {from,to}=view.state.selection;
+  view.state.doc.descendants((node:any,pos:number)=>{if(!node.isText || deletion)return;const range=mentionDeletion(node.text,from-pos,to-pos,direction);if(range)deletion={from:pos+range.from,to:pos+range.to};});
+  if(!deletion)return false;
+  const range=deletion as {from:number;to:number};selectBot('');view.dispatch(view.state.tr.delete(range.from,range.to));return true;
+}
 onMounted(async () => {
   try {
     editor = Editor.make().config(ctx => {
@@ -124,6 +139,7 @@ function setSource(value: string) {
   finally { replacing = false; }
 }
 watch(() => props.modelValue, setSource);
+watch(()=>[pluginState.target,pluginState.mentionText],()=>{if(ready.value && editor){const view=editor.ctx.get(editorViewCtx);view.dispatch(view.state.tr);}});
 watch(() => props.disabled, () => {
   if (ready.value) editor?.ctx.get(editorViewCtx).setProps({ editable: () => !props.disabled });
 });
