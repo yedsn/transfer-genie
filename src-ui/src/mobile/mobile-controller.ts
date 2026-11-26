@@ -1396,7 +1396,7 @@ export function useMobileController() {
       // Feed/status reads may wait on sync or transfer work, especially on a
       // physical iPhone, and must not keep a successfully committed composer
       // disabled or make the user retry the same message.
-      void Promise.allSettled([refreshMessages(), refreshMarked(), refreshStatus(), refreshTransfers()])
+      void Promise.allSettled([refreshMessages(), refreshMarked(), refreshStatus(), refreshTransfers(), (window as any).transferGeniePlugins?.refreshMessageContexts?.()])
         .then((results) => {
           if (generation !== viewGeneration || failed) return;
           if (results.some((result) => result.status === "rejected")) {

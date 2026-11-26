@@ -53,6 +53,11 @@ export function clearCallContext(sent?: ReturnType<typeof getCallContext>, sentS
   pluginState.references = []; pluginState.target = ''; pluginState.mentionText=''; saveDraft();
 }
 export function getDraftIdentity() { return composerDraft; }
+export async function refreshMessageContexts() {
+  const scope = pluginState.scope;
+  const contexts = await invoke('get_message_contexts');
+  if (pluginState.scope === scope) pluginState.contexts = contexts;
+}
 export async function refreshPlugins() {
   await resolvePluginScope(requestedProfile);
   const requestScope = pluginState.scope;
@@ -89,5 +94,5 @@ export async function pluginAction(name: string, args?: any) {
     }
     await refreshPlugins(); return result; } catch(e) { pluginState.error = String(e); throw e; } finally { pluginState.busy = false; }
 }
-(window as any).transferGeniePlugins = { state: pluginState, addReferences, getCallContext, clearCallContext, setScope: resolvePluginScope, setComposerDraft, getDraftIdentity };
+(window as any).transferGeniePlugins = { state: pluginState, addReferences, getCallContext, clearCallContext, setScope: resolvePluginScope, setComposerDraft, getDraftIdentity, refreshMessageContexts };
 window.setInterval(() => { if ((window as any).__TAURI__) void refreshPlugins(); }, 15000);

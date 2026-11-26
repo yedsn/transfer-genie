@@ -190,9 +190,12 @@ const runtimeApi = {
 };
 const runtimeModule = { exports: {} };
 const runtimeClipboard = { writeText: async () => {} };
+let contextRefreshes = 0;
+const referenceContext = { references: [{ filename: 'quoted.png', kind: 'image' }], targetBotInstanceId: null };
+const runtimePlugins = { setScope: async () => {}, getCallContext: () => referenceContext, clearCallContext: () => {}, refreshMessageContexts: async () => { contextRefreshes += 1; } };
 vm.runInNewContext(ts.transpileModule(controller, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, {
   module: runtimeModule, exports: runtimeModule.exports, require: createRequire(import.meta.url),
-  window: { location: { search: '' }, transferGenieApi: runtimeApi, setTimeout, clearTimeout }, URLSearchParams, crypto: globalThis.crypto,
+  window: { location: { search: '' }, transferGenieApi: runtimeApi, transferGeniePlugins: runtimePlugins, setTimeout, clearTimeout }, URLSearchParams, crypto: globalThis.crypto,
   navigator: { clipboard: runtimeClipboard },
 });
 const runtime = runtimeModule.exports.useMobileController();
@@ -788,6 +791,7 @@ assert.equal(await firstSend, false);
 assert.equal(textWrites, 1);
 assert.equal(fileWrites.length, 1);
 assert.equal(textInput.format, 'markdown');
+assert.equal(textInput.references[0].filename, 'quoted.png');
 assert.deepEqual(JSON.parse(JSON.stringify(textInput.markedOptions)), { marked: true, selectedTagIds: ['work', 'urgent'], dueDate: '2026-10-29', createdTags: [], deletedTagIds: [] });
 assert.deepEqual(JSON.parse(JSON.stringify(fileWrites[0].markedOptions)), JSON.parse(JSON.stringify(textInput.markedOptions)));
 assert.equal(runtime.state.composer.text, '');
@@ -801,6 +805,8 @@ assert.deepEqual(JSON.parse(JSON.stringify(fileWrites[1].markedOptions)), JSON.p
 assert.equal(runtime.state.composer.marked, false);
 assert.equal(runtime.state.composer.tagIds.length, 0);
 assert.equal(runtime.state.composer.attachments.length, 0);
+assert.ok(contextRefreshes > 0, 'refresh sent-message references after the local commit');
+assert.match(shell, /v-if="state.pendingMarkedTotal"/);
 
 // A committed send must leave the sending state even when post-send reads hang.
 const hangingPostSendRead = deferred();

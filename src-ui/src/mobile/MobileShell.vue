@@ -1815,8 +1815,8 @@ onBeforeUnmount(() => {
               d="m12 3 2.6 5.3 5.9.9-4.3 4.2 1 5.9-5.2-2.8-5.2 2.8 1-5.9-4.3-4.2 5.9-.9L12 3Z"
             /></svg
           ><span>标记</span
-          ><i v-if="state.markedTotal">{{
-            state.markedTotal
+          ><i v-if="state.pendingMarkedTotal">{{
+            state.pendingMarkedTotal
           }}</i></button
         ><button
           type="button"
