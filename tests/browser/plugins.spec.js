@@ -137,7 +137,11 @@ test('mobile multi-selection quotes messages into a structured bot call', async 
     window.__TAURI__={core:{invoke:async(command)=>{
       if(command==='get_bot_scope') return 'mobile-fixture';
       if(command==='get_message_contexts') return [{filename:'preview-photo.jpg',task_id:'reply-task',text:'下载完成',references:[{filename:'preview-plan.pdf',sender:'Mac',kind:'file',original_name:'引用文件.pdf'}]}];
-      if(command==='list_bot_instances') return [{instance_id:'pc',name:'图片下载',device_name:'PC',enabled:true,expires_at_ms:Date.now()+90000}];
+      if(command==='list_bot_instances' && window.__directoryOffline) throw new Error('offline');
+      if(command==='list_bot_instances') return [
+        {instance_id:'pc',name:'图片下载',device_name:'PC',enabled:true,expires_at_ms:Date.now()+90000},
+        {instance_id:'mac',name:'图片下载',device_name:'MacBook',enabled:true,expires_at_ms:Date.now()-90000},
+      ];
       if(command.startsWith('list_') || command==='get_message_contexts') return [];
       return null;
     }},event:{listen:async()=>()=>{},emit:async()=>{}}};
@@ -155,26 +159,48 @@ test('mobile multi-selection quotes messages into a structured bot call', async 
   await page.locator('.mobile-selection-toolbar').getByRole('button',{name:'引用',exact:true}).click();
   await expect(page.locator('.bot-reference-list')).toContainText('已引用 2 条消息');
   await page.getByRole('textbox',{name:'消息内容',exact:true}).fill('@');
-  await page.getByRole('option').filter({hasText:'图片下载'}).click();
+  expect(await page.evaluate(()=>window.transferGeniePlugins.state.plugins)).toHaveLength(0);
+  await expect(page.locator('.bot-mention-menu').getByRole('option')).toHaveCount(2);
+  await page.evaluate(async()=>{
+    window.__directoryOffline=true;
+    await window.__TAURI__.core.invoke('list_bot_instances').catch(()=>{});
+    const store=await import('/src/plugins/plugin-store.ts');
+    await store.refreshPlugins();
+  });
+  await expect(page.locator('.bot-mention-menu').getByRole('alert')).toContainText('目录读取失败');
+  await expect(page.locator('.bot-mention-menu').getByRole('option')).toHaveCount(2);
+  await page.evaluate(()=>{window.__directoryOffline=false;});
+  await page.locator('.bot-mention-menu').getByRole('button',{name:'重试',exact:true}).click();
+  await expect(page.locator('.bot-mention-menu').getByRole('alert')).toHaveCount(0);
+  await expect(page.locator('.bot-mention-menu').getByRole('option').filter({hasText:'MacBook'})).toContainText('离线');
+  await page.getByRole('option').filter({hasText:'PC'}).click();
   await expect(page.getByRole('textbox',{name:'消息内容',exact:true})).toHaveValue('@图片下载（PC） ');
   await page.getByRole('textbox',{name:'消息内容',exact:true}).press('Backspace');
   await page.getByRole('textbox',{name:'消息内容',exact:true}).press('Backspace');
   await expect(page.getByRole('textbox',{name:'消息内容',exact:true})).toHaveValue('');
   expect(await page.evaluate(()=>window.transferGeniePlugins.getCallContext().targetBotInstanceId)).toBeNull();
   await page.getByRole('textbox',{name:'消息内容',exact:true}).fill('@');
-  await page.locator('.bot-mention-menu').getByRole('option').click();
+  await page.locator('.bot-mention-menu').getByRole('option').filter({hasText:'MacBook'}).click();
   const context=await page.evaluate(()=>window.transferGeniePlugins.getCallContext());
   expect(context.references).toHaveLength(2);
-  expect(context.targetBotInstanceId).toBe('pc');
+  expect(context.targetBotInstanceId).toBe('mac');
   const plainEditor=page.getByRole('textbox',{name:'消息内容',exact:true});
   await plainEditor.fill('');
   await page.locator('.mobile-composer-format').getByRole('button',{name:'Markdown',exact:true}).click();
   const markdownEditor=page.locator('.mobile-composer-sheet [contenteditable="true"]');
   await markdownEditor.click();
   await page.keyboard.type('@');
-  await page.locator('.bot-mention-menu').getByRole('option').click();
+  await page.locator('.bot-mention-menu').getByRole('option').filter({hasText:'PC'}).click();
   await expect(markdownEditor.locator('.bot-mention-token')).toHaveText('@图片下载（PC）');
   expect(await page.evaluate(()=>window.transferGeniePlugins.getCallContext().targetBotInstanceId)).toBe('pc');
+  // A native editor transaction has no DOM input event (e.g. iOS undo).
+  await markdownEditor.evaluate(element => {
+    element.__botEditorChanges = 0;
+    element.addEventListener('bot-editor-change', () => element.__botEditorChanges++);
+  });
+  await page.keyboard.press('ArrowLeft');
+  await expect.poll(() => markdownEditor.evaluate(element => element.__botEditorChanges)).toBeGreaterThan(0);
+  await page.keyboard.press('End');
   await page.keyboard.press('Backspace');
   await page.keyboard.press('Backspace');
   await expect(markdownEditor).not.toContainText('@图片下载');

@@ -23,7 +23,7 @@
 - [x] 5.1 开发遵循通用协议的外部 Rust 图片程序、manifest 和可安装资源包。
 - [x] 5.2 支持引用原件与图片直链，默认系统下载目录及设置页目录配置。
 - [x] 5.3 实现图片验证、流式限制、文件名清洗、同名保护、原子落盘和逐项恢复。
-- [ ] 5.4 配置 Windows/macOS 内置资源构建打包，自动登记图片插件与启用入口。
+- [x] 5.4 配置 Windows/macOS 内置资源构建打包，自动登记图片插件与启用入口。
 
 ## 7. 内置/外置与市场
 - [x] 7.1 定义来源模型和内置资源清单，统一展示内置模块，禁止外置覆盖内置 id。
@@ -42,7 +42,21 @@
 - [x] 6.7 补充插件作者协议、图片机器人使用说明、权限及移动平台限制，记录 UI 截图。
 
 ## 待实机验收说明
-- 2026-11-26：补强移动端 Markdown 的原生编辑事务插入提及，验证文本/Markdown 选择与整体删除、结构化目标清理；候选列表响应 visualViewport 变化。桌面与移动浏览器检查通过，软键盘仍需真机验收。当前会话未提供关联设备工具，本机 SSH 配置无 Mac，尚未执行 Mac 实机测试。
-- 5.4：Windows 资源构建和 NSIS 打包已通过；macOS 构建路径已配置，尚缺 Mac 环境实际打包验证。
+- 2026-11-26：补强移动端 Markdown 的原生编辑事务插入提及，验证文本/Markdown 选择与整体删除、结构化目标清理；候选列表响应 visualViewport 变化。Chromium/WebKit 检查与 Mac 本机构建通过，iOS 专用模拟器安装启动通过，软键盘仍需真机验收。配对 iPhone 可通过 CoreDevice 连接；两次只读草稿检查均通过，设备仍安装 0.5.18。
+- 5.4：Windows 资源构建和 NSIS 打包已通过；2026-11-26 在 Apple Silicon Mac 完成 release .app 构建，包内图片程序为 arm64 且具备执行权限，应用通过 codesign --verify --deep --strict。
 - 6.5：移动端真实组件交互和双 Provider 本地两设备 fixture 已通过，尚缺真实手机通过远端空间调用 PC 的验收；不以浏览器模拟替代。
 - Supabase 增量迁移已提供，尚未部署到远端实例验证 RLS。正式市场地址待实际托管后配置。
+
+## Mac / iOS 编辑器补齐（2026-11-26）
+- [x] 8.0 明确所有平台均展示当前账号/空间内所有机器的启用实例，调用端无需安装插件；移动浏览器验证同名 PC/MacBook 两实例、离线候选与准确实例选择，Chromium/WebKit 四项回归通过。
+- [x] 8.9 目录读取失败显示错误和重试入口，保留已缓存远端机器人，恢复后清除错误；7 项草稿/目录检查、typecheck 和 4 项浏览器回归通过。
+- [x] 8.10 所有平台查询 @ 候选时主动拉取远端 directory，再合并本机实例；不依赖后台轮询或本机插件，10 秒超时保留前端缓存。WebDAV/Supabase 双设备发现及两图执行测试通过。
+- [x] 8.1 移动 Markdown 在 ProseMirror 事务提交后检查 @ 候选与结构化目标，覆盖输入事件先于文档提交的时序。
+- [x] 8.2 插件界面测试使用 Chromium 和 WebKit，覆盖文字/Markdown、多选引用、提及整体删除及无 DOM input 的选区事务。
+- [x] 8.3 Mac 独立图片程序测试 9 项、进程协议测试 1 项、主库串行测试 445 项通过（2 项忽略），双 Provider 图片流程通过。
+- [x] 8.4 验证 Universal 图片程序实际包含 x86_64/arm64，保留 Unix 执行权限。
+- [x] 8.5 修复专用模拟器部署：仅当 project.yml 停用 ShareExtension 时允许无扩展主应用；保留签名、平台与草稿保护。
+- [x] 8.6 在新建 Transfer Genie Bot QA 模拟器构建、签名校验、安装并启动 iOS 0.5.19；未覆盖原模拟器草稿。真机软键盘及远端空间业务验收仍未完成。
+- [x] 8.7 配对 iPhone 原位更新至 0.5.19：签名/有效期/设备范围校验、前后 SQLite 完整性及空草稿检查通过，设备版本复核通过。
+- [ ] 8.8 真机执行 @ 软键盘 XCTest；测试已编译，两次运行器均在建立连接前退出（code 74）。重试明确报告 DTXProxyChannel Channel disconnected、无法从 IDE 取得测试配置；测试方法未执行，不计为测试通过。专用空白模拟器未配置云端空间，无法进入此业务测试的消息页前置条件。
+  - 诊断包进一步确认：Developer Mode enabled、DDI services available、CoreDevice tunnel connected；testmanagerd 控制会话建立成功、运行器安装启动成功，但对端拒绝 dtxproxy:XCTestDriverInterface:XCTestManager_IDEInterface 通道。等待用户确认手机是否出现 UI 自动化/信任提示，未绕过设备授权。诊断输出：target/ios-mention-device-diagnostics。

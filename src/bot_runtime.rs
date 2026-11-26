@@ -441,7 +441,15 @@ pub(crate) async fn synchronize(
         crate::ensure_integration_context(state, ctx)?;
         Connection::open(&state.db_path).and_then(|c|c.execute("UPDATE bot_records SET pending=0 WHERE endpoint_id=?1 AND owner_scope=?2 AND kind=?3 AND id=?4 AND payload=?5",params![ctx.profile_id(),ctx.owner_scope,kind,id,payload])).map_err(|e|e.to_string())?;
     }
-    for kind in ["directory", "tasks", "events", "contexts"] {
+    receive_records(state, ctx, &["directory", "tasks", "events", "contexts"]).await
+}
+
+pub(crate) async fn receive_records(
+    state: &AppState,
+    ctx: &IntegrationTargetContext,
+    kinds: &[&str],
+) -> Result<(), String> {
+    for &kind in kinds {
         let rows: Vec<(String, Value)> = match &ctx.provider {
             crate::storage_provider::ProviderConfig::Webdav(endpoint) => {
                 let entries = crate::webdav::list_entries(
@@ -501,7 +509,13 @@ pub(crate) async fn synchronize(
                         .await
                         .map_err(|e| e.to_string())?;
                     if !response.status().is_success() {
-                        return Err("当前空间尚未支持机器人协议，请部署迁移".into());
+                        let status = response.status().as_u16();
+                        return Err(match status {
+                            404 => "Supabase 缺少机器人目录表或 API 缓存未刷新，请在服务端执行 004_bot_plugin_records.sql 并刷新 schema cache".into(),
+                            401 => "当前空间登录已失效，请重新登录后重试机器人目录".into(),
+                            403 => "当前账号无权读取机器人目录，请检查服务端权限和 RLS 配置".into(),
+                            _ => format!("读取机器人目录失败（HTTP {status}），请稍后重试"),
+                        });
                     }
                     let bytes =
                         read_limited_stream(Box::pin(response.bytes_stream()), 4 * 1024 * 1024)
@@ -1449,6 +1463,15 @@ pub fn plugin_runtime_status(state: State<'_, AppState>, id: String) -> Result<V
 pub async fn list_bot_instances(state: State<'_, AppState>) -> Result<Vec<Value>, String> {
     let settings = crate::current_settings(&state)?;
     let ctx = crate::resolve_send_target_context(&state, &settings)?;
+    // Discovery must not depend on the caller hosting plugins or waiting for
+    // the background task consumer to finish its next synchronization cycle.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        receive_records(&state, &ctx, &["directory"]),
+    )
+    .await
+    .map_err(|_| "刷新远端机器人目录超时".to_string())??;
+    crate::ensure_integration_context(&state, &ctx)?;
     let mut values = records(&state, &ctx, "directory")?;
     #[cfg(desktop)]
     for instance in scoped_instances(&state, &ctx, &settings.sender_name)? {

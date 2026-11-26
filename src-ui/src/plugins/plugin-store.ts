@@ -1,6 +1,6 @@
 import { reactive } from 'vue';
 
-export const pluginState = reactive({ plugins: [] as any[], modules: [] as any[], bots: [] as any[], tasks: [] as any[], events: [] as any[], contexts: [] as any[], market: [] as any[], marketUrl: '', error: '', busy: false, references: [] as any[], target: '', mentionText: '', scope: '' });
+export const pluginState = reactive({ plugins: [] as any[], modules: [] as any[], bots: [] as any[], tasks: [] as any[], events: [] as any[], contexts: [] as any[], market: [] as any[], marketUrl: '', directoryError: '', error: '', busy: false, references: [] as any[], target: '', mentionText: '', scope: '' });
 const invoke = (name: string, args?: any) => { const t = (window as any).__TAURI__; return (t?.core?.invoke || t?.invoke)(name, args); };
 let scopeGeneration = 0;
 let requestedProfile = '';
@@ -32,6 +32,7 @@ function saveDraft() { if (!pluginState.scope) return; localStorage.setItem(draf
 export function setPluginScope(value: string) {
   if (value === pluginState.scope) return;
   saveDraft(); pluginState.scope = value; pluginState.references = []; pluginState.target = '';
+  pluginState.directoryError = '';
   pluginState.mentionText=''; pluginState.bots = []; pluginState.tasks = []; pluginState.events = []; pluginState.contexts = [];
   restoreDraft();
 }
@@ -67,7 +68,12 @@ export async function refreshPlugins() {
       return {...plugin,savedConfig:JSON.stringify(plugin.config)};
     });
   }
-  if (results[1].status === 'fulfilled') pluginState.bots = results[1].value;
+  if (results[1].status === 'fulfilled') { pluginState.bots = results[1].value; pluginState.directoryError = ''; }
+  else {
+    const reason = results[1].reason;
+    const message = typeof reason === 'string' ? reason : reason?.message;
+    pluginState.directoryError = '机器人目录读取失败：' + (message || '请检查当前空间连接后重试。');
+  }
   if (results[2].status === 'fulfilled') pluginState.events = results[2].value;
   if (results[3].status === 'fulfilled') pluginState.contexts = results[3].value;
   if (results[4].status === 'fulfilled') pluginState.marketUrl = results[4].value;

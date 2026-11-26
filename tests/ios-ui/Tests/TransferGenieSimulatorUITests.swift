@@ -3172,6 +3172,31 @@ final class TransferGeniePhysicalDeviceSmokeTests: XCTestCase {
         add(attachment)
     }
 
+    func testBotMentionMenuWithSoftwareKeyboard() throws {
+        XCTAssertTrue(app.buttons["消息"].waitForExistence(timeout: 30))
+        app.buttons["新消息"].tap()
+        let editor = app.textViews.matching(identifier: "消息内容").firstMatch
+        XCTAssertTrue(editor.waitForExistence(timeout: 10))
+        let initial = (editor.value as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard initial.isEmpty || initial == "输入文字，或加入照片和文件…" else {
+            throw XCTSkip("Preserve existing draft")
+        }
+        guard app.buttons.matching(identifier: "移除附件").count == 0 else {
+            throw XCTSkip("Preserve existing attachments")
+        }
+        editor.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        editor.typeText("@")
+        XCTAssertTrue(app.staticTexts["选择要提醒的机器人"].waitForExistence(timeout: 10))
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "bot-mention-software-keyboard"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        editor.typeText(XCUIKeyboardKey.delete.rawValue)
+        XCTAssertTrue(app.staticTexts["选择要提醒的机器人"].waitForNonExistence(timeout: 5))
+        app.buttons["关闭新消息"].tap()
+    }
+
     func testComposerPickerCancellationWithKeyboard() {
         XCTAssertTrue(app.buttons["消息"].waitForExistence(timeout: 30))
         app.buttons["新消息"].tap()

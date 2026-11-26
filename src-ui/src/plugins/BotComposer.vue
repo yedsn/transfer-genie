@@ -156,7 +156,8 @@ onUnmounted(() => {
       <button v-for="(bot,index) in candidates" :key="bot.instance_id" class="mention-option" type="button" role="option" :aria-selected="index===active" @pointerdown.prevent @mousedown.prevent @pointermove="active=index" @click="choose(bot)"><span class="mention-avatar" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="7" width="16" height="14" rx="4"/><path d="M12 7V3m-2 0h4M8 12h1m6 0h1m-7 5h6"/></svg></span><span class="mention-copy"><strong>{{ bot.name }}</strong><small>{{ bot.device_name }}</small></span><span class="mention-presence" :class="{online:bot.expires_at_ms>Date.now()}">{{ bot.expires_at_ms > Date.now() ? '可用' : '离线' }}</span></button>
       <div v-for="plugin in ungranted" :key="plugin.manifest.id" class="bot-permission-hint"><strong>{{ plugin.manifest.name }}</strong><p>已启用，尚未允许当前存储空间调用</p><button type="button" :disabled="state.busy" @mousedown.prevent @click="grant(plugin)">允许当前空间调用</button></div>
       <p v-if="loading && !candidates.length">正在查找机器人…</p>
-      <p v-else-if="!candidates.length && !ungranted.length">{{ state.plugins.some(plugin=>plugin.enabled) ? '当前空间暂无可调用机器人，请确认目标电脑已授权此空间并完成同步。' : '没有匹配的机器人，请在插件管理中安装并启用。' }}</p>
+      <p v-else-if="state.directoryError" role="alert">{{ state.directoryError }}<button type="button" @mousedown.prevent @click="refreshCandidates">重试</button></p>
+      <p v-else-if="!candidates.length && !ungranted.length">{{ query ? '没有匹配的机器人，可按机器人名称或设备名称搜索。' : '当前空间暂无可调用机器人。请在目标电脑启用机器人并允许此空间调用，保持两端处于同一存储空间并完成同步；本机无需安装该插件。' }}</p>
     </div></Teleport>
     <p v-if="state.error" role="alert">{{ state.error }}</p>
   </div>

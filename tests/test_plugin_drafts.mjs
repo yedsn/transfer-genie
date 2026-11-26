@@ -17,6 +17,30 @@ function store() {
   return context.exports;
 }
 
+test('remote directory failure retains cached bots and clears after recovery', async () => {
+  const api = store();
+  let offline = false;
+  api.testWindow.__TAURI__ = { core: { invoke: async command => {
+    if (command === 'get_bot_scope') return 'shared-space';
+    if (command === 'get_plugin_market') return '';
+    if (command === 'list_bot_instances') {
+      if (offline) throw new Error('Supabase 缺少机器人目录表，请执行 004_bot_plugin_records.sql');
+      return [{instance_id:'remote-mac',name:'图片下载',device_name:'Mac'}];
+    }
+    return [];
+  } } };
+  await api.resolvePluginScope('profile');
+  await api.refreshPlugins();
+  offline = true;
+  await api.refreshPlugins();
+  assert.equal(api.pluginState.bots[0].instance_id, 'remote-mac');
+  assert.match(api.pluginState.directoryError, /目录读取失败/);
+  assert.match(api.pluginState.directoryError, /004_bot_plugin_records.sql/);
+  offline = false;
+  await api.refreshPlugins();
+  assert.equal(api.pluginState.directoryError, '');
+});
+
 test('composer tabs retain independent references and bot targets', () => {
   const api=store();
   api.setPluginScope('space'); api.setComposerDraft('one');

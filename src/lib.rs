@@ -23974,7 +23974,13 @@ mod tests {
                 refs.push(plugin_protocol::MessageReference{filename:name.to_string(),..Default::default()});
             }
             bot_runtime::tick(&pc).await.unwrap();
-            bot_runtime::synchronize(&phone,&phone_ctx).await.unwrap();
+            // A caller without enabled local plugins discovers remote bots on
+            // demand without synchronizing or consuming the whole task queue.
+            bot_runtime::receive_records(&phone,&phone_ctx,&["directory"]).await.unwrap();
+            let discovered:i64=rusqlite::Connection::open(&phone.db_path).unwrap().query_row(
+                "SELECT COUNT(*) FROM bot_records WHERE kind='directory' AND json_extract(payload,'$.enabled')=1",
+                [],|row|row.get(0)).unwrap();
+            assert_eq!(discovered,1);
             let target=plugin_host::get(&plugin_root,"image-downloader").unwrap().instance_id;
             bot_runtime::send(&phone,"下载引用图片".into(),None,refs.clone(),Some(target.clone()),Some("mobile-call".into()),None).await.unwrap();
             bot_runtime::synchronize(&phone,&phone_ctx).await.unwrap();

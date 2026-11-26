@@ -87,6 +87,10 @@ const sync = $prose(ctx => new Plugin({
         previousMarkdown = value;
       }
       updateActive();
+      // iOS composition and undo may commit after the DOM input event.
+      queueMicrotask(() => {
+        if (!destroyed && view.dom.isConnected) view.dom.dispatchEvent(new CustomEvent('bot-editor-change', { bubbles: true }));
+      });
     } };
   },
 }));

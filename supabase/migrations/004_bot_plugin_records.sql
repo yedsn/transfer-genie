@@ -28,3 +28,4 @@ revoke all on function transfer_genie.bot_record_put(uuid,text,text,jsonb) from 
 grant execute on function transfer_genie.bot_record_put(uuid,text,text,jsonb) to authenticated;
 insert into transfer_genie.schema_migrations(version) values('004_bot_plugin_records') on conflict do nothing;
 commit;
+notify pgrst, 'reload schema';

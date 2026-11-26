@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { assertSimulatorDevTarget, main, readConfig, selectSimulator } from '../scripts/ios-virtual-deploy.mjs';
+import { assertSimulatorDevTarget, main, readConfig, selectSimulator, requiresShareExtension } from '../scripts/ios-virtual-deploy.mjs';
+
+assert.equal(requiresShareExtension('targets:\n  ShareExtension:\n    type: app-extension'), true);
+assert.equal(requiresShareExtension('  # ShareExtension disabled\n  ShareExtensionTests:\n'), false);
 
 const config = readConfig('# ignored\r\nVPHONE_MACHINE="A VM"\r\nVPHONE_LIBRARY_ROOT=/Volumes/My Disk/machines\nIGNORED\nVALUE=first\nVALUE=last\nLITERAL=$(do-not-execute)\nSINGLE=\'value\'\n');
 assert.equal(config.VPHONE_MACHINE, 'A VM');

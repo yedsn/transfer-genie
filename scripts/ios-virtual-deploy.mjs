@@ -94,12 +94,25 @@ function dropEntitlements(entitlementsPath, keys) {
   }
 }
 
+export function requiresShareExtension(project) {
+  return /^  ShareExtension:\s*$/m.test(project);
+}
+
 function signShareBundlesAdHoc(app, team, staging, { simulator = false } = {}) {
   assert(team && !team.startsWith('YOUR_'), 'Configure APPLE_DEVELOPMENT_TEAM in .env for ad-hoc iOS entitlements');
   const pluginsRoot = join(app, 'PlugIns');
   const appexes = existsSync(pluginsRoot)
     ? readdirSync(pluginsRoot).filter((name) => name.endsWith('.appex'))
     : [];
+  const shareEnabled = requiresShareExtension(readFileSync(join(projectRoot, 'gen/apple/project.yml'), 'utf8'));
+  if (simulator && !shareEnabled && appexes.length === 0) {
+    const entitlements = join(staging, 'simulator-app-entitlements.plist');
+    writeFileSync(entitlements, expandEntitlements(readFileSync(join(projectRoot, 'gen/apple/transfer-genie_iOS/transfer-genie_iOS.entitlements'), 'utf8'), team, bundleId));
+    dropEntitlements(entitlements, SIMULATOR_DROPPED_ENTITLEMENTS);
+    command('codesign', ['--force', '--sign', '-', '--entitlements', entitlements, app]);
+    command('codesign', ['--verify', '--deep', '--strict', app]);
+    return null;
+  }
   assert(appexes.length === 1, 'Expected exactly one embedded share extension before signing');
   const appex = join(pluginsRoot, appexes[0]);
   const appEntitlements = join(staging, 'transfer-genie-app-entitlements.plist');
@@ -298,9 +311,10 @@ export async function main(args = process.argv.slice(2)) {
     log('Built ' + plist('CFBundleShortVersionString') + ' for ' + plist('DTPlatformName'));
     if (target === 'simulator') {
       const simulatorEntitlementDir = mkdtempSync(join(buildDir, 'simulator-entitlements-'));
-      try { signShareBundlesAdHoc(app, env.APPLE_DEVELOPMENT_TEAM, simulatorEntitlementDir, { simulator: true }); }
+      let shareExtension;
+      try { shareExtension = signShareBundlesAdHoc(app, env.APPLE_DEVELOPMENT_TEAM, simulatorEntitlementDir, { simulator: true }); }
       finally { rmSync(simulatorEntitlementDir, { recursive: true, force: true }); }
-      verifyShareArchive(app, env.APPLE_DEVELOPMENT_TEAM);
+      if (shareExtension) verifyShareArchive(app, env.APPLE_DEVELOPMENT_TEAM);
       simulatorDraftGuard(simulator.udid);
       command('xcrun', ['simctl', 'terminate', simulator.udid, bundleId], { allowFailure: true });
       await run('xcrun', ['simctl', 'install', simulator.udid, app], env);

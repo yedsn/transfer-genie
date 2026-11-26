@@ -2,6 +2,15 @@
 
 ### Requirement: Explicit instance targeting
 聊天 SHALL 在消息输入框中输入 @ 时展示候选并通过选择保存目标实例 id，候选展示机器人、设备与可用状态，不单独设置输入框上方的机器人选择栏。删除已选提及 SHALL 解除目标。插件目录 SHALL 仅发布到用户启用的空间；移动端 SHALL 能调用桌面实例而不执行桌面代码。
+所有平台的调用端 SHALL 展示当前账号/空间内所有机器已发布且启用的机器人，不按调用端平台、设备或本机插件安装状态过滤。调用端 SHALL 无需安装对应插件；机器人仍只在具备执行能力的目标机器运行。
+
+#### Scenario: Caller has no local plugins
+- **WHEN** 任意平台的客户端未安装本地插件，在当前空间输入 @
+- **THEN** 候选仍包含其他所有机器已发布的启用实例，展示所属机器并按实例 id 路由
+
+#### Scenario: Offline remote instance
+- **WHEN** 已发布的远端机器人暂时离线
+- **THEN** 候选仍展示该实例并标记离线，选中后按等待设备与到期规则投递
 
 #### Scenario: Same plugin installed on two computers
 - **WHEN** 用户选择家里 PC 的图片实例
