@@ -58,7 +58,18 @@ const sync = $prose(ctx => new Plugin({
   props:{
     decorations(state){const label=selectedMention();const decorations:Decoration[]=[];if(label)state.doc.descendants((node,pos)=>{if(node.isText){const index=node.text?.indexOf(label) ?? -1;if(index>=0)decorations.push(Decoration.inline(pos+index,pos+index+label.length,{class:'bot-mention-token'}));}});return DecorationSet.create(state.doc,decorations);},
     handleKeyDown(view,event){if(event.isComposing || !['Backspace','Delete'].includes(event.key))return false;return deleteMention(view,event.key==='Backspace'?'backward':'forward');},
-    handleDOMEvents:{beforeinput(view,event){const type=(event as InputEvent).inputType;if(!type?.startsWith('delete'))return false;const removed=deleteMention(view,type.includes('Backward')?'backward':'forward');if(removed)event.preventDefault();return removed;}},
+    handleDOMEvents:{
+      'bot-insert-mention'(view,event){
+        const detail=(event as CustomEvent).detail;
+        const {from,to}=view.state.selection;
+        if(!detail || from-detail.query.length-1<0 || view.state.doc.textBetween(from-detail.query.length-1,to)!=='@'+detail.query)return false;
+        view.dispatch(view.state.tr.insertText(detail.text,from-detail.query.length-1,to));
+        detail.handled=true;
+        view.focus();
+        return true;
+      },
+      beforeinput(view,event){const type=(event as InputEvent).inputType;if(!type?.startsWith('delete'))return false;const removed=deleteMention(view,type.includes('Backward')?'backward':'forward');if(removed)event.preventDefault();return removed;}
+    },
   },
   // Synchronous serialization keeps the last keystroke available to Send,
   // background persistence and unmount; do not debounce editor -> draft state.

@@ -166,6 +166,19 @@ test('mobile multi-selection quotes messages into a structured bot call', async 
   const context=await page.evaluate(()=>window.transferGeniePlugins.getCallContext());
   expect(context.references).toHaveLength(2);
   expect(context.targetBotInstanceId).toBe('pc');
+  const plainEditor=page.getByRole('textbox',{name:'消息内容',exact:true});
+  await plainEditor.fill('');
+  await page.locator('.mobile-composer-format').getByRole('button',{name:'Markdown',exact:true}).click();
+  const markdownEditor=page.locator('.mobile-composer-sheet [contenteditable="true"]');
+  await markdownEditor.click();
+  await page.keyboard.type('@');
+  await page.locator('.bot-mention-menu').getByRole('option').click();
+  await expect(markdownEditor.locator('.bot-mention-token')).toHaveText('@图片下载（PC）');
+  expect(await page.evaluate(()=>window.transferGeniePlugins.getCallContext().targetBotInstanceId)).toBe('pc');
+  await page.keyboard.press('Backspace');
+  await page.keyboard.press('Backspace');
+  await expect(markdownEditor).not.toContainText('@图片下载');
+  expect(await page.evaluate(()=>window.transferGeniePlugins.getCallContext().targetBotInstanceId)).toBeNull();
   await page.locator('.mobile-composer-sheet').evaluate(async element => {
     const animations = document.getAnimations().filter(animation => animation.effect?.target instanceof Element && (animation.effect.target.contains(element) || element.contains(animation.effect.target)));
     await Promise.all(animations.map(animation => animation.finished.catch(() => {})));

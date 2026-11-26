@@ -8,7 +8,7 @@ async function locateReference(filename:string) { try { referenceNotice.value=aw
 const query = ref<string | null>(null);
 const root = ref<HTMLElement | null>(null);
 const active = ref(0);
-const position = ref({ left: '0px', top: '0px', width: '280px' });
+const position = ref({ left: '0px', top: '0px', width: '280px', maxHeight: '280px' });
 let editor: HTMLTextAreaElement | HTMLElement | null = null;
 let mentionRange: Range | null = null;
 let start = 0;
@@ -73,12 +73,16 @@ function inspect(event: Event) {
     let textNode:Node|null;
     while((textNode=walker.nextNode())) { const length=textNode.textContent?.length || 0; if(remaining<=length) {mentionRange.setStart(textNode,remaining);break;} remaining-=length; }
   }
-  const rect = codeMirror ? codeMirror.getWrapperElement().getBoundingClientRect() : input.getBoundingClientRect();
+  reposition();
+}
+function reposition() {
+  if(query.value===null || !editor?.isConnected)return;
+  const rect = codeMirror ? codeMirror.getWrapperElement().getBoundingClientRect() : editor.getBoundingClientRect();
   const viewport=window.visualViewport;
   const bottom=(viewport?.offsetTop || 0)+(viewport?.height || window.innerHeight);
-  const menuHeight=Math.min(280, Math.max(120,bottom-16));
+  const menuHeight=Math.min(280, Math.max(64,(viewport?.height || window.innerHeight)-16));
   const top=rect.top>=menuHeight+8 ? rect.top-menuHeight-6 : Math.min(rect.top+28,bottom-menuHeight-8);
-  position.value = { left: Math.max(8,Math.min(rect.left,window.innerWidth- Math.min(320,rect.width)-8)) + 'px', top: Math.max(8,top) + 'px', width: Math.min(320, rect.width, window.innerWidth - 16) + 'px' };
+  position.value = { left: Math.max(8,Math.min(rect.left,window.innerWidth- Math.min(320,rect.width)-8)) + 'px', top: Math.max((viewport?.offsetTop || 0)+8,top) + 'px', width: Math.min(320, rect.width, window.innerWidth - 16) + 'px', maxHeight:menuHeight+'px' };
 }
 function choose(bot: any) {
   if (!editor || !bot) return;
@@ -89,6 +93,9 @@ function choose(bot: any) {
     editor.setRangeText(text, start, end, 'end');
     editor.dispatchEvent(new Event('input', { bubbles: true }));
   } else if (mentionRange) {
+    const detail={query:query.value || '',text,handled:false};
+    editor.dispatchEvent(new CustomEvent('bot-insert-mention',{detail}));
+    if(detail.handled){selectBot(bot.instance_id,token(bot));query.value=null;return;}
     const selection = window.getSelection(); selection?.removeAllRanges(); selection?.addRange(mentionRange);
     document.execCommand('insertText', false, text);
   }
@@ -118,6 +125,8 @@ onMounted(() => {
   document.addEventListener('input', inspect, true); document.addEventListener('click', inspect); document.addEventListener('compositionend', inspect);
   document.addEventListener('bot-editor-change',inspect);
   window.addEventListener('resize',decorateEditors);
+  window.visualViewport?.addEventListener('resize',reposition);
+  window.visualViewport?.addEventListener('scroll',reposition);
   document.addEventListener('input',redraw);document.addEventListener('bot-editor-change',redraw);document.addEventListener('focusin',redraw);document.addEventListener('scroll',redraw,true);document.addEventListener('beforeinput',beforeInput,true);
   document.addEventListener('keydown', keydown, true); document.addEventListener('pointerdown', dismiss);
 });
@@ -125,6 +134,8 @@ onUnmounted(() => {
   document.removeEventListener('input', inspect, true); document.removeEventListener('click', inspect); document.removeEventListener('compositionend', inspect);
   document.removeEventListener('bot-editor-change',inspect);
   window.removeEventListener('resize',decorateEditors);
+  window.visualViewport?.removeEventListener('resize',reposition);
+  window.visualViewport?.removeEventListener('scroll',reposition);
   cmMark?.clear();document.removeEventListener('input',redraw);document.removeEventListener('bot-editor-change',redraw);document.removeEventListener('focusin',redraw);document.removeEventListener('scroll',redraw,true);document.removeEventListener('beforeinput',beforeInput,true);
   document.removeEventListener('keydown', keydown, true); document.removeEventListener('pointerdown', dismiss);
 });
