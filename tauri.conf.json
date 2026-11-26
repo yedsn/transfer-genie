@@ -1,11 +1,11 @@
 {
     "$schema":  "https://schema.tauri.app/config/2",
     "productName":  "Transfer Genie",
-    "version":  "0.5.19",
+    "version":  "0.5.20",
     "identifier":  "com.transfergenie",
     "build":  {
                   "beforeDevCommand":  "npm run dev",
-                  "beforeBuildCommand":  "node scripts/build-image-bot.mjs && npm run build",
+                  "beforeBuildCommand":  "node scripts/build-image-bot.mjs \u0026\u0026 npm run build",
                   "devUrl":  "http://127.0.0.1:7120",
                   "frontendDist":  "./dist"
               },
