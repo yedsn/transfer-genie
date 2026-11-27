@@ -21,7 +21,8 @@ import MobileText from "./MobileText.vue";
 import MobileConnectionWizard from "./MobileConnectionWizard.vue";
 import BotComposer from "../plugins/BotComposer.vue";
 import ReferencePreview from "../plugins/ReferencePreview.vue";
-import { addReferences, resolvePluginScope, pluginState } from "../plugins/plugin-store";
+import BotFeedback from "../plugins/BotFeedback.vue";
+import { addReferences, resolvePluginScope, pluginState, listenBotChat } from "../plugins/plugin-store";
 const loadMobileMarkdownEditor = () => import("./MobileMarkdownEditor.vue");
 const MobileMarkdownEditor = defineAsyncComponent(loadMobileMarkdownEditor);
 let editorWarmTimer: number | undefined;
@@ -120,6 +121,8 @@ let composerKeyboardPrimer: HTMLTextAreaElement | null = null;
 let pendingComposerFocus = "";
 let composerShownRequest = "";
 let removeShareImportListener: (() => void) | undefined;
+let removeBotChatListener: (() => void) | undefined;
+let botChatDisposed = false;
 let shareImportRun: Promise<void> | null = null;
 let shareImportRequested = false;
 let pendingShareComposer = false;
@@ -333,6 +336,7 @@ watch(() => state.composer.draftStatus, (status) => {
 watch(() => state.composer.persistenceReady, handleComposerEditorReady);
 
 const visibleMessages = computed(() => searchQuery.value.trim() ? state.search.messages : state.messages);
+const visibleFeedFiles = computed(() => new Set(visibleMessages.value.map(message => message.filename)));
 const selectedMessages = computed(() => visibleMessages.value.filter((message) => selectedFilenames.value.includes(message.filename)));
 watch(searchQuery, (query) => {
   window.clearTimeout(searchTimer);
@@ -1136,6 +1140,12 @@ async function refreshFeed() {
 
 onMounted(async () => {
   document.addEventListener("visibilitychange", controller.checkStartupDeadline);
+  void listenBotChat(() => {
+    if (!state.previewMode && state.boot === 'ready') void controller.refreshMessages().catch(() => {});
+  })?.then(unlisten => {
+    if (botChatDisposed) unlisten?.();
+    else removeBotChatListener = unlisten;
+  }).catch(() => {});
   if (!state.previewMode || (window as any).__TRANSFER_GENIE_SHARE_IMPORT_SPY__) {
     try {
       const unlisten = await (window as any).transferGenieApi?.event?.listen(
@@ -1237,6 +1247,8 @@ onBeforeUnmount(() => {
   controller.dismissToast();
   removeTransferListeners?.();
   removeShareImportListener?.();
+  botChatDisposed = true;
+  removeBotChatListener?.();
 });
 </script>
 
@@ -1488,9 +1500,8 @@ onBeforeUnmount(() => {
             {{ state.loadingOlder ? "正在加载更早消息…" : "向上滚动查看更多" }}
           </button>
           <div v-if="visibleMessages.length" class="mobile-message-list">
+            <template v-for="message in visibleMessages" :key="message.filename">
             <article
-              v-for="message in visibleMessages"
-              :key="message.filename"
               :data-message-filename="message.filename"
               :data-filename="message.filename"
               class="mobile-message-card"
@@ -1570,6 +1581,8 @@ onBeforeUnmount(() => {
               <ReferencePreview :filename="message.filename" references-only />
               </div>
             </article>
+            <BotFeedback :filename="message.filename" :visible-files="visibleFeedFiles" />
+            </template>
           </div>
           <div v-else class="mobile-empty-state">
             <span>⌕</span

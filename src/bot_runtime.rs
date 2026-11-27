@@ -4,6 +4,21 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{fs, path::Path};
 use tauri::{Emitter, Manager, State};
+use tokio::sync::Notify;
+
+static BOT_SYNC_WAKE: Notify = Notify::const_new();
+
+fn notify_chat(state: &AppState, ctx: &IntegrationTargetContext, messages_changed: bool) {
+    if let Some(app) = &state.app_handle {
+        let _ = app.emit(
+            "bot-chat-updated",
+            json!({
+                "scope": context_scope(ctx),
+                "messagesChanged": messages_changed,
+            }),
+        );
+    }
+}
 
 pub fn initialize(path: &Path) -> Result<(), String> {
     Connection::open(path).and_then(|c|c.execute_batch("CREATE TABLE IF NOT EXISTS bot_records(endpoint_id TEXT NOT NULL,owner_scope TEXT NOT NULL,kind TEXT NOT NULL,id TEXT NOT NULL,payload TEXT NOT NULL,pending INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(endpoint_id,owner_scope,kind,id)); CREATE TABLE IF NOT EXISTS bot_execution(endpoint_id TEXT NOT NULL,owner_scope TEXT NOT NULL,task_id TEXT NOT NULL,status TEXT NOT NULL,result TEXT,PRIMARY KEY(endpoint_id,owner_scope,task_id)); CREATE INDEX IF NOT EXISTS bot_pending_records ON bot_records(endpoint_id,owner_scope,pending); CREATE INDEX IF NOT EXISTS bot_context_filename ON bot_records(endpoint_id,owner_scope,json_extract(payload,'$.filename')) WHERE kind='contexts';")).map_err(|e|e.to_string())
@@ -36,6 +51,7 @@ fn put(
         payload,
         pending,
     )
+    .map(|_| ())
 }
 fn put_record(
     path: &Path,
@@ -45,8 +61,8 @@ fn put_record(
     id: &str,
     payload: &Value,
     pending: bool,
-) -> Result<(), String> {
-    Connection::open(path).and_then(|c|c.execute("INSERT INTO bot_records VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(endpoint_id,owner_scope,kind,id) DO UPDATE SET payload=CASE WHEN excluded.pending=1 OR (bot_records.pending=0 AND excluded.kind='directory') THEN excluded.payload ELSE bot_records.payload END,pending=MAX(bot_records.pending,excluded.pending)",params![endpoint,owner,kind,id,payload.to_string(),pending])).map(|_|()).map_err(|e|e.to_string())
+) -> Result<bool, String> {
+    Connection::open(path).and_then(|c|c.execute("INSERT INTO bot_records VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(endpoint_id,owner_scope,kind,id) DO UPDATE SET payload=excluded.payload,pending=MAX(bot_records.pending,excluded.pending) WHERE excluded.pending=1 OR (bot_records.pending=0 AND excluded.kind='directory' AND bot_records.payload<>excluded.payload)",params![endpoint,owner,kind,id,payload.to_string(),pending])).map(|count|count>0).map_err(|e|e.to_string())
 }
 fn records(
     state: &AppState,
@@ -70,7 +86,51 @@ fn records(
     })
     .collect()
 }
+#[cfg(test)]
 pub async fn send(
+    state: &AppState,
+    text: String,
+    format: Option<String>,
+    references: Vec<MessageReference>,
+    target: Option<String>,
+    client_id: Option<String>,
+    marked_options: Option<crate::SendMarkedOptionsInput>,
+) -> Result<crate::SendMessageResult, String> {
+    send_with_options(
+        state,
+        text,
+        format,
+        references,
+        target,
+        client_id,
+        marked_options,
+        None,
+        None,
+        None,
+    )
+    .await
+}
+
+fn download_body(text: &str, mention: &str, offset: usize) -> Result<String, String> {
+    let mut units = 0;
+    for (index, character) in text.char_indices() {
+        if units == offset
+            && !mention.is_empty()
+            && mention.starts_with('@')
+            && text[index..].starts_with(mention)
+        {
+            let mut suffix = &text[index + mention.len()..];
+            if let Some(rest) = suffix.strip_prefix(' ') {
+                suffix = rest;
+            }
+            return Ok(format!("{}{suffix}", &text[..index]));
+        }
+        units += character.len_utf16();
+    }
+    Err("下载机器人提及已变化，请重新选择".into())
+}
+
+pub async fn send_with_options(
     state: &AppState,
     text: String,
     format: Option<String>,
@@ -78,7 +138,17 @@ pub async fn send(
     target: Option<String>,
     client_id: Option<String>,
     marked_options: Option<crate::SendMarkedOptionsInput>,
+    download_route: Option<String>,
+    mention_text: Option<String>,
+    mention_start: Option<usize>,
 ) -> Result<crate::SendMessageResult, String> {
+    let body = match (&download_route, mention_text, mention_start) {
+        (Some(_), Some(mention), Some(offset)) if target.is_some() => {
+            Some(download_body(&text, &mention, offset)?)
+        }
+        (None, None, None) => None,
+        _ => return Err("下载任务缺少有效提及".into()),
+    };
     if references.len() > MAX_REFERENCES {
         return Err("最多引用 50 条消息".into());
     }
@@ -131,12 +201,21 @@ pub async fn send(
             message_id: id.clone(),
         },
     );
+    let _guard = state.sync_guard.lock().await;
+    crate::ensure_integration_context(state, &ctx)?;
     let existing = records(state, &ctx, "contexts")?
         .into_iter()
         .find(|v| v["id"] == id);
     if let Some(existing) = existing {
-        let requested = json!({"text":text,"format":crate::normalize_send_text_format(format.clone())?,"references":references,"target_bot_instance_id":target});
-        for key in ["text", "format", "references", "target_bot_instance_id"] {
+        let requested = json!({"text":text,"format":crate::normalize_send_text_format(format.clone())?,"references":references,"target_bot_instance_id":target,"download_route":download_route,"download_body":body});
+        for key in [
+            "text",
+            "format",
+            "references",
+            "target_bot_instance_id",
+            "download_route",
+            "download_body",
+        ] {
             if existing[key] != requested[key] {
                 return Err("相同发送标识已用于不同的消息内容，请重新发送".into());
             }
@@ -153,18 +232,38 @@ pub async fn send(
             return Ok(crate::supabase_send_result(ctx.profile_id(), &message));
         }
     }
+    let mut target_info = None;
     if let Some(target) = &target {
         let mut known = records(state, &ctx, "directory")?;
         #[cfg(desktop)]
         for instance in scoped_instances(state, &ctx, &settings.sender_name)? {
             known.push(serde_json::to_value(instance).map_err(|e| e.to_string())?);
         }
-        if !known.iter().any(|v| {
-            v["instance_id"] == *target
-                && v["enabled"] == true
-                && v["protocol_version"].as_u64().unwrap_or(1) == 1
-        }) {
-            return Err("机器人实例未注册或已停用".into());
+        let instance = known
+            .iter()
+            .rev()
+            .find(|v| {
+                v["instance_id"] == *target && v["protocol_version"].as_u64().unwrap_or(1) == 1
+            })
+            .filter(|v| v["enabled"] == true)
+            .ok_or("机器人实例未注册或已停用")?;
+        target_info = Some(instance.clone());
+        if let Some(route) = &download_route {
+            let options = &instance["download_options"];
+            if options.is_null() {
+                return Err("目标机器人版本不支持通用下载，请升级目标设备".into());
+            }
+            if route != "direct"
+                && route != "default"
+                && !options["profiles"]
+                    .as_array()
+                    .is_some_and(|profiles| profiles.iter().any(|p| p["id"] == *route))
+            {
+                return Err("所选下载代理已不存在，请重新选择出口".into());
+            }
+            if references.is_empty() && body.as_deref().unwrap_or_default().trim().is_empty() {
+                return Err("请引用消息或输入要下载的内容".into());
+            }
         }
     }
     let remote_path = crate::filenames::message_remote_path(&filename, now);
@@ -194,8 +293,6 @@ pub async fn send(
         source_channel_id: None,
         source_message_id: None,
     };
-    let _guard = state.sync_guard.lock().await;
-    crate::ensure_integration_context(state, &ctx)?;
     let mut supabase_changes = None;
     let mut webdav_changes = None;
     match &ctx.provider {
@@ -221,11 +318,23 @@ pub async fn send(
             webdav_changes = Some(applied);
         }
     }
-    let context = json!({"id":id,"filename":filename,"references":references,"target_bot_instance_id":target,"task_id":if target.is_some(){Some(id.clone())}else{None},"text":text,"sender":settings.sender_name,"timestamp_ms":now,"format":message.format,"marked":message.marked,"marked_tag_ids":message.marked_tag_ids,"marked_due_date":message.marked_due_date});
+    let mut context = json!({"id":id,"filename":filename,"references":references,"target_bot_instance_id":target,"task_id":if target.is_some(){Some(id.clone())}else{None},"text":text,"sender":settings.sender_name,"timestamp_ms":now,"format":message.format,"marked":message.marked,"marked_tag_ids":message.marked_tag_ids,"marked_due_date":message.marked_due_date,"download_route":download_route,"download_body":body});
+    if let Some(instance) = target_info {
+        context["bot_name"] = instance["name"].clone();
+        context["bot_device_name"] = instance["device_name"].clone();
+        context["bot_expires_at_ms"] = instance["expires_at_ms"].clone();
+        if !instance["download_options"].is_null() {
+            context["bot_target_icon"] = json!("download");
+        }
+    }
     let task = target.map(|target| BotTask {
         retry_of: None,
         retry_item_ids: vec![],
-        protocol_version: 1,
+        protocol_version: if download_route.is_some() { 2 } else { 1 },
+        download_route,
+        download_body: body,
+        original_timestamp_ms: None,
+        original_task_id: None,
         task_id: id.clone(),
         target_instance_id: target,
         author_device_id: plugin_host::device_id(&plugin_host::root(state)).unwrap_or_default(),
@@ -266,14 +375,13 @@ pub async fn send(
     )
     .map_err(|e| e.to_string())?;
     if let Some(task) = task {
+        let serialized = serde_json::to_string(&task).map_err(|e| e.to_string())?;
+        if serialized.len() > 4 * 1024 * 1024 - 64 * 1024 {
+            return Err("机器人任务内容过大，请分批发送".into());
+        }
         tx.execute(
             "INSERT INTO bot_records VALUES(?1,?2,'tasks',?3,?4,1)",
-            params![
-                ctx.profile_id(),
-                ctx.owner_scope,
-                id,
-                serde_json::to_string(&task).map_err(|e| e.to_string())?
-            ],
+            params![ctx.profile_id(), ctx.owner_scope, id, serialized],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -308,19 +416,13 @@ pub async fn send(
         }
     }
     tx.commit().map_err(|e| e.to_string())?;
+    if context["task_id"].is_string() {
+        BOT_SYNC_WAKE.notify_one();
+    }
     if supabase_changes.is_some() {
         crate::notify_supabase_outbox_pending(state);
     }
     Ok(crate::supabase_send_result(ctx.profile_id(), &message))
-}
-fn execution(
-    state: &AppState,
-    ctx: &IntegrationTargetContext,
-    id: &str,
-    status: &str,
-    result: Option<&Value>,
-) -> Result<(), String> {
-    Connection::open(&state.db_path).and_then(|c|c.execute("INSERT INTO bot_execution VALUES(?1,?2,?3,?4,?5) ON CONFLICT(endpoint_id,owner_scope,task_id) DO UPDATE SET status=excluded.status,result=excluded.result",params![ctx.profile_id(),ctx.owner_scope,id,status,result.map(Value::to_string)])).map(|_|()).map_err(|e|e.to_string())
 }
 async fn remote_write(
     state: &AppState,
@@ -428,6 +530,7 @@ pub(crate) async fn synchronize(
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?
     };
+    let task_sent = pending.iter().any(|(kind, _, _)| kind == "tasks");
     for (kind, id, payload) in pending {
         crate::ensure_integration_context(state, ctx)?;
         remote_write(
@@ -441,6 +544,9 @@ pub(crate) async fn synchronize(
         crate::ensure_integration_context(state, ctx)?;
         Connection::open(&state.db_path).and_then(|c|c.execute("UPDATE bot_records SET pending=0 WHERE endpoint_id=?1 AND owner_scope=?2 AND kind=?3 AND id=?4 AND payload=?5",params![ctx.profile_id(),ctx.owner_scope,kind,id,payload])).map_err(|e|e.to_string())?;
     }
+    if task_sent {
+        notify_chat(state, ctx, false);
+    }
     receive_records(state, ctx, &["directory", "tasks", "events", "contexts"]).await
 }
 
@@ -449,6 +555,8 @@ pub(crate) async fn receive_records(
     ctx: &IntegrationTargetContext,
     kinds: &[&str],
 ) -> Result<(), String> {
+    let mut changed = false;
+    let mut message_context_changed = false;
     for &kind in kinds {
         let rows: Vec<(String, Value)> = match &ctx.provider {
             crate::storage_provider::ProviderConfig::Webdav(endpoint) => {
@@ -459,11 +567,28 @@ pub(crate) async fn receive_records(
                     true,
                 )
                 .await?;
+                // Immutable records already in the local index never need another GET.
+                let known = if kind == "directory" {
+                    std::collections::HashSet::new()
+                } else {
+                    let connection = Connection::open(&state.db_path).map_err(|e| e.to_string())?;
+                    let mut query = connection.prepare("SELECT id FROM bot_records WHERE endpoint_id=?1 AND owner_scope=?2 AND kind=?3").map_err(|e| e.to_string())?;
+                    let ids = query
+                        .query_map(params![ctx.profile_id(), ctx.owner_scope, kind], |row| {
+                            row.get::<_, String>(0)
+                        })
+                        .map_err(|e| e.to_string())?;
+                    ids.collect::<Result<std::collections::HashSet<_>, _>>()
+                        .map_err(|e| e.to_string())?
+                };
                 let mut rows = vec![];
                 for entry in entries
                     .into_iter()
                     .filter(|e| !e.is_collection && e.filename.ends_with(".json"))
                 {
+                    if known.contains(entry.filename.trim_end_matches(".json")) {
+                        continue;
+                    }
                     if entry.size.unwrap_or(0) > 4 * 1024 * 1024 {
                         continue;
                     }
@@ -537,9 +662,24 @@ pub(crate) async fn receive_records(
         for (id, payload) in rows {
             crate::ensure_integration_context(state, ctx)?;
             if valid_component(&id) {
-                put(state, ctx, kind, &id, &payload, false)?;
+                let inserted = put_record(
+                    &state.db_path,
+                    ctx.profile_id(),
+                    &ctx.owner_scope,
+                    kind,
+                    &id,
+                    &payload,
+                    false,
+                )?;
+                changed |= inserted && matches!(kind, "tasks" | "events" | "contexts");
+                message_context_changed |=
+                    inserted && kind == "contexts" && payload["metadata_only"] != true;
             }
         }
+    }
+    if changed {
+        let inserted_messages = hydrate_contexts(state, ctx)?;
+        notify_chat(state, ctx, inserted_messages || message_context_changed);
     }
     Ok(())
 }
@@ -554,6 +694,9 @@ fn scoped_instances(
     let mut instances = plugin_host::instances(&root, sender)?;
     for instance in &mut instances {
         instance.enabled &= plugin_host::space_allowed(&root, &instance.plugin_id, &scope)?;
+        if !instance.enabled {
+            instance.download_options = None;
+        }
     }
     Ok(instances)
 }
@@ -610,7 +753,7 @@ pub async fn tick(state: &AppState) -> Result<(), String> {
                 Ok(t) => t,
                 Err(_) => continue,
             };
-            if task.protocol_version != 1 || !valid_component(&task.task_id) {
+            if !matches!(task.protocol_version, 1 | 2) || !valid_component(&task.task_id) {
                 continue;
             }
             let Some(plugin) = local
@@ -619,6 +762,11 @@ pub async fn tick(state: &AppState) -> Result<(), String> {
             else {
                 continue;
             };
+            if task.protocol_version == 2
+                && (plugin.manifest.id != IMAGE_PLUGIN_ID || task.download_route.is_none())
+            {
+                continue;
+            }
             if !plugin_host::space_allowed(&root, &plugin.manifest.id, &context_scope(&ctx))? {
                 continue;
             }
@@ -636,14 +784,23 @@ pub async fn tick(state: &AppState) -> Result<(), String> {
                         kind: "interrupted".into(),
                         payload: json!({"error":"应用退出时任务结果未知；重试可能重复产生外部操作，请核实后手动重试"}),
                     };
-                    put(
-                        state,
-                        &ctx,
-                        "events",
-                        &event.event_id,
-                        &serde_json::to_value(&event).map_err(|e| e.to_string())?,
-                        true,
-                    )?;
+                    let inserted = Connection::open(&state.db_path)
+                        .and_then(|c| {
+                            c.execute(
+                                "INSERT OR IGNORE INTO bot_records VALUES(?1,?2,'events',?3,?4,1)",
+                                params![
+                                    ctx.profile_id(),
+                                    ctx.owner_scope,
+                                    event.event_id,
+                                    json!(event).to_string()
+                                ],
+                            )
+                        })
+                        .map_err(|e| e.to_string())?
+                        > 0;
+                    if inserted {
+                        notify_chat(state, &ctx, false);
+                    }
                 }
                 continue;
             }
@@ -656,13 +813,14 @@ pub async fn tick(state: &AppState) -> Result<(), String> {
                     kind: "expired".into(),
                     payload: json!({"error":"任务已超过有效期"}),
                 };
-                persist_terminal_event(
+                persist_execution_event(
                     &state.db_path,
                     ctx.profile_id(),
                     &ctx.owner_scope,
                     &event,
                     None,
                 )?;
+                notify_chat(state, &ctx, false);
                 continue;
             }
             if cancellation_requested(state, &ctx, &task)? {
@@ -674,22 +832,41 @@ pub async fn tick(state: &AppState) -> Result<(), String> {
                     kind: "cancelled".into(),
                     payload: json!({"error":"任务在执行前已取消"}),
                 };
-                persist_terminal_event(
+                persist_execution_event(
                     &state.db_path,
                     ctx.profile_id(),
                     &ctx.owner_scope,
                     &event,
                     None,
                 )?;
+                notify_chat(state, &ctx, false);
                 continue;
             }
             crate::plugin_process::prepare_invoke(&plugin.manifest.id)?;
+            let accepted = TaskEvent {
+                task_id: task.task_id.clone(),
+                event_id: format!("accepted-{}", uuid::Uuid::new_v4()),
+                device_id: plugin_host::device_id(&root)?,
+                timestamp_ms: crate::now_ms(),
+                kind: "running".into(),
+                payload: json!({}),
+            };
+            persist_execution_event(
+                &state.db_path,
+                ctx.profile_id(),
+                &ctx.owner_scope,
+                &accepted,
+                None,
+            )?;
+            notify_chat(state, &ctx, false);
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let execution = execute(state, &ctx, plugin, &task);
             tokio::pin!(execution);
             loop {
                 tokio::select! {
                     result = &mut execution => { result?; break; }
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(3)) => {
+                    _ = interval.tick() => {
                         // Keep progress delivery and incoming control records moving during a long task.
                         if let Err(error) = crate::ensure_integration_context(state, &ctx) {
                             crate::plugin_process::request_cancel(&plugin.manifest.id)?;
@@ -708,7 +885,9 @@ pub async fn tick(state: &AppState) -> Result<(), String> {
             }
         }
     }
-    hydrate_contexts(state, &ctx)?;
+    if hydrate_contexts(state, &ctx)? {
+        notify_chat(state, &ctx, true);
+    }
     sync_result
 }
 fn cancellation_requested(
@@ -758,10 +937,14 @@ fn failed_item_ids(event: &Value) -> Result<Vec<String>, String> {
 }
 #[tauri::command]
 pub fn retry_bot_task(state: State<'_, AppState>, task_id: String) -> Result<String, String> {
-    let settings = crate::current_settings(&state)?;
-    let ctx = crate::resolve_send_target_context(&state, &settings)?;
-    let device = plugin_host::device_id(&plugin_host::root(&state))?;
-    let mut task: BotTask = records(&state, &ctx, "tasks")?
+    retry_task(&state, task_id)
+}
+
+pub(crate) fn retry_task(state: &AppState, task_id: String) -> Result<String, String> {
+    let settings = crate::current_settings(state)?;
+    let ctx = crate::resolve_send_target_context(state, &settings)?;
+    let device = plugin_host::device_id(&plugin_host::root(state))?;
+    let mut task: BotTask = records(state, &ctx, "tasks")?
         .into_iter()
         .find(|v| v["task_id"] == task_id)
         .ok_or("任务不存在")
@@ -769,7 +952,7 @@ pub fn retry_bot_task(state: State<'_, AppState>, task_id: String) -> Result<Str
     if task.author_device_id != device {
         return Err("请在发起任务的设备上重试".into());
     }
-    let events = records(&state, &ctx, "events")?;
+    let events = records(state, &ctx, "events")?;
     let event = latest_task_event(&events, &json!(task_id)).ok_or("任务尚无结果")?;
     task.retry_item_ids = if event["kind"] == "interrupted" {
         vec![]
@@ -777,6 +960,8 @@ pub fn retry_bot_task(state: State<'_, AppState>, task_id: String) -> Result<Str
         failed_item_ids(event)?
     };
     task.retry_of = Some(task_id.clone());
+    task.original_timestamp_ms.get_or_insert(task.created_at_ms);
+    task.original_task_id.get_or_insert(task_id.clone());
     task.task_id = uuid::Uuid::new_v5(
         &uuid::Uuid::NAMESPACE_URL,
         format!(
@@ -787,7 +972,7 @@ pub fn retry_bot_task(state: State<'_, AppState>, task_id: String) -> Result<Str
         .as_bytes(),
     )
     .to_string();
-    if records(&state, &ctx, "tasks")?
+    if records(state, &ctx, "tasks")?
         .iter()
         .any(|existing| existing["task_id"] == task.task_id)
     {
@@ -796,13 +981,14 @@ pub fn retry_bot_task(state: State<'_, AppState>, task_id: String) -> Result<Str
     task.created_at_ms = crate::now_ms();
     task.expires_at_ms = task.created_at_ms + 86400000;
     put(
-        &state,
+        state,
         &ctx,
         "tasks",
         &task.task_id,
         &serde_json::to_value(&task).map_err(|e| e.to_string())?,
         true,
     )?;
+    BOT_SYNC_WAKE.notify_one();
     Ok(task.task_id)
 }
 #[tauri::command]
@@ -833,10 +1019,14 @@ pub fn cancel_bot_task(state: State<'_, AppState>, task_id: String) -> Result<()
         &event.event_id,
         &serde_json::to_value(&event).map_err(|e| e.to_string())?,
         true,
-    )
+    )?;
+    notify_chat(&state, &ctx, false);
+    BOT_SYNC_WAKE.notify_one();
+    Ok(())
 }
-fn hydrate_contexts(state: &AppState, ctx: &IntegrationTargetContext) -> Result<(), String> {
+fn hydrate_contexts(state: &AppState, ctx: &IntegrationTargetContext) -> Result<bool, String> {
     let c = Connection::open(&state.db_path).map_err(|e| e.to_string())?;
+    let mut inserted = false;
     for value in records(state, ctx, "contexts")? {
         if value["metadata_only"] == true {
             continue;
@@ -847,21 +1037,110 @@ fn hydrate_contexts(state: &AppState, ctx: &IntegrationTargetContext) -> Result<
         if filename.contains('/') || filename.contains('\\') {
             continue;
         }
-        c.execute("INSERT OR IGNORE INTO messages(endpoint_id,owner_scope,filename,sender,timestamp_ms,size,kind,original_name,content,format,message_id,sync_state,marked,marked_tag_ids,marked_due_date) VALUES(?1,?2,?3,?4,?5,?6,'text','message.txt',?7,?8,?9,'synced',?10,?11,?12)",params![ctx.profile_id(),ctx.owner_scope,filename,value["sender"].as_str().unwrap_or("机器人"),value["timestamp_ms"].as_i64().unwrap_or(0),value["text"].as_str().unwrap_or("").len(),value["text"].as_str().unwrap_or(""),value["format"].as_str().unwrap_or("text"),value["id"].as_str(),value["marked"].as_bool().unwrap_or(false),value.get("marked_tag_ids").unwrap_or(&json!([])).to_string(),value["marked_due_date"].as_str()]).map_err(|e|e.to_string())?;
+        inserted |= c.execute("INSERT OR IGNORE INTO messages(endpoint_id,owner_scope,filename,sender,timestamp_ms,size,kind,original_name,content,format,message_id,sync_state,marked,marked_tag_ids,marked_due_date) VALUES(?1,?2,?3,?4,?5,?6,'text','message.txt',?7,?8,?9,'synced',?10,?11,?12)",params![ctx.profile_id(),ctx.owner_scope,filename,value["sender"].as_str().unwrap_or("机器人"),value["timestamp_ms"].as_i64().unwrap_or(0),value["text"].as_str().unwrap_or("").len(),value["text"].as_str().unwrap_or(""),value["format"].as_str().unwrap_or("text"),value["id"].as_str(),value["marked"].as_bool().unwrap_or(false),value.get("marked_tag_ids").unwrap_or(&json!([])).to_string(),value["marked_due_date"].as_str()]).map_err(|e|e.to_string())?>0;
+    }
+    Ok(inserted)
+}
+#[cfg(desktop)]
+fn plain_url(token: &str) -> Option<&str> {
+    let token = token.trim_matches(|c: char| "<>\"'()[]，。".contains(c));
+    (token.starts_with("https://") || token.starts_with("http://")).then_some(token)
+}
+
+#[cfg(desktop)]
+fn links(text: &str) -> impl Iterator<Item = &str> {
+    text.split_whitespace().filter_map(|token| {
+        if let Some((_, target)) = token.rsplit_once("](") {
+            plain_url(target)
+        } else {
+            plain_url(token)
+        }
+    })
+}
+
+#[cfg(desktop)]
+fn text_inputs(
+    inputs: &mut Vec<TaskInput>,
+    stage: &Path,
+    retry: &[String],
+    key: &str,
+    text: &str,
+    timestamp: i64,
+) -> Result<(), String> {
+    if !text.trim().is_empty()
+        && text
+            .split_whitespace()
+            .any(|token| plain_url(token).is_none())
+    {
+        let item_id = format!("{:x}", Sha256::digest(format!("text:{key}").as_bytes()));
+        if retry.is_empty() || retry.contains(&item_id) {
+            let path = stage.join(&item_id);
+            fs::write(&path, text).map_err(|_| "无法暂存文字")?;
+            let date = time::OffsetDateTime::from_unix_timestamp(timestamp.div_euclid(1000))
+                .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+            inputs.push(TaskInput {
+                timestamp_ms: Some(timestamp),
+                item_id,
+                name: format!(
+                    "文字_{:04}{:02}{:02}_{:02}{:02}{:02}.txt",
+                    date.year(),
+                    date.month() as u8,
+                    date.day(),
+                    date.hour(),
+                    date.minute(),
+                    date.second()
+                ),
+                local_path: Some(path.to_string_lossy().into()),
+                url: None,
+                error: None,
+            });
+        }
+    }
+    for url in links(text) {
+        let item_id = format!("{:x}", Sha256::digest(url.as_bytes()));
+        if (!retry.is_empty() && !retry.contains(&item_id))
+            || inputs.iter().any(|i| i.item_id == item_id)
+        {
+            continue;
+        }
+        inputs.push(TaskInput {
+            timestamp_ms: Some(timestamp),
+            item_id,
+            name: "下载文件".into(),
+            local_path: None,
+            url: Some(url.into()),
+            error: None,
+        });
     }
     Ok(())
 }
+
+#[cfg(desktop)]
 async fn inputs(
     state: &AppState,
     ctx: &IntegrationTargetContext,
     task: &BotTask,
+    config: &Value,
+    progress: &mut impl FnMut(&Value) -> Result<(), String>,
 ) -> Result<Vec<TaskInput>, String> {
     let mut inputs = vec![];
     let stage = plugin_host::root(state)
         .join("task-inputs")
+        .join(task_scope_key(ctx))
         .join(&task.task_id);
     fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
     for reference in &task.references {
+        if task.protocol_version == 2 && reference.kind == "text" {
+            text_inputs(
+                &mut inputs,
+                &stage,
+                &task.retry_item_ids,
+                &reference.filename,
+                reference.content.as_deref().unwrap_or_default(),
+                reference.timestamp_ms,
+            )?;
+            continue;
+        }
         let reference_item_id = format!("{:x}", Sha256::digest(reference.filename.as_bytes()));
         if !task.retry_item_ids.is_empty() && !task.retry_item_ids.contains(&reference_item_id) {
             continue;
@@ -870,103 +1149,214 @@ async fn inputs(
             continue;
         }
         let mut input = TaskInput {
+            timestamp_ms: Some(reference.timestamp_ms),
             item_id: format!("{:x}", Sha256::digest(reference.filename.as_bytes())),
             name: reference.original_name.clone(),
             local_path: None,
             url: None,
             error: None,
         };
-        let fetched = async {
-            let message = crate::db::get_message_for_scope(
-                &state.db_path,
-                ctx.profile_id(),
-                &ctx.owner_scope,
-                &reference.filename,
-            )
-            .map_err(|e| e.to_string())?
-            .ok_or("引用消息已不可用")?;
-            if reference.file_hash.is_some() && reference.file_hash != message.file_hash {
-                return Err("引用附件版本已变化".into());
-            }
-            if reference.etag.is_some() && reference.etag != message.etag {
-                return Err("引用附件版本已变化".into());
-            }
-            if reference.size != message.size || reference.timestamp_ms != message.timestamp_ms {
-                return Err("引用附件版本已变化".into());
-            }
-            let bytes = if let Some(path) = message.local_path.filter(|p| Path::new(p).is_file()) {
-                if fs::metadata(&path).map_err(|e| e.to_string())?.len() > 100 * 1024 * 1024 {
-                    return Err("图片附件超限".into());
-                }
-                fs::read(path).map_err(|e| e.to_string())?
-            } else {
-                match &ctx.provider {
-                    crate::storage_provider::ProviderConfig::Webdav(endpoint) => {
-                        let response = crate::webdav::download_file_stream(
-                            &state.http,
-                            endpoint,
-                            &message.remote_path.unwrap_or_else(|| {
-                                crate::filenames::message_remote_path(
-                                    &message.filename,
-                                    message.timestamp_ms,
-                                )
-                            }),
-                        )
-                        .await?;
-                        if reference.etag.is_some() && reference.etag != response.etag {
-                            return Err("远端引用附件版本已变化".into());
-                        }
-                        read_limited_stream(response.stream, 100 * 1024 * 1024).await?
-                    }
-                    crate::storage_provider::ProviderConfig::Supabase(profile) => {
-                        let identity = crate::db::get_message_sync_identity(
-                            &state.db_path,
-                            ctx.profile_id(),
-                            &ctx.owner_scope,
-                            &reference.filename,
-                        )
-                        .map_err(|e| e.to_string())?
-                        .ok_or("附件身份不可用")?;
-                        let object = crate::db::get_attachment_object_path_for_message(
-                            &state.db_path,
-                            ctx.profile_id(),
-                            &ctx.owner_scope,
-                            &identity.0,
-                        )
-                        .map_err(|e| e.to_string())?
-                        .ok_or("附件原件不可用")?;
-                        let response = crate::supabase_sync::download_storage_object_stream(
-                            &state.http,
-                            profile.supabase.as_ref().unwrap(),
-                            ctx.session.as_ref().unwrap(),
-                            &object,
-                        )
-                        .await?;
-                        read_limited_stream(response.stream, 100 * 1024 * 1024).await?
-                    }
-                }
-            };
-            if bytes.len() > 100 * 1024 * 1024 {
-                return Err("图片附件超限".into());
-            }
-            if let Some(hash) = &reference.file_hash {
-                if format!("{:x}", Sha256::digest(&bytes)) != *hash {
-                    return Err("引用附件哈希不符".into());
-                }
-            }
-            let path = stage.join(&input.item_id);
-            fs::write(&path, bytes).map_err(|e| e.to_string())?;
-            Ok(path.to_string_lossy().to_string())
+        let path = stage.join(&input.item_id);
+        let ceiling = if task.protocol_version == 2 {
+            102400
+        } else {
+            100
+        };
+        let max = if task.protocol_version == 2 {
+            config["max_size_mib"].as_u64().unwrap_or(2048)
+        } else {
+            100
         }
-        .await;
+        .clamp(1, ceiling)
+            * 1024
+            * 1024;
+        let mut reported_transfer = false;
+        let fetched = tokio::time::timeout(
+            std::time::Duration::from_secs(
+                config["timeout_seconds"]
+                    .as_u64()
+                    .unwrap_or(600)
+                    .clamp(1, 600),
+            ),
+            async {
+                use futures_util::StreamExt;
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let message = crate::db::get_message_for_scope(
+                    &state.db_path,
+                    ctx.profile_id(),
+                    &ctx.owner_scope,
+                    &reference.filename,
+                )
+                .map_err(|e| e.to_string())?
+                .ok_or("引用消息已不可用")?;
+                if reference.file_hash.is_some() && reference.file_hash != message.file_hash {
+                    return Err("引用附件版本已变化".into());
+                }
+                if reference.etag.is_some() && reference.etag != message.etag {
+                    return Err("引用附件版本已变化".into());
+                }
+                if reference.size != message.size || reference.timestamp_ms != message.timestamp_ms
+                {
+                    return Err("引用附件版本已变化".into());
+                }
+                if message.size > max as i64 {
+                    return Err("引用附件超过大小限制".into());
+                }
+                let mut output = tokio::fs::File::create(&path)
+                    .await
+                    .map_err(|_| "无法暂存引用附件")?;
+                let mut digest = Sha256::new();
+                let mut size = 0;
+                if let Some(local_path) = message.local_path.filter(|p| Path::new(p).is_file()) {
+                    let mut source = tokio::fs::File::open(local_path)
+                        .await
+                        .map_err(|_| "无法打开引用附件")?;
+                    let mut buffer = vec![0; 128 * 1024];
+                    loop {
+                        let n = source
+                            .read(&mut buffer)
+                            .await
+                            .map_err(|_| "读取引用附件失败")?;
+                        if n == 0 {
+                            break;
+                        }
+                        if crate::plugin_process::is_cancelled(IMAGE_PLUGIN_ID)
+                            && task.protocol_version == 2
+                        {
+                            return Err("插件任务已取消".into());
+                        }
+                        size += n as u64;
+                        if size > max {
+                            return Err("引用附件超过大小限制".into());
+                        }
+                        digest.update(&buffer[..n]);
+                        output
+                            .write_all(&buffer[..n])
+                            .await
+                            .map_err(|_| "写入引用附件失败")?;
+                    }
+                } else {
+                    let mut stream = match &ctx.provider {
+                        crate::storage_provider::ProviderConfig::Webdav(endpoint) => {
+                            let response = crate::webdav::download_file_stream(
+                                &state.http,
+                                endpoint,
+                                &message.remote_path.unwrap_or_else(|| {
+                                    crate::filenames::message_remote_path(
+                                        &message.filename,
+                                        message.timestamp_ms,
+                                    )
+                                }),
+                            )
+                            .await?;
+                            if reference.etag.is_some() && reference.etag != response.etag {
+                                return Err("远端引用附件版本已变化".into());
+                            }
+                            response.stream
+                        }
+                        crate::storage_provider::ProviderConfig::Supabase(profile) => {
+                            let identity = crate::db::get_message_sync_identity(
+                                &state.db_path,
+                                ctx.profile_id(),
+                                &ctx.owner_scope,
+                                &reference.filename,
+                            )
+                            .map_err(|e| e.to_string())?
+                            .ok_or("附件身份不可用")?;
+                            let object = crate::db::get_attachment_object_path_for_message(
+                                &state.db_path,
+                                ctx.profile_id(),
+                                &ctx.owner_scope,
+                                &identity.0,
+                            )
+                            .map_err(|e| e.to_string())?
+                            .ok_or("附件原件不可用")?;
+                            let response = crate::supabase_sync::download_storage_object_stream(
+                                &state.http,
+                                profile.supabase.as_ref().unwrap(),
+                                ctx.session.as_ref().unwrap(),
+                                &object,
+                            )
+                            .await?;
+                            response.stream
+                        }
+                    };
+                    let idle = std::time::Duration::from_secs(
+                        config["idle_timeout_seconds"]
+                            .as_u64()
+                            .unwrap_or(30)
+                            .clamp(1, 30),
+                    );
+                    let mut meter = TransferMeter::new(u64::try_from(message.size).ok().filter(|&size| size > 0));
+                    while let Some(chunk) = tokio::time::timeout(idle, stream.next())
+                        .await
+                        .map_err(|_| "读取引用附件超时")?
+                    {
+                        if crate::plugin_process::is_cancelled(IMAGE_PLUGIN_ID)
+                            && task.protocol_version == 2
+                        {
+                            return Err("插件任务已取消".into());
+                        }
+                        let chunk = chunk.map_err(|_| "读取引用附件失败")?;
+                        size += chunk.len() as u64;
+                        if size > max {
+                            return Err("引用附件超过大小限制".into());
+                        }
+                        digest.update(&chunk);
+                        output
+                            .write_all(&chunk)
+                            .await
+                            .map_err(|_| "写入引用附件失败")?;
+                        if let Some(sample) = meter.sample(size) {
+                            progress(&json!({"item":{"item_id":input.item_id,"name":input.name,"status":"downloading","transfer":sample}}))?;
+                            reported_transfer = true;
+                        }
+                    }
+                }
+                if let Some(hash) = &reference.file_hash {
+                    if format!("{:x}", digest.finalize()) != *hash {
+                        return Err("引用附件哈希不符".into());
+                    }
+                }
+                output.flush().await.map_err(|_| "写入引用附件失败")?;
+                Ok(path.to_string_lossy().to_string())
+            },
+        )
+        .await
+        .unwrap_or_else(|_| Err("引用附件下载超时".into()));
+        if reported_transfer {
+            progress(
+                &json!({"item":{"item_id":input.item_id,"name":input.name,"status":"preparing"}}),
+            )?;
+        }
         match fetched {
             Ok(path) => input.local_path = Some(path),
-            Err(error) => input.error = Some(error),
+            Err(error) => {
+                let _ = fs::remove_file(&path);
+                input.error = Some(error);
+            }
         }
         inputs.push(input);
     }
-    let texts = std::iter::once(task.text.as_str())
-        .chain(task.references.iter().filter_map(|r| r.content.as_deref()));
+    if task.protocol_version == 2 {
+        text_inputs(
+            &mut inputs,
+            &stage,
+            &task.retry_item_ids,
+            "body",
+            task.download_body.as_deref().unwrap_or_default(),
+            task.original_timestamp_ms.unwrap_or(task.created_at_ms),
+        )?;
+    }
+    let texts = (task.protocol_version == 1)
+        .then_some(task.text.as_str())
+        .into_iter()
+        .chain(
+            task.references
+                .iter()
+                .filter(|_| task.protocol_version == 1)
+                .filter_map(|r| r.content.as_deref()),
+        );
     for text in texts {
         for part in text.split_whitespace() {
             let url = part.trim_matches(|c: char| "<>\"'()[]，。".contains(c));
@@ -988,6 +1378,7 @@ async fn inputs(
                     .filter(|s| !s.is_empty())
                     .unwrap_or("image".into());
                 inputs.push(TaskInput {
+                    timestamp_ms: Some(task.original_timestamp_ms.unwrap_or(task.created_at_ms)),
                     item_id,
                     name,
                     local_path: None,
@@ -1003,69 +1394,115 @@ async fn inputs(
     Ok(inputs)
 }
 #[cfg(desktop)]
+fn task_scope_key(ctx: &IntegrationTargetContext) -> String {
+    format!("{:x}", Sha256::digest(context_scope(ctx)))
+}
+
+#[cfg(desktop)]
 async fn execute(
     state: &AppState,
     ctx: &IntegrationTargetContext,
     plugin: &plugin_host::InstalledPlugin,
     task: &BotTask,
 ) -> Result<(), String> {
-    execution(state, ctx, &task.task_id, "running", None)?;
     let result = async {
-        let input = inputs(state, ctx, task).await?;
+        let plugin_root = plugin_host::root(state);
+        let mut config = plugin.config.clone();
+        let mut journal_task = task.task_id.as_str();
+        if task.protocol_version == 2 {
+            journal_task = task.original_task_id.as_deref().unwrap_or(&task.task_id);
+            if !valid_component(journal_task) { return Err("下载任务标识无效".into()); }
+            let original = if journal_task != task.task_id {
+                records(state, ctx, "tasks")?.into_iter().find(|v| v["task_id"] == journal_task && v["target_instance_id"] == task.target_instance_id && v["author_device_id"] == task.author_device_id)
+                    .ok_or("原始下载任务不存在")?
+            } else { serde_json::to_value(task).map_err(|_| "下载任务无效")? };
+            let requested = original["download_route"].as_str().ok_or("下载任务缺少出口")?;
+            let route = if requested == "default" { plugin.config["default_route"].as_str().unwrap_or("direct") } else { requested };
+            let connection = Connection::open(&state.db_path).map_err(|e| e.to_string())?;
+            connection.execute("INSERT OR IGNORE INTO bot_records VALUES(?1,?2,'download-routes',?3,?4,0)", params![ctx.profile_id(), ctx.owner_scope, journal_task, json!(route).to_string()]).map_err(|e|e.to_string())?;
+            let frozen: String = connection.query_row("SELECT payload FROM bot_records WHERE endpoint_id=?1 AND owner_scope=?2 AND kind='download-routes' AND id=?3", params![ctx.profile_id(), ctx.owner_scope, journal_task], |row| row.get(0)).map_err(|e| e.to_string())?;
+            let frozen: String = serde_json::from_str(&frozen).map_err(|_| "下载出口记录无效")?;
+            match plugin_host::download_execution_config(&plugin_root, plugin, &frozen) {
+                Ok(resolved) => config = resolved,
+                Err(error) => config["route_error"] = json!(error),
+            }
+        }
+        if plugin.manifest.id == IMAGE_PLUGIN_ID {
+            config["save_filename_rule"] = json!(crate::current_settings(state)?.save_filename_rule);
+        }
+        let db_path = state.db_path.clone();
+        let endpoint = ctx.profile_id().to_string();
+        let owner = ctx.owner_scope.clone();
+        let device = plugin_host::device_id(&plugin_root)?;
+        let app = state.app_handle.clone();
+        let scope = context_scope(ctx);
+        let task_id = task.task_id.clone();
+        let mut last_samples = std::collections::HashMap::new();
+        let mut progress = move |payload: &Value| {
+            let timestamp_ms = crate::now_ms();
+            let item = &payload["item"];
+            let payload = match item["status"].as_str() {
+                Some("downloading") if !item["transfer"].is_null() => {
+                    let id = item["item_id"].as_str().ok_or("下载进度缺少任务项标识")?;
+                    // Leave ordinary item results readable by clients that predate transfer samples.
+                    if last_samples.get(id).is_some_and(|last| timestamp_ms - last < 3_000) { return Ok(()); }
+                    last_samples.insert(id.to_owned(), timestamp_ms);
+                    json!({"transfer_item":item})
+                }
+                Some("preparing") => json!({"transfer_item":item}),
+                _ => payload.clone(),
+            };
+            let event = TaskEvent {
+                task_id: task_id.clone(),
+                event_id: uuid::Uuid::new_v4().to_string(),
+                device_id: device.clone(),
+                timestamp_ms,
+                kind: "progress".into(),
+                payload,
+            };
+            let serialized = serde_json::to_string(&event).map_err(|e| e.to_string())?;
+            Connection::open(&db_path)
+                .and_then(|c| c.execute("INSERT INTO bot_records VALUES(?1,?2,'events',?3,?4,1)", params![endpoint, owner, event.event_id, serialized]))
+                .map_err(|e| e.to_string())?;
+            if let Some(app) = &app {
+                let _ = app.emit("bot-task-progress", &event);
+                let _ = app.emit("bot-chat-updated", json!({"scope":scope,"messagesChanged":false}));
+            }
+            Ok(())
+        };
+        let input = inputs(state, ctx, task, &config, &mut progress).await?;
         crate::ensure_integration_context(state, ctx)?;
         if input.is_empty() && plugin.manifest.id == IMAGE_PLUGIN_ID {
-            return Err("请引用图片消息或提供图片直链".to_string());
+            return Err(if task.protocol_version == 2 { "请引用消息或输入要下载的内容" } else { "请引用图片消息或提供图片直链" }.to_string());
         }
-        let root = plugin_host::root(state)
-            .join(&plugin.manifest.id)
-            .join("data")
-            .join(&task.task_id);
+        let mut root = plugin_root.join(&plugin.manifest.id).join("data");
+        if task.protocol_version == 2 { root = root.join(task_scope_key(ctx)); }
+        let root = root.join(journal_task);
         fs::create_dir_all(&root).map_err(|e| e.to_string())?;
         let request = InvokeRequest {
-            protocol_version: 1,
+            protocol_version: task.protocol_version,
             kind: "invoke".into(),
             request_id: task.task_id.clone(),
             task_id: task.task_id.clone(),
             text: task.text.clone(),
-            config: plugin.config.clone(),
+            config,
             inputs: input,
             state_dir: root.to_string_lossy().into(),
         };
         let plugin = plugin.clone();
-        let db_path = state.db_path.clone();
-        let endpoint = ctx.profile_id().to_string();
-        let owner = ctx.owner_scope.clone();
-        let device = plugin_host::device_id(&plugin_host::root(state))?;
-        let app = state.app_handle.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            crate::plugin_process::invoke_with_progress(&plugin, &request, |payload| {
-                let event = TaskEvent {
-                    task_id: request.task_id.clone(),
-                    event_id: uuid::Uuid::new_v4().to_string(),
-                    device_id: device.clone(),
-                    timestamp_ms: crate::now_ms(),
-                    kind: "progress".into(),
-                    payload: payload.clone(),
-                };
-                let serialized = serde_json::to_string(&event).map_err(|e| e.to_string())?;
-                Connection::open(&db_path)
-                    .and_then(|c| {
-                        c.execute(
-                            "INSERT INTO bot_records VALUES(?1,?2,'events',?3,?4,1)",
-                            params![endpoint, owner, event.event_id, serialized],
-                        )
-                    })
-                    .map_err(|e| e.to_string())?;
-                if let Some(app) = &app {
-                    let _ = app.emit("bot-task-progress", &event);
-                }
-                Ok(())
-            })
+            crate::plugin_process::invoke_with_progress(&plugin, &request, progress)
         })
         .await
         .map_err(|e| e.to_string())?
     }
     .await;
+    let _ = fs::remove_dir_all(
+        plugin_host::root(state)
+            .join("task-inputs")
+            .join(task_scope_key(ctx))
+            .join(&task.task_id),
+    );
     let (status, payload) = match result {
         Ok(v) => {
             let failed = v["items"]
@@ -1141,8 +1578,8 @@ async fn execute(
             ));
         }
     }
-    let reply = json!({"id":reply_id,"filename":filename,"sender":plugin.manifest.name,"timestamp_ms":task.created_at_ms+1,"text":lines.join("\n"),"format":"text","references":[{"filename":task.message_filename,"sender":"我","kind":"text","content":task.text,"original_name":"message.txt","timestamp_ms":task.created_at_ms}],"task_id":task.task_id});
-    persist_terminal_event(
+    let reply = json!({"id":reply_id,"filename":filename,"sender":plugin.config["name"].as_str().unwrap_or(&plugin.manifest.name),"timestamp_ms":task.created_at_ms+1,"text":lines.join("\n"),"format":"text","references":[{"filename":task.message_filename,"sender":"我","kind":"text","content":task.text,"original_name":"message.txt","timestamp_ms":task.created_at_ms}],"task_id":task.task_id,"bot_icon":(plugin.manifest.id == IMAGE_PLUGIN_ID).then_some("download")});
+    persist_execution_event(
         &state.db_path,
         ctx.profile_id(),
         &ctx.owner_scope,
@@ -1154,11 +1591,12 @@ async fn execute(
         .as_ref()
         .map(|app| app.emit("bot-task-result", &event));
     hydrate_contexts(state, ctx)?;
+    notify_chat(state, ctx, true);
     crate::notify_supabase_outbox_pending(state);
     let _ = synchronize(state, ctx).await;
     Ok(())
 }
-fn persist_terminal_event(
+fn persist_execution_event(
     path: &Path,
     endpoint: &str,
     owner: &str,
@@ -1217,13 +1655,57 @@ pub fn start(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
             let state = app.state::<AppState>();
-            if let Err(error) = tick(&state).await {
+            let result = tick(&state).await;
+            if let Err(error) = &result {
                 let _ = app.emit("bot-runtime-status", json!({"error":error}));
             }
+            let delay = bot_poll_delay(&state, result.is_err());
             drop(state);
-            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+            tokio::select! {
+                _ = BOT_SYNC_WAKE.notified() => {},
+                _ = tokio::time::sleep(delay) => {},
+            }
         }
     });
+}
+
+fn bot_poll_delay(state: &AppState, failed: bool) -> std::time::Duration {
+    if failed {
+        return std::time::Duration::from_secs(15);
+    }
+    let awaiting = (|| -> Result<bool, String> {
+        let settings = crate::current_settings(state)?;
+        let ctx = crate::resolve_send_target_context(state, &settings)?;
+        let device = plugin_host::device_id(&plugin_host::root(state))?;
+        #[cfg(desktop)]
+        if scoped_instances(state, &ctx, &settings.sender_name)?
+            .iter()
+            .any(|instance| instance.enabled)
+        {
+            return Ok(true);
+        }
+        let events = records(state, &ctx, "events")?;
+        let now = crate::now_ms();
+        Ok(records(state, &ctx, "tasks")?.iter().any(|task| {
+            if task["author_device_id"] != device
+                || task["expires_at_ms"].as_i64().unwrap_or_default() <= now
+            {
+                return false;
+            }
+            let latest = latest_task_event(&events, &task["task_id"]);
+            if latest
+                .is_some_and(|event| is_terminal_status(event["kind"].as_str().unwrap_or_default()))
+            {
+                return false;
+            }
+            latest
+                .and_then(|event| event["timestamp_ms"].as_i64())
+                .or_else(|| task["created_at_ms"].as_i64())
+                .is_some_and(|activity| now.saturating_sub(activity) < 120_000)
+        }))
+    })()
+    .unwrap_or(false);
+    std::time::Duration::from_secs(if awaiting { 3 } else { 15 })
 }
 
 #[tauri::command]
@@ -1312,6 +1794,65 @@ pub fn set_plugin_secret(
     }
     Ok(())
 }
+#[tauri::command]
+pub fn list_download_proxies(
+    state: State<'_, AppState>,
+) -> Result<Vec<plugin_host::DownloadProxyProfile>, String> {
+    plugin_host::download_profiles(&plugin_host::root(&state))
+}
+
+#[tauri::command]
+pub fn save_download_proxy(
+    state: State<'_, AppState>,
+    id: Option<String>,
+    name: String,
+    address: String,
+    credentials: Option<(String, String)>,
+) -> Result<(), String> {
+    plugin_host::save_download_profile(&plugin_host::root(&state), id, name, address, credentials)
+}
+
+#[tauri::command]
+pub fn remove_download_proxy(
+    state: State<'_, AppState>,
+    id: String,
+    replacement: Option<String>,
+) -> Result<(), String> {
+    plugin_host::remove_download_profile(&plugin_host::root(&state), &id, replacement.as_deref())
+}
+
+#[tauri::command]
+pub async fn check_download_settings(
+    state: State<'_, AppState>,
+    proxy_id: Option<String>,
+    aria2c_path: Option<String>,
+) -> Result<String, String> {
+    #[cfg(desktop)]
+    {
+        let root = plugin_host::root(&state);
+        let plugin = plugin_host::get(&root, IMAGE_PLUGIN_ID)?;
+        let is_engine_check = aria2c_path.is_some();
+        let mut config = plugin_host::download_execution_config(
+            &root,
+            &plugin,
+            proxy_id.as_deref().unwrap_or("direct"),
+        )?;
+        if let Some(path) = aria2c_path {
+            config["aria2c_path"] = json!(path);
+        }
+        tauri::async_runtime::spawn_blocking(move || {
+            crate::image_bot::check_download(&config, is_engine_check)
+        })
+        .await
+        .map_err(|_| "下载设置检查中断".to_string())?
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = (state, proxy_id, aria2c_path);
+        Err("请在执行电脑检查下载设置".into())
+    }
+}
+
 #[tauri::command]
 pub fn test_plugin_environment(state: State<'_, AppState>, id: String) -> Result<Value, String> {
     let plugin = plugin_host::get(&plugin_host::root(&state), &id)?;
@@ -1498,7 +2039,18 @@ pub fn list_bot_tasks(state: State<'_, AppState>) -> Result<Vec<Value>, String> 
     let mut events = records(&state, &ctx, "events")?;
     events.sort_by_key(|e| e["timestamp_ms"].as_i64().unwrap_or(0));
     let mut tasks = records(&state, &ctx, "tasks")?;
+    let pending: std::collections::HashSet<String> = {
+        let conn = Connection::open(&state.db_path).map_err(|e| e.to_string())?;
+        let mut query = conn.prepare("SELECT id FROM bot_records WHERE endpoint_id=?1 AND owner_scope=?2 AND kind='tasks' AND pending=1").map_err(|e| e.to_string())?;
+        let rows = query
+            .query_map(params![ctx.profile_id(), ctx.owner_scope], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
+    };
     for task in &mut tasks {
+        task["pending_delivery"] = json!(task["task_id"]
+            .as_str()
+            .is_some_and(|id| pending.contains(id)));
         let latest = latest_task_event(&events, &task["task_id"]);
         task["status"] = latest.map(|e| e["kind"].clone()).unwrap_or_else(|| {
             json!(
@@ -1726,10 +2278,10 @@ mod tests {
             payload: json!({"items":[]}),
         };
         let reply = json!({"id":"reply","filename":"reply.txt","text":"done","timestamp_ms":1});
-        persist_terminal_event(&path, "space", "owner", &event, Some(("reply", &reply))).unwrap();
+        persist_execution_event(&path, "space", "owner", &event, Some(("reply", &reply))).unwrap();
         let mut conflicting = event.clone();
         conflicting.kind = "failed".into();
-        assert!(persist_terminal_event(&path, "space", "owner", &conflicting, None).is_err());
+        assert!(persist_execution_event(&path, "space", "owner", &conflicting, None).is_err());
         let conn = Connection::open(&path).unwrap();
         let reply_pending: i64 = conn
             .query_row(
@@ -1750,7 +2302,7 @@ mod tests {
         let mut reply_conflict = event.clone();
         reply_conflict.task_id = "other-task".into();
         reply_conflict.event_id = "other-event".into();
-        assert!(persist_terminal_event(
+        assert!(persist_execution_event(
             &path,
             "space",
             "owner",

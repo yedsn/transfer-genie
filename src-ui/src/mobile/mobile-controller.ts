@@ -1357,11 +1357,15 @@ export function useMobileController() {
       if (text) {
         const plugins = (window as any).transferGeniePlugins;
         await plugins?.setScope?.([state.activeProfile?.id,state.account?.userId,currentSpace.value?.id].map(value => value || '').join(':'));
-        const pluginDraft = plugins?.getCallContext?.() || {};
+        const pluginDraft = plugins?.getCallContext?.(text) || {};
         const pluginDraftScope = plugins?.state?.scope;
-        await api().message.sendText({ text, format: state.composer.format, markedOptions, clientId: state.composer.textClientId, ...pluginDraft });
+        const sent = await api().message.sendText({ text, format: state.composer.format, markedOptions, clientId: state.composer.textClientId, ...pluginDraft });
         plugins?.clearCallContext?.(pluginDraft, pluginDraftScope);
         if (generation !== viewGeneration) return false;
+        if (pluginDraft.targetBotInstanceId) {
+          plugins?.noteBotCall?.(sent?.filename, pluginDraft.targetBotInstanceId, pluginDraftScope);
+          void refreshMessages().catch(() => {});
+        }
         localSaveCount += 1;
         state.composer.text = "";
         state.composer.textClientId = `mobile-text-${crypto.randomUUID()}`;

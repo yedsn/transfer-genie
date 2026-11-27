@@ -5,30 +5,50 @@ test('plugin settings and structured multi-reference call render and send', asyn
     const endpoint = { id: 'plugin-test', name: 'Plugin test', url: 'https://example.test/dav', enabled: true };
     const settings = { sender_name: 'Test', refresh_interval_secs: 3600, default_editor_format: 'text', active_storage_profile_id: endpoint.id, webdav_endpoints: [endpoint], storage_profiles: [{ ...endpoint, provider_kind: 'webdav', webdav: { url: endpoint.url } }], send: {}, telegram: {}, ai: {}, speech_to_text: {}, backup: {} };
     const plugin = { manifest: { id: 'image-downloader', name: '图片下载', version: '1.0.0', capabilities:[{kind:'bot'}], runtime: { mode: 'oneshot' }, config_schema: [{ key: 'download_dir', label: '下载目录', kind: 'directory' }] }, config: { download_dir: 'D:/Downloads' }, source_kind: 'builtin', enabled: true, has_current_space:true, current_space_allowed:false };
-    window.__pluginTest = { sends: [] };
+    const fixture = window.__pluginTest = { sends: [], messages: [], contexts: [], tasks: [], events: [], listeners: {} };
     let installed = [plugin];
     plugin.instance_id='pc-image';
+    const proxies = [];
     window.__TAURI__ = { core: { invoke: async (command, args) => {
       if (command === 'get_settings') return structuredClone(settings);
       if (command === 'get_bot_scope') return 'account-space';
       if (command === 'list_plugins') return structuredClone(installed);
-      if (command === 'list_bot_tasks') return [{task_id:'image-task',target_instance_id:'pc-image',text:'下载引用图片',created_at_ms:Date.now(),status:'running',can_cancel:true},{task_id:'other-task',target_instance_id:'other-instance',text:'其他插件任务',created_at_ms:Date.now(),status:'running'}];
+      if (command === 'list_bot_tasks') return [
+        {task_id:'image-task',target_instance_id:'pc-image',text:'下载引用图片',created_at_ms:Date.now(),status:'running',can_cancel:true},
+        ...Array.from({length:11}, (_,index) => ({task_id:'history-'+index,target_instance_id:'pc-image',text:'历史任务 '+index,created_at_ms:Date.now()-1000*(index+1),status:'succeeded'})),
+        {task_id:'other-task',target_instance_id:'other-instance',text:'其他插件任务',created_at_ms:Date.now(),status:'running'},
+        ...structuredClone(fixture.tasks),
+      ];
       if (command === 'configure_plugin') { const entry=installed.find(plugin=>plugin.manifest.id===args.id); entry.enabled=args.enabled; entry.config=args.config; return null; }
+      if (command === 'list_download_proxies') return structuredClone(proxies);
+      if (command === 'save_download_proxy') { proxies.push({id:'company',name:args.name,address:args.address,authenticated:false}); return null; }
+      if (command === 'check_download_settings') return '代理连接成功';
+      if (command === 'remove_download_proxy') { proxies.splice(proxies.findIndex(profile=>profile.id===args.id),1); plugin.config.default_route=args.replacement || 'direct'; return null; }
       if (command === 'import_plugin') { installed.push({...structuredClone(plugin),enabled:false,source_kind:'external',manifest:{...structuredClone(plugin.manifest),id:'echo-bot',name:'Echo Bot'}}); return null; }
       if (command === 'uninstall_plugin') { installed = installed.filter(plugin=>plugin.manifest.id!==args.id); return null; }
       if (command === 'list_integration_modules') return [{ id: 'webdav-sync', displayName: 'WebDAV Sync', enabled: true, running: true }];
       if (command === 'set_plugin_space') { plugin.current_space_allowed=args.allowed; return null; }
-      if (command === 'list_bot_instances') return plugin.current_space_allowed ? [{ instance_id: 'pc-image', name: '图片下载', device_name: 'PC', enabled: true, expires_at_ms: Date.now() + 90000 }] : [];
-      if (command === 'get_message_contexts') return [];
+      if (command === 'list_bot_instances') return plugin.current_space_allowed ? [{ instance_id: 'pc-image', name: '图片下载', device_name: 'PC', enabled: true, expires_at_ms: Date.now() + 90000, download_options:{default_route: plugin.config.default_route || 'direct',profiles:[{id:'company',name:'公司代理'}]} }] : [];
+      if (command === 'get_message_contexts') return structuredClone(fixture.contexts);
+      if (command === 'list_bot_events') return structuredClone(fixture.events);
       if (command === 'get_plugin_market') return '';
-      if (command === 'send_text') { window.__pluginTest.sends.push(args); return { filename: 'sent.txt', markedTagIds: [] }; }
-      if (command === 'list_messages_window') return { messages: [], has_more_before: false, has_more_after: false };
+      if (command === 'send_text') {
+        fixture.sends.push(args);
+        const now = Date.now();
+        fixture.messages = [
+          { filename: 'older.md', sender: 'Test', timestamp_ms: now - 100, kind: 'text', format: 'markdown', content: '# Markdown' },
+          { filename: 'sent.txt', sender: 'Test', timestamp_ms: now, kind: 'text', format: 'text', content: args.text },
+        ];
+        fixture.tasks = [{ task_id: 'sent-task', message_filename: 'sent.txt', target_instance_id: 'pc-image', status: 'waiting_device', pending_delivery: true, created_at_ms: now }];
+        return { filename: 'sent.txt', markedTagIds: [] };
+      }
+      if (command === 'list_messages_window') return { messages: structuredClone(fixture.messages), total: fixture.messages.length, hasMoreBefore: false, hasMoreAfter: false };
       if (command === 'get_sync_status' || command === 'refresh') return { running: false };
       if (command === 'get_app_version') return 'test';
       if (command === 'get_marked_messages' || command === 'list_download_history' || command === 'list_upload_history') return { records: [], total: 0 };
       if (command.startsWith('list_')) return [];
       return null;
-    } }, event: { listen: async () => () => {}, emit: async () => {} }, dialog: { open: async () => 'fixture.zip', save: async () => null } };
+    } }, event: { listen: async (name, handler) => { fixture.listeners[name] = handler; return () => {}; }, emit: async () => {} }, dialog: { open: async () => 'fixture.zip', save: async () => null } };
   });
   await page.goto('/', { waitUntil: 'networkidle' });
   await page.waitForFunction(() => window.transferGenieSendActiveDraft);
@@ -39,9 +59,38 @@ test('plugin settings and structured multi-reference call render and send', asyn
   await expect(page.locator('.plugin-install-row').first()).toContainText('内置');
   await page.screenshot({ path: 'target/playwright/plugins/plugin-management.png' });
   await page.locator('[data-settings-nav-target="settings-plugin-image-downloader"]').click();
-  await expect(page.locator('#settings-plugin-image-downloader .plugin-field input[type="text"]').first()).toHaveValue('D:/Downloads');
-  await expect(page.locator('#settings-plugin-image-downloader .plugin-task-panel')).toContainText('下载引用图片');
-  await expect(page.locator('#settings-plugin-image-downloader .plugin-task-panel')).not.toContainText('其他插件任务');
+  await expect(page.locator('#settings-plugin-image-downloader').getByLabel('下载目录')).toHaveValue('D:/Downloads');
+  await page.locator('#settings-plugin-image-downloader').getByRole('button',{name:'前往基本设置'}).click();
+  await expect(page.getByPlaceholder('{yyyymmdd}_{filename}.{file_suffix}')).toBeFocused();
+  await page.locator('[data-settings-nav-target="settings-plugin-image-downloader"]').click();
+  const downloadSettings = page.locator('#settings-plugin-image-downloader .download-settings');
+  await downloadSettings.getByRole('button',{name:'新增代理'}).click();
+  await downloadSettings.getByLabel('代理名称').fill('公司代理');
+  await downloadSettings.getByLabel('HTTP 代理地址').fill('http://127.0.0.1:7890');
+  await downloadSettings.getByRole('button',{name:'保存代理'}).click();
+  await downloadSettings.getByRole('button',{name:'测试连接'}).click();
+  await expect(downloadSettings.getByRole('status')).toHaveText('代理连接成功');
+  await downloadSettings.getByLabel('默认出口',{exact:true}).selectOption('company');
+  await page.locator('#settings-plugin-image-downloader').getByRole('button',{name:'保存配置'}).click();
+  await downloadSettings.getByRole('button',{name:'删除',exact:true}).click();
+  await expect(downloadSettings.getByRole('button',{name:'确认删除'})).toBeDisabled();
+  await downloadSettings.getByLabel('新的默认出口').selectOption('direct');
+  await downloadSettings.getByRole('button',{name:'确认删除'}).click();
+  await expect(downloadSettings.getByRole('status')).toHaveText('代理已删除');
+  const taskPanel = page.locator('#settings-plugin-image-downloader .plugin-task-panel');
+  await expect(taskPanel.locator('.plugin-task-row')).toHaveCount(10);
+  await expect(taskPanel.locator('.plugin-task-row').first()).toContainText('下载引用图片');
+  await taskPanel.getByRole('button',{name:'下一页'}).click();
+  await expect(taskPanel.locator('.plugin-task-row')).toHaveCount(2);
+  await expect(taskPanel.getByRole('status')).toHaveText('第 2 / 2 页');
+  await taskPanel.getByRole('combobox',{name:'每页任务数量'}).selectOption('20');
+  await expect(taskPanel.locator('.plugin-task-row')).toHaveCount(12);
+  await expect(taskPanel.getByRole('status')).toHaveText('第 1 / 1 页');
+  await expect(taskPanel).not.toContainText('其他插件任务');
+  const permission = page.locator('#settings-plugin-image-downloader .plugin-permissions-header').getByRole('switch',{name:'允许当前空间调用'});
+  await permission.check();
+  await expect(permission).toBeChecked();
+  await permission.uncheck();
   await expect(page.locator('.bot-composer')).not.toContainText('机器人任务');
   await page.locator('[data-settings-nav-target="settings-section-plugins"]').click();
   await page.getByRole('button',{name:'导入插件包',exact:true}).click();
@@ -53,9 +102,14 @@ test('plugin settings and structured multi-reference call render and send', asyn
   await page.getByRole('button',{name:'收起配置',exact:true}).click();
   await page.getByRole('checkbox',{name:'启用 Echo Bot',exact:true}).check();
   await expect(echoMenu).toBeVisible();
+  const settingsOrder = await page.evaluate(() => ({
+    menu: Array.from(document.querySelectorAll('.settings-nav [data-settings-nav-target]'), button => button.dataset.settingsNavTarget),
+    content: Array.from(document.querySelectorAll('.settings-content [data-settings-section]'), section => section.id),
+  }));
+  expect(settingsOrder.content).toEqual(settingsOrder.menu);
   await echoMenu.click();
   await expect(page.locator('#settings-plugin-echo-bot h3')).toHaveText('Echo Bot');
-  await page.locator('#settings-plugin-echo-bot').getByRole('checkbox',{name:'启用',exact:true}).click();
+  await page.locator('#settings-plugin-echo-bot').getByRole('checkbox',{name:'启用 Echo Bot',exact:true}).click();
   await expect(echoMenu).toHaveCount(0);
   await page.getByRole('checkbox',{name:'启用 Echo Bot',exact:true}).check();
   await echoMenu.click();
@@ -79,7 +133,13 @@ test('plugin settings and structured multi-reference call render and send', asyn
   await page.evaluate(()=>{window.transferGenieVue.activateTab('home');const store=window.transferGenieComposerStore;store.setDraftText(store.getActiveDraft().id,'');store.setDraftFormat(store.getActiveDraft().id,'markdown');});
   const richEditor=page.locator('.cw-md-wrap .CodeMirror textarea');
   await page.locator('.cw-md-wrap[data-markdown-ready="true"]').waitFor(); await page.locator('.cw-md-wrap .CodeMirror').click(); await page.keyboard.type('@');
-  await expect(page.getByRole('listbox',{name:'选择机器人'})).toBeVisible();
+  const mentionMenu = page.getByRole('listbox',{name:'选择机器人'});
+  await expect(mentionMenu).toBeVisible();
+  await expect.poll(() => page.locator('.cw-md-wrap .CodeMirror').evaluate(element => {
+    const anchor = element.CodeMirror.charCoords({line: 0, ch: 0}, 'window');
+    const menu = document.querySelector('[role="listbox"][aria-label="选择机器人"]').getBoundingClientRect();
+    return Math.abs(menu.left - (anchor.right + 6)) < 2 && (menu.top >= anchor.bottom || menu.bottom <= anchor.top);
+  })).toBe(true);
   await page.getByRole('button',{name:'允许当前空间调用',exact:true}).click();
   await expect(page.locator('.bot-mention-menu').getByRole('option')).toContainText('图片下载');
   await page.locator('.bot-mention-menu').getByRole('option').click();
@@ -105,10 +165,17 @@ test('plugin settings and structured multi-reference call render and send', asyn
   expect(await page.evaluate(()=>window.__quoteLocated)).toBe('one.png');
   await expect(page.locator('.quote-notice')).toContainText('原消息已删除或当前不可用');
   await expect(page.locator('.bot-target-picker')).toHaveCount(0);
-  await page.locator('.cw-textarea:visible').fill('@图');
-  await expect(page.getByRole('listbox', {name:'选择机器人'})).toBeVisible();
+  const textEditor = page.locator('.cw-textarea:visible');
+  await textEditor.fill('@图');
+  await expect(mentionMenu).toBeVisible();
+  const firstMenuLeft = (await mentionMenu.boundingBox()).x;
+  await textEditor.fill('Download this @图');
+  await expect.poll(async () => (await mentionMenu.boundingBox()).x).toBeGreaterThan(firstMenuLeft + 60);
+  await textEditor.fill('@图');
   await expect(page.locator('.bot-mention-menu').getByRole('option')).toContainText('图片下载');
   await page.locator('.cw-textarea:visible').press('Enter');
+  await page.locator('.cw-textarea:visible').press('Alt+ArrowDown');
+  await page.getByRole('menuitemradio',{name:'公司代理'}).click();
   await expect(page.locator('.cw-textarea:visible')).toHaveValue('@图片下载（PC） ');
   await expect(page.locator('.mention-textarea-mirror .bot-mention-token')).toHaveCount(1);
   await page.locator('.cw-textarea:visible').press('Backspace');
@@ -119,6 +186,9 @@ test('plugin settings and structured multi-reference call render and send', asyn
   expect(await page.evaluate(() => window.transferGeniePlugins.getCallContext().targetBotInstanceId)).toBeNull();
   await page.locator('.cw-textarea:visible').fill('@图');
   await page.locator('.cw-textarea:visible').press('Enter');
+  await page.locator('.cw-textarea:visible').press('Alt+ArrowDown');
+  await expect(page.getByRole('menuitemradio',{name:/跟随默认/})).toHaveAttribute('aria-checked','true');
+  await page.getByRole('menuitemradio',{name:'公司代理'}).click();
   await page.locator('.bot-composer').evaluate(async element => {
     const animations = document.getAnimations().filter(animation => animation.effect?.target instanceof Element && animation.effect.target.contains(element));
     await Promise.all(animations.map(animation => animation.finished.catch(() => {})));
@@ -128,7 +198,64 @@ test('plugin settings and structured multi-reference call render and send', asyn
   await expect.poll(() => page.evaluate(() => window.__pluginTest.sends.length)).toBe(1);
   const sent = await page.evaluate(() => window.__pluginTest.sends[0]);
   expect(sent.targetBotInstanceId).toBe('pc-image');
+  expect(sent.downloadRoute).toBe('company');
+  expect(sent.text.slice(sent.mentionStart,sent.mentionStart+sent.mentionText.length)).toBe('@图片下载（PC）');
   expect(sent.references.map(item => item.filename)).toEqual(['one.png', 'two.png']);
+  const feedback = page.locator('#message-list .bot-feedback');
+  await expect(feedback).toContainText('正在投递');
+  await page.evaluate(() => {
+    const fixture = window.__pluginTest;
+    fixture.tasks[0].pending_delivery = false;
+    fixture.listeners['bot-chat-updated']({ payload: { scope: 'account-space' } });
+  });
+  await expect(feedback).toContainText('等待机器人接单');
+  await page.evaluate(() => {
+    const fixture = window.__pluginTest;
+    fixture.tasks[0].created_at_ms -= 9000;
+    fixture.listeners['bot-chat-updated']({ payload: { scope: 'other-space' } });
+  });
+  await expect(feedback).toContainText('等待机器人接单');
+  await page.evaluate(() => window.__pluginTest.listeners['bot-chat-updated']({ payload: { scope: 'account-space' } }));
+  await expect(feedback).toContainText('机器人暂未响应');
+  await page.evaluate(() => {
+    const fixture = window.__pluginTest;
+    fixture.tasks[0].status = 'running';
+    fixture.listeners['bot-chat-updated']({ payload: { scope: 'account-space' } });
+  });
+  await expect(feedback).toContainText('正在处理');
+  await page.evaluate(() => {
+    const fixture = window.__pluginTest;
+    fixture.tasks[0].status = 'progress';
+    const updates = [
+      { transfer_item: { item_id: 'video', name: 'demo.mp4', status: 'downloading', transfer: { received_bytes: 1024 ** 2, total_bytes: 4 * 1024 ** 2, bytes_per_second: 512 * 1024 } } },
+      { transfer_item: { item_id: 'archive', name: 'archive.zip', status: 'downloading', transfer: { received_bytes: 64 * 1024, total_bytes: null, bytes_per_second: 32 * 1024 } } },
+      { item: { item_id: 'note', name: 'note.txt', status: 'succeeded' } },
+    ];
+    fixture.events = updates.map(payload => ({ task_id: 'sent-task', kind: 'progress', timestamp_ms: Date.now(), payload }));
+    fixture.listeners['bot-chat-updated']({ payload: { scope: 'account-space' } });
+  });
+  await expect(feedback).toContainText('已处理 1 项');
+  await expect(feedback).toContainText('512 KB/s');
+  await expect(feedback).toContainText('25.0%');
+  await expect(feedback.getByRole('progressbar', { name: 'demo.mp4 的下载进度' })).toHaveAttribute('value', '1048576');
+  await expect(feedback.getByRole('progressbar', { name: 'archive.zip 的下载进度' })).not.toHaveAttribute('value');
+  await page.evaluate(() => {
+    const fixture = window.__pluginTest;
+    fixture.events.push({ task_id: 'sent-task', kind: 'progress', timestamp_ms: Date.now(), payload: { item: { item_id: 'video', status: 'succeeded' } } });
+    fixture.listeners['bot-chat-updated']({ payload: { scope: 'account-space' } });
+  });
+  await expect(feedback).toContainText('已处理 2 项');
+  await expect(feedback.getByRole('progressbar')).toHaveCount(1);
+  await page.evaluate(() => {
+    const fixture = window.__pluginTest;
+    const timestamp_ms = fixture.messages[1].timestamp_ms + 1;
+    fixture.tasks[0].status = 'succeeded';
+    fixture.messages.push({ filename: 'reply.txt', sender: '图片下载', timestamp_ms, kind: 'text', content: '下载完成' });
+    fixture.contexts.push({ filename: 'reply.txt', task_id: 'sent-task', text: '下载完成' });
+    fixture.listeners['bot-chat-updated']({ payload: { scope: 'account-space', messagesChanged: true } });
+  });
+  await expect(page.locator('#message-list .message-card[data-filename="reply.txt"]')).toContainText('下载完成');
+  await expect(feedback).toHaveCount(0);
 });
 
 test('mobile multi-selection quotes messages into a structured bot call', async ({page}) => {
@@ -136,10 +263,15 @@ test('mobile multi-selection quotes messages into a structured bot call', async 
   await page.addInitScript(()=>{
     window.__TAURI__={core:{invoke:async(command)=>{
       if(command==='get_bot_scope') return 'mobile-fixture';
+      if(command==='list_bot_tasks') return [
+        { task_id:'offline-task', message_filename:'preview-text', target_instance_id:'mac', created_at_ms:Date.now(), status:'waiting_device' },
+        { task_id:'mobile-download', message_filename:'preview-plan.pdf', target_instance_id:'pc', created_at_ms:Date.now(), status:'progress' },
+      ];
+      if(command==='list_bot_events') return [{ task_id:'mobile-download', kind:'progress', timestamp_ms:Date.now(), payload:{ transfer_item:{ item_id:'file', name:'demo.zip', status:'downloading', transfer:{ received_bytes:512, total_bytes:1024, bytes_per_second: 256 } } } }];
       if(command==='get_message_contexts') return [{filename:'preview-photo.jpg',task_id:'reply-task',text:'下载完成',references:[{filename:'preview-plan.pdf',sender:'Mac',kind:'file',original_name:'引用文件.pdf'}]}];
       if(command==='list_bot_instances' && window.__directoryOffline) throw new Error('offline');
       if(command==='list_bot_instances') return [
-        {instance_id:'pc',name:'图片下载',device_name:'PC',enabled:true,expires_at_ms:Date.now()+90000},
+        {instance_id:'pc',name:'图片下载',device_name:'PC',enabled:true,expires_at_ms:Date.now()+90000,download_options:{default_route:'direct',profiles:[{id:'mobile-proxy',name:'家用代理'}]}},
         {instance_id:'mac',name:'图片下载',device_name:'MacBook',enabled:true,expires_at_ms:Date.now()-90000},
       ];
       if(command.startsWith('list_') || command==='get_message_contexts') return [];
@@ -148,6 +280,9 @@ test('mobile multi-selection quotes messages into a structured bot call', async 
   });
   await page.goto('/?mobile-preview=1',{waitUntil:'networkidle'});
   await expect(page.locator('.mobile-message-card').first()).toBeVisible();
+  const mobileFeedback = page.locator('.mobile-message-list .bot-feedback');
+  await expect(mobileFeedback.filter({ hasText:'目标设备离线' })).toBeVisible();
+  await expect(mobileFeedback.filter({ hasText:'demo.zip' })).toContainText('50.0%');
   await expect(page.locator('.mobile-message-header .bot-message-identity')).toHaveAttribute('aria-label', '机器人');
   await expect(page.locator('.mobile-message-bubble .bot-message-identity')).toHaveCount(0);
   const quotedCard=page.locator('[data-message-filename="preview-photo.jpg"]');
@@ -161,12 +296,9 @@ test('mobile multi-selection quotes messages into a structured bot call', async 
   await page.getByRole('textbox',{name:'消息内容',exact:true}).fill('@');
   expect(await page.evaluate(()=>window.transferGeniePlugins.state.plugins)).toHaveLength(0);
   await expect(page.locator('.bot-mention-menu').getByRole('option')).toHaveCount(2);
-  await page.evaluate(async()=>{
-    window.__directoryOffline=true;
-    await window.__TAURI__.core.invoke('list_bot_instances').catch(()=>{});
-    const store=await import('/src/plugins/plugin-store.ts');
-    await store.refreshPlugins();
-  });
+  await page.evaluate(()=>{window.__directoryOffline=true;});
+  await page.getByRole('textbox',{name:'消息内容',exact:true}).fill('');
+  await page.getByRole('textbox',{name:'消息内容',exact:true}).fill('@');
   await expect(page.locator('.bot-mention-menu').getByRole('alert')).toContainText('目录读取失败');
   await expect(page.locator('.bot-mention-menu').getByRole('option')).toHaveCount(2);
   await page.evaluate(()=>{window.__directoryOffline=false;});
@@ -175,6 +307,9 @@ test('mobile multi-selection quotes messages into a structured bot call', async 
   await expect(page.locator('.bot-mention-menu').getByRole('option').filter({hasText:'MacBook'})).toContainText('离线');
   await page.getByRole('option').filter({hasText:'PC'}).click();
   await expect(page.getByRole('textbox',{name:'消息内容',exact:true})).toHaveValue('@图片下载（PC） ');
+  await page.locator('[data-download-mention]:visible').click();
+  await page.getByRole('menuitemradio',{name:'家用代理'}).click();
+  expect(await page.evaluate(()=>window.transferGeniePlugins.getCallContext().downloadRoute)).toBe('mobile-proxy');
   await page.getByRole('textbox',{name:'消息内容',exact:true}).press('Backspace');
   await page.getByRole('textbox',{name:'消息内容',exact:true}).press('Backspace');
   await expect(page.getByRole('textbox',{name:'消息内容',exact:true})).toHaveValue('');
@@ -190,8 +325,23 @@ test('mobile multi-selection quotes messages into a structured bot call', async 
   const markdownEditor=page.locator('.mobile-composer-sheet [contenteditable="true"]');
   await markdownEditor.click();
   await page.keyboard.type('@');
+  await expect.poll(() => markdownEditor.evaluate(element => {
+    const text = element.querySelector('p').firstChild;
+    const range = document.createRange();
+    range.setStart(text, 0);
+    range.setEnd(text, 1);
+    const anchor = range.getBoundingClientRect();
+    const menu = document.querySelector('[role="listbox"][aria-label="选择机器人"]')?.getBoundingClientRect();
+    if (!menu) return false;
+    const left = Math.max(8, Math.min(anchor.right + 6, innerWidth - menu.width - 8));
+    return Math.abs(menu.left - left) < 2 && (menu.top >= anchor.bottom || menu.bottom <= anchor.top);
+  })).toBe(true);
   await page.locator('.bot-mention-menu').getByRole('option').filter({hasText:'PC'}).click();
   await expect(markdownEditor.locator('.bot-mention-token')).toHaveText('@图片下载（PC）');
+  await markdownEditor.locator('[data-download-mention]').click();
+  await page.getByRole('menuitemradio',{name:'直连',exact:true}).click();
+  expect(await page.evaluate(()=>window.transferGeniePlugins.getCallContext().downloadRoute)).toBe('direct');
+  await markdownEditor.focus();
   expect(await page.evaluate(()=>window.transferGeniePlugins.getCallContext().targetBotInstanceId)).toBe('pc');
   // A native editor transaction has no DOM input event (e.g. iOS undo).
   await markdownEditor.evaluate(element => {

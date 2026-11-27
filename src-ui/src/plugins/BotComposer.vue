@@ -1,14 +1,58 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
-import { selectedMention, mentionDeletion, decorateTextarea, deleteTextareaMention } from './mention-editor';
-import { pluginState as state, removeReference, clearReferences, selectBot, refreshPlugins, pluginAction } from './plugin-store';
+import type { CSSProperties } from 'vue';
+import { selectedMention, mentionDeletion, decorateTextarea, deleteTextareaMention, createMentionChip, textareaCharacterRect } from './mention-editor';
+import { downloadDraft, mentionOffset, selectDownloadRoute, pluginState as state, removeReference, clearReferences, selectBot, refreshPlugins, pluginAction } from './plugin-store';
 import { locateQuotedMessage } from './reference-navigation';
 const referenceNotice=ref('');
 async function locateReference(filename:string) { try { referenceNotice.value=await locateQuotedMessage(filename)?'':'原消息已删除或当前不可用'; } catch { referenceNotice.value='暂时无法加载原消息，请稍后重试'; } }
 const query = ref<string | null>(null);
 const root = ref<HTMLElement | null>(null);
 const active = ref(0);
-const position = ref({ left: '0px', top: '0px', width: '280px', maxHeight: '280px' });
+const mentionMenu = ref<HTMLElement | null>(null);
+const position = ref<CSSProperties>({ visibility: 'hidden' });
+const routeTrigger = ref<HTMLElement | null>(null);
+const routeMenu = ref<HTMLElement | null>(null);
+const routePosition = ref({left:'0px', top:'0px'});
+const chosenBot = computed(() => state.bots.find(bot => bot.instance_id === state.target));
+const routeOptions = computed(() => {
+  const options = chosenBot.value?.download_options;
+  if (!options) return [];
+  const profiles = (Array.isArray(options.profiles) ? options.profiles : []) as {id:string; name:string}[];
+  const defaultName = profiles.find(profile => profile.id === options.default_route)?.name ?? '直连';
+  return [{id:'default',name:'跟随默认（'+ defaultName +'）'}, {id:'direct',name:'直连'}, ...profiles];
+});
+const routeLabel = computed(() => routeOptions.value.find(option => option.id === downloadDraft.route)?.name ?? '代理不可用');
+function closeRoute(restore = false) {
+  const trigger = routeTrigger.value;
+  routeTrigger.value = null;
+  if (restore) trigger?.focus({preventScroll:true});
+}
+function openRoute(trigger: HTMLElement) {
+  if (!downloadDraft.enabled || !routeOptions.value.length) return;
+  if (routeTrigger.value === trigger) { closeRoute(); return; }
+  query.value = null;
+  routeTrigger.value = trigger;
+  void nextTick(() => {
+    const rect = trigger.getBoundingClientRect();
+    const bounds = routeMenu.value?.getBoundingClientRect();
+    if (!bounds) return;
+    const viewport = window.visualViewport;
+    const top = viewport?.offsetTop ?? 0;
+    const bottom = top + (viewport?.height ?? window.innerHeight);
+    routePosition.value = { left: Math.max(8, Math.min(rect.left, window.innerWidth - bounds.width - 8))+'px', top: Math.max(top+8, Math.min(rect.bottom+5, bottom-bounds.height-8))+'px' };
+    routeMenu.value?.querySelector<HTMLElement>('[aria-checked="true"], button')?.focus({preventScroll:true});
+  });
+}
+function chooseRoute(route: string) { selectDownloadRoute(route); closeRoute(true); }
+function routeKeys(event: KeyboardEvent) {
+  if (event.key === 'Escape') { event.preventDefault(); closeRoute(true); return; }
+  if (!['ArrowUp','ArrowDown'].includes(event.key)) return;
+  event.preventDefault();
+  const buttons = Array.from(routeMenu.value?.querySelectorAll<HTMLButtonElement>('button') ?? []);
+  const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+  buttons[(index + (event.key === 'ArrowUp' ? -1 : 1) + buttons.length) % buttons.length]?.focus();
+}
 let editor: HTMLTextAreaElement | HTMLElement | null = null;
 let mentionRange: Range | null = null;
 let start = 0;
@@ -21,10 +65,11 @@ function decorateEditors() {
   if(!root.value) return;
   const host=root.value.closest('.composer, .mobile-composer-content');
   host?.querySelectorAll<HTMLTextAreaElement>('textarea').forEach(input=>{if(!input.closest('.CodeMirror')) decorateTextarea(input);});
+  if (document.activeElement?.closest('[data-download-mention], .bot-route-menu')) return;
   cmMark?.clear();cmMark=null;
-  host?.querySelectorAll('.CodeMirror').forEach(node=>{const cm=(node as any).CodeMirror;const label=selectedMention();if(!cm || !label)return;const index=cm.getValue().indexOf(label);if(index<0)return;const chip=document.createElement('span');chip.className='bot-mention-token';chip.textContent=label;cmMark=cm.markText(cm.posFromIndex(index),cm.posFromIndex(index+label.length),{replacedWith:chip,atomic:true,clearOnEnter:false});});
+  host?.querySelectorAll('.CodeMirror').forEach(node=>{const cm=(node as any).CodeMirror;const label=selectedMention();if(!cm || !label)return;const index=mentionOffset(cm.getValue(),label);if(index<0)return;const chip=createMentionChip(label);cmMark=cm.markText(cm.posFromIndex(index),cm.posFromIndex(index+label.length),{replacedWith:chip,atomic:true,clearOnEnter:false,handleMouseEvents:false});});
 }
-watch(()=>[state.target,state.mentionText,state.scope],()=>{void nextTick(decorateEditors);});
+watch(()=>[state.target,state.mentionText,state.scope],()=>{closeRoute();void nextTick(decorateEditors);});
 function redraw(event:Event) { const node=event.target as HTMLElement; if(node.closest?.('.composer, .mobile-composer-content')===root.value?.closest('.composer, .mobile-composer-content')) void nextTick(decorateEditors); }
 function beforeInput(event:Event) { const input=event.target;const kind=(event as InputEvent).inputType;if(input instanceof HTMLTextAreaElement && !input.closest('.CodeMirror') && kind?.startsWith('delete') && input.closest('.composer, .mobile-composer-content')===root.value?.closest('.composer, .mobile-composer-content')){if(deleteTextareaMention(input,kind.includes('Backward')?'backward':'forward'))event.preventDefault();} }
 const candidates = computed(() => state.bots.filter(bot => bot.enabled && (bot.name + ' ' + bot.device_name).toLowerCase().includes((query.value || '').toLowerCase())));
@@ -35,13 +80,14 @@ async function grant(plugin:any) { try { await pluginAction('set_plugin_space',{
 function token(bot: any) { return '@' + bot.name + '（' + bot.device_name + '）'; }
 function inspect(event: Event) {
   const node = event.target as HTMLElement;
+  const chip = node?.closest?.<HTMLElement>('[data-download-mention]');
+  if (chip && event.type === 'click' && chip.closest('.composer, .mobile-composer-content') === root.value?.closest('.composer, .mobile-composer-content')) { openRoute(chip); return; }
   if ((event as InputEvent).isComposing) return;
   if (!node?.closest?.('.composer, .mobile-composer-content') || node.closest('.composer, .mobile-composer-content') !== root.value?.closest('.composer, .mobile-composer-content')) return;
   const input = node instanceof HTMLTextAreaElement ? node : node.closest<HTMLElement>('[contenteditable="true"]');
   if (!input) return;
   editor = input;
   codeMirror=(event as CustomEvent).detail?.cm || (node.closest('.CodeMirror') as any)?.CodeMirror || null;
-  const selected = state.bots.find(bot => bot.instance_id === state.target);
   const fullText = codeMirror ? codeMirror.getValue() : input instanceof HTMLTextAreaElement ? input.value : input.textContent || '';
   if (['input','bot-editor-change'].includes(event.type) && state.target && selectedMention() && !fullText.includes(selectedMention())) selectBot('');
   let before = '';
@@ -71,23 +117,74 @@ function inspect(event: Event) {
     let remaining=before.length-match[1].length-1;
     const walker=document.createTreeWalker(input,NodeFilter.SHOW_TEXT);
     let textNode:Node|null;
-    while((textNode=walker.nextNode())) { const length=textNode.textContent?.length || 0; if(remaining<=length) {mentionRange.setStart(textNode,remaining);break;} remaining-=length; }
+    while((textNode=walker.nextNode())) { const length=textNode.textContent?.length || 0; if(remaining<length) {mentionRange.setStart(textNode,remaining);break;} remaining-=length; }
   }
-  reposition();
+  void nextTick(reposition);
 }
+
+function mentionAnchor() {
+  if (codeMirror) return codeMirror.charCoords(cmStart, 'window');
+  if (editor instanceof HTMLTextAreaElement && editor.value[start] === '@') return textareaCharacterRect(editor, start);
+  if (mentionRange) {
+    const { startContainer, startOffset } = mentionRange;
+    if (startContainer.textContent?.[startOffset] === '@' && startContainer.nodeType === Node.TEXT_NODE) {
+      const character = mentionRange.cloneRange();
+      character.setEnd(startContainer, startOffset + 1);
+      return character.getBoundingClientRect();
+    }
+  }
+}
+
 function reposition() {
-  if(query.value===null || !editor?.isConnected)return;
-  const rect = codeMirror ? codeMirror.getWrapperElement().getBoundingClientRect() : editor.getBoundingClientRect();
-  const viewport=window.visualViewport;
-  const bottom=(viewport?.offsetTop || 0)+(viewport?.height || window.innerHeight);
-  const menuHeight=Math.min(280, Math.max(64,(viewport?.height || window.innerHeight)-16));
-  const top=rect.top>=menuHeight+8 ? rect.top-menuHeight-6 : Math.min(rect.top+28,bottom-menuHeight-8);
-  position.value = { left: Math.max(8,Math.min(rect.left,window.innerWidth- Math.min(320,rect.width)-8)) + 'px', top: Math.max((viewport?.offsetTop || 0)+8,top) + 'px', width: Math.min(320, rect.width, window.innerWidth - 16) + 'px', maxHeight:menuHeight+'px' };
+  const menu = mentionMenu.value;
+  if (query.value === null || !editor?.isConnected || !menu) return;
+  const bounds = (codeMirror?.getScrollerElement() ?? editor).getBoundingClientRect();
+  const anchor = mentionAnchor();
+  if (!anchor || anchor.bottom <= bounds.top || anchor.top >= bounds.bottom) {
+    position.value.visibility = 'hidden';
+    return;
+  }
+  const viewport = window.visualViewport;
+  const margin = 8;
+  const gap = 6;
+  const viewportLeft = viewport?.offsetLeft ?? 0;
+  const viewportTop = viewport?.offsetTop ?? 0;
+  const viewportWidth = viewport?.width ?? window.innerWidth;
+  const nativeKeyboardTop = editor.closest('.mobile-shell.is-keyboard-visible')?.getBoundingClientRect().bottom;
+  const viewportBottom = Math.min(nativeKeyboardTop ?? Infinity, viewportTop + (viewport?.height ?? window.innerHeight));
+  const width = Math.max(0, Math.min(320, bounds.width, viewportWidth - margin * 2));
+  const left = Math.max(viewportLeft + margin, Math.min(anchor.right + gap, viewportLeft + viewportWidth - width - margin));
+  // Measure at the new width before choosing a side so the fallback accounts for wrapped rows.
+  menu.style.width = width + 'px';
+  const height = Math.min(280, menu.scrollHeight + menu.offsetHeight - menu.clientHeight);
+  const below = Math.max(0, viewportBottom - margin - anchor.bottom - gap);
+  const above = Math.max(0, anchor.top - gap - viewportTop - margin);
+  const opensAbove = height > below && above > below;
+  const maxHeight = Math.min(280, opensAbove ? above : below);
+  const preferredTop = opensAbove ? anchor.top - gap - Math.min(height, maxHeight) : anchor.bottom + gap;
+  const top = Math.max(viewportTop + margin, Math.min(preferredTop, viewportBottom - margin - Math.min(height, maxHeight)));
+  position.value = { left: left + 'px', top: top + 'px', width: width + 'px', maxHeight: maxHeight + 'px' };
 }
+
+watch([candidates, ungranted, loading, () => state.directoryError], reposition, { flush: 'post' });
+
+function repositionOnEditorScroll(event: Event) {
+  const target = event.target;
+  if (target === document || (target instanceof Element && editor && (target.contains(editor) || target === codeMirror?.getScrollerElement()))) reposition();
+}
+function repositionAfterKeyboardChange() { void nextTick(reposition); }
 function choose(bot: any) {
   if (!editor || !bot) return;
   editor.focus();
   const text = token(bot) + ' ';
+  const before = codeMirror ? codeMirror.getValue().slice(0,codeMirror.indexFromPos(cmStart)) : editor instanceof HTMLTextAreaElement ? editor.value.slice(0,start) : (() => {
+    if (!mentionRange) return '';
+    const range = mentionRange.cloneRange();
+    range.selectNodeContents(editor!);
+    range.setEnd(mentionRange.startContainer, mentionRange.startOffset);
+    return range.toString();
+  })();
+  const ordinal = before.split(token(bot)).length - 1;
   if(codeMirror) {const cm=codeMirror; cm.replaceRange(text,cmStart,cmEnd,'+input'); cm.focus();}
   else if (editor instanceof HTMLTextAreaElement) {
     editor.setRangeText(text, start, end, 'end');
@@ -95,14 +192,24 @@ function choose(bot: any) {
   } else if (mentionRange) {
     const detail={query:query.value || '',text,handled:false};
     editor.dispatchEvent(new CustomEvent('bot-insert-mention',{detail}));
-    if(detail.handled){selectBot(bot.instance_id,token(bot));query.value=null;return;}
+    if(detail.handled){selectBot(bot.instance_id,token(bot),ordinal);query.value=null;return;}
     const selection = window.getSelection(); selection?.removeAllRanges(); selection?.addRange(mentionRange);
     document.execCommand('insertText', false, text);
   }
-  selectBot(bot.instance_id,token(bot)); query.value = null; void nextTick(decorateEditors);
+  selectBot(bot.instance_id,token(bot),ordinal); query.value = null; void nextTick(decorateEditors);
 }
 function keydown(event: KeyboardEvent) {
   const input=event.target as HTMLElement;
+  if (input.matches('[data-download-mention]') && input.closest('.composer, .mobile-composer-content') === root.value?.closest('.composer, .mobile-composer-content') && ['Enter',' '].includes(event.key)) {
+    event.preventDefault(); event.stopImmediatePropagation(); openRoute(input); return;
+  }
+  if (event.altKey && event.key === 'ArrowDown' && downloadDraft.enabled && root.value) {
+    const host = root.value.closest('.composer, .mobile-composer-content');
+    if (input.closest('.composer, .mobile-composer-content') === host) {
+      const chip = Array.from(host?.querySelectorAll<HTMLElement>('[data-download-mention]') ?? []).find(node => node.offsetWidth > 0);
+      if (chip) { event.preventDefault(); event.stopImmediatePropagation(); openRoute(chip); return; }
+    }
+  }
   if(!event.isComposing && ['Backspace','Delete'].includes(event.key) && input.closest?.('.composer, .mobile-composer-content')===root.value?.closest('.composer, .mobile-composer-content')) {
     const cm=(input.closest('.CodeMirror') as any)?.CodeMirror;
     let removed=false;
@@ -119,14 +226,21 @@ function keydown(event: KeyboardEvent) {
     else choose(candidates.value[active.value]);
   }
 }
-function dismiss(event: Event) { if (!(event.target as HTMLElement)?.closest?.('.bot-mention-menu') && event.target !== editor) query.value = null; }
+function dismiss(event: Event) {
+  const target = event.target as HTMLElement;
+  if (!target?.closest?.('.bot-mention-menu') && target !== editor) query.value = null;
+  if (!target?.closest?.('.bot-route-menu,[data-download-mention]')) closeRoute();
+}
 onMounted(() => {
   void refreshPlugins();
   document.addEventListener('input', inspect, true); document.addEventListener('click', inspect); document.addEventListener('compositionend', inspect);
   document.addEventListener('bot-editor-change',inspect);
   window.addEventListener('resize',decorateEditors);
+  window.addEventListener('resize',reposition);
+  document.addEventListener('scroll',repositionOnEditorScroll,true);
   window.visualViewport?.addEventListener('resize',reposition);
   window.visualViewport?.addEventListener('scroll',reposition);
+  window.addEventListener('transfer-genie-keyboard-geometry',repositionAfterKeyboardChange);
   document.addEventListener('input',redraw);document.addEventListener('bot-editor-change',redraw);document.addEventListener('focusin',redraw);document.addEventListener('scroll',redraw,true);document.addEventListener('beforeinput',beforeInput,true);
   document.addEventListener('keydown', keydown, true); document.addEventListener('pointerdown', dismiss);
 });
@@ -134,8 +248,11 @@ onUnmounted(() => {
   document.removeEventListener('input', inspect, true); document.removeEventListener('click', inspect); document.removeEventListener('compositionend', inspect);
   document.removeEventListener('bot-editor-change',inspect);
   window.removeEventListener('resize',decorateEditors);
+  window.removeEventListener('resize',reposition);
+  document.removeEventListener('scroll',repositionOnEditorScroll,true);
   window.visualViewport?.removeEventListener('resize',reposition);
   window.visualViewport?.removeEventListener('scroll',reposition);
+  window.removeEventListener('transfer-genie-keyboard-geometry',repositionAfterKeyboardChange);
   cmMark?.clear();document.removeEventListener('input',redraw);document.removeEventListener('bot-editor-change',redraw);document.removeEventListener('focusin',redraw);document.removeEventListener('scroll',redraw,true);document.removeEventListener('beforeinput',beforeInput,true);
   document.removeEventListener('keydown', keydown, true); document.removeEventListener('pointerdown', dismiss);
 });
@@ -151,9 +268,16 @@ onUnmounted(() => {
       </div>
     </details>
     <small v-if="referenceNotice" class="quote-notice" role="status">{{ referenceNotice }}</small>
-    <Teleport to="body"><div v-if="query !== null" class="bot-mention-menu" :style="position" role="listbox" aria-label="选择机器人">
+    <small v-if="downloadDraft.enabled && chosenBot" class="download-route-summary" role="status">{{ chosenBot.device_name }} · {{ routeLabel }}</small>
+    <Teleport to="body">
+      <div v-if="routeTrigger" ref="routeMenu" class="bot-mention-menu bot-route-menu" :style="routePosition" role="menu" aria-label="本次下载出口" @keydown="routeKeys">
+        <div class="mention-heading">{{ chosenBot?.device_name }} · 本次下载出口</div>
+        <button v-for="option in routeOptions" :key="option.id" type="button" role="menuitemradio" :aria-checked="downloadDraft.route === option.id" @click="chooseRoute(option.id)">{{ option.name }}</button>
+      </div>
+    </Teleport>
+    <Teleport to="body"><div v-if="query !== null" ref="mentionMenu" class="bot-mention-menu" :style="position" role="listbox" aria-label="选择机器人">
       <div class="mention-heading">选择要提醒的机器人</div>
-      <button v-for="(bot,index) in candidates" :key="bot.instance_id" class="mention-option" type="button" role="option" :aria-selected="index===active" @pointerdown.prevent @mousedown.prevent @pointermove="active=index" @click="choose(bot)"><span class="mention-avatar" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="7" width="16" height="14" rx="4"/><path d="M12 7V3m-2 0h4M8 12h1m6 0h1m-7 5h6"/></svg></span><span class="mention-copy"><strong>{{ bot.name }}</strong><small>{{ bot.device_name }}</small></span><span class="mention-presence" :class="{online:bot.expires_at_ms>Date.now()}">{{ bot.expires_at_ms > Date.now() ? '可用' : '离线' }}</span></button>
+      <button v-for="(bot,index) in candidates" :key="bot.instance_id" class="mention-option" type="button" role="option" :aria-selected="index===active" @pointerdown.prevent @mousedown.prevent @pointermove="active=index" @click="choose(bot)"><span class="mention-avatar" aria-hidden="true"><svg v-if="bot.download_options" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4" stroke-linecap="round" stroke-linejoin="round"/></svg><svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="7" width="16" height="14" rx="4"/><path d="M12 7V3m-2 0h4M8 12h1m6 0h1m-7 5h6"/></svg></span><span class="mention-copy"><strong>{{ bot.name }}</strong><small>{{ bot.device_name }}</small></span><span class="mention-presence" :class="{online:bot.expires_at_ms>Date.now()}">{{ bot.expires_at_ms > Date.now() ? '可用' : '离线' }}</span></button>
       <div v-for="plugin in ungranted" :key="plugin.manifest.id" class="bot-permission-hint"><strong>{{ plugin.manifest.name }}</strong><p>已启用，尚未允许当前存储空间调用</p><button type="button" :disabled="state.busy" @mousedown.prevent @click="grant(plugin)">允许当前空间调用</button></div>
       <p v-if="loading && !candidates.length">正在查找机器人…</p>
       <p v-else-if="state.directoryError" role="alert">{{ state.directoryError }}<button type="button" @mousedown.prevent @click="refreshCandidates">重试</button></p>

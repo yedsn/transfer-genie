@@ -2,10 +2,18 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { pluginState as state, pluginAction, refreshPlugins } from './plugin-store';
 import PluginTasks from './PluginTasks.vue';
+import PluginPagination from './PluginPagination.vue';
+import DownloadSettings from './DownloadSettings.vue';
 const marketUrl = ref('');
 const active = ref('installed');
 const props = defineProps<{pluginId?:string}>();
 const selectedPlugins = computed(() => state.plugins.filter(plugin => plugin.manifest.id === props.pluginId));
+const downloadPluginId = 'image-downloader';
+const downloadFields = new Set(['download_engine', 'aria2c_path', 'default_route']);
+function openFilenameRule() {
+  document.querySelector<HTMLElement>('[data-settings-nav-target="settings-section-basic"]')?.click();
+  document.getElementById('save-filename-rule')?.focus();
+}
 const editingPlugin = ref('');
 function openSettings(id:string) {
   const plugin = state.plugins.find(plugin => plugin.manifest.id===id);
@@ -71,8 +79,8 @@ async function fetchMarket() { await run('set_plugin_market',{url:marketUrl.valu
 </script>
 <template>
   <section class="plugins-panel">
-    <div class="plugins-heading"><div><h3>{{ props.pluginId ? selectedPlugins[0]?.manifest.name : '插件管理' }}</h3><p>{{ props.pluginId ? '配置本机插件、空间权限和运行方式。' : '安装插件，为聊天添加新的能力。' }}</p></div><button type="button" @click="refreshPlugins">刷新</button></div>
     <template v-if="!props.pluginId">
+    <div class="plugins-heading"><div><h3>插件管理</h3><p>安装插件，为聊天添加新的能力。</p></div><button type="button" @click="refreshPlugins">刷新</button></div>
     <nav class="plugins-tabs"><button type="button" :class="{active:active==='installed'}" @click="active='installed'">已安装</button><button type="button" :class="{active:active==='market'}" @click="active='market'">插件市场</button></nav>
     <p v-if="state.error" role="alert" class="plugin-error">{{ state.error }}</p>
     <div class="plugin-list-toolbar"><label class="plugin-search"><span aria-hidden="true">⌕</span><input v-model="search" type="search" aria-label="搜索插件" placeholder="搜索插件名称或 ID…" /></label><span>{{ active==='installed'?'已安装':'市场插件' }} {{ total }}</span></div>
@@ -98,24 +106,60 @@ async function fetchMarket() { await run('set_plugin_market',{url:marketUrl.valu
       <div class="plugin-store-grid"><article v-for="plugin in marketEntries" :key="plugin.id" class="plugin-card"><div class="plugin-title"><strong>{{ plugin.name }}</strong><code>v{{ plugin.version }}</code></div><p>{{ plugin.description }}</p><p v-if="plugin.unavailable_reason">{{ plugin.unavailable_reason }}</p><button type="button" :disabled="state.busy || !!plugin.unavailable_reason" @click="installMarket(plugin.id)">安装 / 更新</button><p v-if="downloads[plugin.id]" role="status"><progress :value="downloads[plugin.id].bytes" :max="downloads[plugin.id].total || undefined" /> {{ Math.ceil(downloads[plugin.id].bytes / 1024) }} KB</p></article></div>
     </div>
     <p v-if="active==='market' && !marketEntries.length && marketUrl" class="plugin-empty">{{ search ? '没有找到匹配的插件。' : '暂无可安装插件，刷新索引后重试。' }}</p>
-    <footer class="plugin-pagination"><span role="status">共 {{ total }} 项 · 第 {{ page }} / {{ pageCount }} 页</span><label>每页 <select v-model.number="pageSize" aria-label="每页插件数量"><option :value="10">10</option><option :value="20">20</option><option :value="50">50</option></select> 项</label><div><button type="button" :disabled="page<=1" @click="page--">上一页</button><button type="button" :disabled="page>=pageCount" @click="page++">下一页</button></div></footer>
+    <PluginPagination class="plugin-pagination" v-model:page="page" v-model:page-size="pageSize" :page-count="pageCount" :total="total" label="插件" unit="项" />
     </template>
     <template v-else>
-    <div>
+    <div class="plugin-detail-content">
       <article v-for="plugin in selectedPlugins" :key="plugin.manifest.id" class="plugin-card plugin-settings-card">
-        <div class="plugins-heading"><div><strong>{{ plugin.manifest.name }}</strong> <small>{{ plugin.manifest.version }} · {{ plugin.source_kind==='builtin'?'内置':'外置' }}</small><p>{{ plugin.error || (plugin.enabled ? (plugin.manifest.runtime.mode==='oneshot'?'已启用 · 按任务运行':'已启用 · 服务模式') : '已停用') }}</p></div><label><input type="checkbox" :checked="plugin.enabled" :disabled="state.busy || !!plugin.error" @change="configure(plugin,($event.target as HTMLInputElement).checked)" /> 启用</label></div>
-        <div v-for="field in plugin.manifest.config_schema" :key="field.key" class="plugin-field"><label>{{ field.label }}</label><input v-if="field.kind !== 'secret'" :value="plugin.config[field.key]" :checked="!!plugin.config[field.key]" @input="updateField(plugin,field,$event)" :type="field.kind==='boolean'?'checkbox':field.kind==='number'?'number':'text'" /><button v-if="field.kind==='directory'" type="button" @click="selectDirectory(plugin,field.key)">选择</button></div>
-        <div v-for="field in plugin.manifest.config_schema.filter((field:any)=>field.kind==='secret')" :key="'secret:'+field.key" class="plugin-field"><label>{{ field.label }}</label><input type="password" autocomplete="new-password" v-model="secretDrafts[plugin.manifest.id+':'+field.key]" placeholder="保存在本机系统凭据库，留空保存则删除" /><button type="button" :disabled="state.busy" @click="saveSecret(plugin,field.key)">保存凭据</button></div>
-        <div class="plugins-tools"><button type="button" :disabled="state.busy" @click="configure(plugin)">保存配置</button><button v-if="plugin.source_kind!=='builtin'" type="button" :disabled="state.busy" @click="run('uninstall_plugin',{id:plugin.manifest.id,keepData:true})">卸载并保留数据</button></div>
-        <label class="plugin-field"><input type="checkbox" :checked="plugin.current_space_allowed" :disabled="state.busy || !plugin.has_current_space" @change="run('set_plugin_space',{id:plugin.manifest.id,allowed:($event.target as HTMLInputElement).checked})" />允许当前存储空间调用</label>
-        <small>插件以当前用户权限运行。启用后还需允许当前空间调用。</small>
+        <header class="plugin-settings-header">
+          <div class="plugin-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path v-if="plugin.manifest.id === downloadPluginId" d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/><template v-else><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 8V4m-3 0h6M8 13h1m6 0h1m-7 4h6"/></template></svg></div>
+          <div class="plugin-card-main">
+            <h3>{{ plugin.manifest.name }}</h3>
+            <p>{{ plugin.source_kind === 'builtin' ? '内置' : '外置' }} · v{{ plugin.manifest.version }} · {{ plugin.manifest.runtime.mode === 'oneshot' ? '按任务运行' : '服务模式' }}</p>
+          </div>
+          <span class="plugin-status" :class="{enabled:plugin.enabled}">{{ plugin.enabled ? '已启用' : '已停用' }}</span>
+          <label class="plugin-switch"><input type="checkbox" :aria-label="'启用 '+plugin.manifest.name" :checked="plugin.enabled" :disabled="state.busy || !!plugin.error" @change="configure(plugin,($event.target as HTMLInputElement).checked)" /><span></span></label>
+        </header>
+        <p v-if="plugin.error || state.error" class="plugin-error" role="alert">{{ plugin.error || state.error }}</p>
+        <section class="plugin-settings-section">
+          <h4>{{ plugin.manifest.id === downloadPluginId ? '下载设置' : '插件配置' }}</h4>
+          <div class="plugin-settings-fields">
+            <div v-for="field in plugin.manifest.config_schema.filter((field:any) => field.kind !== 'secret' && (plugin.manifest.id !== downloadPluginId || !downloadFields.has(field.key)))" :key="field.key" class="plugin-setting-control" :class="{ 'plugin-setting-wide': field.kind === 'directory' }">
+              <label :for="'plugin-field-'+plugin.manifest.id+'-'+field.key">{{ field.label }}</label>
+              <div class="plugin-control-row">
+                <input :id="'plugin-field-'+plugin.manifest.id+'-'+field.key" :value="plugin.config[field.key]" :checked="!!plugin.config[field.key]" @input="updateField(plugin,field,$event)" :type="field.kind==='boolean'?'checkbox':field.kind==='number'?'number':'text'" />
+                <button v-if="field.kind==='directory'" type="button" @click="selectDirectory(plugin,field.key)">选择</button>
+              </div>
+            </div>
+            <div v-for="field in plugin.manifest.config_schema.filter((field:any)=>field.kind==='secret')" :key="field.key" class="plugin-setting-control plugin-setting-wide">
+              <label :for="'plugin-secret-'+plugin.manifest.id+'-'+field.key">{{ field.label }}</label>
+              <div class="plugin-control-row"><input :id="'plugin-secret-'+plugin.manifest.id+'-'+field.key" type="password" autocomplete="new-password" v-model="secretDrafts[plugin.manifest.id+':'+field.key]" placeholder="留空保存则删除凭据" /><button type="button" :disabled="state.busy" @click="saveSecret(plugin,field.key)">保存凭据</button></div>
+            </div>
+          </div>
+          <div v-if="plugin.manifest.id === downloadPluginId" class="plugin-naming-note"><div><strong>保存文件名</strong><p>使用本机基本设置中的保存文件名规则。</p></div><button type="button" @click="openFilenameRule">前往基本设置</button></div>
+        </section>
+        <DownloadSettings v-if="plugin.enabled && plugin.manifest.id === downloadPluginId" :config="plugin.config" />
+        <section class="plugin-settings-section">
+          <header class="plugin-permissions-header">
+            <h4>权限与运行</h4>
+            <div class="plugin-permission">
+              <label :for="'plugin-space-'+plugin.manifest.id">允许当前空间调用</label>
+              <span class="plugin-switch">
+                <input :id="'plugin-space-'+plugin.manifest.id" type="checkbox" role="switch" :checked="plugin.current_space_allowed" :disabled="state.busy || !plugin.has_current_space" @change="run('set_plugin_space',{id:plugin.manifest.id,allowed:($event.target as HTMLInputElement).checked})" />
+                <span aria-hidden="true"></span>
+              </span>
+            </div>
+          </header>
+          <p class="plugin-muted">插件以当前用户权限运行。</p>
+          <div class="plugin-control-row"><button type="button" :disabled="state.busy" @click="testEnvironment(plugin.manifest.id)">检查环境</button><span role="status">{{ testResults[plugin.manifest.id] }}</span></div>
+          <details @toggle="($event.target as HTMLDetailsElement).open && runtime(plugin.manifest.id)"><summary>运行状态与日志</summary><p>{{ runtimeDetails[plugin.manifest.id]?.running ? '进程运行中' : '当前无空闲常驻进程' }}</p><button type="button" @click="runtime(plugin.manifest.id)">刷新状态</button><pre>{{ runtimeDetails[plugin.manifest.id]?.log || '暂无日志' }}</pre></details>
+        </section>
         <button v-if="plugin.source_kind!=='builtin'" type="button" :disabled="state.busy" @click="run('uninstall_plugin',{id:plugin.manifest.id,keepData:false})">卸载并删除配置、凭据与日志</button>
         <small v-if="plugin.manifest.capabilities?.some((capability:any)=>capability.kind!=='bot')">此插件包含当前版本暂不支持的能力。</small>
-        <div class="plugins-tools"><button type="button" :disabled="state.busy" @click="testEnvironment(plugin.manifest.id)">检查环境</button><span role="status">{{ testResults[plugin.manifest.id] }}</span></div>
         <label v-if="plugin.manifest.runtime.mode==='service'" class="plugin-field"><input type="checkbox" :checked="plugin.manifest.runtime.auto_start" @change="run('set_plugin_auto_start',{id:plugin.manifest.id,enabled:($event.target as HTMLInputElement).checked})" />随应用自动启动</label>
         <label v-if="plugin.source_kind!=='builtin' && plugin.available_versions?.length>1" class="plugin-field">切换已安装版本<select value="" @change="run('rollback_plugin',{id:plugin.manifest.id,version:($event.target as HTMLSelectElement).value})"><option value="" disabled>选择版本（切换后需重新启用）</option><option v-for="version in plugin.available_versions.filter((version:string)=>version!==plugin.manifest.version)" :key="version" :value="version">{{ version }}</option></select></label>
-        <details @toggle="($event.target as HTMLDetailsElement).open && runtime(plugin.manifest.id)"><summary>运行状态与日志</summary><p>{{ runtimeDetails[plugin.manifest.id]?.running ? '进程运行中' : '当前无空闲常驻进程' }}</p><button type="button" @click="runtime(plugin.manifest.id)">刷新状态</button><pre>{{ runtimeDetails[plugin.manifest.id]?.log || '暂无日志' }}</pre></details>
         <div v-if="plugin.manifest.runtime.mode==='service'" class="plugins-tools"><button type="button" @click="run('plugin_service',{id:plugin.manifest.id,start:true})">启动</button><button type="button" @click="run('plugin_service',{id:plugin.manifest.id,start:false})">停止</button></div>
+        <footer class="plugin-settings-footer"><button v-if="plugin.source_kind!=='builtin'" type="button" :disabled="state.busy" @click="run('uninstall_plugin',{id:plugin.manifest.id,keepData:true})">卸载并保留数据</button><button class="plugin-save" type="button" :disabled="state.busy" @click="configure(plugin)">保存配置</button></footer>
       </article>
       <PluginTasks v-if="props.pluginId && selectedPlugins.some(plugin=>plugin.manifest.capabilities?.some((capability:any)=>capability.kind==='bot'))" :plugin-id="props.pluginId" />
     </div>

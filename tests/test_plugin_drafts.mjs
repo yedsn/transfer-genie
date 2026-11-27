@@ -3,13 +3,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
+import { computed, reactive, ref, shallowRef } from 'vue';
 
 function store() {
   const storage = new Map();
-  const context = { exports: {}, window: { setInterval() {} }, localStorage: {
+  const context = { exports: {}, window: { setInterval() {}, clearInterval() {} }, localStorage: {
     getItem: key => storage.get(key) ?? null,
     setItem: (key, value) => storage.set(key, value),
-  }, require: () => ({ reactive: value => value }) };
+  }, require: () => ({ computed, reactive, ref, shallowRef }) };
   const source = fs.readFileSync(new URL('../src-ui/src/plugins/plugin-store.ts', import.meta.url), 'utf8');
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } });
   vm.runInNewContext(compiled.outputText, context);
@@ -52,6 +53,25 @@ test('composer tabs retain independent references and bot targets', () => {
   api.setComposerDraft('one');
   assert.equal(api.pluginState.references[0].filename,'one.png');
   assert.equal(api.pluginState.target,'pc');
+});
+test('download route stays on its draft and preserves other occurrences of the mention', () => {
+  const api = store();
+  api.setPluginScope('space');
+  api.setComposerDraft('one');
+  api.pluginState.bots = [{ instance_id: 'pc', download_options: { default_route: 'direct', profiles: [] } }];
+  const label = '@下载机器人（PC）';
+  const text = '🙂 ' + label + '\n' + label + ' 保留这段话';
+  api.selectBot('pc', label, 1);
+  api.selectDownloadRoute('company');
+  api.setComposerDraft('two');
+  assert.equal(api.getCallContext().targetBotInstanceId, null);
+  api.setComposerDraft('one');
+  const sent = api.getCallContext(text);
+  assert.equal(sent.downloadRoute, 'company');
+  assert.equal(sent.mentionStart, text.lastIndexOf(label));
+  api.clearCallContext(sent, 'space');
+  api.selectBot('pc', label);
+  assert.equal(api.getCallContext(label).downloadRoute, 'default');
 });
 test('references are deduplicated, ordered and isolated between spaces', () => {
   const api = store();

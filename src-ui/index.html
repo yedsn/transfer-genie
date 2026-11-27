@@ -221,9 +221,8 @@
                  <button id="feed-search-button" class="button ghost small" type="button">搜索</button>
                </div>
                <ul id="message-list-vue" v-if="ui.homeFeed.useVueList" class="message-list">
+                <template v-for="card in ui.homeFeed.messageCards" :key="card.filename">
                 <li
-                  v-for="card in ui.homeFeed.messageCards"
-                  :key="card.filename"
                  class="message-card"
                  :class="{ 'is-file': card.isFile, 'is-text': card.isText, 'is-self': card.isSelf, 'is-marked': card.isMarked }"
                  :data-filename="card.filename"
@@ -297,8 +296,13 @@
                     </div>
                   </div>
                 </li>
+                <bot-feedback tag="li" :filename="card.filename" :visible-files="visibleFeedFiles"></bot-feedback>
+                </template>
               </ul>
                <ul id="message-list" class="message-list" v-show="!ui.homeFeed.useVueList"></ul>
+               <teleport v-for="row in legacyFeedback" :key="row.filename" :to="row.target">
+                 <bot-feedback :filename="row.filename" :visible-files="legacyFeedFiles"></bot-feedback>
+               </teleport>
                <button id="scroll-to-bottom" class="scroll-to-bottom" type="button" hidden>
                  回到底部
                </button>
@@ -798,8 +802,6 @@
                 </div>
               </aside>
               <div class="settings-content">
-                <div class="settings-section" id="settings-section-plugins" data-settings-section><plugins-panel></plugins-panel></div>
-                <div v-for="plugin in pluginState.plugins.filter(plugin => plugin.enabled)" :key="plugin.manifest.id" class="settings-section" :id="'settings-plugin-' + plugin.manifest.id" data-settings-section><plugins-panel :plugin-id="plugin.manifest.id"></plugins-panel></div>
                 <div class="endpoint-settings settings-section" id="settings-section-webdav" data-settings-section>
                 <div class="endpoint-header">
                   <div>
@@ -1335,7 +1337,7 @@
                   </div>
                 </div>
               </div>
-              <div class="settings-group">
+              <div class="settings-group settings-section" id="settings-section-data" data-settings-section>
                 <h3 class="settings-group-title">数据管理</h3>
                 <div class="settings-group-content">
                   <div class="settings-actions">
@@ -1603,6 +1605,8 @@
                   </div>
                 </div>
               </div>
+              <div class="settings-section" id="settings-section-plugins" data-settings-section><plugins-panel></plugins-panel></div>
+              <div v-for="plugin in pluginState.plugins.filter(plugin => plugin.enabled)" :key="plugin.manifest.id" class="settings-section" :id="'settings-plugin-' + plugin.manifest.id" data-settings-section><plugins-panel :plugin-id="plugin.manifest.id"></plugins-panel></div>
             </div>
           </section>
           </settings-page-shell>

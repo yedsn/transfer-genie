@@ -1,4 +1,6 @@
-use crate::plugin_protocol::{InvokeRequest, ItemResult, TaskInput, PROTOCOL_VERSION};
+use crate::plugin_protocol::{
+    InvokeRequest, ItemResult, TaskInput, TransferMeter, TransferProgress, PROTOCOL_VERSION,
+};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{
@@ -6,6 +8,10 @@ use std::{
     io::{BufRead, Read, Write},
     path::{Path, PathBuf},
 };
+#[path = "download_bot.rs"]
+mod download_bot;
+#[allow(unused_imports)]
+pub use download_bot::{check_download, cleanup_download};
 
 const MAX_BYTES: u64 = 100 * 1024 * 1024;
 static PUBLICATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -13,7 +19,11 @@ static PUBLICATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn limit(config: &serde_json::Value, key: &str, default: u64, ceiling: u64) -> u64 {
     config[key].as_u64().unwrap_or(default).clamp(1, ceiling)
 }
-fn download_url(url: url::Url, config: &serde_json::Value) -> Result<Vec<u8>, String> {
+fn download_url(
+    url: url::Url,
+    config: &serde_json::Value,
+    mut progress: impl FnMut(TransferProgress),
+) -> Result<Vec<u8>, String> {
     let max_bytes = limit(config, "max_size_mib", 100, 100) * 1024 * 1024;
     let total_seconds = limit(config, "timeout_seconds", 600, 600);
     let idle_seconds = limit(config, "idle_timeout_seconds", 30, 30);
@@ -38,6 +48,7 @@ fn download_url(url: url::Url, config: &serde_json::Value) -> Result<Vec<u8>, St
             return Err("图片超过大小限制".into());
         }
         let mut data = Vec::new();
+        let mut meter = TransferMeter::new(response.content_length());
         loop {
             let chunk = tokio::time::timeout(
                 std::time::Duration::from_secs(idle_seconds),
@@ -53,6 +64,9 @@ fn download_url(url: url::Url, config: &serde_json::Value) -> Result<Vec<u8>, St
                 return Err("图片超过大小限制".into());
             }
             data.extend_from_slice(&chunk);
+            if let Some(sample) = meter.sample(data.len() as u64) {
+                progress(sample);
+            }
         }
         Ok(data)
     })
@@ -95,7 +109,11 @@ fn process(
     input: &TaskInput,
     req: &InvokeRequest,
     _client: &reqwest::blocking::Client,
+    mut progress: impl FnMut(Option<&str>, TransferProgress),
 ) -> Result<ItemResult, String> {
+    if req.protocol_version == 2 {
+        return download_bot::process(input, req, &mut progress);
+    }
     let state_dir = PathBuf::from(&req.state_dir);
     fs::create_dir_all(&state_dir).map_err(|e| e.to_string())?;
     let journal = state_dir.join(format!("{}.json", hash(input.item_id.as_bytes())));
@@ -132,7 +150,9 @@ fn process(
         {
             return Err("仅支持无内嵌凭据的 HTTP(S) 图片直链".into());
         }
-        data = download_url(parsed, &req.config)?;
+        data = download_url(parsed, &req.config, |sample| {
+            progress(Some(&input.name), sample)
+        })?;
     } else {
         return Err("没有图片附件或直链".into());
     }
@@ -166,17 +186,24 @@ fn process(
     // serially so two items with the same name cannot race each other.
     let _publication = PUBLICATION.lock().map_err(|e| e.to_string())?;
     let name = safe_name(&input.name, ext);
+    let name = match req.config["save_filename_rule"].as_str() {
+        Some(rule) => {
+            download_bot::target_name(&name, rule, input.timestamp_ms.unwrap_or_default())
+        }
+        None => name,
+    };
+    let name_path = Path::new(&name);
+    let stem = name_path.file_stem().unwrap().to_string_lossy();
+    let suffix = name_path.extension().map(|ext| ext.to_string_lossy());
     let digest = hash(&data);
     let mut path = directory.join(&name);
     let mut selected = false;
     for n in 0..10000 {
         if n > 0 {
-            path = directory.join(format!(
-                "{} ({}).{}",
-                Path::new(&name).file_stem().unwrap().to_string_lossy(),
-                n,
-                ext
-            ));
+            path = directory.join(match &suffix {
+                Some(ext) => format!("{stem} ({n}).{ext}"),
+                None => format!("{stem} ({n})"),
+            });
         }
         match fs::symlink_metadata(&path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -278,14 +305,14 @@ pub fn run() -> Result<(), String> {
             return Err("请求过大".into());
         }
         let req: InvokeRequest = serde_json::from_slice(&line).map_err(|e| e.to_string())?;
-        if req.protocol_version != PROTOCOL_VERSION || req.kind != "invoke" {
+        if !matches!(req.protocol_version, PROTOCOL_VERSION | 2) || req.kind != "invoke" {
             return Err("无效协议请求".into());
         }
         if req.inputs.len() > 50 {
             return Err("单次任务最多 50 项".into());
         }
-        let results = process_inputs(&req, &client, |result| {
-            writeln!(output, "{}", json!({"protocol_version":1, "kind":"progress","request_id":req.request_id,"task_id":req.task_id,"item":result})).map_err(|e| e.to_string())?;
+        let results = process_inputs(&req, &client, |item| {
+            writeln!(output, "{}", json!({"protocol_version":1, "kind":"progress","request_id":req.request_id,"task_id":req.task_id,"item":item})).map_err(|e| e.to_string())?;
             output.flush().map_err(|e| e.to_string())?;
             Ok(())
         })?;
@@ -295,10 +322,15 @@ pub fn run() -> Result<(), String> {
     }
     Ok(())
 }
+enum ItemUpdate {
+    Transfer(serde_json::Value),
+    Finished(usize, ItemResult),
+}
+
 fn process_inputs(
     request: &InvokeRequest,
     client: &reqwest::blocking::Client,
-    mut progress: impl FnMut(&ItemResult) -> Result<(), String>,
+    mut progress: impl FnMut(serde_json::Value) -> Result<(), String>,
 ) -> Result<Vec<ItemResult>, String> {
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -319,7 +351,13 @@ fn process_inputs(
                 let Some(input) = request.inputs.get(index) else {
                     break;
                 };
-                let result = process(input, request, client).unwrap_or_else(|error| ItemResult {
+                let result = process(input, request, client, |name, sample| {
+                    let _ = send.send(ItemUpdate::Transfer(json!({
+                        "item_id": input.item_id, "name": name.unwrap_or(&input.name),
+                        "status": "downloading", "transfer": sample,
+                    })));
+                })
+                .unwrap_or_else(|error| ItemResult {
                     item_id: input.item_id.clone(),
                     status: "failed".into(),
                     name: input.name.clone(),
@@ -328,16 +366,21 @@ fn process_inputs(
                     size: 0,
                     error: Some(error),
                 });
-                if send.send((index, result)).is_err() {
+                if send.send(ItemUpdate::Finished(index, result)).is_err() {
                     break;
                 }
             });
         }
         drop(send);
         let mut results = Vec::with_capacity(request.inputs.len());
-        for (index, result) in receive {
-            progress(&result)?;
-            results.push((index, result));
+        for update in receive {
+            match update {
+                ItemUpdate::Transfer(item) => progress(item)?,
+                ItemUpdate::Finished(index, result) => {
+                    progress(json!(result))?;
+                    results.push((index, result));
+                }
+            }
         }
         results.sort_by_key(|(index, _)| *index);
         Ok(results.into_iter().map(|(_, result)| result).collect())
@@ -363,6 +406,7 @@ mod tests {
             state_dir: root.join("state").to_string_lossy().into(),
             inputs: vec![
                 TaskInput {
+                    timestamp_ms: None,
                     item_id: "one".into(),
                     name: "same.png".into(),
                     local_path: Some(source.to_string_lossy().into()),
@@ -370,6 +414,7 @@ mod tests {
                     error: None,
                 },
                 TaskInput {
+                    timestamp_ms: None,
                     item_id: "failed".into(),
                     name: "missing".into(),
                     local_path: None,
@@ -377,6 +422,7 @@ mod tests {
                     error: Some("附件不存在".into()),
                 },
                 TaskInput {
+                    timestamp_ms: None,
                     item_id: "two".into(),
                     name: "same.png".into(),
                     local_path: Some(source.to_string_lossy().into()),
@@ -387,7 +433,7 @@ mod tests {
         };
         let mut progress = Vec::new();
         let results = process_inputs(&request, &reqwest::blocking::Client::new(), |item| {
-            progress.push(item.item_id.clone());
+            progress.push(item["item_id"].as_str().unwrap().to_owned());
             Ok(())
         })
         .unwrap();
@@ -448,21 +494,23 @@ mod tests {
             state_dir: root.join("state").to_string_lossy().into(),
         };
         let input = TaskInput {
+            timestamp_ms: None,
             item_id: "image".into(),
             name: "download.png".into(),
             local_path: None,
             url: Some(format!("http://{address}/image")),
             error: None,
         };
-        let result = process(&input, &req, &client).unwrap();
+        let result = process(&input, &req, &client, |_, _| {}).unwrap();
         assert_eq!(fs::read(result.saved_path.unwrap()).unwrap(), original);
         let invalid = TaskInput {
+            timestamp_ms: None,
             item_id: "html".into(),
             name: "fake.png".into(),
             url: Some(format!("http://{address}/html")),
             ..input
         };
-        assert!(process(&invalid, &req, &client)
+        assert!(process(&invalid, &req, &client, |_, _| {})
             .unwrap_err()
             .contains("图片"));
         assert_eq!(fs::read_dir(root.join("downloads")).unwrap().count(), 1);
@@ -503,13 +551,15 @@ mod tests {
         let config = json!({"max_size_mib":1,"idle_timeout_seconds":1});
         assert!(download_url(
             url::Url::parse(&format!("http://{address}/redirect")).unwrap(),
-            &config
+            &config,
+            |_| {},
         )
         .unwrap_err()
         .contains("大小"));
         assert!(download_url(
             url::Url::parse(&format!("http://{address}/idle")).unwrap(),
-            &config
+            &config,
+            |_| {},
         )
         .unwrap_err()
         .contains("时限"));
@@ -538,6 +588,7 @@ mod tests {
             state_dir: root.join("state").to_string_lossy().into(),
         };
         let input = TaskInput {
+            timestamp_ms: None,
             item_id: "a".into(),
             name: "a.png".into(),
             local_path: Some(source.to_string_lossy().into()),
@@ -545,15 +596,17 @@ mod tests {
             error: None,
         };
         let client = reqwest::blocking::Client::new();
-        let first = process(&input, &req, &client).unwrap();
-        let second = process(&input, &req, &client).unwrap();
+        let first = process(&input, &req, &client, |_, _| {}).unwrap();
+        let second = process(&input, &req, &client, |_, _| {}).unwrap();
         assert_eq!(first.saved_path, second.saved_path);
         let unavailable = TaskInput {
             error: Some("原件已删除".into()),
             ..input.clone()
         };
         assert_eq!(
-            process(&unavailable, &req, &client).unwrap().saved_path,
+            process(&unavailable, &req, &client, |_, _| {})
+                .unwrap()
+                .saved_path,
             second.saved_path
         );
         assert_eq!(
@@ -563,10 +616,11 @@ mod tests {
         let changed = image::RgbImage::from_pixel(2, 2, image::Rgb([255, 0, 0]));
         changed.save(&source).unwrap();
         let collision = TaskInput {
+            timestamp_ms: None,
             item_id: "collision".into(),
             ..input.clone()
         };
-        let saved_collision = process(&collision, &req, &client).unwrap();
+        let saved_collision = process(&collision, &req, &client, |_, _| {}).unwrap();
         assert_ne!(saved_collision.saved_path, second.saved_path);
         assert_eq!(
             fs::read(saved_collision.saved_path.unwrap()).unwrap(),
@@ -574,10 +628,11 @@ mod tests {
         );
         fs::write(&source, b"<html>bad</html>").unwrap();
         let bad = TaskInput {
+            timestamp_ms: None,
             item_id: "bad".into(),
             ..input
         };
-        assert!(process(&bad, &req, &client).is_err());
+        assert!(process(&bad, &req, &client, |_, _| {}).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 }

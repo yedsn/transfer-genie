@@ -32,7 +32,7 @@ fn default_telegram_poll_interval_secs() -> u64 {
 }
 
 pub fn default_save_filename_rule() -> String {
-    "{filename}.{file_suffix}".to_string()
+    crate::save_filename::DEFAULT_RULE.to_string()
 }
 
 fn default_telegram_proxy_url() -> String {

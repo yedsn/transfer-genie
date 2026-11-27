@@ -2,6 +2,8 @@
 // building a separate executable without Tauri or application startup.
 #[path = "../../../../src/plugin_protocol.rs"]
 mod plugin_protocol;
+#[path = "../../../../src/save_filename.rs"]
+mod save_filename;
 #[path = "../../../../src/image_bot.rs"]
 mod image_bot;
 

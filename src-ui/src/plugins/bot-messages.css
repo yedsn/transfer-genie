@@ -4,3 +4,8 @@
 textarea.has-mention-overlay{color:transparent!important;caret-color:var(--ink)!important;background:transparent!important}
 .bot-message-identity{display:inline-flex;align-items:center;justify-content:center;margin-inline:0 5px;color:var(--ink,#374151);vertical-align:-3px;line-height:1}
 .bot-message-identity svg{display:block;width:16px;height:16px;flex:none}
+[data-download-mention] { pointer-events: auto; cursor: pointer; }
+button.bot-mention-token { appearance: none; display: inline; padding: 0; border: 0; font: inherit; background: #e7f2eb; color: #28764c; }
+.bot-route-menu [aria-checked="true"] { background: var(--panel-soft, #f2f2f2); font-weight: 600; }
+.bot-route-menu { width: min(250px, calc(100vw - 16px)); }
+.download-route-summary { color: var(--muted); font-size: 11px; }

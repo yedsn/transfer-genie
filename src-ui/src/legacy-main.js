@@ -1,3 +1,5 @@
+import { legacyFeedbackTargets, listenBotChat, noteBotCall } from './plugins/plugin-store';
+
 const tauri = window.__TAURI__ || {};
 const invoke = tauri.core?.invoke || tauri.invoke;
 const openDialog = tauri.dialog?.open;
@@ -7402,14 +7404,6 @@ async function closeFeedSearch(options = {}) {
 }
 
 function ensureSettingsSectionTargets() {
-  const dataGroup = exportSettingsButton ? exportSettingsButton.closest('.settings-group') : null;
-  if (dataGroup && !dataGroup.id) {
-    dataGroup.id = 'settings-section-data';
-  }
-  if (dataGroup && !Object.prototype.hasOwnProperty.call(dataGroup.dataset, 'settingsSection')) {
-    dataGroup.dataset.settingsSection = '';
-  }
-
   settingsSections = Array.from(document.querySelectorAll('[data-settings-section]')).filter(
     (section) => section.id,
   );
@@ -10057,6 +10051,7 @@ function renderMessages(messages, options = {}) {
   });
   updateSelectionBar();
   messageList.innerHTML = '';
+  legacyFeedbackTargets.value = [];
   
   const markdownRenderQueue = [];
   const collapseQueue = [];
@@ -10076,6 +10071,7 @@ function renderMessages(messages, options = {}) {
     return;
   }
 
+  const legacyTargets = [];
   merged.forEach((message) => {
     const viewModel = createMessageViewModel(message);
     const item = document.createElement('li');
@@ -10298,6 +10294,9 @@ function renderMessages(messages, options = {}) {
       identity.setAttribute('aria-label', '机器人');
       identity.title = '机器人';
       identity.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M11 3a1 1 0 0 1 2 0v3h4a4 4 0 0 1 4 4v7a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4v-7a4 4 0 0 1 4-4h4V3ZM8.5 10a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3Zm7 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3ZM9 16a1 1 0 0 0 0 2h6a1 1 0 0 0 0-2H9Z" clip-rule="evenodd"/><rect x="0" y="10" width="2" height="7" rx="1"/><rect x="22" y="10" width="2" height="7" rx="1"/></svg>';
+      if (context.bot_icon === 'download') {
+        identity.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+      }
       headerText.prepend(identity);
     }
     if (context?.references?.length) {
@@ -10723,6 +10722,11 @@ function renderMessages(messages, options = {}) {
       }
     }
     messageList.appendChild(item);
+    const feedbackTarget = document.createElement('li');
+    feedbackTarget.setAttribute('role', 'presentation');
+    feedbackTarget.className = 'legacy-bot-feedback-target';
+    messageList.appendChild(feedbackTarget);
+    legacyTargets.push({ filename: viewModel.filename, target: feedbackTarget });
   });
   
   // Render "Load More" item at the top if not searching
@@ -10787,6 +10791,7 @@ function renderMessages(messages, options = {}) {
     query,
     messages: merged,
   });
+  legacyFeedbackTargets.value = legacyTargets;
 
   if (scrollToBottom) {
     forceScrollMessageListToBottom();
@@ -10857,13 +10862,14 @@ function hasActiveContentTransfer() {
 }
 
 async function loadMessages(options = {}) {
+  const botUpdateScope = options.botUpdate ? window.transferGeniePlugins?.state?.scope : null;
   if (options.loadMore || (!options.checkNew && !options.preserveMedia)) {
     mediaSession?.stop('message-page-change');
   }
-  if (isLoadMessagesRunning && options.checkNew) {
+  if (isLoadMessagesRunning && options.checkNew && !options.botUpdate) {
     return;
   }
-  if (options.checkNew && isMessageSelectionRefreshPaused()) {
+  if (options.checkNew && isMessageSelectionRefreshPaused() && !options.botUpdate) {
     return;
   }
   isLoadMessagesRunning = true;
@@ -10939,8 +10945,12 @@ async function loadMessages(options = {}) {
             },
           })
         : latestResult;
+      if (options.botUpdate && botUpdateScope !== window.transferGeniePlugins?.state?.scope) return;
 
-      const newMessages = newerResult.messages || [];
+      // A bot reply is ordered beside its invocation, so it may precede the newest visible message.
+      const newMessages = options.botUpdate
+        ? [...new Map([...(latestResult.messages || []), ...(newerResult.messages || [])].map(message => [message.filename, message])).values()]
+        : newerResult.messages || [];
 
       if (feedState?.reconcileCheckNewState) {
         const reconciled = feedState.reconcileCheckNewState(
@@ -10963,7 +10973,8 @@ async function loadMessages(options = {}) {
         newestLoadedMessageRef = reconciled.state.newestLoadedMessageRef;
         if (reconciled.shouldRender) {
           renderCurrentMessageView({
-            scrollToBottom: lastMessages.length === reconciled.appendedCount ? shouldScroll : false,
+            scrollToBottom: options.botUpdate ? shouldScroll : lastMessages.length === reconciled.appendedCount && shouldScroll,
+            preserveScroll: options.botUpdate && !shouldScroll,
           });
         }
         return;
@@ -12922,7 +12933,13 @@ async function sendText() {
 
   let activeMarkedOptions = cloneComposerMarkedOptions(getComposerMarkedOptions());
   const textToSend = text;
-  const pluginDraft = window.transferGeniePlugins?.getCallContext?.() || {};
+  let pluginDraft;
+  try {
+    pluginDraft = window.transferGeniePlugins?.getCallContext?.(textToSend) || {};
+  } catch (error) {
+    setErrorStatus(error.message || String(error));
+    return;
+  }
   const pluginDraftScope = window.transferGeniePlugins?.state?.scope;
   const pluginDraftIdentity = window.transferGeniePlugins?.getDraftIdentity?.();
   const formatToSend = currentFormat === 'markdown' ? 'markdown' : 'text';
@@ -12981,18 +12998,23 @@ async function sendText() {
           ...pluginDraft,
           markedOptions: activeMarkedOptions,
         });
+        const isBotCall = !!pluginDraft.targetBotInstanceId;
+        if (isBotCall) noteBotCall(result?.filename, pluginDraft.targetBotInstanceId, pluginDraftScope);
         if (pluginDraftIdentity === window.transferGeniePlugins?.getDraftIdentity?.()) window.transferGeniePlugins?.clearCallContext?.(pluginDraft, pluginDraftScope);
-        if (pendingTextFilename && pendingSends.has(pendingTextFilename)) {
+        if (isBotCall) {
+          pendingSends.delete(pendingTextFilename);
+          void loadMessages({ checkNew: true, botUpdate: true });
+        } else if (pendingTextFilename && pendingSends.has(pendingTextFilename)) {
           pendingSends.set(pendingTextFilename, {
             ...pendingSends.get(pendingTextFilename),
             sendStatus: SEND_STATUS.SUCCESS,
           });
         }
-        renderCurrentMessageView({ preserveScroll: true });
+        if (!isBotCall) renderCurrentMessageView({ preserveScroll: true });
         applySuccessfulSendResult(result);
         if (!usesWorkspaceComposer) exitComposerFullscreenAfterSendSuccess();
         await copySentTextAfterSend(textToSend);
-        setTimeout(async () => {
+        if (!isBotCall) setTimeout(async () => {
           const shouldStickToBottom = isMessageListAtBottom();
           if (pendingTextFilename) pendingSends.delete(pendingTextFilename);
           await loadMessages({
@@ -13559,6 +13581,9 @@ async function refreshMessages(options = {}) {
 }
 
 if (listen) {
+  void listenBotChat(() => {
+    void loadMessages({ checkNew: true, botUpdate: true });
+  })?.catch(() => {});
   listen('supabase-realtime-synced', async () => {
     if (!isActiveSupabaseEndpoint()) return;
     supabaseRealtimeRefreshQueued = true;

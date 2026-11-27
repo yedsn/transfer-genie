@@ -1,6 +1,8 @@
 mod credential_store;
 mod db;
 mod filenames;
+mod save_filename;
+use save_filename::{build_save_filename, normalize_save_filename_rule, sanitize_filename};
 mod history;
 mod integration_runtime;
 mod plugin_protocol;
@@ -10798,9 +10800,12 @@ async fn send_text(
     client_id: Option<String>,
     references: Option<Vec<plugin_protocol::MessageReference>>,
     target_bot_instance_id: Option<String>,
+    download_route: Option<String>,
+    mention_text: Option<String>,
+    mention_start: Option<usize>,
 ) -> Result<SendMessageResult, String> {
     if references.as_ref().is_some_and(|r| !r.is_empty()) || target_bot_instance_id.is_some() {
-        return bot_runtime::send(&state, text, format, references.unwrap_or_default(), target_bot_instance_id, client_id, marked_options).await;
+        return bot_runtime::send_with_options(&state, text, format, references.unwrap_or_default(), target_bot_instance_id, client_id, marked_options, download_route, mention_text, mention_start).await;
     }
     send_text_with_client_id_impl(&state, text, format, marked_options, client_id).await
 }
@@ -19655,15 +19660,6 @@ fn normalize_download_dir(raw: &str, fallback: &Path) -> String {
     }
 }
 
-fn normalize_save_filename_rule(raw: &str) -> String {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        crate::types::default_save_filename_rule()
-    } else {
-        trimmed.to_string()
-    }
-}
-
 fn endpoint_files_dir(state: &AppState, endpoint_id: &str) -> PathBuf {
     state.files_base_dir.join(endpoint_id)
 }
@@ -20907,50 +20903,6 @@ fn prepare_supabase_download_target(
     ))
 }
 
-fn split_filename_parts(original_name: &str) -> (String, String) {
-    let sanitized = sanitize_filename(original_name);
-    let path = Path::new(&sanitized);
-    let stem = path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("download")
-        .to_string();
-    let suffix = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or("")
-        .to_string();
-    (stem, suffix)
-}
-
-fn format_yyyymmdd(timestamp_ms: i64) -> String {
-    let datetime = OffsetDateTime::from_unix_timestamp_nanos((timestamp_ms as i128) * 1_000_000)
-        .unwrap_or_else(|_| OffsetDateTime::now_utc());
-    format!(
-        "{:04}{:02}{:02}",
-        datetime.year(),
-        u8::from(datetime.month()),
-        datetime.day()
-    )
-}
-
-fn build_save_filename(rule: &str, original_name: &str, timestamp_ms: i64) -> String {
-    let normalized_rule = normalize_save_filename_rule(rule);
-    let (name, suffix) = split_filename_parts(original_name);
-    let rule_with_suffix = if suffix.is_empty() {
-        normalized_rule.replace(".{file_suffix}", "")
-    } else {
-        normalized_rule
-    };
-    let rendered = rule_with_suffix
-        .replace("{yyyymmdd}", &format_yyyymmdd(timestamp_ms))
-        .replace("{filename}", &name)
-        .replace("{file_suffix}", &suffix);
-
-    sanitize_filename(&rendered)
-}
-
 fn build_download_target_path(
     state: &AppState,
     settings: &Settings,
@@ -20965,14 +20917,6 @@ fn build_download_target_path(
     ))
 }
 
-fn sanitize_filename(name: &str) -> String {
-    Path::new(name)
-        .file_name()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("download.bin")
-        .to_string()
-}
 
 fn compute_file_hash_from_path(path: &Path) -> Result<String, String> {
     use std::io::Read;
@@ -23441,6 +23385,10 @@ pub fn run() {
             bot_runtime::set_plugin_space,
             bot_runtime::set_plugin_secret,
             bot_runtime::test_plugin_environment,
+            bot_runtime::list_download_proxies,
+            bot_runtime::save_download_proxy,
+            bot_runtime::remove_download_proxy,
+            bot_runtime::check_download_settings,
             bot_runtime::set_plugin_auto_start,
             bot_runtime::rollback_plugin,
             list_bot_instances, list_bot_events, get_message_contexts,
@@ -23958,6 +23906,43 @@ mod tests {
             plugin_host::set_builtin_resource(&plugin_root,&executable).unwrap();
             let plugin=plugin_host::get(&plugin_root,"image-downloader").unwrap();
             plugin_host::configure(&plugin_root,"image-downloader",true,plugin.config).unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let proxy_address = format!("http://{}", listener.local_addr().unwrap());
+            plugin_host::save_download_profile(&plugin_root,None,"Fixture proxy".into(),proxy_address.clone(),None).unwrap();
+            let profile = plugin_host::download_profiles(&plugin_root).unwrap().pop().unwrap();
+            let (demo_started, demo_requested) = tokio::sync::oneshot::channel();
+            let (finish_demo, demo_released) = tokio::sync::oneshot::channel();
+            let proxy = tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut retry_attempts = 0;
+                let mut demo_gate = Some((demo_started, demo_released));
+                for _ in 0..3 {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    while !request.ends_with(b"\r\n\r\n") {
+                        request.push(socket.read_u8().await.unwrap());
+                    }
+                    let request = String::from_utf8_lossy(&request);
+                    if request.starts_with("GET http://files.invalid/retry.zip ") {
+                        retry_attempts += 1;
+                        if retry_attempts == 1 {
+                            socket.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                        } else {
+                            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nzip").await.unwrap();
+                        }
+                    } else {
+                        assert!(request.starts_with("GET http://files.invalid/demo.apk "));
+                        let (started, released) = demo_gate.take().unwrap();
+                        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\na").await.unwrap();
+                        started.send(()).unwrap();
+                        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+                        socket.write_all(b"p").await.unwrap();
+                        released.await.unwrap();
+                        socket.write_all(b"k").await.unwrap();
+                    }
+                }
+                assert_eq!(retry_attempts, 2);
+            });
             let mut pc_settings=current_settings(&pc).unwrap();pc_settings.sender_name="Target PC".into();*pc.settings.lock().unwrap()=pc_settings;
             plugin_host::set_space_allowed(&plugin_root,"image-downloader",&bot_runtime::context_scope(&pc_ctx),true).unwrap();
             let source=root.join("source.png");
@@ -24005,8 +23990,64 @@ mod tests {
             let status:String=rusqlite::Connection::open(&pc.db_path).unwrap().query_row("SELECT status FROM bot_execution WHERE task_id=?1",[&task_id],|row|row.get(0)).unwrap();
             assert_eq!(status,"cancelled");
             assert_eq!(fs::read_dir(&pc.default_download_dir).unwrap().count(),2);
+            let directory: String = conn.query_row("SELECT payload FROM bot_records WHERE kind='directory' AND id=?1",[&profile_target(&plugin_root)], |row| row.get(0)).unwrap();
+            assert!(directory.contains("Fixture proxy"));
+            assert!(!directory.contains(&proxy_address));
+            let target = profile_target(&plugin_root);
+            let mention = "@下载机器人（Target PC）";
+            let note_text = "保留第一行\n保留第二行\nhttp://files.invalid/demo.apk\nhttp://files.invalid/retry.zip";
+            let text = format!("{mention}{note_text}");
+            pc.settings.lock().unwrap().save_filename_rule = "归档_{filename}.{file_suffix}".into();
+            let mut config = plugin_host::get(&plugin_root,"image-downloader").unwrap().config;
+            config["default_route"] = serde_json::json!(profile.id);
+            plugin_host::configure(&plugin_root,"image-downloader",true,config.clone()).unwrap();
+            let sent = bot_runtime::send_with_options(&phone,text,None,vec![plugin_protocol::MessageReference{filename:"one.png".into(),..Default::default()}],Some(target),Some("mixed-call".into()),None,Some("default".into()),Some(mention.into()),Some(0)).await.unwrap();
+            bot_runtime::synchronize(&phone,&phone_ctx).await.unwrap();
+            let task_id:String=conn.query_row("SELECT id FROM bot_records WHERE kind='tasks' AND json_extract(payload,'$.message_filename')=?1",[sent.filename],|row|row.get(0)).unwrap();
+            let (execution, ()) = tokio::join!(bot_runtime::tick(&pc), async {
+                tokio::time::timeout(std::time::Duration::from_secs(10), demo_requested).await.unwrap().unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    loop {
+                        bot_runtime::synchronize(&phone,&phone_ctx).await.unwrap();
+                        let accepted: bool = conn.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM bot_records WHERE kind='events' AND json_extract(payload,'$.task_id')=?1 AND json_extract(payload,'$.kind')='running')",
+                            [&task_id], |row| row.get(0),
+                        ).unwrap();
+                        let progress: bool = conn.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM bot_records WHERE kind='events' AND json_extract(payload,'$.task_id')=?1 AND json_extract(payload,'$.payload.transfer_item.transfer.received_bytes')=2 AND json_extract(payload,'$.payload.transfer_item.transfer.total_bytes')=3 AND json_extract(payload,'$.payload.transfer_item.transfer.bytes_per_second')>0)",
+                            [&task_id], |row| row.get(0),
+                        ).unwrap();
+                        if accepted && progress { break; }
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                }).await.expect("caller should see the acknowledgment and transfer progress before the download finishes");
+                assert!(!pc.default_download_dir.join("归档_demo.apk").exists());
+                finish_demo.send(()).unwrap();
+            });
+            execution.unwrap();
+            bot_runtime::synchronize(&phone,&phone_ctx).await.unwrap();
+            config["default_route"] = serde_json::json!("direct");
+            plugin_host::configure(&plugin_root,"image-downloader",true,config).unwrap();
+            let retry = bot_runtime::retry_task(&phone, task_id).unwrap();
+            bot_runtime::synchronize(&phone,&phone_ctx).await.unwrap();
+            bot_runtime::tick(&pc).await.unwrap();
+            bot_runtime::synchronize(&phone,&phone_ctx).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(2), proxy).await.unwrap().unwrap();
+            let result:String=conn.query_row("SELECT payload FROM bot_records WHERE kind='events' AND json_extract(payload,'$.task_id')=?1 AND json_extract(payload,'$.kind')='succeeded'",[retry],|row|row.get(0)).unwrap();
+            let result:serde_json::Value=serde_json::from_str(&result).unwrap();
+            assert_eq!(result["payload"]["items"].as_array().unwrap().len(),1);
+            let downloaded = fs::read_dir(&pc.default_download_dir).unwrap().map(|entry| entry.unwrap().path()).collect::<Vec<_>>();
+            assert_eq!(downloaded.len(), 6);
+            assert_eq!(fs::read(pc.default_download_dir.join("归档_demo.apk")).unwrap(), b"apk");
+            assert_eq!(fs::read(pc.default_download_dir.join("归档_one.png")).unwrap(), bytes);
+            let note = downloaded.iter().find(|path| path.extension().is_some_and(|ext| ext == "txt")).unwrap();
+            assert_eq!(fs::read_to_string(note).unwrap(), note_text);
             drop(conn);drop(phone);drop(pc);fs::remove_dir_all(root).unwrap();
         }
+    }
+    #[cfg(desktop)]
+    fn profile_target(root: &Path) -> String {
+        plugin_host::get(root, "image-downloader").unwrap().instance_id
     }
     async fn test_dav_propfind(
         TestAxumState(state): TestAxumState<TestDavState>,

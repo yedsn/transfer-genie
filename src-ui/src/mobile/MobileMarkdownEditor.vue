@@ -9,7 +9,7 @@ import { $prose, callCommand, replaceAll } from '@milkdown/kit/utils';
 import { Plugin, TextSelection } from '@milkdown/kit/prose/state';
 import { Decoration, DecorationSet } from '@milkdown/kit/prose/view';
 import { selectedMention, mentionDeletion } from '../plugins/mention-editor';
-import { selectBot, pluginState } from '../plugins/plugin-store';
+import { downloadDraft, selectBot, pluginState } from '../plugins/plugin-store';
 import { undo, redo } from '@milkdown/kit/prose/history';
 import { lift } from '@milkdown/kit/prose/commands';
 import '@milkdown/kit/prose/view/style/prosemirror.css';
@@ -56,7 +56,25 @@ function updateActive() {
 }
 const sync = $prose(ctx => new Plugin({
   props:{
-    decorations(state){const label=selectedMention();const decorations:Decoration[]=[];if(label)state.doc.descendants((node,pos)=>{if(node.isText){const index=node.text?.indexOf(label) ?? -1;if(index>=0)decorations.push(Decoration.inline(pos+index,pos+index+label.length,{class:'bot-mention-token'}));}});return DecorationSet.create(state.doc,decorations);},
+    decorations(state) {
+      const label = selectedMention();
+      const decorations: Decoration[] = [];
+      let ordinal = 0;
+      if (label) state.doc.descendants((node, pos) => {
+        if (!node.isText || !node.text) return;
+        let index = node.text.indexOf(label);
+        while (index >= 0) {
+          if (ordinal++ === downloadDraft.ordinal) {
+            const attributes: Record<string,string> = {class:'bot-mention-token'};
+            if (downloadDraft.enabled) Object.assign(attributes, {'data-download-mention':'', role:'button', tabindex:'0', 'aria-haspopup':'menu', 'aria-label':label+'，选择本次下载出口'});
+            decorations.push(Decoration.inline(pos+index,pos+index+label.length,attributes));
+            break;
+          }
+          index = node.text.indexOf(label, index+label.length);
+        }
+      });
+      return DecorationSet.create(state.doc, decorations);
+    },
     handleKeyDown(view,event){if(event.isComposing || !['Backspace','Delete'].includes(event.key))return false;return deleteMention(view,event.key==='Backspace'?'backward':'forward');},
     handleDOMEvents:{
       'bot-insert-mention'(view,event){

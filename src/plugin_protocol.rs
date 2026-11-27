@@ -90,6 +90,18 @@ pub struct BotInstance {
     pub heartbeat_ms: i64,
     pub expires_at_ms: i64,
     pub capabilities: Vec<Capability>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_options: Option<DownloadOptions>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DownloadOptions {
+    pub default_route: String,
+    pub profiles: Vec<PublicProxyProfile>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PublicProxyProfile {
+    pub id: String,
+    pub name: String,
 }
 fn protocol_version() -> u32 {
     PROTOCOL_VERSION
@@ -109,6 +121,14 @@ pub struct BotTask {
     pub retry_of: Option<String>,
     #[serde(default)]
     pub retry_item_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_route: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_body: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_timestamp_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_task_id: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskEvent {
@@ -122,6 +142,8 @@ pub struct TaskEvent {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_ms: Option<i64>,
     pub item_id: String,
     pub name: String,
     #[serde(default)]
@@ -156,6 +178,45 @@ pub struct ItemResult {
     pub size: u64,
     #[serde(default)]
     pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferProgress {
+    pub received_bytes: u64,
+    pub total_bytes: Option<u64>,
+    pub bytes_per_second: u64,
+}
+
+pub struct TransferMeter {
+    last_sample: std::time::Instant,
+    last_bytes: u64,
+    total_bytes: Option<u64>,
+}
+
+impl TransferMeter {
+    pub fn new(total_bytes: Option<u64>) -> Self {
+        Self {
+            last_sample: std::time::Instant::now(),
+            last_bytes: 0,
+            total_bytes,
+        }
+    }
+
+    pub fn sample(&mut self, received_bytes: u64) -> Option<TransferProgress> {
+        let elapsed = self.last_sample.elapsed().as_secs_f64();
+        if elapsed < 1.0 {
+            return None;
+        }
+        let bytes_per_second =
+            (received_bytes.saturating_sub(self.last_bytes) as f64 / elapsed) as u64;
+        self.last_sample = std::time::Instant::now();
+        self.last_bytes = received_bytes;
+        Some(TransferProgress {
+            received_bytes,
+            total_bytes: self.total_bytes,
+            bytes_per_second,
+        })
+    }
 }
 
 pub fn valid_component(value: &str) -> bool {
@@ -299,6 +360,7 @@ mod tests {
     fn rejects_missing_duplicate_and_unknown_item_results() {
         let inputs = vec![
             TaskInput {
+                timestamp_ms: None,
                 item_id: "one".into(),
                 name: String::new(),
                 local_path: None,
@@ -306,6 +368,7 @@ mod tests {
                 error: None,
             },
             TaskInput {
+                timestamp_ms: None,
                 item_id: "two".into(),
                 name: String::new(),
                 local_path: None,

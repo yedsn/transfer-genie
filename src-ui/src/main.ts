@@ -7,7 +7,8 @@ import BotComposer from "./plugins/BotComposer.vue";
 import "./plugins/reference-quotes.css";
 import "./plugins/bot-messages.css";
 import ReferencePreview from "./plugins/ReferencePreview.vue";
-import { addReferences, pluginState } from "./plugins/plugin-store";
+import BotFeedback from "./plugins/BotFeedback.vue";
+import { addReferences, feedbackByMessage, legacyFeedbackTargets, pluginState } from "./plugins/plugin-store";
 import MobileShell from "./mobile/MobileShell.vue";
 import "./mobile/mobile.css";
 import "./mobile/composer.css";
@@ -134,6 +135,11 @@ const app = createApp({
     return { ui: store.state, pluginState };
   },
   computed: {
+    visibleFeedFiles() { return new Set(store.state.homeFeed.messageCards.map((card: any) => card.filename)); },
+    legacyFeedback() {
+      return store.state.homeFeed.useVueList ? [] : legacyFeedbackTargets.value.filter(({ filename }) => feedbackByMessage.value.has(filename));
+    },
+    legacyFeedFiles() { return new Set(legacyFeedbackTargets.value.map(({ filename }) => filename)); },
     runningModuleCount(): number {
       return (store.state.integrationModules || []).filter((m: any) => !!m.running).length;
     },
@@ -614,6 +620,7 @@ app.component("composer-workspace", ComposerWorkspace);
 app.component("plugins-panel", PluginsPanel);
 app.component("bot-composer", BotComposer);
 app.component("reference-preview", ReferencePreview);
+app.component("bot-feedback", BotFeedback);
 (window as any).transferGenieComposerStore = composerStore;
 
 if (previewMobile || nativeIosWebview) {

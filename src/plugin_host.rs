@@ -31,8 +31,17 @@ pub struct InstalledPlugin {
     #[serde(default)]
     pub log_path: String,
 }
+#[derive(Clone, Serialize, Deserialize)]
+pub struct DownloadProxyProfile {
+    pub id: String,
+    pub name: String,
+    pub address: String,
+    pub authenticated: bool,
+}
 #[derive(Default, Serialize, Deserialize)]
 struct Registry {
+    #[serde(default)]
+    download_profiles: Vec<DownloadProxyProfile>,
     #[serde(default)]
     plugins: BTreeMap<String, InstalledPlugin>,
     #[serde(default)]
@@ -111,7 +120,7 @@ pub fn initialize(root: &Path, download_dir: &Path) -> Result<(), String> {
             enabled: false,
             instance_id: uuid::Uuid::new_v4().to_string(),
             root: String::new(),
-            config: json!({"name":"图片下载","download_dir":download_dir.to_string_lossy()}),
+            config: json!({"download_dir":download_dir.to_string_lossy()}),
             error: None,
             source_url: None,
             log_path: root
@@ -120,8 +129,20 @@ pub fn initialize(root: &Path, download_dir: &Path) -> Result<(), String> {
                 .to_string_lossy()
                 .into(),
         });
+    if entry.manifest.version == "1.0.0" {
+        if entry.config["name"] == "图片下载" {
+            entry.config["name"] = json!("下载机器人");
+        }
+        // The previous default was also the hard maximum.
+        if entry.config["max_size_mib"] == 100 {
+            entry.config["max_size_mib"] = json!(2048);
+        }
+    }
     entry.manifest = manifest;
     entry.source_kind = "builtin".into();
+    if let Some(config) = entry.config.as_object_mut() {
+        config.remove("filename_prefix");
+    }
     for field in &entry.manifest.config_schema {
         if entry.config.get(&field.key).is_none() && !field.default.is_null() {
             entry.config[&field.key] = field.default.clone();
@@ -206,6 +227,198 @@ pub fn secrets(plugin: &InstalledPlugin) -> Result<BTreeMap<String, String>, Str
     }
     Ok(values)
 }
+fn proxy_entry(plugin: &InstalledPlugin, id: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(
+        "transfer-genie-plugins",
+        &format!("{}:download-proxy:{id}", plugin.instance_id),
+    )
+    .map_err(|_| "无法打开下载代理凭据".into())
+}
+
+pub fn download_profiles(root: &Path) -> Result<Vec<DownloadProxyProfile>, String> {
+    Ok(read_registry(root)?.download_profiles)
+}
+
+pub fn save_download_profile(
+    root: &Path,
+    id: Option<String>,
+    name: String,
+    address: String,
+    credentials: Option<(String, String)>,
+) -> Result<(), String> {
+    let name = name.trim();
+    let address = url::Url::parse(address.trim()).map_err(|_| "请输入有效的 HTTP 代理地址")?;
+    if address.scheme() != "http"
+        || address.host().is_none()
+        || address.path() != "/"
+        || address.query().is_some()
+        || address.fragment().is_some()
+        || !address.username().is_empty()
+        || address.password().is_some()
+    {
+        return Err("请填写不含凭据的 HTTP 代理地址，例如 http://127.0.0.1:7890".into());
+    }
+    if name.is_empty()
+        || name.chars().count() > 48
+        || name.contains("://")
+        || name.chars().any(char::is_control)
+    {
+        return Err("请输入 1–48 字符的代理名称，地址请填在代理地址栏".into());
+    }
+    let _guard = REGISTRY_WRITE.lock().map_err(|e| e.to_string())?;
+    let mut registry = read_registry(root)?;
+    let plugin = registry
+        .plugins
+        .get(IMAGE_PLUGIN_ID)
+        .ok_or("下载机器人未注册")?;
+    let prior = match id {
+        Some(id) => Some(
+            registry
+                .download_profiles
+                .iter()
+                .position(|p| p.id == id)
+                .ok_or("下载代理不存在")?,
+        ),
+        None if registry.download_profiles.len() < 32 => None,
+        None => return Err("最多配置 32 条代理".into()),
+    };
+    if registry
+        .download_profiles
+        .iter()
+        .enumerate()
+        .any(|(i, p)| Some(i) != prior && p.name == name)
+    {
+        return Err("代理名称已存在".into());
+    }
+    let mut profile = prior
+        .map(|i| registry.download_profiles[i].clone())
+        .unwrap_or_else(|| DownloadProxyProfile {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: String::new(),
+            address: String::new(),
+            authenticated: false,
+        });
+    profile.name = name.into();
+    profile.address = address.to_string();
+    let credential_change = if let Some((user, password)) = credentials {
+        if (user.is_empty() && !password.is_empty())
+            || user.contains(['\r', '\n', ':'])
+            || password.contains(['\r', '\n'])
+        {
+            return Err("代理认证格式无效".into());
+        }
+        let entry = proxy_entry(plugin, &profile.id)?;
+        let previous = match entry.get_password() {
+            Ok(value) => Some(value),
+            Err(keyring::Error::NoEntry) => None,
+            Err(_) => return Err("读取代理凭据失败".into()),
+        };
+        if user.is_empty() {
+            if previous.is_some() {
+                entry.delete_credential().map_err(|_| "删除代理凭据失败")?;
+            }
+        } else {
+            entry
+                .set_password(&json!([user, password]).to_string())
+                .map_err(|_| "保存代理凭据失败")?;
+        }
+        profile.authenticated = !user.is_empty();
+        Some((entry, previous))
+    } else {
+        None
+    };
+    if let Some(i) = prior {
+        registry.download_profiles[i] = profile;
+    } else {
+        registry.download_profiles.push(profile);
+    }
+    if let Err(error) = write_registry(root, &registry) {
+        if let Some((entry, previous)) = credential_change {
+            if let Some(previous) = previous {
+                let _ = entry.set_password(&previous);
+            } else {
+                let _ = entry.delete_credential();
+            }
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+pub fn remove_download_profile(
+    root: &Path,
+    id: &str,
+    replacement: Option<&str>,
+) -> Result<(), String> {
+    let _guard = REGISTRY_WRITE.lock().map_err(|e| e.to_string())?;
+    let mut registry = read_registry(root)?;
+    let index = registry
+        .download_profiles
+        .iter()
+        .position(|p| p.id == id)
+        .ok_or("下载代理不存在")?;
+    let profile = registry.download_profiles.remove(index);
+    let plugin = registry
+        .plugins
+        .get_mut(IMAGE_PLUGIN_ID)
+        .ok_or("下载机器人未注册")?;
+    if plugin.config["default_route"] == id {
+        let replacement = replacement.ok_or("请先选择新的默认出口")?;
+        if replacement != "direct"
+            && !registry
+                .download_profiles
+                .iter()
+                .any(|p| p.id == replacement)
+        {
+            return Err("替代出口不存在".into());
+        }
+        plugin.config["default_route"] = json!(replacement);
+    }
+    let entry = profile
+        .authenticated
+        .then(|| proxy_entry(plugin, id))
+        .transpose()?;
+    write_registry(root, &registry)?;
+    if let Some(entry) = entry {
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => {}
+            Err(_) => return Err("代理已删除，但清理系统凭据失败".into()),
+        }
+    }
+    Ok(())
+}
+
+pub fn download_execution_config(
+    root: &Path,
+    plugin: &InstalledPlugin,
+    route: &str,
+) -> Result<Value, String> {
+    let mut config = plugin.config.clone();
+    if route == "direct" {
+        return Ok(config);
+    }
+    let profile = download_profiles(root)?
+        .into_iter()
+        .find(|p| p.id == route)
+        .ok_or("所选下载代理已不存在，请重新选择出口")?;
+    let mut address = url::Url::parse(&profile.address).map_err(|_| "下载代理地址无效")?;
+    if profile.authenticated {
+        let credential = proxy_entry(plugin, route)?
+            .get_password()
+            .map_err(|_| "下载代理凭据不可用")?;
+        let (user, password): (String, String) =
+            serde_json::from_str(&credential).map_err(|_| "下载代理凭据无效")?;
+        address
+            .set_username(&user)
+            .map_err(|_| "下载代理凭据无效")?;
+        address
+            .set_password(Some(&password))
+            .map_err(|_| "下载代理凭据无效")?;
+    }
+    config["resolved_proxy_url"] = json!(address.as_str());
+    Ok(config)
+}
+
 pub fn redact(text: &str, secrets: &BTreeMap<String, String>) -> String {
     let mut redacted = text.to_string();
     let mut values = secrets
@@ -239,6 +452,25 @@ pub fn configure(root: &Path, id: &str, enabled: bool, config: Value) -> Result<
     let mut registry = read_registry(root)?;
     let plugin = registry.plugins.get_mut(id).ok_or("插件不存在")?;
     validate_config(&plugin.manifest, &config)?;
+    if id == IMAGE_PLUGIN_ID {
+        let route = config["default_route"].as_str().unwrap_or("direct");
+        if route != "direct" && !registry.download_profiles.iter().any(|p| p.id == route) {
+            return Err("默认下载代理不存在".into());
+        }
+        if !matches!(
+            config["download_engine"].as_str(),
+            None | Some("builtin" | "aria2c")
+        ) {
+            return Err("下载引擎无效".into());
+        }
+        if config.get("max_size_mib").is_some()
+            && !config["max_size_mib"]
+                .as_u64()
+                .is_some_and(|n| (1..=102400).contains(&n))
+        {
+            return Err("单项大小上限须为 1–102400 MiB 的整数".into());
+        }
+    }
     if enabled {
         command(plugin)?;
         secrets(plugin)?;
@@ -551,12 +783,27 @@ pub fn command(plugin: &InstalledPlugin) -> Result<(PathBuf, Vec<String>), Strin
     }
 }
 pub fn instances(root: &Path, name: &str) -> Result<Vec<BotInstance>, String> {
-    let id = device_id(root)?;
+    let registry = read_registry(root)?;
+    let id = registry.device_id;
     let now = crate::now_ms();
     Ok(list(root)?
         .into_iter()
         .filter(|p| p.manifest.capabilities.iter().any(|c| c.kind == "bot"))
         .map(|p| BotInstance {
+            download_options: (p.manifest.id == IMAGE_PLUGIN_ID).then(|| DownloadOptions {
+                default_route: p.config["default_route"]
+                    .as_str()
+                    .unwrap_or("direct")
+                    .into(),
+                profiles: registry
+                    .download_profiles
+                    .iter()
+                    .map(|profile| PublicProxyProfile {
+                        id: profile.id.clone(),
+                        name: profile.name.clone(),
+                    })
+                    .collect(),
+            }),
             protocol_version: PROTOCOL_VERSION,
             instance_id: p.instance_id,
             plugin_id: p.manifest.id,
@@ -1033,6 +1280,7 @@ mod tests {
                 text: "test".into(),
                 config: json!({}),
                 inputs: vec![TaskInput {
+                    timestamp_ms: None,
                     item_id: "one".into(),
                     name: "one".into(),
                     local_path: None,
@@ -1098,6 +1346,57 @@ mod tests {
         assert_eq!(p.source_kind, "builtin");
         assert!(uninstall(&r, IMAGE_PLUGIN_ID, false).is_err());
         fs::remove_dir_all(r).unwrap();
+    }
+    #[test]
+    fn upgrade_preserves_instance_and_download_proxy_identity() {
+        let root = std::env::temp_dir().join(format!("upgrade-download-{}", uuid::Uuid::new_v4()));
+        let folder = root.join("Custom folder");
+        initialize(&root, &folder).unwrap();
+        let mut registry = read_registry(&root).unwrap();
+        let plugin = registry.plugins.get_mut(IMAGE_PLUGIN_ID).unwrap();
+        let instance = plugin.instance_id.clone();
+        plugin.enabled = true;
+        plugin.manifest.version = "1.0.0".into();
+        plugin.config = json!({"name":"家里的下载", "download_dir":folder, "max_size_mib":100, "filename_prefix":"旧前缀_"});
+        write_registry(&root, &registry).unwrap();
+        set_space_allowed(&root, IMAGE_PLUGIN_ID, "space-a", true).unwrap();
+        for _ in 0..2 {
+            initialize(&root, &root.join("default")).unwrap();
+        }
+        let plugin = get(&root, IMAGE_PLUGIN_ID).unwrap();
+        assert_eq!(plugin.instance_id, instance);
+        assert!(plugin.enabled && space_allowed(&root, IMAGE_PLUGIN_ID, "space-a").unwrap());
+        assert_eq!(plugin.config["name"], "家里的下载");
+        assert_eq!(
+            plugin.config["download_dir"],
+            folder.to_string_lossy().as_ref()
+        );
+        assert_eq!(plugin.config["max_size_mib"], 2048);
+        assert!(plugin.config.get("filename_prefix").is_none());
+        assert_eq!(list(&root).unwrap().len(), 1);
+
+        let address = "http://127.0.0.1:12345";
+        save_download_profile(&root, None, "测试代理".into(), address.into(), None).unwrap();
+        let id = download_profiles(&root).unwrap().pop().unwrap().id;
+        save_download_profile(
+            &root,
+            Some(id.clone()),
+            "已改名".into(),
+            address.into(),
+            None,
+        )
+        .unwrap();
+        let published = serde_json::to_string(&instances(&root, "PC").unwrap()).unwrap();
+        assert!(published.contains("已改名") && !published.contains(address));
+        let mut config = plugin.config.clone();
+        config["default_route"] = json!(id);
+        configure(&root, IMAGE_PLUGIN_ID, false, config).unwrap();
+        assert!(remove_download_profile(&root, &id, None).is_err());
+        remove_download_profile(&root, &id, Some("direct")).unwrap();
+        save_download_profile(&root, None, "已改名".into(), address.into(), None).unwrap();
+        assert_ne!(download_profiles(&root).unwrap().pop().unwrap().id, id);
+        assert!(download_execution_config(&root, &plugin, &id).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn concurrent_configuration_preserves_both_plugin_updates() {

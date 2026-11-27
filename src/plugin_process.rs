@@ -234,6 +234,9 @@ pub fn request_cancel(id: &str) -> Result<(), String> {
     cancellation(id)?.store(true, Ordering::SeqCst);
     Ok(())
 }
+pub fn is_cancelled(id: &str) -> bool {
+    cancellation(id).is_ok_and(|flag| flag.load(Ordering::SeqCst))
+}
 pub fn prepare_invoke(id: &str) -> Result<(), String> {
     cancellation(id)?.store(false, Ordering::SeqCst);
     Ok(())
@@ -457,6 +460,9 @@ pub fn invoke_with_progress(
                 }
             } else {
                 terminate(&mut process);
+                if plugin.manifest.id == crate::plugin_protocol::IMAGE_PLUGIN_ID {
+                    crate::image_bot::cleanup_download(&request);
+                }
             }
         }
     }

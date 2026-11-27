@@ -31,6 +31,17 @@
 - **WHEN** 同一任务被重复同步或应用重启后重放
 - **THEN** 不重复创建任务、回复或重新执行已确认完成项
 
+### Requirement: Live task feedback in chat
+调用消息保存后，聊天 SHALL 立即在其后显示任务反馈。执行设备确认接单后显示正在处理，收到结果后在同一位置显示最终回复。缺少执行确认时区分目标设备离线、正在投递和暂未响应，离线任务按原有效期保留。发送失败时 SHALL 显示实际错误，不将调用显示为正在执行。
+
+#### Scenario: Target is slow to acknowledge
+- **WHEN** 调用已保存，但执行端尚未确认接单
+- **THEN** 聊天立即显示等待反馈，目标离线时说明任务已排队，在线但迟迟未确认时明确提示尚未接单
+
+#### Scenario: Task is accepted and finishes
+- **WHEN** 执行端接单、上报进度并给出终态
+- **THEN** 桌面和移动聊天依次更新同一处反馈，正式回复到达后收起临时反馈，重复同步不产生第二条回复
+
 ### Requirement: Per item results and controlled recovery
 任务 SHALL 保存每项状态并报告进度、部分成功、失败、取消及中断，显式重试 SHALL 仅处理选定失败项；未知副作用 SHALL 不被静默自动重试。
 
