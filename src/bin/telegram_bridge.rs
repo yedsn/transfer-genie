@@ -4,6 +4,9 @@ mod filenames;
 #[allow(dead_code)]
 #[path = "../history.rs"]
 mod history;
+#[allow(dead_code)]
+#[path = "../save_filename.rs"]
+mod save_filename;
 #[path = "../telegram_bridge.rs"]
 #[allow(dead_code)]
 mod telegram_bridge;
