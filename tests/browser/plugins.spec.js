@@ -291,6 +291,22 @@ test('mobile multi-selection quotes messages into a structured bot call', async 
   await expect(quotedCard.locator('.mobile-message-header').getByRole('img', { name:'机器人' })).toBeVisible();
   await expect(quotedCard.locator('.reference-preview')).toContainText('引用文件.pdf');
   await expect(quotedCard.locator('.mobile-message-bubble + .reference-preview')).toBeVisible();
+  await page.evaluate(() => {
+    window.transferGeniePlugins.state.contexts[0].references[0].content = 'https://example.test/' + 'long-path'.repeat(80) + '\n第二行\n第三行\n第四行';
+  });
+  for (const width of [320, 390]) {
+    await page.setViewportSize({ width, height:844 });
+    const bounds = await quotedCard.locator('.reference-preview').evaluate(element => {
+      const text = element.querySelector('button span');
+      const rect = element.getBoundingClientRect();
+      return { left:rect.left, right:rect.right, width:innerWidth, height:text.getBoundingClientRect().height, lineHeight:parseFloat(getComputedStyle(text).lineHeight), clamp:getComputedStyle(text).webkitLineClamp };
+    });
+    expect(bounds.left).toBeGreaterThanOrEqual(0);
+    expect(bounds.right).toBeLessThanOrEqual(bounds.width);
+    expect(bounds.height).toBeLessThanOrEqual(bounds.lineHeight * 3 + 1);
+    expect(bounds.clamp).toBe('3');
+  }
+  await page.evaluate(() => { delete window.transferGeniePlugins.state.contexts[0].references[0].content; });
   await page.getByRole('button',{name:'更多操作'}).first().click();
   await page.getByRole('button',{name:'多选',exact:false}).click();
   await page.locator('.mobile-message-select').nth(1).click();

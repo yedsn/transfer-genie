@@ -139,7 +139,9 @@ html.is-ios-platform #mobile-app-shell { display: block; }
 .is-bot.is-marked .mobile-message-bubble { --bubble-background: #fff5ed; --bubble-border: #f4c9ac; }
 .mobile-message-card > .reference-preview { max-width: 88%; margin-top: 6px; }
 .mobile-message-card.is-self > .reference-preview { justify-items: end; }
-.mobile-shell .reference-preview > button { min-height: 44px; align-items: center; font-size: calc(12px * var(--mobile-text-scale, 1)); }
+.mobile-shell .reference-preview { grid-template-columns: minmax(0, 1fr); overflow-wrap: anywhere; }
+.mobile-shell .reference-preview > button { width: 100%; box-sizing: border-box; min-height: 44px; align-items: flex-start; overflow: hidden; font-size: calc(12px * var(--mobile-text-scale, 1)); }
+.mobile-shell .reference-preview > button span { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; line-height: 1.55; max-height: 4.65em; white-space: pre-wrap; overflow-wrap: anywhere; }
 .mobile-shell .reference-preview > button::before { align-self: center; }
 .mobile-detail-scroll > .reference-preview { margin-top: 6px; }
 .is-image .mobile-message-bubble, .is-video .mobile-message-bubble { width: 244px; padding: 6px; }
