@@ -233,7 +233,7 @@ function dismiss(event: Event) {
 }
 onMounted(() => {
   void refreshPlugins();
-  document.addEventListener('input', inspect, true); document.addEventListener('click', inspect); document.addEventListener('compositionend', inspect);
+  document.addEventListener('input', inspect); document.addEventListener('click', inspect); document.addEventListener('compositionend', inspect);
   document.addEventListener('bot-editor-change',inspect);
   window.addEventListener('resize',decorateEditors);
   window.addEventListener('resize',reposition);
@@ -245,7 +245,7 @@ onMounted(() => {
   document.addEventListener('keydown', keydown, true); document.addEventListener('pointerdown', dismiss);
 });
 onUnmounted(() => {
-  document.removeEventListener('input', inspect, true); document.removeEventListener('click', inspect); document.removeEventListener('compositionend', inspect);
+  document.removeEventListener('input', inspect); document.removeEventListener('click', inspect); document.removeEventListener('compositionend', inspect);
   document.removeEventListener('bot-editor-change',inspect);
   window.removeEventListener('resize',decorateEditors);
   window.removeEventListener('resize',reposition);

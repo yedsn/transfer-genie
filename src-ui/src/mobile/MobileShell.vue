@@ -22,7 +22,7 @@ import MobileConnectionWizard from "./MobileConnectionWizard.vue";
 import BotComposer from "../plugins/BotComposer.vue";
 import ReferencePreview from "../plugins/ReferencePreview.vue";
 import BotFeedback from "../plugins/BotFeedback.vue";
-import { addReferences, resolvePluginScope, pluginState, listenBotChat } from "../plugins/plugin-store";
+import { addReferences, isBotReplyContext, resolvePluginScope, pluginState, listenBotChat } from "../plugins/plugin-store";
 const loadMobileMarkdownEditor = () => import("./MobileMarkdownEditor.vue");
 const MobileMarkdownEditor = defineAsyncComponent(loadMobileMarkdownEditor);
 let editorWarmTimer: number | undefined;
@@ -51,9 +51,13 @@ const locateReference = async (filename:string) => {
     await controller.loadOlderMessages();
     if(profile!==state.activeProfile?.id || space!==currentSpace.value?.id || state.messages.length<=before) return false;
   }
+  if (!state.messages.some(message => message.filename === filename)) return false;
+  if (activeSheet.value === 'detail' && managedHistorySheet.value === 'detail') {
+    return requestNativeHistoryBack(filename);
+  }
   activeTab.value='feed'; activeSheet.value=null; searchQuery.value='';
   await nextTick();
-  return state.messages.some(message=>message.filename===filename);
+  return true;
 };
 (window as any).transferGenieLocateReference=locateReference;
 onBeforeUnmount(()=>{if((window as any).transferGenieLocateReference===locateReference) delete (window as any).transferGenieLocateReference;});
@@ -98,6 +102,7 @@ const nativePagePresented = ref(false);
 const nativePagePreparing = ref(false);
 let explicitNativeClose = false;
 let explicitCloseFingerprint = "";
+let referenceReturn: { filename: string; resolve: (returned: boolean) => void } | undefined;
 let nativePickerAfterShow: "media" | "document" | undefined;
 let nativeGestureRequest = 0;
 const connectionRemoveEscalated = ref(false);
@@ -337,6 +342,7 @@ watch(() => state.composer.persistenceReady, handleComposerEditorReady);
 
 const visibleMessages = computed(() => searchQuery.value.trim() ? state.search.messages : state.messages);
 const visibleFeedFiles = computed(() => new Set(visibleMessages.value.map(message => message.filename)));
+const botReplyFilenames = computed(() => new Set(pluginState.contexts.filter(isBotReplyContext).map(context => context.filename)));
 const selectedMessages = computed(() => visibleMessages.value.filter((message) => selectedFilenames.value.includes(message.filename)));
 watch(searchQuery, (query) => {
   window.clearTimeout(searchTimer);
@@ -603,29 +609,36 @@ watch(
   { flush: "post" },
 );
 
-async function requestNativeHistoryBack() {
+async function requestNativeHistoryBack(referenceFilename?: string): Promise<boolean> {
   if (!managedHistorySheet.value) {
     clearTopLevelSheet();
-    return;
+    return false;
   }
+  if (referenceReturn) return false;
   const page = managedHistorySheet.value;
   const requestId = nativePageRequestId.value;
+  const returned = referenceFilename ? new Promise<boolean>(resolve => { referenceReturn = { filename: referenceFilename, resolve }; }) : null;
   explicitNativeClose = true;
   explicitCloseFingerprint = returnFingerprint();
   if (!hasNativeNavigation()) {
     await handleNativePageReturned(new CustomEvent("transfer-genie-navigation-returned", { detail: { page, requestId } }));
-    return;
+    return returned ?? true;
   }
   try {
     const result = await nativePageCommand(page, "close", requestId);
     if (!result?.accepted) {
       explicitNativeClose = false;
       navigationError.value = "页面正在切换，请稍后重试";
+      referenceReturn?.resolve(false);
+      referenceReturn = undefined;
     }
   } catch {
     explicitNativeClose = false;
     navigationError.value = "暂时无法返回，请重试";
+    referenceReturn?.resolve(false);
+    referenceReturn = undefined;
   }
+  return returned ?? true;
 }
 
 async function handleNativePageReturned(event: Event) {
@@ -634,6 +647,8 @@ async function handleNativePageReturned(event: Event) {
   const safe = activeSheet.value === page && !detailUnderlay.value && !composerUnderlay.value &&
     (page === "detail" || composerNativeBackSafe.value);
   if (!safe && !(explicitNativeClose && explicitCloseFingerprint === returnFingerprint())) {
+    referenceReturn?.resolve(false);
+    referenceReturn = undefined;
     setNativeNavigationGestures(false);
     if (hasNativeNavigation()) await nativePageCommand(page, "resume", requestId);
     navigationError.value = "当前操作尚未完成，请稍后返回";
@@ -643,9 +658,19 @@ async function handleNativePageReturned(event: Event) {
   nativePagePresented.value = false;
   managedHistorySheet.value = null;
   nativePageRequestId.value = "";
+  const reference = referenceReturn;
+  referenceReturn = undefined;
+  if (reference) {
+    activeTab.value = 'feed';
+    searchQuery.value = '';
+  }
   clearTopLevelSheet();
-  await waitForNavigationPaint();
-  if (hasNativeNavigation()) await nativePageCommand(page, "finish", requestId);
+  try {
+    await waitForNavigationPaint();
+    if (hasNativeNavigation()) await nativePageCommand(page, "finish", requestId);
+  } finally {
+    reference?.resolve(state.messages.some(message => message.filename === reference.filename));
+  }
   if (pendingShareComposer) {
     pendingShareComposer = false;
     void importPendingSharesAndOpen();
@@ -1216,6 +1241,8 @@ onMounted(async () => {
   }, 30000);
 });
 onBeforeUnmount(() => {
+  referenceReturn?.resolve(false);
+  referenceReturn = undefined;
   controller.disposeStartup();
   document.removeEventListener("visibilitychange", controller.checkStartupDeadline);
   releaseKeyboardPrimer();
@@ -1505,7 +1532,7 @@ onBeforeUnmount(() => {
               :data-message-filename="message.filename"
               :data-filename="message.filename"
               class="mobile-message-card"
-              :class="[`is-${message.kind}`, { 'is-marked': message.marked, 'is-self': isOwnMessage(message, state.settings?.sender_name), 'is-selecting': selectionMode, 'is-selected': selectedFilenames.includes(message.filename) }]"
+              :class="[`is-${message.kind}`, { 'is-bot': botReplyFilenames.has(message.filename), 'is-marked': message.marked, 'is-self': !botReplyFilenames.has(message.filename) && isOwnMessage(message, state.settings?.sender_name), 'is-selecting': selectionMode, 'is-selected': selectedFilenames.includes(message.filename) }]"
               @click="openMessage(message)"
               @pointerdown="beginLongPress(message)"
               @pointerup="cancelLongPress"
@@ -1578,10 +1605,10 @@ onBeforeUnmount(() => {
                 >
               </div>
               </MobileMessageBody>
-              <ReferencePreview :filename="message.filename" references-only />
               </div>
+              <ReferencePreview :filename="message.filename" references-only />
             </article>
-            <BotFeedback :filename="message.filename" :visible-files="visibleFeedFiles" />
+            <BotFeedback v-if="!selectionMode" mobile :filename="message.filename" :visible-files="visibleFeedFiles" />
             </template>
           </div>
           <div v-else class="mobile-empty-state">
@@ -2408,7 +2435,7 @@ onBeforeUnmount(() => {
           <header>
             <div>
               <small
-                >{{ selectedMessage?.source }} ·
+                ><ReferencePreview v-if="selectedMessage" :filename="selectedMessage.filename" identity-only />{{ selectedMessage?.source }} ·
                 {{ selectedMessage?.time }}</small
               >
               <h2 id="mobile-detail-title">{{ selectedMessage?.title }}</h2>
@@ -2479,6 +2506,7 @@ onBeforeUnmount(() => {
             ><small>{{ selectedMessage.meta }}</small>
           </div>
           <MobileText v-if="selectedMessage?.body" class="mobile-detail-copy" :text="selectedMessage.body" :format="selectedMessage.format" />
+          <ReferencePreview v-if="selectedMessage" :filename="selectedMessage.filename" references-only />
           <div
             v-if="selectedMessage && selectedMessage.kind !== 'text'"
             class="mobile-attachment-feedback"

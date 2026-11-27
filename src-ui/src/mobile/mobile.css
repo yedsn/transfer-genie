@@ -135,6 +135,13 @@ html.is-ios-platform #mobile-app-shell { display: block; }
 .is-self .mobile-message-bubble { --bubble-background: #dff5d5; --bubble-border: #c8ebc0; border-radius: 16px 4px 16px 16px; }
 .is-self .mobile-message-bubble::before { left: auto; right: -4px; transform: rotate(225deg); }
 .is-marked .mobile-message-bubble { --bubble-background: #fff5ed; --bubble-border: #f4c9ac; }
+.is-bot .mobile-message-bubble { --bubble-background: #f3f8f4; --bubble-border: #d9e6dc; }
+.is-bot.is-marked .mobile-message-bubble { --bubble-background: #fff5ed; --bubble-border: #f4c9ac; }
+.mobile-message-card > .reference-preview { max-width: 88%; margin-top: 6px; }
+.mobile-message-card.is-self > .reference-preview { justify-items: end; }
+.mobile-shell .reference-preview > button { min-height: 44px; align-items: center; font-size: calc(12px * var(--mobile-text-scale, 1)); }
+.mobile-shell .reference-preview > button::before { align-self: center; }
+.mobile-detail-scroll > .reference-preview { margin-top: 6px; }
 .is-image .mobile-message-bubble, .is-video .mobile-message-bubble { width: 244px; padding: 6px; }
 .mobile-bubble-content { display: flex; align-items: center; gap: 11px; min-width: 0; }
 .is-image .mobile-bubble-content, .is-video .mobile-bubble-content { flex-direction: column; align-items: stretch; gap: 8px; }

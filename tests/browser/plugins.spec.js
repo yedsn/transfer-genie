@@ -282,12 +282,15 @@ test('mobile multi-selection quotes messages into a structured bot call', async 
   await expect(page.locator('.mobile-message-card').first()).toBeVisible();
   const mobileFeedback = page.locator('.mobile-message-list .bot-feedback');
   await expect(mobileFeedback.filter({ hasText:'目标设备离线' })).toBeVisible();
-  await expect(mobileFeedback.filter({ hasText:'demo.zip' })).toContainText('50.0%');
-  await expect(page.locator('.mobile-message-header .bot-message-identity')).toHaveAttribute('aria-label', '机器人');
+  const liveReply = mobileFeedback.filter({ hasText:'demo.zip' });
+  await expect(liveReply.locator('.mobile-message-bubble')).toContainText('50.0%');
+  await expect(liveReply.locator('.mobile-message-header').getByRole('img', { name:'机器人' })).toBeVisible();
   await expect(page.locator('.mobile-message-bubble .bot-message-identity')).toHaveCount(0);
   const quotedCard=page.locator('[data-message-filename="preview-photo.jpg"]');
+  await expect(quotedCard).toHaveClass(/is-bot/);
+  await expect(quotedCard.locator('.mobile-message-header').getByRole('img', { name:'机器人' })).toBeVisible();
   await expect(quotedCard.locator('.reference-preview')).toContainText('引用文件.pdf');
-  expect(await quotedCard.evaluate(card=>{const body=card.querySelector('.mobile-message-content');const quote=card.querySelector('.reference-preview');return !!(body.compareDocumentPosition(quote)&Node.DOCUMENT_POSITION_FOLLOWING);})).toBe(true);
+  await expect(quotedCard.locator('.mobile-message-bubble + .reference-preview')).toBeVisible();
   await page.getByRole('button',{name:'更多操作'}).first().click();
   await page.getByRole('button',{name:'多选',exact:false}).click();
   await page.locator('.mobile-message-select').nth(1).click();
@@ -364,4 +367,22 @@ test('mobile multi-selection quotes messages into a structured bot call', async 
   await page.locator('.quote-jump').first().click();
   await expect(page.locator('.mobile-composer-sheet')).toHaveCount(0);
   expect(await page.evaluate(filename=>Array.from(document.querySelectorAll('[data-filename]')).some(node=>node.dataset.filename===filename && node.getBoundingClientRect().top>=0),referencedFilename)).toBe(true);
+  await page.locator('.mobile-selection-toolbar').getByRole('button',{name:'取消',exact:true}).click();
+  await page.evaluate(() => {
+    window.__TRANSFER_GENIE_NATIVE_GESTURE_SPY__ = true;
+    window.__botDetailNavigation = [];
+    window.transferGenieApi.mobileIntegration.navigateNativePage = async (page, action, requestId) => {
+      window.__botDetailNavigation.push(action);
+      if (action === 'close') setTimeout(() => window.dispatchEvent(new CustomEvent('transfer-genie-navigation-returned', { detail: { page, requestId } })), 0);
+      return { accepted: true };
+    };
+  });
+  await quotedCard.locator('.mobile-message-bubble').click();
+  const detail = page.locator('.mobile-detail-sheet');
+  await expect(detail.locator('header').getByRole('img', { name:'机器人' })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.__botDetailNavigation)).toEqual(['prepare', 'show']);
+  await detail.getByRole('button', { name:/引用文件[.]pdf/ }).click();
+  await expect(detail).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => window.__botDetailNavigation)).toEqual(['prepare', 'show', 'close', 'finish']);
+  await expect(page.locator('[data-message-filename="preview-plan.pdf"]')).toBeInViewport();
 });

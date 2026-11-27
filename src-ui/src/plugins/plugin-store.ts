@@ -35,8 +35,12 @@ export const feedbackByMessage = computed(() => {
   }
   return byMessage;
 });
+export function isBotReplyContext(context: any) {
+  return !!context?.task_id && !context.target_bot_instance_id && typeof context.text === 'string';
+}
+
 export const botReplies = computed(() => new Map<string, { filename: string; text?: string }>(pluginState.contexts
-  .filter(context => context.task_id && !context.target_bot_instance_id && context.filename)
+  .filter(context => context.filename && isBotReplyContext(context))
   .map(context => [context.task_id, context])));
 const eventsByTask = computed(() => {
   const map = new Map<string, any[]>();
